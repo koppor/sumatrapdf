@@ -155,7 +155,11 @@ bool HttpGetToFile(Str urlA, Str destFilePath, const Func1<HttpProgress*>& cbPro
     return ok;
 }
 
-bool HttpPost(Str serverA, int port, Str urlA, str::Builder* headers, str::Builder* data) {
+bool HttpPost(Str serverA, int port, Str urlA, str::Builder* headers, str::Builder* data, str::Builder* outResp,
+              DWORD* outStatusCode) {
+    if (outStatusCode) {
+        *outStatusCode = 0;
+    }
     TempStr bodyPath = NewTempFilePathTemp(StrL("sumatra-http-post-body-"));
     TempStr outPath = NewTempFilePathTemp(StrL("sumatra-http-post-out-"));
     TempStr statusPath = NewTempFilePathTemp(StrL("sumatra-http-status-"));
@@ -187,7 +191,19 @@ bool HttpPost(Str serverA, int port, Str urlA, str::Builder* headers, str::Build
         ok = ok && RunShellCommand(ToStr(cmd));
     }
 
-    ok = ok && ReadHttpStatusCode(statusPath) == 200;
+    {
+        int statusCode = ReadHttpStatusCode(statusPath);
+        ok = ok && statusCode >= 200 && statusCode < 300;
+        if (outStatusCode) {
+            *outStatusCode = (DWORD)statusCode;
+        }
+    }
+    if (ok && outResp) {
+        Str body = file::ReadFile(outPath);
+        if (body) {
+            ok = outResp->Append(body);
+        }
+    }
 
 Exit:
     file::Delete(bodyPath);

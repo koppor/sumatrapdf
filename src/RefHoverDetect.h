@@ -50,5 +50,10 @@ RectF DetectEquationBox(WStr text, const Rect* coords, RectF mediabox, float des
 // close and continues at the top of the next column (e.g. "[63]"-style
 // entries wrapping across a column break); empty when there's no such
 // continuation. Ignored (left untouched) by callers that don't need it.
+//
+// outIsBibEntry (optional): true when the returned box is a fitted
+// bibliography / glossary / description-list entry — i.e. text suitable for
+// "push to citation manager" workflows. False when the function fell back
+// to LandscapeBox (figure caption, section heading, code listing, etc.).
 RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX, float destY,
-                     RectF* continuationOut = nullptr);
+                     RectF* continuationOut = nullptr, bool* outIsBibEntry = nullptr);

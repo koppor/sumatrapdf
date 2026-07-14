@@ -51,6 +51,9 @@ void RefHoverOnTimer(RefHoverState* s, HWND hwndCanvas, EngineBase* engine, floa
     }
 
     RectF region;
+    // Only set true when the destination is a fitted bibliography / glossary
+    // entry (DetectEntryBox path) — gates the JabRef push existence check.
+    bool isBibEntry = false;
     // Set when a bracket-style entry wraps across a 2-column page break (e.g.
     // "[63]"): a second crop, stitched below `region` in the delivered
     // bitmap. Empty (dx/dy <= 0) otherwise.
@@ -78,7 +81,7 @@ void RefHoverOnTimer(RefHoverState* s, HWND hwndCanvas, EngineBase* engine, floa
         }
         region = DetectEquationBox(text, normCoords, mediabox, destX, destY);
         if (region.dx <= 0.f || region.dy <= 0.f) {
-            region = DetectEntryBox(text, normCoords, mediabox, destX, destY, &continuation);
+            region = DetectEntryBox(text, normCoords, mediabox, destX, destY, &continuation, &isBibEntry);
         }
         if (normCoords != coords) {
             free(normCoords);
@@ -180,4 +183,8 @@ void RefHoverOnTimer(RefHoverState* s, HWND hwndCanvas, EngineBase* engine, floa
     req.srcPageRaw = s->pending.srcPage;
     req.srcRectRaw = s->pending.srcRect;
     RefHoverRequestRender(s, engine, req);
+
+    // JabRef push: capture the bib entry text and fire the existence check
+    // (lights the popup-corner badge) for the freshly-shown destination.
+    RefHoverCaptureEntryAndCheck(s, engine, destPage, region, isBibEntry);
 }

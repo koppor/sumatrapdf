@@ -256,6 +256,7 @@ export const commands = [
     "CmdToggleLightDarkTheme", "Toggle Light/Dark Theme",
     "CmdChangeTheme", "Change Theme...",
     "CmdTranslateSelection", "Translate Selection...",
+    "CmdRefHoverPushToJabRef", "Push Reference to JabRef",
     "CmdNone", "Do nothing",
 ];
 

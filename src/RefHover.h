@@ -11,6 +11,21 @@ struct RenderedBitmap;
 struct Pixmap;
 struct RefLookupCache;
 
+// Status badge rendered in the corner of the citation hover popup. Hue + shape
+// cues form a consistent palette (mint = positive, olive = partial, grey =
+// neutral, orange = error). Shape distinguishes "in flight" (small filled
+// square) from "no match" (hollow ring) — same hue, different stage.
+enum class RefHoverPushStatus {
+    None,         // no badge (popup is hiding a non-bib or hasn't been checked yet)
+    Searching,    // small grey square (#BBBBBB) — hover-time existence check in flight
+    NoMatch,      // hollow grey ring (#BBBBBB) — lookup completed, not in any open library
+    Sending,      // small grey square (#BBBBBB) — Ctrl+J push in flight
+    Sent,         // mint filled circle (#44BB99) — entry in *active* library (Ctrl+J would duplicate)
+    RelatedMatch, // olive filled circle (#AAAA00) — entry in another open library, not the active one
+    Failed,       // orange filled circle (#EE7733) — push HTTP error (non-2xx response)
+    Disconnected, // orange filled circle (#EE7733) — JabRef HTTP server unreachable
+};
+
 struct RefHoverState {
     HWND hwndPopup = nullptr;
     HWND hwndCanvas = nullptr;
@@ -115,6 +130,35 @@ struct RefHoverState {
         int srcPage = -1;
         RectF srcRect{};
     } displayed;
+
+    // UTF-8 text of the bibliography entry currently shown in the popup, or
+    // null when the popup shows a non-bibliography target (figure, table,
+    // landscape view). Set during RefHoverOnTimer; consumed by
+    // RefHoverPushToJabRef when the user presses Ctrl+J.
+    char* entryText = nullptr;
+
+    // Server-issued cache token returned by the hover-time existence check.
+    // When set, Ctrl+J uses it to add the citation without paying for the
+    // (expensive) LLM parse a second time. Null until the existence check
+    // completes; reset whenever entryText is replaced.
+    char* parserCacheKey = nullptr;
+
+    // FNV-1a 64-bit hashes of entryText for citations the user has already
+    // pushed in this session. Used to light the mint badge immediately on
+    // hover without waiting on a server-side lookup that may flake (LLM
+    // quota exhausted, JabRef restarted, etc.). Bounded by the natural pace
+    // of manual citation imports — no eviction needed.
+    Vec<u64> pushedEntryHashes;
+
+    // Push-status badge for the currently-shown entry. Reset to None whenever
+    // the popup transitions to a new entry; advanced by RefHoverSetPushStatus
+    // when the user fires Ctrl+J.
+    RefHoverPushStatus pushStatus = RefHoverPushStatus::None;
+    // Bumped on every transition to a new entry. Async existence-check
+    // workers snapshot the value at dispatch time and discard their result
+    // when the version no longer matches — so a slow check for a previously-
+    // hovered entry can't paint a stale badge over the current one.
+    int entryVersion = 0;
 };
 
 constexpr UINT_PTR kRefHoverTimerID = 9;
@@ -159,3 +203,73 @@ bool RefHoverWheelZoom(RefHoverState* s, EngineBase* engine, int wheelDelta);
 // (continuous scrolling). Popup window keeps its initial size; only the
 // rendered region's Y (and possibly page number) changes.
 bool RefHoverWheelScroll(RefHoverState* s, EngineBase* engine, int wheelDelta);
+
+// Result of an attempt to push the hovered reference to JabRef.
+enum class RefHoverPushResult {
+    Failed, // JabRef could not be reached / returned a non-2xx status
+    Sent,   // the entry was posted to JabRef's local HTTP server
+};
+
+// Set the push-status badge and invalidate the popup so the badge repaints.
+// Called by SumatraPDF.cpp around the async push: Sending before RunAsync,
+// Sent / Failed when the UI task fires.
+void RefHoverSetPushStatus(RefHoverState* s, RefHoverPushStatus status);
+// Returns a heap-allocated UTF-8 copy of the bibliography entry currently
+// shown in the popup, or nullptr when the popup isn't visible / isn't showing
+// a pushable bibliography entry. Caller frees with str::Free. Snapshotting
+// lets the HTTP POST run on a background thread without racing with the
+// hover-detection thread that mutates RefHoverState.
+char* RefHoverDupEntryTextIfPushable(RefHoverState* s);
+// Returns a heap-allocated UTF-8 copy of the parser-cache token issued by the
+// last hover-time existence check, or nullptr when none is available. Caller
+// frees with str::Free. Used by Ctrl+J so the add request reuses the cached
+// BibEntry (no LLM call) instead of re-parsing entryText from scratch.
+char* RefHoverDupParserCacheKey(RefHoverState* s);
+
+// Records `entryText` as already-pushed in this RefHoverState. Called by the
+// Ctrl+J UI task after a successful POST. Subsequent hovers of any citation
+// whose extracted entryText matches will light the mint badge from the local
+// record alone (no server roundtrip).
+void RefHoverMarkPushed(RefHoverState* s, const char* entryText);
+
+// Returns true when `entryText` has been recorded by RefHoverMarkPushed in
+// this session.
+bool RefHoverWasPushed(RefHoverState* s, const char* entryText);
+
+// FNV-1a 64-bit hash of `entryText` (UTF-8). Exposed so callers outside
+// RefHover (in-PDF marker scan, page-paint) can derive the same identity
+// key RefHoverMarkPushed uses, without duplicating the hash implementation.
+u64 RefHoverHashEntryText(const char* entryText);
+
+// One in-text citation the user has pushed (or that the server reports is
+// already in the active library). Lives on WindowTab so the marker dot
+// survives popup hide / page scroll / tab switch within a session.
+//
+// `srcPage` + `srcRect` locate the in-text reference on the source PDF page
+// (the `[Kar+24b]` / `(Smith 2020)` link rectangle) — used to position the
+// dot during page paint. `entryTextHash` is the FNV-1a hash of the resolved
+// bibliography entry text; lets a second occurrence of the same citation
+// elsewhere in the doc be marked too when the page-scan resolves it.
+struct PushedCitation {
+    int srcPage = -1;
+    RectF srcRect{};
+    u64 entryTextHash = 0;
+    // Match scope reported by JabRef: "active" = in the library Ctrl+J would
+    // add to (paint mint), "other" = in some other open library (paint olive).
+    // Stored as the same enum used by the popup badge so the paint loop can
+    // share colour logic with RefHover.cpp.
+    RefHoverPushStatus status = RefHoverPushStatus::Sent;
+};
+// Synchronously POSTs to JabRef's local HTTP server. Tries the cached-parse
+// fast path first (POST /libraries/current/citations/{parserCacheKey}) when
+// parserCacheKey is non-null; falls back to the plain-citation endpoint
+// (POST /libraries/current/entries) when the cache key has expired (HTTP 410)
+// or wasn't issued (parserCacheKey nullptr). Blocks the calling thread for up
+// to ~15s, so call from a worker thread.
+//
+// outHttpStatus (optional): raw HTTP status code from the final attempt that
+// determined success / failure. 0 indicates a TCP / WinINet error.
+// outRespBody (optional): heap-allocated copy of the response body from the
+// final attempt (JabRef returns its exception message on 5xx). Caller frees.
+RefHoverPushResult RefHoverPushToJabRef(const char* entryText, const char* parserCacheKey, int* outHttpStatus = nullptr,
+                                        char** outRespBody = nullptr);

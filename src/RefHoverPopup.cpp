@@ -98,6 +98,86 @@ static LRESULT CALLBACK RefHoverWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             }
         }
 
+        // JabRef push-status badge — top-right corner of the popup. Icon
+        // palette: hue + shape cues so each lookup / push stage is
+        // distinguishable at a glance.
+        if (s && s->pushStatus != RefHoverPushStatus::None) {
+            // Canvas is the badge bounding box. Shape footprint within is
+            // either a small filled square (in-flight, ~50% canvas to leave
+            // visual room for the eventual result icon), a hollow ring
+            // (no-match, full canvas), or a filled circle (positive result
+            // or hard failure, full canvas).
+            constexpr int kBadgeCanvas = 14;
+            constexpr int kBadgeMargin = 6;
+            int bx = rc.right - kBadgeCanvas - kBadgeMargin;
+            int by = rc.top + kBadgeMargin;
+
+            COLORREF gray = RGB(0xBB, 0xBB, 0xBB);
+            COLORREF mint = RGB(0x44, 0xBB, 0x99);
+            COLORREF olive = RGB(0xAA, 0xAA, 0x00);
+            COLORREF orange = RGB(0xEE, 0x77, 0x33);
+
+            HGDIOBJ oldP = SelectObject(hdc, GetStockObject(NULL_PEN));
+            switch (s->pushStatus) {
+                case RefHoverPushStatus::Searching:
+                case RefHoverPushStatus::Sending: {
+                    // Small centred grey square — ~50% of canvas footprint so
+                    // a result icon (full-size circle/ring) reads as visibly
+                    // larger when the lookup completes.
+                    int side = kBadgeCanvas / 2;
+                    int off = (kBadgeCanvas - side) / 2;
+                    HBRUSH hb = CreateSolidBrush(gray);
+                    HGDIOBJ oldB = SelectObject(hdc, hb);
+                    Rectangle(hdc, bx + off, by + off, bx + off + side + 1, by + off + side + 1);
+                    SelectObject(hdc, oldB);
+                    DeleteObject(hb);
+                    break;
+                }
+                case RefHoverPushStatus::NoMatch: {
+                    // Hollow grey ring — full canvas size. Same hue as the
+                    // searching square; shape (ring vs filled square) tells
+                    // them apart.
+                    constexpr int kRingWidth = 2;
+                    HPEN hp = CreatePen(PS_SOLID, kRingWidth, gray);
+                    HGDIOBJ oldP2 = SelectObject(hdc, hp);
+                    HGDIOBJ oldB = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                    Ellipse(hdc, bx, by, bx + kBadgeCanvas + 1, by + kBadgeCanvas + 1);
+                    SelectObject(hdc, oldB);
+                    SelectObject(hdc, oldP2);
+                    DeleteObject(hp);
+                    break;
+                }
+                case RefHoverPushStatus::Sent: {
+                    HBRUSH hb = CreateSolidBrush(mint);
+                    HGDIOBJ oldB = SelectObject(hdc, hb);
+                    Ellipse(hdc, bx, by, bx + kBadgeCanvas + 1, by + kBadgeCanvas + 1);
+                    SelectObject(hdc, oldB);
+                    DeleteObject(hb);
+                    break;
+                }
+                case RefHoverPushStatus::RelatedMatch: {
+                    HBRUSH hb = CreateSolidBrush(olive);
+                    HGDIOBJ oldB = SelectObject(hdc, hb);
+                    Ellipse(hdc, bx, by, bx + kBadgeCanvas + 1, by + kBadgeCanvas + 1);
+                    SelectObject(hdc, oldB);
+                    DeleteObject(hb);
+                    break;
+                }
+                case RefHoverPushStatus::Failed:
+                case RefHoverPushStatus::Disconnected: {
+                    HBRUSH hb = CreateSolidBrush(orange);
+                    HGDIOBJ oldB = SelectObject(hdc, hb);
+                    Ellipse(hdc, bx, by, bx + kBadgeCanvas + 1, by + kBadgeCanvas + 1);
+                    SelectObject(hdc, oldB);
+                    DeleteObject(hb);
+                    break;
+                }
+                case RefHoverPushStatus::None:
+                    break;
+            }
+            SelectObject(hdc, oldP);
+        }
+
         EndPaint(hwnd, &ps);
         return 0;
     }

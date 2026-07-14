@@ -23,6 +23,7 @@
 #include "ReadAloudHighlight.h"
 #include "Translations.h"
 #include "EditAnnotations.h"
+#include "RefHover.h"
 
 WindowTab::WindowTab(MainWindow* win) {
     this->win = win;
@@ -65,6 +66,7 @@ WindowTab::~WindowTab() {
     // so doesn't need to be kept for long
     gMostRecentlyOpenedDoc = nullptr;
     delete ctrl;
+    delete pushedCitations;
     str::Free(filePath);
     filePath = {};
     str::Free(displayName);

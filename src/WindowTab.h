@@ -5,6 +5,7 @@ struct SelectionOnPage;
 struct WatchedFile;
 struct EditAnnotationsWindow;
 struct MainWindow;
+struct PushedCitation;
 namespace str {
 struct Builder;
 }
@@ -83,6 +84,14 @@ struct WindowTab {
 
     // TODO: arguably a hack
     bool ignoreNextAutoReload = false;
+
+    // In-text citation markers painted as colored dots on the source page.
+    // Populated by the Ctrl+J push UI task on a successful add (and by the
+    // future page-scan flow on a positive existence-check); read by Canvas
+    // WM_PAINT. Pointer-owned so callers can null-check cheaply; allocated
+    // lazily on first push to avoid a Vec for every tab that never sees a
+    // citation push.
+    Vec<PushedCitation>* pushedCitations = nullptr;
 
     // per-provider AI chat state, indexed by AIChatBackend
     // (0 = Claude, 1 = Grok, 2 = Codex)

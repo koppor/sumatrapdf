@@ -36,3 +36,10 @@ bool RefHoverPopupCreate(RefHoverState* s, HWND hwndCanvas);
 void RefHoverShowPopup(RefHoverState* s, Point screenPt);
 void RefHoverRequestRender(RefHoverState* s, EngineBase* engine, RefHoverState::RenderRequest req);
 bool RefHoverRerenderDisplayedRegion(RefHoverState* s, EngineBase* engine, int page, RectF region);
+
+// JabRef push (RefHover.cpp): capture the bibliography entry text for the
+// just-shown destination region and kick off the async existence check.
+// Resets the push badge for the new entry. `isBibEntry` is the result of
+// DetectEntryBox's outIsBibEntry — non-bib targets (figures, headings) leave
+// the previously-captured entry alive so a Ctrl+J retry still works.
+void RefHoverCaptureEntryAndCheck(RefHoverState* s, EngineBase* engine, int destPage, RectF region, bool isBibEntry);

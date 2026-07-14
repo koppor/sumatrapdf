@@ -166,9 +166,13 @@ Exit:
     return ok;
 }
 
-bool HttpPost(Str serverA, int port, Str urlA, str::Builder* headers, str::Builder* data) {
+bool HttpPost(Str serverA, int port, Str urlA, str::Builder* headers, str::Builder* data, str::Builder* outResp,
+              DWORD* outStatusCode) {
     str::Builder resp(2048);
     bool ok = false;
+    if (outStatusCode) {
+        *outStatusCode = 0;
+    }
     char* hdr = nullptr;
     DWORD hdrLen = 0;
     HINTERNET hConn = nullptr, hReq = nullptr;
@@ -184,7 +188,15 @@ bool HttpPost(Str serverA, int port, Str urlA, str::Builder* headers, str::Build
     WCHAR* url = CWStrTemp(urlA);
     DWORD infoLevel;
 
-    DWORD accessType = INTERNET_OPEN_TYPE_PRECONFIG;
+    // Loopback POST targets (JabRef HTTP server on 127.0.0.1:23119, etc.) get
+    // INTERNET_OPEN_TYPE_DIRECT so a system-configured proxy can't intercept
+    // localhost traffic. The default INTERNET_OPEN_TYPE_PRECONFIG honors IE /
+    // Windows Internet Options, and some corp PAC files route loopback through
+    // the proxy — there the request never reaches the local server even when
+    // a plain Python / curl request to the same URL succeeds.
+    bool isLoopback = str::Eq(serverA, "127.0.0.1") || str::Eq(serverA, "localhost") || str::Eq(serverA, "::1") ||
+                      str::EqI(serverA, "localhost");
+    DWORD accessType = isLoopback ? INTERNET_OPEN_TYPE_DIRECT : INTERNET_OPEN_TYPE_PRECONFIG;
     HINTERNET hInet = InternetOpenW(kUserAgent, accessType, nullptr, nullptr, 0);
     if (!hInet) {
         goto Exit;
@@ -242,7 +254,15 @@ bool HttpPost(Str serverA, int port, Str urlA, str::Builder* headers, str::Build
         goto Exit;
     }
 #endif
-    ok = (200 == respHttpCode);
+    // Accept any 2xx — JabRef's /libraries/current/entries returns 201 Created
+    // on success, and other REST endpoints commonly return 202/204.
+    ok = (respHttpCode >= 200 && respHttpCode < 300);
+    if (outResp && len(resp) > 0) {
+        outResp->Append(ToStr(resp));
+    }
+    if (outStatusCode) {
+        *outStatusCode = respHttpCode;
+    }
 Exit:
     if (hReq) {
         InternetCloseHandle(hReq);

@@ -921,9 +921,13 @@ static RectF FindColumnWrapContinuation(WStr text, const Rect* coords, RectF med
 // (TOC, topbar, cross-ref, table caption). The landscape box renders a half-
 // page-tall slice of the page anchored on the destination so the user sees
 // surrounding context (e.g. the table rows under a caption).
-RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX, float destY, RectF* continuationOut) {
+RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX, float destY, RectF* continuationOut,
+                     bool* outIsBibEntry) {
     if (continuationOut) {
         *continuationOut = RectF{};
+    }
+    if (outIsBibEntry) {
+        *outIsBibEntry = false;
     }
     // Sparse-text dest page (image-only or near-image-only — e.g. a
     // children's PDF overview with character thumbnails plus a single
@@ -1365,6 +1369,9 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
                       (float)(bMaxX - bMinX) + 2.f * kEntryPadPt, (float)(bMaxY - bMinY) + 2.f * kEntryPadPt};
             ClipToMediabox(box, mediabox);
             if (box.dx >= 50.f && box.dy >= 20.f) {
+                if (outIsBibEntry) {
+                    *outIsBibEntry = true;
+                }
                 // No sibling "[" closed this entry, and — checked below — no
                 // more text at all follows in this column: this looks like the
                 // entry ran off the end of the column's content rather than
@@ -1633,6 +1640,9 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
     // Description-list bibliography ("[Smith2020]", "[1]", …) — unambiguous,
     // keep the fitted box.
     if (text.s[startIdx] == L'[') {
+        if (outIsBibEntry) {
+            *outIsBibEntry = true;
+        }
         return box;
     }
     // Tabular layout: continuation X far right of firstLineLeftX is a
@@ -1687,6 +1697,9 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
     // is a strong "this is a list of entries" signal even when the current
     // entry is a single line (abbreviations: "JVM Java Virtual Machine.").
     if (descListSibling) {
+        if (outIsBibEntry) {
+            *outIsBibEntry = true;
+        }
         return box;
     }
     // Single-line entry with no continuation indent and no sibling entry
@@ -1696,5 +1709,8 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
     }
     // Default: looks like a multi-line author-year bibliography entry,
     // keep the fitted box.
+    if (outIsBibEntry) {
+        *outIsBibEntry = true;
+    }
     return box;
 }

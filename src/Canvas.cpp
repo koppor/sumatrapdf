@@ -55,6 +55,7 @@
 #include "Translations.h"
 
 #include "RefHover.h"
+#include "RefHoverText.h"
 
 // if set instead of trying to render pages we don't have, we simply do nothing
 // this reduces the flickering when going quickly through pages but creates
@@ -1970,6 +1971,39 @@ NO_INLINE static void PaintCurrentEditAnnotationMark(WindowTab* tab, HDC hdc, Di
     drawHandle(left, midY);
 }
 
+// Paint the in-PDF marker dots for citations the user has pushed to JabRef
+// (mint) or that JabRef reports live in another open library (olive).
+// Mirrors the popup-corner badge palette in RefHover.cpp so the two surfaces
+// match. Skipped for non-fixed-layout tabs (the marker positions are PDF
+// user-space rects and have no meaning in reflowed views).
+static void PaintCitationMarkers(WindowTab* tab, HDC hdc, DisplayModel* dm) {
+    if (!tab || !tab->pushedCitations || tab->pushedCitations->len == 0) {
+        return;
+    }
+    Gdiplus::Graphics gs(hdc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    // Match the popup badge palette. Same constants are inlined in
+    // RefHover.cpp; keeping them duplicated here avoids cross-TU coupling for
+    // two colours that aren't going to drift.
+    Gdiplus::SolidBrush brushMint(Gdiplus::Color(255, 0x44, 0xBB, 0x99));
+    Gdiplus::SolidBrush brushOlive(Gdiplus::Color(255, 0xAA, 0xAA, 0x00));
+    int sz = DpiScale(tab->win->hwndCanvas, 8);
+    for (int i = 0; i < tab->pushedCitations->len; i++) {
+        const PushedCitation& pc = tab->pushedCitations->operator[](i);
+        if (pc.srcPage <= 0 || !dm->PageVisible(pc.srcPage)) {
+            continue;
+        }
+        // CvtToScreen requires the page be visible (laid out); guarded above.
+        Rect rc = dm->CvtToScreen(pc.srcPage, pc.srcRect);
+        // Anchor dot at the citation rect's top-right corner, half-overlapping
+        // so it reads as a callout rather than swallowing the link text.
+        int cx = rc.x + rc.dx - sz / 2;
+        int cy = rc.y - sz / 2;
+        Gdiplus::SolidBrush* brush = (pc.status == RefHoverPushStatus::RelatedMatch) ? &brushOlive : &brushMint;
+        gs.FillEllipse(brush, cx, cy, sz, sz);
+    }
+}
+
 static bool DrawDocument(MainWindow* win, HDC hdc, RECT* rcArea) {
     ReportIf(!win->AsFixed());
     if (!win->AsFixed()) {
@@ -2207,6 +2241,7 @@ static bool DrawDocument(MainWindow* win, HDC hdc, RECT* rcArea) {
 
     WindowTab* tab = win->CurrentTab();
     PaintCurrentEditAnnotationMark(tab, hdc, dm);
+    PaintCitationMarkers(tab, hdc, dm);
 
     // draw highlight rectangle around element under cursor during context menu
     if (win->contextMenuHighlightPageNo > 0 && dm->PageVisible(win->contextMenuHighlightPageNo)) {

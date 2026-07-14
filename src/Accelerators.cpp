@@ -169,6 +169,11 @@ static SeqStrNum gVirtKeysNum =
 // https://learn.microsoft.com/en-us/windows/win32/menurc/using-keyboard-accelerators?referrer=grok.com
 // https://grok.com/share/bGVnYWN5_d83c2956-4ce2-4c74-ba4d-9794d1760ccb?rid=746312cc-7d0f-4479-abec-25c394652cac
 ACCEL gBuiltInAccelerators[] = {
+    // Citation push to JabRef (Ctrl+J) registered as accelerator so it fires
+    // regardless of which child holds focus — alt-tabbing back to SumatraPDF
+    // can leave focus on toolbar / sidebar / search edit, where canvas-level
+    // WM_KEYDOWN never gets the key.
+    {FCONTROL | FVIRTKEY, 'J', CmdRefHoverPushToJabRef},
     {FVIRTKEY, 'K', CmdScrollUp},
     {FVIRTKEY, 'J', CmdScrollDown},
     {FVIRTKEY, 'H', CmdScrollLeft},
