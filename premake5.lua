@@ -71,6 +71,20 @@ newoption {
 
 include("premake5.files.lua")
 
+-- MSVC runs per-file CustomBuild (our NASM .asm steps) sequentially unless the
+-- item has BuildInParallel=true. With that metadata set, Microsoft.CppCommon.targets
+-- uses ParallelCustomBuild (same idea as /MP for ClCompile). Harmless for projects
+-- that have no CustomBuild items.
+require("vstudio")
+premake.override(premake.vstudio.vc2010.elements, "itemDefinitionGroup", function(base, cfg)
+  local calls = base(cfg)
+  table.insert(calls, function(_cfg)
+    premake.push("<CustomBuild>")
+    premake.w("<BuildInParallel>true</BuildInParallel>")
+    premake.pop("</CustomBuild>")
+  end)
+  return calls
+end)
 
 -- this is meant to make the binary win7 compatible but
 -- does't seem to work
@@ -447,39 +461,19 @@ workspace "SumatraPDF"
     filter {}
     unrar_files()
 
-  project "libdjvu"
-    dll_intermediate_dirs()
-    kind "StaticLib"
-    characterset("MBCS")
-    language "C++"
-    optimized_conf()
-    defines {
-      "_CRT_SECURE_NO_WARNINGS",
-      "NEED_JPEG_DECODER",
-      "WINTHREADS=1",
-      "DDJVUAPI=/**/",
-      "MINILISPAPI=/**/",
-      "DEBUGLVL=0"
-    }
-    filter { "platforms:x64_asan" }
-      defines { "DISABLE_MMX" }
-    filter {}
-    exceptionhandling "On"
-    disablewarnings { "4100", "4189", "4244", "4267", "4302", "4311", "4312", "4505" }
-    disablewarnings { "4456", "4457", "4459", "4701", "4702", "4703", "4706" }
-    includedirs { "ext/libjpeg-turbo/src" }
-    libdjvu_files()
-
-  project "chm"
+  -- chmdec: linked into libmupdf.dll (and static EXE). SumatraPDF.exe /
+  -- PdfFilter / PdfPreview import chm_* via libmupdf.def; do not also link here.
+  project "chmdec"
     static_intermediate_dirs()
     kind "StaticLib"
     language "C"
     optimized_conf()
     defines { "_CRT_SECURE_NO_WARNINGS" }
-    disablewarnings { "4018", "4244", "4267", "4996" }
-    files { "ext/libchm/*.c", "ext/libchm/*.h" }
+    disablewarnings { "4018", "4244", "4267", "4456", "4996" }
+    files { "ext/chmdec/*.c", "ext/chmdec/*.h" }
 
-  -- cmark-gfm for markdown browser (MarkdownToc/MarkdownModel) and mupdf md.c.
+  -- cmark-gfm: linked into mupdf → libmupdf.dll (md.c + MarkdownToc imports).
+  -- Do not also link into SumatraPDF.exe; re-export via libmupdf.def instead.
   project "cmark-gfm"
     dll_intermediate_dirs()
     kind "StaticLib"
@@ -499,7 +493,6 @@ workspace "SumatraPDF"
     -- loop), so favor speed over size here (the rest of the tree uses /O1)
     optimize "Speed"
     defines { "_CRT_SECURE_NO_WARNINGS" }
-    disablewarnings { "4018", "4101", "4244", "4267", "4996" }
     files { "ext/djvudec/djvu.c", "ext/djvudec/djvu.h" }
 
   -- zopfli / zopflipng: lossless PNG recompression, used to shrink PNGs we
@@ -519,6 +512,9 @@ workspace "SumatraPDF"
       "ext/a-zopfli/zopflipng/lodepng/lodepng.h", "ext/a-zopfli/version.txt",
     }
 
+  -- libarchive: linked into mupdf → libmupdf.dll (and into static EXE).
+  -- Do not also link into SumatraPDF.exe / PdfFilter / PdfPreview; re-export
+  -- the Archive.cpp symbols via libmupdf.def instead (same as cmark-gfm).
   project "libarchive"
     static_intermediate_dirs()
     kind "StaticLib"
@@ -593,58 +589,35 @@ workspace "SumatraPDF"
     -- build src/libdav1d.a.p/looprestoration_avx2.obj: CUSTOM_COMMAND_DEP ../src/x86/looprestoration_avx2.asm | C$:/Users/kjk/AppData/Local/bin/NASM/nasm.EXE
     -- COMMAND = "C:\Users\kjk\AppData\Local\bin\NASM\nasm.EXE" "-f" "win64" "-I" "C:/Users/kjk/src/dav1d/src/" "-I" "C:/Users/kjk/src/dav1d/build/" "-MQ" "src/libdav1d.a.p/looprestoration_avx2.obj" "-MF" "src/libdav1d.a.p/looprestoration_avx2.obj.ndep" "../src/x86/looprestoration_avx2.asm" "-o" "src/libdav1d.a.p/looprestoration_avx2.obj"
 
-  -- highway: SIMD dispatch library used by libjxl (ext/highway, v1.2.0)
-  project "highway"
+  -- jxldec: JPEG XL decoder amalgamation (replaces libjxl + highway + skcms).
+  project "jxldec"
     static_intermediate_dirs()
     kind "StaticLib"
-    language "C++"
-    cppdialect "C++17"
+    language "C"
     optimized_conf()
-    includedirs { "ext/highway" }
-    disablewarnings { "4100", "4127", "4244", "4245", "4267", "4324", "4456", "4457", "4701", "4702", "4723", "5054", "4146", "4458" }
-    highway_files()
+    -- decode is CPU-bound; favor speed over size
+    optimize "Speed"
+    defines { "_CRT_SECURE_NO_WARNINGS" }
+    disablewarnings { "4018", "4100", "4127", "4204", "4244", "4245", "4267", "4389", "4456", "4701", "4702", "4996" }
+    files { "ext/jxldec/jxl.c", "ext/jxldec/jxl.h" }
 
-  -- skcms: color management used by libjxl. Baseline only.
-  project "a-skcms"
+  -- HEIC/HEIF/AVIF decoder amalgamation (replaces libheif). HEVC is pure-C;
+  -- AV1 uses dav1d; unci zlib/brotli compression uses a-zlib / brotli at link.
+  project "heicdec"
     static_intermediate_dirs()
     kind "StaticLib"
-    language "C++"
-    cppdialect "C++17"
+    language "C"
     optimized_conf()
-    defines { "SKCMS_DISABLE_HSW", "SKCMS_DISABLE_SKX" }
-    includedirs { "ext/a-skcms" }
-    disablewarnings { "4100", "4201", "4244", "4245", "4267", "4310", "4456", "4701", "4702" }
-    files { "ext/a-skcms/skcms.cpp", "ext/a-skcms/skcms.h", "ext/a-skcms/version.txt" }
-
-  -- libjxl decoder (ext/libjxl, v0.11.2). Decoder subset only; uses skcms for
-  -- color management and brotli for compressed metadata.
-  project "libjxl"
-    static_intermediate_dirs()
-    kind "StaticLib"
-    language "C++"
-    cppdialect "C++17"
-    optimized_conf()
-    exceptionhandling "On"
-    rtti "On"
-    defines { "JPEGXL_ENABLE_SKCMS=1", "JPEGXL_ENABLE_TRANSCODE_JPEG=0", "JPEGXL_BUNDLING_LIBJXL=1", "_CRT_SECURE_NO_WARNINGS" }
-    includedirs { "ext/libjxl", "ext/libjxl/lib/include", "ext/highway", "ext/a-skcms", "ext/brotli/c/include" }
-    disablewarnings { "4018", "4100", "4127", "4146", "4201", "4244", "4245", "4267", "4305", "4308", "4310", "4324", "4334", "4456", "4457", "4505", "4806", "4458", "4459", "4701", "4702", "4703", "4838", "4996", "5054" }
-    buildoptions { "/bigobj" }
-    libjxl_files()
-
-  project "libheif"
-    static_intermediate_dirs()
-    kind "StaticLib"
-    language "C++"
-    cppdialect "C++latest"
-    optimized_conf()
-    defines { "_CRT_SECURE_NO_WARNINGS", "HAVE_DAV1D", "LIBHEIF_STATIC_BUILD" }
-    includedirs { "ext/libheif/libheif", "ext/libheif/libheif/api", "ext/dav1d/include" }
-    disablewarnings { "4018", "4065", "4100", "4101", "4146", "4244", "4245", "4267", "4273", "4319", "4456", "4701", "4703", "4805", "4996" }
-    -- TODO: I don't want RTTI and /EHsc
-    rtti "On"
-    buildoptions { "/EHsc" }
-    libheif_files()
+    -- HEVC decode is CPU-bound (CABAC / transform / deblock), favor speed
+    optimize "Speed"
+    defines {
+      "_CRT_SECURE_NO_WARNINGS",
+      "HEIC_HAVE_DAV1D",
+      "HEIC_HAVE_ZLIB",
+      "HEIC_HAVE_BROTLI",
+    }
+    includedirs { "ext/heicdec", "ext/dav1d/include", "ext/a-zlib", "ext/brotli/c/include" }
+    files { "ext/heicdec/heic.c", "ext/heicdec/heic.h" }
 
   project "dav1d"
     static_intermediate_dirs()
@@ -681,20 +654,8 @@ workspace "SumatraPDF"
     disablewarnings { "4005", "4131", "4244", "4245", "4267", "4996" }
     zlib_files()
 
-  project "a-gumbo"
-    static_intermediate_dirs()
-    kind "StaticLib"
-    language "C"
-    optimized_conf()
-    disablewarnings { "4018", "4100", "4132", "4189", "4204", "4244", "4245", "4267",
-      "4305", "4306", "4389", "4456", "4701", "4702" }
-    includedirs { "ext/a-gumbo" }
-    a_gumbo_files()
-
--- to make Visual Studio solution smaller
--- combine 9 libs only used by mupdf into a single project
--- instead of having 9 projects
-
+  -- Kept for bench_image only; mupdf compiles the same sources into its static
+  -- lib for libmupdf / SumatraPDF-static (see project "mupdf").
   project "libjpeg-turbo"
     static_intermediate_dirs()
     kind "StaticLib"
@@ -703,8 +664,6 @@ workspace "SumatraPDF"
     defines { "_CRT_SECURE_NO_WARNINGS" }
     disablewarnings { "4013", "4018", "4100", "4244", "4245", "4819" }
     includedirs { "ext/libjpeg-turbo/src" }
-    -- libjpeg-turbo 3.x NASM SIMD: include dirs are simd/nasm (shared macros)
-    -- and the per-arch dir (simd/i386 or simd/x86_64).
     filter { 'files:**.asm', 'platforms:x86' }
       buildmessage '%{file.relpath}'
       buildoutputs { '%{cfg.objdir}/%{file.basename}.obj' }
@@ -720,112 +679,6 @@ workspace "SumatraPDF"
       }
     filter {}
     libjpeg_turbo_files()
-
-  project "a-jbig2dec"
-    static_intermediate_dirs()
-    kind "StaticLib"
-    language "C"
-    optimized_conf()
-    defines { "_CRT_SECURE_NO_WARNINGS", "HAVE_STRING_H=1", "JBIG_NO_MEMENTO" }
-    disablewarnings { "4018", "4100", "4146", "4244", "4267", "4456", "4701" }
-    includedirs { "ext/a-jbig2dec" }
-    files { "ext/a-jbig2dec/jbig2dec.c", "ext/a-jbig2dec/jbig2.h", "ext/a-jbig2dec/version.txt" }
-
-  project "a-openjpeg"
-    static_intermediate_dirs()
-    kind "StaticLib"
-    language "C"
-    optimized_conf()
-    disablewarnings { "4005", "4100", "4127", "4244", "4310", "4389", "4456", "4702" }
-    defines { "_CRT_SECURE_NO_WARNINGS", "USE_JPIP", "OPJ_STATIC", "OPJ_EXPORTS" }
-    includedirs { "ext/a-openjpeg" }
-    files { "ext/a-openjpeg/openjpeg.c", "ext/a-openjpeg/*.h", "ext/a-openjpeg/version.txt" }
-
-  project "freetype"
-    static_intermediate_dirs()
-    kind "StaticLib"
-    language "C"
-    optimized_conf()
-    defines {
-      "FT2_BUILD_LIBRARY",
-      "FT_CONFIG_MODULES_H=\"slimftmodules.h\"",
-      "FT_CONFIG_OPTIONS_H=\"slimftoptions.h\"",
-    }
-    disablewarnings { "4018", "4100", "4101", "4244", "4267", "4312", "4701", "4706", "4996" }
-    includedirs { "mupdf/scripts/freetype", "ext/freetype/include", "ext/brotli/c/include" }
-    freetype_files()
-
-  project "lcms2"
-    static_intermediate_dirs()
-    kind "StaticLib"
-    language "C"
-    optimized_conf()
-    disablewarnings { "4100", "4244" }
-    includedirs { "ext/lcms2/include" }
-    lcms2_files()
-
-  project "harfbuzz"
-    static_intermediate_dirs()
-    kind "StaticLib"
-    language "C++"
-    cppdialect "C++latest"
-    optimized_conf()
-    -- ext/harfbuzz/src is required so /Yu"hb.hh" and forceincludes can resolve
-    -- hb.hh (sources also rely on same-dir includes for other headers).
-    includedirs { "ext/harfbuzz/src", "ext/harfbuzz/src/hb-ucdn", "mupdf/scripts/freetype", "ext/freetype/include" }
-    defines {
-      "_CRT_SECURE_NO_WARNINGS",
-      "HAVE_FALLBACK=1",
-      "HAVE_OT",
-      "HAVE_UCDN",
-      "HAVE_FREETYPE",
-      -- plain malloc/free wrappers (ext/mupdf_load_system_font.c) so that
-      -- harfbuzz allocations don't depend on mupdf's thread-local fz_hb_secret
-      -- context being set (it's NULL during atexit and when fz_hb_lock/unlock
-      -- pairs nest via store scavenging)
-      "hb_malloc_impl=sumatra_hb_malloc",
-      "hb_calloc_impl=sumatra_hb_calloc",
-      "hb_realloc_impl=sumatra_hb_realloc",
-      "hb_free_impl=sumatra_hb_free"
-    }
-    filter "configurations:Debug or DebugFull"
-    defines {
-      "HAVE_ATEXIT",
-    }
-    filter {}
-    disablewarnings { "4805", "4100", "4146", "4244", "4245", "4267", "4310", "4456", "4457", "4459", "4505", "4701", "4702", "4706", "4996" }
-    -- precompiled header: hb.hh is re-parsed by every harfbuzz TU and dominates
-    -- its compile time. forceincludes so MSVC /Yu finds the PCH marker even in
-    -- TUs that include a secondary header first (which then pulls in hb.hh).
-    pchheader "hb.hh"
-    pchsource "src/HarfBuzzPch.cpp"
-    files { "src/HarfBuzzPch.cpp" }
-    forceincludes { "hb.hh" }
-    harfbuzz_files()
-
-  project "a-mujs"
-    static_intermediate_dirs()
-    kind "StaticLib"
-    language "C"
-    optimized_conf()
-    includedirs { "ext/a-mujs" }
-    disablewarnings { "4090", "4100", "4146", "4310", "4702", "4706" }
-    files { "ext/a-mujs/mujs.c", "ext/a-mujs/mujs.h", "ext/a-mujs/version.txt" }
-
-  project "a-extract"
-    static_intermediate_dirs()
-    kind "StaticLib"
-    language "C"
-    optimized_conf()
-    disablewarnings {
-      "4005", "4100", "4127", "4130", "4201", "4245", "4310", "4389", "4456", "4457", "4701", "4996"
-    }
-    includedirs { "ext/a-extract" }
-    uses_zlib()
-    files {
-      "ext/a-extract/extract.c", "ext/a-extract/memento.h",
-      "ext/a-extract/extract/*.h", "ext/a-extract/version.txt",
-    }
 
   project "brotli"
     static_intermediate_dirs()
@@ -932,7 +785,9 @@ workspace "SumatraPDF"
   project "mupdf"
     static_intermediate_dirs()
     kind "StaticLib"
-    language "C"
+    -- C++ for harfbuzz; C sources still compile as C
+    language "C++"
+    cppdialect "C++latest"
     mixed_dbg_rel_conf()
     -- for openjpeg, OPJ_STATIC is alrady defined in load-jpx.c
     -- so we can't double-define it
@@ -943,14 +798,33 @@ workspace "SumatraPDF"
     defines { "TOFU_NOTO", "TOFU_CJK_LANG", "TOFU_NOTO_SUMATRA" }
     defines { "FZ_ENABLE_PDF=1", "FZ_ENABLE_SVG=1", "FZ_ENABLE_BROTLI=1", "FZ_ENABLE_BARCODE=0", "FZ_ENABLE_JS=1", "FZ_ENABLE_HYPHEN=0", "FZ_ENABLE_MD=1" }
     defines { "HAVE_LIBARCHIVE", "LIBARCHIVE_STATIC" }
+    -- third-party libs compiled into this project (was separate a-* static libs)
+    defines {
+      "_CRT_SECURE_NO_WARNINGS", "HAVE_STRING_H=1", "JBIG_NO_MEMENTO",
+      "FT2_BUILD_LIBRARY",
+      "FT_CONFIG_MODULES_H=\"slimftmodules.h\"",
+      "FT_CONFIG_OPTIONS_H=\"slimftoptions.h\"",
+      -- harfbuzz
+      "HAVE_FALLBACK=1", "HAVE_OT", "HAVE_UCDN", "HAVE_FREETYPE",
+      -- plain malloc/free wrappers (ext/mupdf_load_system_font.c) so that
+      -- harfbuzz allocations don't depend on mupdf's thread-local fz_hb_secret
+      "hb_malloc_impl=sumatra_hb_malloc",
+      "hb_calloc_impl=sumatra_hb_calloc",
+      "hb_realloc_impl=sumatra_hb_realloc",
+      "hb_free_impl=sumatra_hb_free",
+    }
+    filter "configurations:Debug or DebugFull"
+      defines { "HAVE_ATEXIT" }
+    filter {}
 
     filter { "platforms:arm64" }
     defines { "ARCH_HAS_NEON=1" }
     filter {}
 
     disablewarnings {
-      "4005", "4013", "4018", "4057", "4100", "4115", "4130", "4132", "4146", "4200", "4204", "4206", "4210",
-      "4245", "4267", "4295", "4305", "4389", "4456", "4457", "4703", "4706", "4819", "5286"
+      "4005", "4013", "4018", "4057", "4100", "4101", "4115", "4127", "4130", "4132", "4146", "4189", "4200", "4201",
+      "4204", "4206", "4210", "4090", "4244", "4245", "4267", "4295", "4305", "4306", "4310", "4312", "4389", "4456",
+      "4457", "4459", "4505", "4701", "4702", "4703", "4706", "4805", "4819", "4996", "5286"
     }
     -- force including mupdf/scripts/openjpeg/opj_config_private.h
     -- with our build over-rides
@@ -959,6 +833,7 @@ workspace "SumatraPDF"
     includedirs {
       "mupdf/include",
       "mupdf/generated",
+      "ext/a-jbig2dec",
       "ext/jbig2dec",
       "ext/libjpeg-turbo/src",
       "ext/a-openjpeg",
@@ -978,17 +853,54 @@ workspace "SumatraPDF"
     fonts()
 
     mupdf_files()
+    -- Third-party code that only mupdf/libmupdf needs is compiled into this
+    -- static lib (smaller VS solution; was separate a-* projects).
+    files { "ext/a-jbig2dec/jbig2dec.c", "ext/a-jbig2dec/jbig2.h", "ext/a-jbig2dec/version.txt" }
+    files { "ext/a-openjpeg/openjpeg.c", "ext/a-openjpeg/*.h", "ext/a-openjpeg/version.txt" }
+    files { "ext/a-mujs/mujs.c", "ext/a-mujs/mujs.h", "ext/a-mujs/version.txt" }
+    files {
+      "ext/a-extract/extract.c", "ext/a-extract/memento.h",
+      "ext/a-extract/extract/*.h", "ext/a-extract/version.txt",
+    }
+    -- mupdf provides memento.obj; skip extract's amalgamated memento body
+    filter { "files:ext/a-extract/extract.c" }
+      defines { "EXTRACT_NO_OWN_MEMENTO" }
+    filter {}
+    a_gumbo_files()
+    lcms2_files()
+    -- libjpeg-turbo (also kept as its own project for bench_image only)
+    libjpeg_turbo_files()
+    freetype_files()
+    harfbuzz_files()
+    filter { 'files:**.asm', 'platforms:x86' }
+      buildmessage '%{file.relpath}'
+      buildoutputs { '%{cfg.objdir}/%{file.basename}.obj' }
+      buildcommands {
+        '..\\bin\\nasm.exe -f win32 -DWIN32 -I ../ext/libjpeg-turbo/simd/nasm/ -I ../ext/libjpeg-turbo/simd/i386/ -o "%{cfg.objdir}/%{file.basename}.obj" "%{file.relpath}"'
+      }
+    filter {}
+    filter { 'files:**.asm', 'platforms:x64 or x64_asan' }
+      buildmessage '%{file.relpath}'
+      buildoutputs { '%{cfg.objdir}/%{file.basename}.obj' }
+      buildcommands {
+        '..\\bin\\nasm.exe -f win64 -DWIN64 -D__x86_64__ -I ../ext/libjpeg-turbo/simd/nasm/ -I ../ext/libjpeg-turbo/simd/x86_64/ -o "%{cfg.objdir}/%{file.basename}.obj" "%{file.relpath}"'
+      }
+    filter {}
+    filter {
+      "files:ext/a-jbig2dec/** or files:ext/a-openjpeg/** or files:ext/a-mujs/** or files:ext/a-extract/** or files:ext/a-gumbo/** or files:ext/lcms2/** or files:ext/libjpeg-turbo/** or files:ext/freetype/** or files:ext/harfbuzz/**"
+    }
+      optimize "Size"
+    filter {}
     links {
-      "cmark-gfm", "a-mujs", "a-extract", "harfbuzz", "freetype", "brotli",
-      "lcms2", "a-openjpeg", "a-jbig2dec", "libjpeg-turbo", "libarchive", "a-gumbo"
+      "cmark-gfm", "brotli", "libarchive"
     }
 
     -- mupdf
     -- this fixes "NAN" is not a constant in some version of msvc
     -- without this it's #define _UCRT_NAN (__ucrt_int_to_float(0x7FC00000))
     -- CMARK_GFM_STATIC_DEFINE: md.c includes cmark-gfm headers; we link the
-    -- cmark-gfm static lib. FZ_ENABLE_MD defaults to 1
-    -- in mupdf's config.h, enabling markdown support.
+    -- cmark-gfm static lib into this project so libmupdf.dll contains cmark
+    -- (and re-exports MarkdownToc's symbols via libmupdf.def).
     defines { "_UCRT_NOISY_NAN", "CMARK_GFM_STATIC_DEFINE" }
 
   project "libmupdf"
@@ -1011,7 +923,19 @@ workspace "SumatraPDF"
     -- linkoptions { "/DEF:..\\src\\libmupdf.def", "-IGNORE:4702" }
     linkoptions { "-IGNORE:4701", "-IGNORE:4702" }
     links_zlib()
-    links { "mupdf", "libdjvu", "djvudec", "libwebp", "dav1d", "libheif", "libjxl", "highway", "a-skcms" }
+    -- image codecs + their transitive deps are part of this DLL only; consumers
+    -- (SumatraPDF, PdfPreview, …) import the few needed symbols via libmupdf.def
+    -- and must not also link libwebp/jxldec/heicdec/dav1d/brotli.
+    -- brotli is required by freetype (via mupdf) and by heicdec.
+    -- unrar: static lib kept as its own project; linked only into this DLL (and
+    -- static EXE). Archive.cpp RAR* APIs are re-exported via libmupdf.def so
+    -- SumatraPDF / PdfFilter / PdfPreview do not carry a second copy.
+    -- chmdec: same pattern — ChmFile / -dump-chm import chm_* via libmupdf.def.
+    -- unrar is C++ with exceptions; keep them enabled so the DLL can host it.
+    exceptionhandling "On"
+    links {
+      "mupdf", "djvudec", "libwebp", "dav1d", "heicdec", "jxldec", "brotli", "unrar", "chmdec"
+    }
     links {
       "advapi32", "kernel32", "user32", "gdi32", "comdlg32",
       "shell32", "windowscodecs", "comctl32", "msimg32",
@@ -1066,12 +990,12 @@ workspace "SumatraPDF"
     mixed_dbg_rel_conf()
     disablewarnings { "4838" }
     includedirs { "src", "ext/djvudec", "ext/libarchive", "ext/unrar", "mupdf/include" }
-    includedirs { "ext/libheif/libheif/api", "ext/libwebp/src", "ext/libjxl/lib/include" }
-    defines { "LIBHEIF_STATIC_BUILD" }
+    includedirs { "ext/heicdec", "ext/libwebp/src", "ext/jxldec" }
     test_engines_files()
     links_zlib()
+    -- static link (no libmupdf.dll): same image-codec set as libmupdf.dll
     links { "base", "djvudec", "libarchive", "unrar", "mupdf" }
-    links { "libwebp", "dav1d", "libheif", "libjxl", "highway", "a-skcms" }
+    links { "libwebp", "dav1d", "heicdec", "jxldec", "brotli" }
     links {
       "gdiplus", "gdi32", "user32", "comctl32", "shlwapi", "Version", "wininet",
       "shcore", "wintrust", "crypt32", "shell32", "ole32", "oleAut32", "urlmon",
@@ -1089,6 +1013,31 @@ workspace "SumatraPDF"
     includedirs { "src" }
     bin2coff_files()
     links { "gdiplus", "comctl32", "shlwapi", "Version" }
+
+  -- Image decode microbench: native lib vs WIC vs GDI+ (-jpeg / -webp / -avif / -heif / -jxl)
+  project "bench_image"
+    static_app_objdir()
+    static_linker_intermediates()
+    kind "ConsoleApp"
+    language "C++"
+    cppdialect "C++latest"
+    mixed_dbg_rel_conf()
+    disablewarnings { "4611", "4838" } -- setjmp / C++ destruction; QITABENT
+    includedirs {
+      "src", "ext/libjpeg-turbo/src", "ext/libwebp/src", "ext/heicdec",
+      "ext/jxldec",
+    }
+    bench_image_files()
+    setup_base_pch()
+    -- heicdec needs dav1d (AV1), a-zlib / brotli (unci compressed HEIC)
+    links {
+      "base", "libjpeg-turbo", "libwebp", "heicdec", "dav1d", "a-zlib",
+      "jxldec", "brotli",
+    }
+    links {
+      "gdiplus", "gdi32", "user32", "comctl32", "shlwapi", "Version",
+      "ole32", "oleAut32", "windowscodecs", "shcore", "wininet",
+    }
 
   -- small console app that runs the mupdf command-line tools (draw, convert,
   -- info, ...). Console subsystem (so it works with cmd.exe / PowerShell) and
@@ -1119,7 +1068,8 @@ workspace "SumatraPDF"
     filter {}
     includedirs { "src", "src/wingui", "mupdf/include", "ext/libarchive" }
     search_filter_files()
-    links { "base", "unrar", "libmupdf", "libarchive" }
+    -- libarchive + unrar live in libmupdf.dll (re-exported); do not link second copies
+    links { "base", "libmupdf" }
     links { "comctl32", "gdiplus", "shlwapi", "version", "wininet", "wintrust", "crypt32" }
 
   -- project "PdfFilter2"
@@ -1142,8 +1092,6 @@ workspace "SumatraPDF"
   --     "src", "src/wingui"
   --   }
   --   pdf_preview2_files()
-  --   -- TODO: "chm" should only be for Debug config but doing links { "chm" }
-  --   -- in the filter breaks linking by setting LinkLibraryDependencies to false
   --   links { "comctl32", "gdiplus", "msimg32", "shlwapi", "version", "wininet", "wintrust", "crypt32" }
 
   project "PdfPreview"
@@ -1154,19 +1102,18 @@ workspace "SumatraPDF"
     mixed_dbg_rel_conf()
     disablewarnings { "4100", "4838" }
     defines { "HAVE_LIBARCHIVE", "LIBARCHIVE_STATIC" }
-    defines { "LIBHEIF_STATIC_BUILD" }
+    -- image codecs (webp/jxl/heic/dav1d) live in libmupdf.dll and are imported
+    -- via libmupdf.def; only headers are needed here to compile the readers.
     includedirs {
       "src", "src/wingui", "mupdf/include",
-      "ext/libdjvu", "ext/djvudec", "ext/libchm",
+      "ext/djvudec", "ext/chmdec",
       "ext/libarchive",
-      "ext/libheif/libheif/api", "ext/libwebp/src", "ext/libjxl/lib/include",
-      "ext/brotli/c/include",
+      "ext/heicdec", "ext/libwebp/src", "ext/jxldec",
     }
-    brotli_files()
     pdf_preview_files()
-    -- TODO: "chm" should only be for Debug config but doing links { "chm" }
-    -- in the filter breaks linking by setting LinkLibraryDependencies to false
-    links { "base", "unrar", "libmupdf", "libarchive", "chm", "djvudec", "libwebp", "dav1d", "libheif", "libjxl", "highway", "a-skcms" }
+    -- djvudec / chmdec / libarchive / unrar live in libmupdf.dll (re-exported);
+    -- do not link second copies
+    links { "base", "libmupdf" }
     links { "comctl32", "gdiplus", "msimg32", "shlwapi", "version", "wininet", "wintrust", "crypt32" }
 
   -- a single static executable
@@ -1180,11 +1127,11 @@ workspace "SumatraPDF"
     warnings_as_errors()
     entrypoint "WinMainCRTStartup"
     manifest("Off")
-    defines { "LIBARCHIVE_STATIC", "LIBHEIF_STATIC_BUILD" }
+    defines { "LIBARCHIVE_STATIC" }
     includedirs { "src", "mupdf/include" }
-    includedirs { "ext/synctex", "ext/libdjvu", "ext/djvudec", "ext/libchm", "ext/libarchive", "ext/zopfli/src" }
+    includedirs { "ext/synctex", "ext/djvudec", "ext/chmdec", "ext/libarchive", "ext/zopfli/src" }
     includedirs { "ext/cmark-gfm/src", "ext/cmark-gfm/extensions", "mupdf/scripts/cmark-gfm" }
-    includedirs { "ext/libheif/libheif/api", "ext/libwebp/src", "ext/libjxl/lib/include" }
+    includedirs { "ext/heicdec", "ext/libwebp/src", "ext/jxldec" }
 
     -- MSVC's dynamic asan runtime ignores __asan_default_options/suppressions(),
     -- so asan options can only come from the environment.
@@ -1242,8 +1189,12 @@ workspace "SumatraPDF"
     disablewarnings { "4302", "4311", "4838" }
 
     links_zlib()
+    -- static build has no libmupdf.dll: image codecs + chmdec/unrar/libarchive
+    -- link in here (same set as libmupdf.dll uses). brotli is pulled via mupdf
+    -- (freetype) + needed by heic.
     links {
-      "djvudec", "libwebp", "dav1d", "libheif", "libjxl", "highway", "a-skcms", "mupdf", "libarchive", "base", "unrar", "chm", "a-zopfli"
+      "djvudec", "libwebp", "dav1d", "heicdec", "jxldec", "brotli",
+      "mupdf", "libarchive", "base", "unrar", "chmdec", "a-zopfli"
     }
     links {
       "comctl32", "delayimp", "gdiplus", "msimg32", "shlwapi", "urlmon",
@@ -1276,11 +1227,12 @@ workspace "SumatraPDF"
     warnings_as_errors()
     entrypoint "WinMainCRTStartup"
     manifest("Off")
-    defines { "LIBARCHIVE_STATIC", "LIBHEIF_STATIC_BUILD" }
+    defines { "LIBARCHIVE_STATIC" }
     includedirs { "src", "mupdf/include" }
-    includedirs { "ext/synctex", "ext/libdjvu", "ext/djvudec", "ext/libchm", "ext/libarchive", "ext/zopfli/src" }
+    includedirs { "ext/synctex", "ext/djvudec", "ext/chmdec", "ext/libarchive", "ext/zopfli/src" }
     includedirs { "ext/darkmodelib/include" }
-    includedirs { "ext/libheif/libheif/api", "ext/libwebp/src", "ext/libjxl/lib/include" }
+    -- headers only: webp/jxl/heic/chm symbols come from libmupdf.dll (libmupdf.def)
+    includedirs { "ext/heicdec", "ext/libwebp/src", "ext/jxldec" }
 
     -- MSVC's dynamic asan runtime ignores __asan_default_options/suppressions(),
     -- so asan options can only come from the environment.
@@ -1341,11 +1293,14 @@ workspace "SumatraPDF"
 
     files { "src/MuPDF_Exports.cpp" }
 
+    -- MarkdownToc / Archive.cpp / ChmFile use cmark + libarchive + unrar +
+    -- chmdec via libmupdf.def exports (all live in libmupdf.dll; do not link
+    -- second copies into the EXE).
     includedirs { "ext/cmark-gfm/src", "ext/cmark-gfm/extensions", "mupdf/scripts/cmark-gfm" }
     defines { "CMARK_GFM_STATIC_DEFINE" }
 
     links {
-      "libmupdf", "unrar", "libarchive", "base", "chm", "cmark-gfm", "a-zopfli"
+      "libmupdf", "base", "a-zopfli"
     }
     links {
       "comctl32", "delayimp", "gdiplus", "msimg32", "shlwapi", "urlmon",

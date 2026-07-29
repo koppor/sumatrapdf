@@ -21,7 +21,8 @@ struct ILinkHandler {
     virtual void ScrollTo(int pageNo, RectF rect, float zoom) = 0;
     virtual void LaunchURL(Str) = 0;
     virtual void LaunchFile(Str path, IPageDestination*) = 0;
-    virtual IPageDestination* FindTocItem(TocItem* item, Str name, bool partially) = 0;
+    // first ToC entry whose title (partially) matches name; nullptr if none
+    virtual TocItem* FindTocItem(TocItem* item, Str name, bool partially) = 0;
 };
 
 enum class PageInfoState {
@@ -187,6 +188,10 @@ struct PageDestinationURL : IPageDestination {
 struct PageDestinationFile : IPageDestination {
     Str path;
     Str dest;
+    // PDF GoToR /NewWindow (when known). MuPDF's file: URI conversion does not
+    // currently preserve this flag; callers may still set it, and Ctrl+click
+    // also opens remote files in a new window.
+    bool openInNewWindow = false;
 
     PageDestinationFile() = delete;
 
@@ -380,7 +385,7 @@ struct TocTree : TreeModel {
     Str Text(TreeItem) override;
     TreeItem Parent(TreeItem) override;
     int ChildCount(TreeItem) override;
-    TreeItem ChildAt(TreeItem, int index) override;
+    TreeItem ChildAt(TreeItem, int idx) override;
     bool IsExpanded(TreeItem) override;
     bool IsChecked(TreeItem) override;
 
@@ -488,7 +493,7 @@ class EngineBase {
     virtual Str GetFileData() = 0;
 
     // saves a copy of the current file under a different name (overwriting an existing file)
-    virtual bool SaveFileAs(Str copyFileName) = 0;
+    virtual bool SaveFileAs(Str dstPath) = 0;
 
     // extracts all text found in the given page (and optionally also the
     // coordinates of the individual glyphs)
@@ -545,6 +550,9 @@ class EngineBase {
     // creates a PageDestination from a name (or nullptr for invalid names)
     // caller must delete the result
     virtual IPageDestination* GetNamedDest(Str name);
+
+    // 1-based page from safe PDF /OpenAction GoTo, or 0 (issue #1631)
+    virtual int GetOpenActionPageNo() { return 0; }
 
     // checks whether this document has an associated Table of Contents
     bool HasToc();
@@ -609,7 +617,7 @@ class EngineBase {
 };
 
 struct PasswordUI {
-    virtual Str GetPassword(Str fileName, u8* fileDigest, u8 decryptionKeyOut[32], bool* saveKey) = 0;
+    virtual Str GetPassword(Str path, u8* fileDigest, u8 decryptionKeyOut[32], bool* saveKey) = 0;
     virtual ~PasswordUI() = default;
 };
 

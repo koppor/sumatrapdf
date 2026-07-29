@@ -256,8 +256,15 @@ enum {
     CmdToggleLightDarkTheme = 445,
     CmdChangeTheme = 446,
     CmdTranslateSelection = 447,
-    CmdRefHoverPushToJabRef = 448,
-    CmdNone = 449,
+    CmdFavoriteShowInTab = 448,
+    CmdTocExpandToLevel1 = 449,
+    CmdTocExpandToLevel2 = 450,
+    CmdTocExpandToLevel3 = 451,
+    CmdTocCollapseSameLevel = 452,
+    CmdToggleFavoritesSort = 453,
+    CmdZoomFitHeight = 454,
+    CmdRefHoverPushToJabRef = 455,
+    CmdNone = 456,
 
     /* range for file history */
     CmdFileHistoryFirst,

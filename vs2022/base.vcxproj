@@ -391,6 +391,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -420,6 +423,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
@@ -449,6 +455,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug x64_asan|x64'">
     <ClCompile>
@@ -478,6 +487,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull|Win32'">
     <ClCompile>
@@ -507,6 +519,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull|x64'">
     <ClCompile>
@@ -536,6 +551,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull|ARM64'">
     <ClCompile>
@@ -565,6 +583,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull x64_asan|x64'">
     <ClCompile>
@@ -594,6 +615,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
@@ -627,6 +651,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -660,6 +687,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <ClCompile>
@@ -693,6 +723,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release x64_asan|x64'">
     <ClCompile>
@@ -725,6 +758,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze|Win32'">
     <ClCompile>
@@ -758,6 +794,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze|x64'">
     <ClCompile>
@@ -791,6 +830,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze|ARM64'">
     <ClCompile>
@@ -824,6 +866,9 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze x64_asan|x64'">
     <ClCompile>
@@ -856,13 +901,15 @@
     </Link>
     <ProjectReference>
     </ProjectReference>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\src\base\Archive.h" />
     <ClInclude Include="..\src\base\Arena.h" />
     <ClInclude Include="..\src\base\Base.h" />
     <ClInclude Include="..\src\base\BitReader.h" />
-    <ClInclude Include="..\src\base\BuildConfig.h" />
     <ClInclude Include="..\src\base\ByteOrderDecoder.h" />
     <ClInclude Include="..\src\base\ByteReader.h" />
     <ClInclude Include="..\src\base\ByteWriter.h" />
@@ -943,6 +990,13 @@
     <ClCompile Include="..\src\base\Http_win.cpp" />
     <ClCompile Include="..\src\base\JsonParser.cpp" />
     <ClCompile Include="..\src\base\LzmaSimpleArchive.cpp" />
+    <!-- LzSA decoder (LzmaDecode + x86 BCJ). Bra.c (ARM/PPC/etc.) not needed. -->
+    <ClCompile Include="..\ext\lzma\C\Bra86.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma\C\LzmaDec.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\src\base\Pixmap.cpp" />
     <ClCompile Include="..\src\base\SettingsUtil.cpp" />
     <ClCompile Include="..\src\base\SquareTreeParser.cpp" />

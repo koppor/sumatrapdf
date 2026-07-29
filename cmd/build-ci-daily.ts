@@ -39,7 +39,7 @@ async function isGithubMyMasterBranch(): Promise<boolean> {
 }
 
 function buildConfigPath(): string {
-  return join("src", "base", "BuildConfig.h");
+  return join("src", "BuildConfig.h");
 }
 
 function setBuildConfigPreRelease(sha1: string, preRelVer: string): void {
@@ -55,7 +55,7 @@ async function revertBuildConfig(): Promise<void> {
 }
 
 function ensureManualIsBuilt(): void {
-  const path = join("docs", "manual.dat");
+  const path = join(".work", "manual.dat");
   let size = 0;
   try {
     size = statSync(path).size;

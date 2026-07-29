@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -402,8 +402,8 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <MinimalRebuild>false</MinimalRebuild>
@@ -417,8 +417,8 @@
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/dbg32\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/dbg32\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -433,9 +433,13 @@
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/dbg32 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
@@ -444,8 +448,8 @@ cd ../out/dbg32 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <MinimalRebuild>false</MinimalRebuild>
@@ -459,8 +463,8 @@ cd ../out/dbg32 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/dbg64\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/dbg64\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -475,9 +479,13 @@ cd ../out/dbg32 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/dbg64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
@@ -486,8 +494,8 @@ cd ../out/dbg64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <MinimalRebuild>false</MinimalRebuild>
@@ -501,8 +509,8 @@ cd ../out/dbg64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/dbgarm64\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/dbgarm64\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -517,9 +525,13 @@ cd ../out/dbg64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/dbgarm64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug x64_asan|x64'">
     <ClCompile>
@@ -528,8 +540,8 @@ cd ../out/dbgarm64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:l
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <MinimalRebuild>false</MinimalRebuild>
@@ -543,8 +555,8 @@ cd ../out/dbgarm64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:l
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/dbg64_asan\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/dbg64_asan\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -559,12 +571,16 @@ cd ../out/dbgarm64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:l
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/dbg64_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>copy /y "$(VCToolsInstallDir)bin\Hostx64\x64\clang_rt.asan_dynamic-x86_64.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull|Win32'">
     <ClCompile>
@@ -573,8 +589,8 @@ cd ../out/dbg64_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <MinimalRebuild>false</MinimalRebuild>
@@ -588,8 +604,8 @@ cd ../out/dbg64_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/dbgfull32\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/dbgfull32\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -604,9 +620,13 @@ cd ../out/dbg64_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/dbgfull32 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull|x64'">
     <ClCompile>
@@ -615,8 +635,8 @@ cd ../out/dbgfull32 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <MinimalRebuild>false</MinimalRebuild>
@@ -630,8 +650,8 @@ cd ../out/dbgfull32 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/dbgfull64\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/dbgfull64\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -646,9 +666,13 @@ cd ../out/dbgfull32 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/dbgfull64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull|ARM64'">
     <ClCompile>
@@ -657,8 +681,8 @@ cd ../out/dbgfull64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <MinimalRebuild>false</MinimalRebuild>
@@ -672,8 +696,8 @@ cd ../out/dbgfull64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/dbgfullarm64\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/dbgfullarm64\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -688,9 +712,13 @@ cd ../out/dbgfull64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/dbgfullarm64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='DebugFull x64_asan|x64'">
     <ClCompile>
@@ -699,8 +727,8 @@ cd ../out/dbgfullarm64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.d
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>Disabled</Optimization>
       <MinimalRebuild>false</MinimalRebuild>
@@ -714,8 +742,8 @@ cd ../out/dbgfullarm64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.d
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/dbgfull64_asan\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;DEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/dbgfull64_asan\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -730,12 +758,16 @@ cd ../out/dbgfullarm64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.d
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/dbgfull64_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>copy /y "$(VCToolsInstallDir)bin\Hostx64\x64\clang_rt.asan_dynamic-x86_64.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
@@ -744,8 +776,8 @@ cd ../out/dbgfull64_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -761,8 +793,8 @@ cd ../out/dbgfull64_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/rel32\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/rel32\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -779,9 +811,13 @@ cd ../out/dbgfull64_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/rel32 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -790,8 +826,8 @@ cd ../out/rel32 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -807,8 +843,8 @@ cd ../out/rel32 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/rel64\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/rel64\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -825,9 +861,13 @@ cd ../out/rel32 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/rel64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
     <ClCompile>
@@ -836,8 +876,8 @@ cd ../out/rel64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -853,8 +893,8 @@ cd ../out/rel64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/arm64\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/arm64\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -871,9 +911,13 @@ cd ../out/rel64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/arm64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release x64_asan|x64'">
     <ClCompile>
@@ -882,8 +926,8 @@ cd ../out/arm64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -899,8 +943,8 @@ cd ../out/arm64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/rel64_asan\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/rel64_asan\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -916,12 +960,16 @@ cd ../out/arm64 &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libm
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/rel64_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>copy /y "$(VCToolsInstallDir)bin\Hostx64\x64\clang_rt.asan_dynamic-x86_64.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze|Win32'">
     <ClCompile>
@@ -929,8 +977,8 @@ cd ../out/rel64_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll
       <PrecompiledHeaderFile>base/Base.h</PrecompiledHeaderFile>
       <WarningLevel>Level4</WarningLevel>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;28125;28252;28253;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -946,8 +994,8 @@ cd ../out/rel64_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/rel32_prefast\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/rel32_prefast\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -965,9 +1013,13 @@ cd ../out/rel64_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/rel32_prefast &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze|x64'">
     <ClCompile>
@@ -975,8 +1027,8 @@ cd ../out/rel32_prefast &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.
       <PrecompiledHeaderFile>base/Base.h</PrecompiledHeaderFile>
       <WarningLevel>Level4</WarningLevel>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;28125;28252;28253;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -992,8 +1044,8 @@ cd ../out/rel32_prefast &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/rel64_prefast\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/rel64_prefast\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -1011,9 +1063,13 @@ cd ../out/rel32_prefast &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/rel64_prefast &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze|ARM64'">
     <ClCompile>
@@ -1021,8 +1077,8 @@ cd ../out/rel64_prefast &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.
       <PrecompiledHeaderFile>base/Base.h</PrecompiledHeaderFile>
       <WarningLevel>Level4</WarningLevel>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;28125;28252;28253;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -1038,8 +1094,8 @@ cd ../out/rel64_prefast &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/arm64_prefast\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;INSTALL_PAYLOAD_ZIP=.\../out/arm64_prefast\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -1057,9 +1113,13 @@ cd ../out/rel64_prefast &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/arm64_prefast &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseAnalyze x64_asan|x64'">
     <ClCompile>
@@ -1067,8 +1127,8 @@ cd ../out/arm64_prefast &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.
       <PrecompiledHeaderFile>base/Base.h</PrecompiledHeaderFile>
       <WarningLevel>Level4</WarningLevel>
       <DisableSpecificWarnings>4127;4189;4324;4458;4522;4611;4800;6319;28125;28252;28253;4100;4701;4702;4703;4706;6324;4302;4311;4838;4819;%(DisableSpecificWarnings)</DisableSpecificWarnings>
-      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <Optimization>MinSpace</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -1084,8 +1144,8 @@ cd ../out/arm64_prefast &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
     <ResourceCompile>
-      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;LIBHEIF_STATIC_BUILD;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/rel64_prefast_asan\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\libdjvu;..\ext\djvudec;..\ext\libchm;..\ext\libarchive;..\ext\zopfli\src;..\ext\libheif\libheif\api;..\ext\libwebp\src;..\ext\libjxl\lib\include;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>ASAN_BUILD=1;WIN32;_WIN32;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000;_HAS_ITERATOR_DEBUGGING=0;NDEBUG;LIBARCHIVE_STATIC;_DARKMODELIB_NO_INI_CONFIG;_CRT_SECURE_NO_WARNINGS;DISABLE_DOCUMENT_RESTRICTIONS;CMARK_GFM_STATIC_DEFINE;_WIN64;INSTALL_PAYLOAD_ZIP=.\../out/rel64_prefast_asan\InstallerData.dat;_HAS_EXCEPTIONS=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\src;..\mupdf\include;..\ext\djvudec;..\ext\chmdec;..\ext\libarchive;..\ext\zopfli\src;..\ext\heicdec;..\ext\libwebp\src;..\ext\jxldec;..\ext\darkmodelib\include;..\packages\Microsoft.Web.WebView2.1.0.4022.49\build\native\include;..\ext\a-zlib;..\ext\synctex;..\ext\cmark-gfm\src;..\ext\cmark-gfm\extensions;..\mupdf\scripts\cmark-gfm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -1102,12 +1162,16 @@ cd ../out/arm64_prefast &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.
     <ProjectReference>
     </ProjectReference>
     <PreBuildEvent>
-      <Command>..\bin\MakeLZSA.exe ..\translations\translations.txt.lzsa ..\translations\translations-good.txt:translations-good.txt
+      <Command>if not exist ..\.work mkdir ..\.work
+..\bin\MakeLZSA.exe ..\.work\translations.txt.lzsa ..\.work\translations.txt:translations.txt
 cd ../out/rel64_prefast_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libmupdf.dll:libmupdf.dll PdfFilter.dll:PdfFilter.dll PdfPreview.dll:PdfPreview.dll sumatrapdf-tool.exe:sumatrapdf-tool.exe</Command>
     </PreBuildEvent>
     <PostBuildEvent>
       <Command>copy /y "$(VCToolsInstallDir)bin\Hostx64\x64\clang_rt.asan_dynamic-x86_64.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
+    <CustomBuild>
+      <BuildInParallel>true</BuildInParallel>
+    </CustomBuild>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\ext\darkmodelib\include\DarkModeSubclass.h" />
@@ -1134,6 +1198,7 @@ cd ../out/rel64_prefast_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libm
     <ClInclude Include="..\src\AppSettings.h" />
     <ClInclude Include="..\src\AppTools.h" />
     <ClInclude Include="..\src\AvifReader.h" />
+    <ClInclude Include="..\src\BuildConfig.h" />
     <ClInclude Include="..\src\Canvas.h" />
     <ClInclude Include="..\src\CaptionGlyphs.h" />
     <ClInclude Include="..\src\ChangeThemeDialog.h" />
@@ -1165,13 +1230,12 @@ cd ../out/rel64_prefast_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libm
     <ClInclude Include="..\src\FindWindow.h" />
     <ClInclude Include="..\src\Flags.h" />
     <ClInclude Include="..\src\FormFields.h" />
-    <ClInclude Include="..\src\FzImgReader.h" />
-    <ClInclude Include="..\src\GdiPlusExtFormats.h" />
     <ClInclude Include="..\src\GlobalPrefs.h" />
     <ClInclude Include="..\src\GumboHelpers.h" />
     <ClInclude Include="..\src\GumboHtmlParser.h" />
     <ClInclude Include="..\src\HomePage.h" />
     <ClInclude Include="..\src\HtmlFormatter.h" />
+    <ClInclude Include="..\src\ImageReader.h" />
     <ClInclude Include="..\src\ImageSaveCropResize.h" />
     <ClInclude Include="..\src\Installer.h" />
     <ClInclude Include="..\src\JxlReader.h" />
@@ -1293,6 +1357,17 @@ cd ../out/rel64_prefast_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libm
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <DisableSpecificWarnings>4244;4267;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
+    <!-- LzSA decoder in the exe (not via libmupdf.dll) so installer can extract libmupdf.dll -->
+    <ClCompile Include="..\ext\lzma\C\Bra86.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>..\ext\lzma\C;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <DisableSpecificWarnings>4457;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma\C\LzmaDec.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalIncludeDirectories>..\ext\lzma\C;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <DisableSpecificWarnings>4457;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
     <ClCompile Include="..\src\AIChatCommon.cpp" />
     <ClCompile Include="..\src\AIChatPanel.cpp" />
     <ClCompile Include="..\src\Accelerators.cpp" />
@@ -1355,15 +1430,14 @@ cd ../out/rel64_prefast_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libm
     <ClCompile Include="..\src\FindWindow.cpp" />
     <ClCompile Include="..\src\Flags.cpp" />
     <ClCompile Include="..\src\FormFields.cpp" />
-    <ClCompile Include="..\src\FzImgReader.cpp" />
-    <ClCompile Include="..\src\FzImgReader_win.cpp" />
-    <ClCompile Include="..\src\GdiPlusExtFormats.cpp" />
     <ClCompile Include="..\src\GlobalPrefs.cpp" />
     <ClCompile Include="..\src\GrokBuild.cpp" />
     <ClCompile Include="..\src\GumboHelpers.cpp" />
     <ClCompile Include="..\src\GumboHtmlParser.cpp" />
     <ClCompile Include="..\src\HomePage.cpp" />
     <ClCompile Include="..\src\HtmlFormatter.cpp" />
+    <ClCompile Include="..\src\ImageReader.cpp" />
+    <ClCompile Include="..\src\ImageReader_win.cpp" />
     <ClCompile Include="..\src\ImageSaveCropResize.cpp" />
     <ClCompile Include="..\src\Installer.cpp" />
     <ClCompile Include="..\src\InstallerCommon.cpp" />
@@ -1733,20 +1807,8 @@ cd ../out/rel64_prefast_asan &amp; ..\..\bin\MakeLZSA.exe InstallerData.dat libm
     <ProjectReference Include="libmupdf.vcxproj">
       <Project>{B812ACA6-A4DF-06B2-CDF8-F459B9243C40}</Project>
     </ProjectReference>
-    <ProjectReference Include="unrar.vcxproj">
-      <Project>{AD768210-198B-AAC1-E20C-4E214EE0A6F2}</Project>
-    </ProjectReference>
-    <ProjectReference Include="libarchive.vcxproj">
-      <Project>{1E5D585E-0A15-9AAB-731C-73075FF3349C}</Project>
-    </ProjectReference>
     <ProjectReference Include="base.vcxproj">
       <Project>{8078947C-6CAF-950D-159C-7B1001B2110F}</Project>
-    </ProjectReference>
-    <ProjectReference Include="chm.vcxproj">
-      <Project>{DD65880B-496F-887C-D2EA-9E7C3EF3937C}</Project>
-    </ProjectReference>
-    <ProjectReference Include="cmark-gfm.vcxproj">
-      <Project>{5AADABD2-C617-6049-0F56-11EF7BFF3D9E}</Project>
     </ProjectReference>
     <ProjectReference Include="a-zopfli.vcxproj">
       <Project>{87C84EAD-7395-A9B8-9CAE-976088DADE46}</Project>

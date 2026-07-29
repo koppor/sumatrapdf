@@ -172,25 +172,6 @@ function unrar_files()
   })
 end
 
-function libdjvu_files()
-  files_in_dir("ext/libdjvu", {
-    "Arrays.cpp", "atomic.cpp", "BSByteStream.cpp", "BSEncodeByteStream.cpp",
-    "ByteStream.cpp", "DataPool.cpp", "ddjvuapi.cpp", "debug.cpp",
-    "DjVmDir.cpp", "DjVmDir0.cpp", "DjVmDoc.cpp", "DjVmNav.cpp",
-    "DjVuAnno.cpp", "DjVuDocEditor.cpp", "DjVuDocument.cpp", "DjVuDumpHelper.cpp",
-    "DjVuErrorList.cpp", "DjVuFile.cpp", "DjVuFileCache.cpp", "DjVuGlobal.cpp",
-    "DjVuGlobalMemory.cpp", "DjVuImage.cpp", "DjVuInfo.cpp", "DjVuMessage.cpp",
-    "DjVuMessageLite.cpp", "DjVuNavDir.cpp", "DjVuPalette.cpp", "DjVuPort.cpp",
-    "DjVuText.cpp", "DjVuToPS.cpp", "GBitmap.cpp", "GContainer.cpp", "GException.cpp",
-    "GIFFManager.cpp", "GMapAreas.cpp", "GOS.cpp", "GPixmap.cpp", "GRect.cpp",
-    "GScaler.cpp", "GSmartPointer.cpp", "GString.cpp", "GThreads.cpp",
-    "GUnicode.cpp", "GURL.cpp", "IFFByteStream.cpp", "IW44EncodeCodec.cpp",
-    "IW44Image.cpp", "JB2EncodeCodec.cpp", "JB2Image.cpp",
-    "JPEGDecoder.cpp", "miniexp.cpp", "MMRDecoder.cpp", "MMX.cpp",
-    "UnicodeByteStream.cpp", "XMLParser.cpp", "XMLTags.cpp", "ZPCodec.cpp",
-  })
-end
-
 function libarchive_files()
   files { "ext/libarchive/libarchive/*.h" }
   removefiles { "ext/libarchive/libarchive/config_linux.h" }
@@ -305,109 +286,6 @@ function jbig2dec_files()
     "jbig2_segment.c",
     "jbig2_symbol_dict.c",
     "jbig2_text.c",
-  })
-end
-
-function libheif_files()
-  files_in_dir("ext/libheif/libheif", {
-    "bitstream.*",
-    "box.*",
-    "brands.*",
-    "common_utils.*",
-    "context.*",
-    "error.*",
-    "file.*",
-    "file_layout.*",
-    "id_creator.*",
-    "init.*",
-    "logging.*",
-    "mini.*",
-    "nclx.*",
-    "omaf_boxes.*",
-    "plugin_registry.*",
-    "region.*",
-    "security_limits.*",
-    "text.*",
-  })
-  files_in_dir("ext/libheif/libheif/image", {
-    "image_description.*",
-    "pixelimage.*",
-  })
-  files_in_dir("ext/libheif/libheif/image-items", {
-    "avc.*",
-    "avif.*",
-    "grid.*",
-    "hevc.*",
-    "iden.*",
-    "image_item.*",
-    "jpeg.*",
-    "jpeg2000.*",
-    "mask_image.*",
-    "overlay.*",
-    "tiled.*",
-    "vvc.*",
-  })
-  files_in_dir("ext/libheif/libheif/codecs", {
-    "avc_boxes.*",
-    "avc_dec.*",
-    "avc_enc.*",
-    "avif_boxes.*",
-    "avif_dec.*",
-    "avif_enc.*",
-    "decoder.*",
-    "encoder.*",
-    "hevc_boxes.*",
-    "hevc_dec.*",
-    "hevc_enc.*",
-    "jpeg2000_boxes.*",
-    "jpeg2000_dec.*",
-    "jpeg2000_enc.*",
-    "jpeg_boxes.*",
-    "jpeg_dec.*",
-    "jpeg_enc.*",
-    "vvc_boxes.*",
-    "vvc_dec.*",
-    "vvc_enc.*",
-  })
-  files_in_dir("ext/libheif/libheif/color-conversion", {
-    "alpha.*",
-    "bayer_bilinear.*",
-    "chroma_sampling.*",
-    "colorconversion.*",
-    "hdr_sdr.*",
-    "monochrome.*",
-    "rgb2rgb.*",
-    "rgb2yuv.*",
-    "rgb2yuv_sharp.*",
-    "yuv2rgb.*",
-  })
-  files_in_dir("ext/libheif/libheif/plugins", {
-    "decoder_dav1d.*",
-    "encoder_mask.*",
-  })
-  files_in_dir("ext/libheif/libheif/sequences", {
-    "chunk.*",
-    "seq_boxes.*",
-    "track.*",
-    "track_metadata.*",
-    "track_visual.*",
-  })
-  files_in_dir("ext/libheif/libheif/api/libheif", {
-    "heif.*",
-    "heif_brands.*",
-    "heif_color.*",
-    "heif_components.*",
-    "heif_context.*",
-    "heif_decoding.*",
-    "heif_encoding.*",
-    "heif_image.*",
-    "heif_image_handle.*",
-    "heif_metadata.*",
-    "heif_omaf.*",
-    "heif_plugin.*",
-    "heif_security.*",
-    "heif_sequences.*",
-    "heif_tai_timestamps.*",
   })
 end
 
@@ -599,38 +477,39 @@ function libjpeg_turbo_files()
     "jerror.c", "jfdctflt.c", "jmemmgr.c", "jmemnobs.c", "jpeg_nbits.c",
   })
 
-  -- libjpeg-turbo 3.x: per-precision wrappers (8/12/16-bit), each #includes
-  -- the matching ../<name>.c with BITS_IN_JSAMPLE set. These provide run-time
-  -- selectable data precision.
+  -- libjpeg-turbo 3.x: 8-bit precision wrappers only. Each #includes the
+  -- matching ../<name>.c with BITS_IN_JSAMPLE=8. 12/16-bit wrappers are
+  -- omitted (MuPDF only uses the 8-bit API); jcinit/jdmaster/jdtrans reject
+  -- higher data_precision with JERR_BAD_PRECISION.
   files_in_dir("ext/libjpeg-turbo/src/wrapper", {
-    "jcapistd-8.c", "jcapistd-12.c", "jcapistd-16.c",
-    "jccoefct-8.c", "jccoefct-12.c",
-    "jccolor-8.c", "jccolor-12.c", "jccolor-16.c",
-    "jcdctmgr-8.c", "jcdctmgr-12.c",
-    "jcdiffct-8.c", "jcdiffct-12.c", "jcdiffct-16.c",
-    "jclossls-8.c", "jclossls-12.c", "jclossls-16.c",
-    "jcmainct-8.c", "jcmainct-12.c", "jcmainct-16.c",
-    "jcprepct-8.c", "jcprepct-12.c", "jcprepct-16.c",
-    "jcsample-8.c", "jcsample-12.c", "jcsample-16.c",
-    "jdapistd-8.c", "jdapistd-12.c", "jdapistd-16.c",
-    "jdcoefct-8.c", "jdcoefct-12.c",
-    "jdcolor-8.c", "jdcolor-12.c", "jdcolor-16.c",
-    "jddctmgr-8.c", "jddctmgr-12.c",
-    "jddiffct-8.c", "jddiffct-12.c", "jddiffct-16.c",
-    "jdlossls-8.c", "jdlossls-12.c", "jdlossls-16.c",
-    "jdmainct-8.c", "jdmainct-12.c", "jdmainct-16.c",
-    "jdmerge-8.c", "jdmerge-12.c",
-    "jdpostct-8.c", "jdpostct-12.c", "jdpostct-16.c",
-    "jdsample-8.c", "jdsample-12.c", "jdsample-16.c",
-    "jfdctfst-8.c", "jfdctfst-12.c",
-    "jfdctint-8.c", "jfdctint-12.c",
-    "jidctflt-8.c", "jidctflt-12.c",
-    "jidctfst-8.c", "jidctfst-12.c",
-    "jidctint-8.c", "jidctint-12.c",
-    "jidctred-8.c", "jidctred-12.c",
-    "jquant1-8.c", "jquant1-12.c",
-    "jquant2-8.c", "jquant2-12.c",
-    "jutils-8.c", "jutils-12.c", "jutils-16.c",
+    "jcapistd-8.c",
+    "jccoefct-8.c",
+    "jccolor-8.c",
+    "jcdctmgr-8.c",
+    "jcdiffct-8.c",
+    "jclossls-8.c",
+    "jcmainct-8.c",
+    "jcprepct-8.c",
+    "jcsample-8.c",
+    "jdapistd-8.c",
+    "jdcoefct-8.c",
+    "jdcolor-8.c",
+    "jddctmgr-8.c",
+    "jddiffct-8.c",
+    "jdlossls-8.c",
+    "jdmainct-8.c",
+    "jdmerge-8.c",
+    "jdpostct-8.c",
+    "jdsample-8.c",
+    "jfdctfst-8.c",
+    "jfdctint-8.c",
+    "jidctflt-8.c",
+    "jidctfst-8.c",
+    "jidctint-8.c",
+    "jidctred-8.c",
+    "jquant1-8.c",
+    "jquant2-8.c",
+    "jutils-8.c",
   })
 
   -- arm64: no SIMD (WITH_SIMD is left undefined in jconfig.h/jconfigint.h).
@@ -842,10 +721,9 @@ function sumatrapdf_files()
     "FindBar.*",
     "FindWindow.*",
     "FormFields.*",
-    "GdiPlusExtFormats.*",
-    "FzImgReader.h",
-    "FzImgReader.cpp",
-    "FzImgReader_win.cpp",
+    "ImageReader.h",
+    "ImageReader.cpp",
+    "ImageReader_win.cpp",
     "GlobalPrefs.*",
     "HomePage.*",
     "Installer.*",
@@ -914,6 +792,7 @@ function sumatrapdf_files()
     "TreeModel.*",
     "Uninstaller.cpp",
     "UpdateCheck.*",
+    "BuildConfig.h",
     "Version.h",
     "VirtWnd.*",
     "WebpReader.*",
@@ -981,7 +860,6 @@ function base_files()
     "Base.cpp",
     "Base_win.cpp",
     "BitReader.*",
-    "BuildConfig.h",
     "ByteOrderDecoder.*",
     "ByteReader.*",
     "ByteWriter.*",
@@ -1464,6 +1342,7 @@ function test_util_files()
     "File.h",
     "File.cpp",
     "File_win.cpp",
+    "FileWatcher.*",
     "Geom.*",
     "GuessFileType.*",
     "HtmlTags.*",
@@ -1524,9 +1403,8 @@ function test_engines_files()
     "src/EngineDjvuDec.cpp",
     "src/EngineImages.cpp",
     "src/EngineMupdf.cpp",
-    "src/FzImgReader.cpp",
-    "src/FzImgReader_win.cpp",
-    "src/GdiPlusExtFormats.cpp",
+    "src/ImageReader.cpp",
+    "src/ImageReader_win.cpp",
     "src/GumboHtmlParser.cpp",
     "src/GumboHelpers.cpp",
     "src/JxlReader.cpp",
@@ -1542,6 +1420,12 @@ function test_engines_files()
     "src/TreeModel.cpp",
     "src/TreeModel.h",
     "src/tools/test_engines.cpp",
+  }
+end
+
+function bench_image_files()
+  files {
+    "src/tools/bench_image.cpp",
   }
 end
 
@@ -1567,10 +1451,9 @@ function pdf_preview_files()
     "EngineMupdf.*",
     "EngineMupdfImpl.*",
     "AvifReader.*",
-    "FzImgReader.h",
-    "FzImgReader.cpp",
-    "FzImgReader_win.cpp",
-    "GdiPlusExtFormats.*",
+    "ImageReader.h",
+    "ImageReader.cpp",
+    "ImageReader_win.cpp",
     "GumboHtmlParser.*",
     "GumboHelpers.*",
     "HtmlFormatter.*",
@@ -1721,29 +1604,6 @@ function bin2coff_files()
   files_in_dir("tools", {
     "bin2coff.c"
   })
-end
-
--- highway (SIMD library, dependency of libjxl). Only the core runtime sources;
--- the rest is header-only.
-function highway_files()
-  files { "ext/highway/hwy/*.cc", "ext/highway/hwy/*.h", "ext/highway/hwy/ops/*.h" }
-end
-
--- skcms (color management, dependency of libjxl). Baseline only (HSW/SKX
--- disabled), so no per-file /arch flags are needed.
-function skcms_files()
-  files {
-    "ext/skcms/skcms.cc",
-    "ext/skcms/skcms.h",
-    "ext/skcms/src/skcms_TransformBaseline.cc",
-    "ext/skcms/src/*.h",
-  }
-end
-
--- libjxl decoder. ext/libjxl/lib/jxl only contains the decoder subset we
--- vendored (see ext/versions.txt), so globbing it picks exactly those files.
-function libjxl_files()
-  files { "ext/libjxl/lib/jxl/**.cc", "ext/libjxl/lib/jxl/**.h", "ext/libjxl/lib/include/jxl/*.h" }
 end
 
 function sumatrapdf_tool_files()

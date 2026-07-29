@@ -258,6 +258,13 @@ static SeqStrings gCommandNames =
     "CmdToggleLightDarkTheme\0"
     "CmdChangeTheme\0"
     "CmdTranslateSelection\0"
+    "CmdFavoriteShowInTab\0"
+    "CmdTocExpandToLevel1\0"
+    "CmdTocExpandToLevel2\0"
+    "CmdTocExpandToLevel3\0"
+    "CmdTocCollapseSameLevel\0"
+    "CmdToggleFavoritesSort\0"
+    "CmdZoomFitHeight\0"
     "CmdRefHoverPushToJabRef\0"
     "CmdNone\0"
     "\0";
@@ -510,6 +517,13 @@ static i32 gCommandIds[] = {
     CmdToggleLightDarkTheme,
     CmdChangeTheme,
     CmdTranslateSelection,
+    CmdFavoriteShowInTab,
+    CmdTocExpandToLevel1,
+    CmdTocExpandToLevel2,
+    CmdTocExpandToLevel3,
+    CmdTocCollapseSameLevel,
+    CmdToggleFavoritesSort,
+    CmdZoomFitHeight,
     CmdRefHoverPushToJabRef,
     CmdNone,
 };
@@ -762,6 +776,13 @@ SeqStrings gCommandDescriptions =
     "Toggle Light/Dark Theme\0"
     "Change Theme...\0"
     "Translate Selection...\0"
+    "Show Favorites in Tab\0"
+    "Bookmarks: Expand to Level 1\0"
+    "Bookmarks: Expand to Level 2\0"
+    "Bookmarks: Expand to Level 3\0"
+    "Bookmarks: Collapse Same Level\0"
+    "Sort Favorites By Name\0"
+    "Zoom: Fit Height\0"
     "Push Reference to JabRef\0"
     "Do nothing\0"
     "\0";

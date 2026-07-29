@@ -114,6 +114,9 @@
     <ClInclude Include="..\src\AvifReader.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\BuildConfig.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\Canvas.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -207,12 +210,6 @@
     <ClInclude Include="..\src\FormFields.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\FzImgReader.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\GdiPlusExtFormats.h">
-      <Filter>src</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\GlobalPrefs.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -226,6 +223,9 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\HtmlFormatter.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ImageReader.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\ImageSaveCropResize.h">
@@ -668,15 +668,6 @@
     <ClCompile Include="..\src\FormFields.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\FzImgReader.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\FzImgReader_win.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\GdiPlusExtFormats.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\GlobalPrefs.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -693,6 +684,12 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\HtmlFormatter.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ImageReader.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ImageReader_win.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\ImageSaveCropResize.cpp">
