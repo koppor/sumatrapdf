@@ -139,7 +139,12 @@ void RelayoutNotifications(HWND hwndCanvas) {
         return;
     }
 
-    Rect frame = ClientRect(hwndCanvas);
+    Rect frame = HwndClientRect(hwndCanvas);
+    // Canvas can be empty during early startup / DeferWindowPos; nothing to
+    // anchor to yet. A later UpdateCanvasSize / RelayoutFrame will retry.
+    if (frame.IsEmpty()) {
+        return;
+    }
     int dyPadding = DpiScale(hwndCanvas, kPadding);
     bool isRtl = IsUIRtl();
     // running vertical offset per corner so multiple notifications in the same
@@ -151,19 +156,24 @@ void RelayoutNotifications(HWND hwndCanvas) {
             // still in delay period, not yet visible
             continue;
         }
-        if (!IsWindowVisible(wnd->hwnd)) {
-            // hidden because it's tied to a non-active tab; don't reserve space
+        // Use the window's own WS_VISIBLE, not IsWindowVisible(): the latter
+        // walks parents and returns false while the frame/canvas is mid-show
+        // (first document open). That skipped positioning so bottom-right
+        // toasts (e.g. "Errors in document") stayed at 0,0 / off-canvas until
+        // a later reload when parents were already visible.
+        if (!(GetWindowStyle(wnd->hwnd) & WS_VISIBLE)) {
+            // explicitly hidden (e.g. tied to a non-active tab)
             continue;
         }
         int xMargin = DpiScale(hwndCanvas, wnd->xMargin);
         int yMargin = DpiScale(hwndCanvas, wnd->yMargin);
-        Rect rect = WindowRect(wnd->hwnd);
-        // re-wrap the message if the notification no longer fits
-        // (e.g. when the window was made smaller, issue #2916)
+        Rect rect = HwndWindowRect(wnd->hwnd);
+        // re-measure when the canvas is too small for the current size, or when
+        // the notif was first laid out against an empty/wrong parent size
         int maxDx = frame.dx - (2 * xMargin);
-        if (maxDx > 0 && rect.dx > maxDx) {
+        if (maxDx > 0 && (rect.dx > maxDx || rect.dx <= 0 || rect.dy <= 0)) {
             wnd->Layout(HwndGetTextTemp(wnd->hwnd));
-            rect = WindowRect(wnd->hwnd);
+            rect = HwndWindowRect(wnd->hwnd);
         }
 
         NotifCorner corner = wnd->corner;
@@ -175,6 +185,13 @@ void RelayoutNotifications(HWND hwndCanvas) {
         int x = atRight ? (frame.dx - rect.dx - xMargin) : xMargin;
         int idx = (int)corner;
         int y = atBottom ? (frame.dy - rect.dy - yMargin - yOffset[idx]) : (yMargin + yOffset[idx]);
+        // keep fully inside the canvas (guards empty/partial layout races)
+        if (x < 0) {
+            x = 0;
+        }
+        if (y < 0) {
+            y = 0;
+        }
         // SWP_NOCOPYBITS: repaint from scratch instead of copying stale bits, so
         // notifications that shift when another is dismissed draw correctly
         // (OnPaint is double-buffered, so no flicker)
@@ -234,8 +251,8 @@ static void NotifsRemoveNotification(NotificationWnd* wnd) {
 }
 
 int GetWndX(NotificationWnd* wnd) {
-    Rect rect = WindowRect(wnd->hwnd);
-    rect = MapRectToWindow(rect, HWND_DESKTOP, GetParent(wnd->hwnd));
+    Rect rect = HwndWindowRect(wnd->hwnd);
+    rect = HwndMapRectToWindow(rect, HWND_DESKTOP, GetParent(wnd->hwnd));
     return rect.x;
 }
 
@@ -329,7 +346,7 @@ void NotificationWnd::Layout(Str message) {
     // limit the width to the parent window so that the close button
     // stays reachable even for very long messages (issue #2916)
     int topLeftMargin = DpiScale(hwnd, kTopLeftMargin);
-    Rect rParent = ClientRect(GetParent(hwnd));
+    Rect rParent = HwndClientRect(GetParent(hwnd));
     int maxTextDx = rParent.dx - (2 * topLeftMargin) - (2 * padX);
     if (!noClose) {
         maxTextDx -= closeLeftMargin + closeDx + padX;
@@ -405,7 +422,7 @@ void NotificationWnd::Layout(Str message) {
         dy += padY + progressDy + padY;
     }
 
-    Rect rCurr = WindowRect(hwnd);
+    Rect rCurr = HwndWindowRect(hwnd);
     // for less flicker we don't want to shrink the window when the text shrinks
     if (dx < rCurr.dx) {
         int diff = rCurr.dx - dx;
@@ -434,7 +451,7 @@ void NotificationWnd::Layout(Str message) {
 #endif
 #if 0
     if (wnd->shrinkLimit < 1.0f) {
-        Rect rcOrig = ClientRect(wnd->hwnd);
+        Rect rcOrig = HwndClientRect(wnd->hwnd);
         if (rMsg.dx < rcOrig.dx && rMsg.dx > rcOrig.dx * wnd->shrinkLimit) {
             rMsg.dx = rcOrig.dx;
         }
@@ -457,17 +474,17 @@ void NotificationWnd::Layout(Str message) {
     // move the window to the right for a right-to-left layout
     if (IsUIRtl()) {
         HWND parent = GetParent(hwnd);
-        Rect r = MapRectToWindow(WindowRect(hwnd), HWND_DESKTOP, parent);
+        Rect r = HwndMapRectToWindow(HwndWindowRect(hwnd), HWND_DESKTOP, parent);
         int cxVScroll = GetSystemMetrics(SM_CXVSCROLL);
-        r.x = WindowRect(parent).dx - r.dx - DpiScale(hwnd, kTopLeftMargin) - cxVScroll;
+        r.x = HwndWindowRect(parent).dx - r.dx - DpiScale(hwnd, kTopLeftMargin) - cxVScroll;
         flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOREDRAW | SWP_NOACTIVATE | SWP_DEFERERASE;
         SetWindowPos(hwnd, nullptr, r.x, r.y, 0, 0, flags);
     }
 }
 
 // TODO: figure out why it flickers
-void NotificationWnd::OnPaint(HDC hdcIn, PAINTSTRUCT* ps) {
-    Rect rc = ClientRect(hwnd);
+void NotificationWnd::OnPaint(HDC hdcIn, PAINTSTRUCT* /*ps*/) {
+    Rect rc = HwndClientRect(hwnd);
     DoubleBuffer buffer(hwnd, rc);
     HDC hdc = buffer.GetDC();
     // HDC hdc = hdcIn;
@@ -498,8 +515,7 @@ void NotificationWnd::OnPaint(HDC hdcIn, PAINTSTRUCT* ps) {
         SetViewportOrgEx(hdc, oldOrg.x, oldOrg.y, nullptr);
     } else {
         TempStr text = HwndGetTextTemp(hwnd);
-        RECT rTmp = ToRECT(rTxt);
-        HdcDrawText(hdc, text, &rTmp, txtFmt);
+        HdcDrawText(hdc, text, rTxt, txtFmt);
     }
 
     if (!noClose) {

@@ -62,10 +62,10 @@ struct PropertiesWnd : Wnd {
 static Vec<PropertiesWnd*> gPropertiesWindows;
 
 PropertiesWnd::~PropertiesWnd() {
-    if (propsFont) {
-        DeleteObject(propsFont);
-        propsFont = nullptr;
-    }
+    // propsFont is from HdcCreateSimpleFont — cached for the app lifetime.
+    // Do not DeleteObject it or the cache returns a dead HFONT on the next open
+    // (Document Properties then falls back to a proportional font; issue #5852).
+    propsFont = nullptr;
 }
 
 static void DeletePropertiesWndInstance(PropertiesWnd* w) {
@@ -127,9 +127,7 @@ static bool PdfDateParseA(Str date, SYSTEMTIME* timeOut, int* timeZoneOut) {
 
     Str slice = date;
     // "D:" at the beginning is optional
-    if (str::StartsWith(slice, "D:")) {
-        slice = Str(slice.s + 2, slice.len - 2);
-    }
+    str::TrimPrefix(slice, StrL("D:"));
     int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
     Str end = str::Parse(slice,
                          "%4d%2d%2d"
@@ -159,7 +157,7 @@ static bool PdfDateParseA(Str date, SYSTEMTIME* timeOut, int* timeZoneOut) {
         if (!tzEnd.s) {
             str::Parse(tz, "%2d", &tzHour);
         }
-        *timeZoneOut = sign * (tzHour * 100 + tzMin);
+        *timeZoneOut = sign * ((tzHour * 100) + tzMin);
     }
     return true;
     // don't bother about the day of week, we won't display it anyway
@@ -198,7 +196,7 @@ static bool IsoDateParse(Str date, SYSTEMTIME* timeOut, int* timeZoneOut) {
                 if (!tzEnd.s) {
                     str::Parse(tz, "%2d%2d", &tzHour, &tzMin);
                 }
-                *timeZoneOut = sign * (tzHour * 100 + tzMin);
+                *timeZoneOut = sign * ((tzHour * 100) + tzMin);
             }
         }
     }
@@ -262,7 +260,7 @@ static TempStr FormatPageSizeUnitTemp(SizeF sizeInches, double unitsPerInch, Str
     }
     TempStr strWidth = str::FormatFloatWithThousandSepTemp(width);
     TempStr strHeight = str::FormatFloatWithThousandSepTemp(height);
-    return fmt("%s x %s %s", strWidth, strHeight, unit);
+    return fmt("%sx%s %s", strWidth, strHeight, unit);
 }
 
 // Format page size in cm/mm/in (locale unit first) and pixels (issue #2186).
@@ -310,9 +308,9 @@ static TempStr FormatPageSizeTemp(EngineBase* engine, int pageNo, int rotation) 
     TempStr mmStr = FormatPageSizeUnitTemp(size, 25.4, StrL("mm"));
 
     // Pixel size at the document's native DPI (PDF media box is typically 72 dpi)
-    int pxW = (int)(size.dx * fileDpi + 0.5f);
-    int pxH = (int)(size.dy * fileDpi + 0.5f);
-    TempStr pxStr = fmt("%d x %d px", pxW, pxH);
+    int pxW = (int)((size.dx * fileDpi) + 0.5f);
+    int pxH = (int)((size.dy * fileDpi) + 0.5f);
+    TempStr pxStr = fmt("%dx%d px", pxW, pxH);
 
     // Locale unit first, then the other two, then pixels (issue #2186)
     bool isMetric = GetMeasurementSystem() == 0;
@@ -434,7 +432,7 @@ static void AppendPropTranslated(str::Builder& out, DocProp prop, Str val) {
 
 static void AppendPdfFileStructure(str::Builder& out, Str fstruct, Str filePath) {
     if (len(fstruct) == 0) {
-        bool isPDF = str::EndsWithI(filePath, ".pdf");
+        bool isPDF = str::EndsWithI(filePath, StrL(".pdf"));
         if (isPDF) {
             AppendProp(out, str::JoinTemp(_TRA("Fast Web View"), StrL(":")), _TRA("No"));
         }
@@ -617,6 +615,19 @@ static void GetPropsText(DocController* ctrl, str::Builder& out) {
     AppendPropTranslated(out, DocProp::Files, GetPropValueTemp(props, DocProp::Files));
 }
 
+// make text end with exactly one '\n' (if not empty) so that appending
+// a section preceded by "\n" yields a single empty line, not more.
+// the last property is optional (e.g. "Files:") so text can end with
+// a stray blank line
+static void EndWithSingleNewline(str::Builder& b) {
+    while (len(b) > 0 && b.LastChar() == '\n') {
+        b.RemoveLast();
+    }
+    if (len(b) > 0) {
+        b.AppendChar('\n');
+    }
+}
+
 static int GetPropertyLabelWidth(Str line, int* labelBytesOut) {
     for (int i = 0; i + 2 < line.len; i++) {
         if (line.s[i] != ':' || line.s[i + 1] != ' ') {
@@ -709,11 +720,9 @@ void PropertiesWnd::SizeToContent() {
         Str rest = Str(text.s + off, text.len - off);
         int nl = str::IndexOfChar(rest, '\n');
         int lineLen = nl >= 0 ? nl : rest.len;
-        SIZE sz{};
-        TempWStr lineW = ToWStrTemp(Str(rest.s, lineLen));
-        GetTextExtentPoint32W(hdcEdit, lineW.s, lineW.len, &sz);
-        if (sz.cx > maxLineDx) {
-            maxLineDx = sz.cx;
+        Size size = HdcGetTextExtentPoint32(hdcEdit, Str(rest.s, lineLen));
+        if (size.dx > maxLineDx) {
+            maxLineDx = size.dx;
         }
         nLines++;
         off += lineLen + (nl >= 0 ? 1 : 0);
@@ -723,38 +732,40 @@ void PropertiesWnd::SizeToContent() {
     TEXTMETRICW tm{};
     GetTextMetricsW(hdcEdit, &tm);
     int lineHeight = tm.tmHeight + tm.tmExternalLeading;
+    // a bit of slack so the longest lines don't touch the right edge
+    maxLineDx += 4 * tm.tmAveCharWidth;
 
     SelectObject(hdcEdit, origFont);
     ReleaseDC(hwndEdit, hdcEdit);
 
     // add padding for scrollbar, border, window frame
-    int editPadding = GetSystemMetrics(SM_CXVSCROLL) + 2 * GetSystemMetrics(SM_CXEDGE) + 16;
+    int editPadding = GetSystemMetrics(SM_CXVSCROLL) + (2 * GetSystemMetrics(SM_CXEDGE)) + 16;
     int frameDx = GetSystemMetrics(SM_CXFRAME) * 2;
     int wantedClientDx = maxLineDx + editPadding;
     if (btnCopyToClipboard) {
         Size buttonSize = btnCopyToClipboard->GetIdealSize();
-        wantedClientDx = std::max(wantedClientDx, buttonSize.dx + 2 * ButtonPadding(hwnd));
+        wantedClientDx = std::max(wantedClientDx, buttonSize.dx + (2 * ButtonPadding(hwnd)));
     }
     int wantedDx = wantedClientDx + frameDx;
 
     // calculate height to fit all lines
     int editBorderDy = 2 * GetSystemMetrics(SM_CYEDGE);
-    int frameDy = GetSystemMetrics(SM_CYFRAME) * 2 + GetSystemMetrics(SM_CYCAPTION);
+    int frameDy = (GetSystemMetrics(SM_CYFRAME) * 2) + GetSystemMetrics(SM_CYCAPTION);
     int btnAreaDy = DpiScale(hwnd, 40);
     if (btnCopyToClipboard) {
-        btnAreaDy = std::max(btnAreaDy, btnCopyToClipboard->GetIdealSize().dy + 2 * ButtonPadding(hwnd));
+        btnAreaDy = std::max(btnAreaDy, btnCopyToClipboard->GetIdealSize().dy + (2 * ButtonPadding(hwnd)));
     }
     int bottomMargin = ButtonPadding(hwnd);
-    int wantedDy = (nLines + 3) * lineHeight + editBorderDy + btnAreaDy + bottomMargin + frameDy;
+    int wantedDy = ((nLines + 3) * lineHeight) + editBorderDy + btnAreaDy + bottomMargin + frameDy;
 
     // cap at 80% of screen
-    Rect work = GetWorkAreaRect(WindowRect(hwnd), hwnd);
+    Rect work = GetWorkAreaRect(HwndWindowRect(hwnd), hwnd);
     int maxDx = (work.dx * 80) / 100;
     int maxDy = (work.dy * 80) / 100;
     wantedDx = std::min(wantedDx, maxDx);
     wantedDy = std::min(wantedDy, maxDy);
 
-    Rect wRc = WindowRect(hwnd);
+    Rect wRc = HwndWindowRect(hwnd);
     MoveWindow(hwnd, wRc.x, wRc.y, wantedDx, wantedDy, TRUE);
     LayoutToClient();
 }
@@ -763,7 +774,7 @@ void PropertiesWnd::LayoutToClient() {
     if (!layout || !hwnd) {
         return;
     }
-    Rect rc = ClientRect(hwnd);
+    Rect rc = HwndClientRect(hwnd);
     Constraints bc = Tight({rc.dx, rc.dy});
     layout->Layout(bc);
     layout->SetBounds({0, 0, rc.dx, rc.dy});
@@ -782,6 +793,10 @@ void PropertiesWnd::UpdateTheme() {
     if (UseDarkModeLib()) {
         DarkMode::setDarkWndSafe(hwnd);
         DarkMode::setWindowEraseBgSubclass(hwnd);
+    }
+    // Re-apply monospaced font after darkmode child theming (may reset font).
+    if (editProps && propsFont) {
+        HwndSetFont(editProps->hwnd, propsFont);
     }
     RedrawWindow(hwnd, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
@@ -821,7 +836,7 @@ static void SavePropertiesWindowPos(PropertiesWnd* w, HWND hwnd) {
     if (!w || !hwnd || !IsWindow(hwnd)) {
         return;
     }
-    Rect rc = WindowRect(hwnd);
+    Rect rc = HwndWindowRect(hwnd);
     Point pos = {rc.x, rc.y};
     if (pos != w->initialPos) {
         gGlobalPrefs->propWinPos = pos;
@@ -874,7 +889,7 @@ bool PropertiesWnd::Create(HWND parent) {
     }
 
     HDC hdc = GetDC(hwnd);
-    propsFont = CreateSimpleFont(hdc, "Consolas", 14);
+    propsFont = HdcCreateSimpleFont(hdc, "Consolas", 14);
     ReleaseDC(hwnd, hdc);
 
     auto* vbox = new VBox();
@@ -891,6 +906,8 @@ bool PropertiesWnd::Create(HWND parent) {
         editProps = new Edit();
         editProps->Create(args);
         SendMessageW(editProps->hwnd, EM_SETREADONLY, TRUE, 0);
+        // multi-line edit default can still cap text; font lists may be large
+        SendMessageW(editProps->hwnd, EM_SETLIMITTEXT, 0, 0);
         DWORD tabStop = 16;
         SendMessageW(editProps->hwnd, EM_SETTABSTOPS, 1, (LPARAM)&tabStop);
         vbox->AddChild(editProps, 1);
@@ -923,15 +940,14 @@ struct GetFontsResult {
 static void OnGetFontsFinished(GetFontsResult* result) {
     PropertiesWnd* w = FindPropertyWindowByHwnd(result->hwnd);
     if (w) {
-        Str marker = _TRA("Getting fonts information...");
+        Str marker = _TRA("Getting font information...");
         Str props = ToStr(w->propsText);
         int pos = str::IndexOf(props, marker);
         if (pos >= 0) {
-            if (pos > 0 && props.s[pos - 1] == '\n') {
-                pos--;
-            }
             w->propsText.RemoveAt(pos, len(w->propsText) - pos);
         }
+        // fontsText starts with "\n" to separate it with a single empty line
+        EndWithSingleNewline(w->propsText);
         w->propsText.Append(ToStr(result->fontsText));
         w->SetPropsText(ToStr(w->propsText));
         w->SizeToContent();
@@ -941,11 +957,11 @@ static void OnGetFontsFinished(GetFontsResult* result) {
 
 struct GetFontsData {
     HWND hwnd;
-    DocController* ctrl;
+    EngineBase* engine;
 };
 
 static void GetFontsThread(GetFontsData* data) {
-    TempStr val = data->ctrl->GetPropertyTemp(DocProp::FontList);
+    TempStr val = data->engine->GetPropertyTemp(DocProp::FontList);
     auto result = new GetFontsResult;
     result->hwnd = data->hwnd;
     if (val) {
@@ -956,6 +972,7 @@ static void GetFontsThread(GetFontsData* data) {
     }
     auto fn = MkFunc0<GetFontsResult>(OnGetFontsFinished, result);
     uitask::Post(fn, "GetFontsFinished");
+    data->engine->Release();
     delete data;
     DestroyTempArena();
 }
@@ -975,8 +992,9 @@ void ShowProperties(HWND parent, DocController* ctrl) {
     gPropertiesWindows.Append(wnd);
     GetPropsText(ctrl, wnd->propsText);
     AlignPropertiesText(wnd->propsText);
+    EndWithSingleNewline(wnd->propsText);
     wnd->propsText.Append("\n");
-    wnd->propsText.Append(_TRA("Getting fonts information..."));
+    wnd->propsText.Append(_TRA("Getting font information..."));
 
     wnd->onClose = MkFunc1Void<Wnd::CloseEvent*>(OnPropertiesClose);
     wnd->onDestroy = MkFunc1Void<Wnd::DestroyEvent*>(OnPropertiesDestroy);
@@ -991,17 +1009,25 @@ void ShowProperties(HWND parent, DocController* ctrl) {
         SetWindowPos(wnd->hwnd, nullptr, savedPos.x, savedPos.y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
         wnd->LayoutToClient();
     } else {
-        CenterDialog(wnd->hwnd, parent);
+        HwndCenterDialog(wnd->hwnd, parent);
     }
-    HwndEnsureVisible(wnd->hwnd);
+    HwndEnsureOnScreen(wnd->hwnd);
     {
-        Rect rc = WindowRect(wnd->hwnd);
+        Rect rc = HwndWindowRect(wnd->hwnd);
         wnd->initialPos = {rc.x, rc.y};
     }
 
+    DisplayModel* dm = ctrl->AsFixed();
+    if (!dm || !dm->engine) {
+        auto result = new GetFontsResult;
+        result->hwnd = wnd->hwnd;
+        OnGetFontsFinished(result);
+        return;
+    }
     auto data = new GetFontsData;
     data->hwnd = wnd->hwnd;
-    data->ctrl = ctrl;
+    data->engine = dm->engine;
+    data->engine->AddRef();
     auto fn = MkFunc0<GetFontsData>(GetFontsThread, data);
     RunAsync(fn, "GetFontsThread");
 }

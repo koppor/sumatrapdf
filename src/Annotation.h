@@ -4,6 +4,8 @@
 // TODO: not quite happy how those functions are split among
 // Annotation.cpp, EngineMupdf.cpp and EditAnnotations.cpp
 
+struct Pixmap;
+
 // for fast conversions, must match the order of pdf_annot_type enum in annot.h
 enum class AnnotationType {
     Text,
@@ -85,9 +87,7 @@ struct AnnotCreateArgs {
     int borderWidth = -1;
     bool setContentToSelection = false;
     Str content;
-    // for Stamp annotations: encoded image bytes (e.g. BMP from the clipboard).
-    // when set, the Stamp is created as an image stamp sized to the image.
-    Str stampImage;
+    Pixmap* stampImage = nullptr;
 };
 
 int PageNo(Annotation*);
@@ -157,6 +157,10 @@ bool SetWidgetChoiceValue(Annotation*, Str value);
 // Toggle a checkbox / radio-button form field in place. Returns true if it was
 // a (non-read-only) checkbox/radio and got toggled.
 bool ToggleFormButton(Annotation*);
+
+// True if annot is non-null, has a live pdf_annot*, and is still listed in
+// its EngineMupdf page (markup or form widget). Use before any MuPDF call.
+bool AnnotationIsLive(Annotation*);
 
 void DeleteAnnotation(Annotation*);
 bool AnnotationCanBeMoved(AnnotationType);

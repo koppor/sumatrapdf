@@ -56,6 +56,8 @@ CmdCopyLinkTarget,,Copy Link Target,
 CmdCopySelection,"Ctrl + C, Ctrl + Insert",Copy Selection,
 CmdCopyFilePath,,Copy File Path,ver 3.5+
 CmdDeleteFile,,Delete Currently Opened File, ver 3.6+
+CmdDeleteFileAndOpenNext,,Delete File And Open Next,"moves the current file to the Recycle Bin after the next file opens successfully, ver 3.7+"
+CmdShowGeneratedHTML,,Show Generated HTML,"available for Markdown files; saves the generated HTML to a temporary .html file and opens it in Notepad, ver 3.7+"
 ```
 
 ## Search
@@ -89,11 +91,10 @@ CmdTogglePageInfo,i,Show / Hide Current Page Number,was Shift + i before 3.6
 CmdChangeScrollbar,,Change Scrollbar,"Opens dialog to choose scrollbar mode (windows/smart/overlay/hidden)"
 CmdChangeBackgroundColor,,Change Background Color,"Opens color picker to change document background color"
 CmdToggleToolbar,F8,Toggle Toolbar,
-CmdToggleToolbarPosition,,Toggle Toolbar Position,"ver 3.7+, moves the toolbar between the top and bottom of the window (works in both show and overlay modes)"
 CmdAIChatWithClaudeCode,,AI Chat with document using Claude Code,"Toggle Claude Code chat sidebar, ver 3.7+. See AI-Chat-with-document.md"
 CmdAIChatWithGrokBuild,,AI Chat with document using Grok Build,"Toggle Grok Build chat sidebar, ver 3.7+. See AI-Chat-with-document.md#grok-build"
 CmdAIChatWithOpenAICodex,,AI Chat with document using OpenAI Codex,"Toggle OpenAI Codex chat sidebar, ver 3.7+. See AI-Chat-with-document.md#openai-codex"
-CmdSelectNextTheme,,Select Next Theme,ver 3.5+
+CmdChangeTheme,,Change Theme...,"ver 3.7+, opens a dialog to pick a UI theme and optionally how document colors follow the theme (`DocumentColorsFollowTheme`)"
 CmdToggleLightDarkTheme,,Toggle Light/Dark Theme,"ver 3.7+, switches between the last used light and dark themes (see `LastLightTheme` / `LastDarkTheme` advanced settings)"
 CmdToggleEngineeringDrawingEnhance,,Toggle Engineering Drawing Enhancement,"ver 3.7+, toggles CAD/engineering-drawing line enhancement for the current PDF (see the `EngineeringDrawingEnhance` advanced setting)"
 CmdSetDocumentColorsFollowTheme,,Set Document Colors Follow Theme,"ver 3.7+, opens a dialog to pick how MuPDF-rendered documents follow the UI theme (`DocumentColorsFollowTheme`: off, smart, legacy)"
@@ -192,6 +193,7 @@ CmdDeleteAnnotation,Delete,Delete Annotation,
 CmdEditAnnotations,,Edit Annotations,
 CmdSaveAnnotations,Shift + Ctrl + S,Save Annotations to existing PDF,
 CmdSaveAnnotationsNewFile,,Save Annotations to new PDF,ver 3.6+
+CmdDiscardChanges,,Discard Changes,"reloads the document from disk, discarding unsaved annotations and form changes; also on the tab context menu when there are unsaved changes, ver 3.7+ (renamed from `CmdDiscardAnnotations`)"
 CmdShowAnnotations,,Show Annotations,"ver 3.6+, for current document"
 CmdHideAnnotations,,Hide Annotations,"ver 3.6+, for current document"
 CmdToggleShowAnnotations,,Toggle Showing Annotations,"ver 3.6+, for current document"
@@ -254,11 +256,12 @@ CmdOpenWithHtmlHelp,,Open in Microsoft HTML Help,
 CmdOpenWithPdfDjvuBookmarker,,Open in Pdf&Djvu Bookmarker,
 CmdOpenWithPdfXchange,,Open in PDF-XChange,
 CmdOpenWithXpsViewer,,Open in Microsoft Xps Viewer,
+CmdTranslateSelection,,Translate Selection...,"ver 3.7+, opens a dialog to translate the selected text (edit text, pick languages and engine); used from the selection context menu and command palette"
 CmdTranslateSelectionWithDeepL,,Translate Selection With DeepL,
 CmdTranslateSelectionWithGoogle,,Translate Selection with Google,
-CmdTranslateSelectionWithGrokBuild,,Translate Selection with Grok Build,
-CmdTranslateSelectionWithClaudeCode,,Translate Selection with Claude Code,
-CmdTranslateSelectionWithOpenAICodex,,Translate Selection with OpenAI Codex,
+CmdTranslateSelectionWithGrokBuild,,Translate Selection with Grok Build,"ver 3.7+, requires the Grok Build CLI"
+CmdTranslateSelectionWithClaudeCode,,Translate Selection with Claude Code,"ver 3.7+, requires the Claude Code CLI"
+CmdTranslateSelectionWithOpenAICodex,,Translate Selection with OpenAI Codex,"ver 3.7+, requires the OpenAI Codex CLI"
 CmdSearchSelectionWithBing,,Search Selection with Bing,
 CmdSearchSelectionWithGoogle,,Search Selection with Google,
 CmdSearchSelectionWithWikipedia,,Search Selection with Wikipedia,ver 3.6+
@@ -278,6 +281,7 @@ CmdChangeLanguage,,Change Language...,
 CmdCheckUpdate,,Check For Updates,
 CmdClearHistory,,Clear History,Clears history of opened files (for recently opened list in home page)
 CmdRemoveDeletedFilesFromHistory,,Remove Deleted Files From History,"ver 3.7+, removes from history entries for files that no longer exist on disk"
+CmdDeleteCachedFiles,,Delete Cached Files,"ver 3.7+, deletes local copies of comic book archives cached under cbx-cache when opened from a network drive"
 CmdContributeTranslation,,Contribute Translation,
 CmdForgetSelectedDocument,,Remove Selected Document From History,
 CmdListPrinters,,List Printers,ver 3.7+
@@ -347,6 +351,8 @@ CmdNone,,Do nothing,
 
 ```commands
 Command IDs,Keyboard shortcuts,Command Palette,Notes
+CmdInstallPrereleaseUpdate,,internal,"used by the pre-release update notification link (Download and install latest version); not for user shortcuts or DDE"
+CmdTogglePdfPreviewLogging,,internal,"toggles PDF shell-preview logging for debugging the Windows preview handler; not for normal use"
 CmdDebugCorruptMemory,,don't use,
 CmdOpenWithKnownExternalViewerFirst,,don't use,
 CmdOpenWithKnownExternalViewerLast,,don't use,
@@ -355,7 +361,7 @@ CmdSetTheme,,don't use,
 CmdViewWithExternalViewer,,don't use,
 CmdSaveAttachment,,don't use,
 CmdOpenAttachment,,don't use,
-CmdExec,,don't use,
+CmdExec,,internal,"runs an external program with optional filter; used internally (e.g. selection handlers), not for normal shortcuts or DDE",
 ```
 
 `CmdFindMatch` is an old name for `CmdFindToggleMatchCase`. It is not a generated command ID, but SumatraPDF still accepts it in old shortcut settings for compatibility.

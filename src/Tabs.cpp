@@ -106,8 +106,19 @@ static void ShowTabBar(MainWindow* win, bool show) {
 
 void UpdateTabWidth(MainWindow* win) {
     int nTabs = win->TabCount();
+    // Count real documents only: Home (and Favorites) alone should not keep the
+    // tab bar open. Showing Home as a single tab after the last document closed
+    // fought RelayoutCaption (which hides tabs with no file tabs) and caused a
+    // continuous TabsCtrl repaint storm (issue #5861).
+    int nDocTabs = 0;
+    for (int i = 0; i < nTabs; i++) {
+        WindowTab* t = win->GetTab(i);
+        if (t && !t->IsNonDocumentTab()) {
+            nDocTabs++;
+        }
+    }
     bool showSingleTab = SettingsUseTabs() || win->tabsInTitlebar;
-    bool showTabs = (nTabs > 1) || (showSingleTab && (nTabs > 0));
+    bool showTabs = (nDocTabs > 1) || (showSingleTab && (nDocTabs > 0));
     // TabWidth is stored in logical (96-DPI) units, same as other layout
     // settings; convert to physical pixels so HiDPI monitors honor the value
     // (issue #3850). Height already uses DpiScale via GetTabbarHeight.
@@ -135,6 +146,9 @@ void RemoveTab(WindowTab* tab) {
         win->ctrl = nullptr;
         win->currentTabTemp = nullptr;
     }
+    // Hide the bar before selecting Home so we don't flash Home's close button
+    // when the last document closes (formerly a special case; now UpdateTabWidth
+    // itself treats Home-only as "no tabs").
     UpdateTabWidth(win);
 
     int nTabs = win->TabCount();
@@ -223,13 +237,13 @@ static void MaybeMigrateTab(WindowTab* tab, MainWindow* newWin, Point releasePt)
             int dx = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
             int dy = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
             int x = releasePt.x - DpiScale(oldWin->hwndFrame, 100);
-            int y = releasePt.y - GetTabbarHeight(oldWin->hwndFrame) / 2;
+            int y = releasePt.y - (GetTabbarHeight(oldWin->hwndFrame) / 2);
             Rect rect = ShiftRectToWorkArea(Rect(x, y, dx, dy), oldWin->hwndFrame, true);
             newWin = CreateAndShowMainWindow(nullptr, false);
             if (!newWin) {
                 return;
             }
-            MoveWindow(newWin->hwndFrame, rect);
+            HwndMoveWindow(newWin->hwndFrame, &rect);
             ShowMainWindow(newWin, WIN_STATE_NORMAL);
         } else {
             newWin = CreateAndShowMainWindow(nullptr);
@@ -314,7 +328,7 @@ static MenuDef menuDefContextTab[] = {
     },
     {
         _TRN("&Discard changes"),
-        CmdDiscardAnnotations,
+        CmdDiscardChanges,
     },
     {
         kMenuSeparator,
@@ -435,7 +449,7 @@ static void TabsContextMenu(ContextMenuEvent* ev) {
     if (tabUnderMouse->IsAboutTab()) {
         return;
     }
-    POINT pt = ToPOINT(ev->mouseScreen);
+    Point pt = ev->mouseScreen;
 
     Vec<WindowTab*> toCloseOther;
     Vec<WindowTab*> toCloseRight;
@@ -471,7 +485,7 @@ static void TabsContextMenu(ContextMenuEvent* ev) {
     if (!EngineHasUnsavedAnnotations(tabEngine)) {
         DeleteMenu(popup, CmdSaveAnnotations, MF_BYCOMMAND);
         DeleteMenu(popup, CmdSaveAnnotationsNewFile, MF_BYCOMMAND);
-        DeleteMenu(popup, CmdDiscardAnnotations, MF_BYCOMMAND);
+        DeleteMenu(popup, CmdDiscardChanges, MF_BYCOMMAND);
         RemoveBadMenuSeparators(popup);
     }
     MarkMenuOwnerDraw(popup);
@@ -537,7 +551,7 @@ static void TabsContextMenu(ContextMenuEvent* ev) {
             SaveAnnotationsToMaybeNewPdfFile(tabUnderMouse);
             return;
         }
-        case CmdDiscardAnnotations: {
+        case CmdDiscardChanges: {
             // revert to the on-disk version, discarding unsaved changes
             TabsSelect(win, tabIdx);
             ReloadDocument(win, false);
@@ -560,7 +574,7 @@ static void MainWindowTabSelectionChanging(MainWindow* win, TabsCtrl::SelectionC
     ev->preventChanging = false;
 }
 
-static void MainWindowTabSelectionChanged(MainWindow* win, TabsCtrl::SelectionChangedEvent* ev) {
+static void MainWindowTabSelectionChanged(MainWindow* win, TabsCtrl::SelectionChangedEvent* /*ev*/) {
     int currentIdx = win->tabsCtrl->GetSelected();
     WindowTab* tab = win->Tabs()[currentIdx];
     // page-info tip is restored via MainWindow::pageInfoWanted in LoadModelIntoTab
@@ -570,10 +584,7 @@ static void MainWindowTabSelectionChanged(MainWindow* win, TabsCtrl::SelectionCh
 static void MainWindowTabMigration(MainWindow* win, TabsCtrl::MigrationEvent* ev) {
     WindowTab* tab = win->GetTab(ev->tabIdx);
     MainWindow* releaseWnd = nullptr;
-    POINT p;
-    p.x = ev->releasePoint.x;
-    p.y = ev->releasePoint.y;
-    HWND hwnd = WindowFromPoint(p);
+    HWND hwnd = HwndWindowFromPoint(ev->releasePoint);
     if (hwnd != nullptr) {
         releaseWnd = FindMainWindowByHwnd(hwnd);
     }
@@ -669,7 +680,7 @@ void SaveCurrentWindowTab(MainWindow* win) {
     win->tabSelectionHistory->Append(tab);
 }
 
-WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab) {
+WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab, bool deferUpdate) {
     ReportIf(!win);
     if (!win) {
         return nullptr;
@@ -693,7 +704,7 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab) {
         newTab->isPinned = true;
         newTab->canClose = true;
         newTab->userData = (UINT_PTR)homeTab;
-        int insertedIdx = tabs->InsertTab(idx, newTab);
+        int insertedIdx = tabs->InsertTab(idx, newTab, !deferUpdate);
         ReportIf(insertedIdx != 0);
         idx++;
     }
@@ -705,10 +716,12 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab) {
     newTab->userData = (UINT_PTR)tab;
     newTab->tabColor = tab->tabColor;
 
-    int insertedIdx = tabs->InsertTab(idx, newTab);
+    int insertedIdx = tabs->InsertTab(idx, newTab, !deferUpdate);
     ReportIf(insertedIdx == -1);
-    tabs->SetSelected(insertedIdx);
-    UpdateTabWidth(win);
+    if (!deferUpdate) {
+        tabs->SetSelected(insertedIdx);
+        UpdateTabWidth(win);
+    }
     return tab;
 }
 

@@ -76,6 +76,11 @@ WindowTab::~WindowTab() {
     gMostRecentlyOpenedDoc = nullptr;
     delete ctrl;
     delete pushedCitations;
+    if (pendingLoadArgs) {
+        delete pendingLoadArgs->ctrl;
+        pendingLoadArgs->ctrl = nullptr;
+    }
+    delete pendingLoadArgs;
     str::Free(filePath);
     filePath = {};
     str::Free(displayName);

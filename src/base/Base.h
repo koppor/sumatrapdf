@@ -81,16 +81,16 @@
 #define __unused [[maybe_unused]]
 
 // C/C++ standard headers  we use often
-#include <ctype.h>
-#include <limits.h>
-#include <stdarg.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <wchar.h>
-#include <wctype.h>
+#include <cctype>
+#include <climits>
+#include <cstdarg>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <cwchar>
+#include <cwctype>
 #include <new>       // for placement new
 #include <algorithm> // for std::min, std::max
 #include <utility>   // for std::forward
@@ -128,8 +128,6 @@
 // that use min/max as identifiers; pre-include them before defining macros
 #ifdef __GNUC__
 #include <cmath>
-#include <algorithm>
-#include <limits>
 #endif
 #define min(x, y) ((x) < (y) ? (x) : (y))
 #define max(x, y) ((x) > (y) ? (x) : (y))
@@ -187,66 +185,6 @@ struct FILETIME {
 constexpr int MAX_PATH = 4096;
 constexpr int URLZONE_INVALID = -1;
 constexpr int URLZONE_INTERNET = 3;
-
-struct POINT {
-    LONG x;
-    LONG y;
-};
-
-struct RECT {
-    LONG left;
-    LONG top;
-    LONG right;
-    LONG bottom;
-};
-
-struct SIZE {
-    LONG cx;
-    LONG cy;
-};
-
-namespace Gdiplus {
-struct Point {
-    int X;
-    int Y;
-
-    Point() = default;
-    Point(int x, int y) : X(x), Y(y) {}
-};
-struct PointF {
-    float X;
-    float Y;
-
-    PointF() = default;
-    PointF(float x, float y) : X(x), Y(y) {}
-};
-struct Rect {
-    int X;
-    int Y;
-    int Width;
-    int Height;
-
-    Rect() = default;
-    Rect(int x, int y, int width, int height) : X(x), Y(y), Width(width), Height(height) {}
-};
-struct RectF {
-    float X;
-    float Y;
-    float Width;
-    float Height;
-
-    RectF() = default;
-    RectF(float x, float y, float width, float height) : X(x), Y(y), Width(width), Height(height) {}
-};
-struct Color {
-    uint32_t argb = 0;
-
-    Color() = default;
-    explicit Color(uint32_t argb) : argb(argb) {}
-    Color(uint8_t r, uint8_t g, uint8_t b) : argb((uint32_t)0xff << 24 | (uint32_t)r << 16 | (uint32_t)g << 8 | b) {}
-    Color(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
-        : argb((uint32_t)a << 24 | (uint32_t)r << 16 | (uint32_t)g << 8 | b) {}
-};
 } // namespace Gdiplus
 
 #define ZeroMemory(Destination, Length) memset((Destination), 0, (Length))
@@ -337,7 +275,7 @@ struct WStr {
 using TempWStr = WStr;
 
 // Create WStr from wide string literal with compile-time length
-#define WStrL(lit) WStr((wchar_t*)(lit), (int)(sizeof(lit) / sizeof(wchar_t) - 1))
+#define WStrL(lit) WStr((wchar_t*)(lit), (int)((sizeof(lit) / sizeof(wchar_t)) - 1))
 
 // length of a Str / WStr as int. Also accepts a C string (char* / wchar_t*) via
 // Str/WStr's implicit ctor, like the former str::Leni / wstr::Leni it replaces.
@@ -662,7 +600,7 @@ inline bool isOfKindHelper(Kind k1, Kind k2) {
     return k1 == k2;
 }
 
-#define IsOfKind(o, wantedKind) (o && isOfKindHelper(o->kind, wantedKind))
+#define IsOfKind(o, wantedKind) ((o) && isOfKindHelper((o)->kind, (wantedKind)))
 
 extern Kind kindNone; // unknown kind
 
@@ -695,7 +633,7 @@ class ExitScopeHelp {
 using func0Ptr = void (*)(void*);
 using funcVoidPtr = void (*)();
 
-#define kFuncNoArg (void*)-1
+#define kFuncNoArg ((void*)(-1))
 
 // the simplest possible function that ties a function and a single argument to it
 // we get type safety and convenience with mkFunc()

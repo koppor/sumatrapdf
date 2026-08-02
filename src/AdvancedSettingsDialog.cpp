@@ -31,6 +31,7 @@
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
 #include "Translations.h"
+#include "FilterHighlightDraw.h"
 #include "AdvancedSettingsDialog.h"
 
 constexpr const char* kSettingsDocsUrl = "https://www.sumatrapdfreader.org/settings/settings3-7.html";
@@ -268,11 +269,22 @@ struct AdvancedSettingsWnd : Wnd {
     Str dropDownOrigVal;                   // value before the drop-down opened (owned), for Esc
     int editItemIdx = -1;                  // index into items of the setting being edited
 
+    // bottom buttons (layout-owned; Tab order Save → Cancel → Open → Help)
+    Button* btnSave = nullptr;
+    Button* btnCancel = nullptr;
+    Button* btnOpenSettingsFile = nullptr;
+    Button* btnHelp = nullptr;
+
+    // filter tokens for list matching + match underlay paint (command-palette style)
+    StrVec filterWords;
+    Vec<u8> highlighted; // scratch for DrawMaybeHighlightedText
+
     Vec<SettingItem*> items;
 
     bool Create(MainWindow* win);
     bool PreTranslateMessage(MSG&) override;
-    void OnSize(UINT msg, UINT type, SIZE size) override;
+    void OnSize(UINT msg, UINT type, Size size) override;
+    void AdvanceFocus(bool forward);
 
     void QueryChanged();
     void DrawListBoxItem(ListBox::DrawItemEvent* ev);
@@ -333,13 +345,32 @@ void AdvancedSettingsWnd::ScheduleDelete() {
     uitask::Post(fn, "SafeDeleteAdvancedSettingsDialog");
 }
 
+// Match setting name against a pre-split filter so "use tabs" hits "UseTabs".
+// words is empty when the filter is empty or only whitespace (match all).
+// SplitFilterToWords already trims; do not ContainsI against the raw edit text
+// ("use " would miss "UseTabs" because of the trailing space).
+static bool SettingNameMatchesFilter(Str name, const StrVec& words) {
+    if (len(words) == 0) {
+        return true;
+    }
+    // Single token: continuous case-insensitive substring ("use" / "use " → UseTabs)
+    if (len(words) == 1) {
+        return str::ContainsI(name, words[0]);
+    }
+    // Multi-word: every word must appear (camelCase-friendly; order-independent)
+    return FilterMatches(name, words);
+}
+
 void AdvancedSettingsWnd::QueryChanged() {
     CancelEditValue();
     Str filter = editFilter->GetTextTemp();
+    // split trims leading/trailing/internal runs of whitespace into words
+    filterWords.Reset();
+    SplitFilterToWords(filter, filterWords);
     model->filtered.Reset();
     int n = len(items);
     for (int i = 0; i < n; i++) {
-        if (len(filter) == 0 || str::ContainsI(items[i]->name, filter)) {
+        if (SettingNameMatchesFilter(items[i]->name, filterWords)) {
             model->filtered.Append(i);
         }
     }
@@ -371,10 +402,10 @@ void AdvancedSettingsWnd::OnSelectionChanged() {
 // Split a list-item row into non-overlapping name (left) and value (right)
 // columns so long names and long values (e.g. InverseSearchCmdLine) don't
 // draw on top of each other (#5804).
-static void AdvSettingsItemColumns(HWND hwnd, const RECT& rc, RECT& rcName, RECT& rcVal) {
+static void AdvSettingsItemColumns(HWND hwnd, const Rect& rc, Rect& rcName, Rect& rcVal) {
     int pad = DpiScale(hwnd, 4);
     int gap = DpiScale(hwnd, 10);
-    int totalW = (rc.right - rc.left) - 2 * pad;
+    int totalW = rc.dx - (2 * pad);
     if (totalW < 1) {
         rcName = rc;
         rcVal = rc;
@@ -389,7 +420,7 @@ static void AdvSettingsItemColumns(HWND hwnd, const RECT& rc, RECT& rcName, RECT
     }
     int nameW = totalW - valW - gap;
     if (nameW < DpiScale(hwnd, 72)) {
-        nameW = totalW / 2 - gap / 2;
+        nameW = (totalW / 2) - (gap / 2);
         valW = totalW - nameW - gap;
     }
     if (nameW < 1) {
@@ -400,12 +431,12 @@ static void AdvSettingsItemColumns(HWND hwnd, const RECT& rc, RECT& rcName, RECT
     }
 
     rcName = rc;
-    rcName.left += pad;
-    rcName.right = rcName.left + nameW;
+    rcName.x += pad;
+    rcName.dx = nameW;
 
     rcVal = rc;
-    rcVal.right -= pad;
-    rcVal.left = rcVal.right - valW;
+    rcVal.x += rcVal.dx - pad - valW;
+    rcVal.dx = valW;
 }
 
 void AdvancedSettingsWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
@@ -417,7 +448,7 @@ void AdvancedSettingsWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
     }
 
     HDC hdc = ev->hdc;
-    RECT rc = ev->itemRect;
+    Rect rc = ev->itemRect;
 
     COLORREF colBg = IsSpecialColor(lb->bgColor) ? GetSysColor(COLOR_WINDOW) : lb->bgColor;
     COLORREF colText = IsSpecialColor(lb->textColor) ? GetSysColor(COLOR_WINDOWTEXT) : lb->textColor;
@@ -426,7 +457,7 @@ void AdvancedSettingsWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
     }
 
     SetBkColor(hdc, colBg);
-    ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
+    HdcFillRectWithBkColor(hdc, rc);
 
     HFONT fontNormal = font ? font : GetAppFont(hwnd);
 
@@ -436,18 +467,24 @@ void AdvancedSettingsWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
     HFONT valFont = (SettingDiffersFromDefault(item) && fontBold) ? fontBold : fontNormal;
 
     SetTextColor(hdc, colText);
+    SetBkMode(hdc, TRANSPARENT);
 
-    RECT rcName{}, rcVal{};
+    Rect rcName{}, rcVal{};
     AdvSettingsItemColumns(hwnd, rc, rcName, rcVal);
 
+    bool isRtl = HwndIsRtl(lb->hwnd);
     HGDIOBJ prevFont = SelectObject(hdc, nameFont);
-    TempWStr ws = ToWStrTemp(item->name);
-    DrawTextW(hdc, ws.s, -1, &rcName, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+    // yellow/accent underlays on matched filter tokens (same as command palette)
+    uint nameFmt = DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS;
+    if (isRtl) {
+        nameFmt = DT_RIGHT | DT_RTLREADING | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS;
+    }
+    DrawMaybeHighlightedText(hdc, rcName, item->name, filterWords, highlighted, colBg, isRtl, false, nameFmt);
 
     TempStr val = FormatSettingValueTemp(item);
     SelectObject(hdc, valFont);
-    ws = ToWStrTemp(val);
-    DrawTextW(hdc, ws.s, -1, &rcVal, DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
+    TempWStr ws = ToWStrTemp(val);
+    HdcDrawText(hdc, ws, rcVal, DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
 
     SelectObject(hdc, prevFont);
 }
@@ -465,14 +502,13 @@ Rect AdvancedSettingsWnd::ValueRectForItem(int idx) {
     if (lbIdx < 0) {
         return Rect();
     }
-    RECT rc{};
-    LRESULT res = SendMessageW(listBox->hwnd, LB_GETITEMRECT, (WPARAM)lbIdx, (LPARAM)&rc);
-    if (res == LB_ERR) {
+    Rect rc = LbGetItemRect(listBox->hwnd, lbIdx);
+    if (rc.IsEmpty()) {
         return Rect();
     }
-    RECT rcName{}, rcVal{};
+    Rect rcName{}, rcVal{};
     AdvSettingsItemColumns(hwnd, rc, rcName, rcVal);
-    return ToRect(rcVal);
+    return rcVal;
 }
 
 void AdvancedSettingsWnd::BeginEditValue(int idx) {
@@ -525,9 +561,7 @@ void AdvancedSettingsWnd::BeginEditEnum(int idx) {
     }
     // ValueRectForItem is in listBox client coords; the drop-down is parented
     // to the dialog (see below), so map the rect into dialog client coords
-    RECT rr = {r.x, r.y, r.x + r.dx, r.y + r.dy};
-    MapWindowPoints(listBox->hwnd, hwnd, (POINT*)&rr, 2);
-    r = ToRect(rr);
+    r = HwndMapRectToWindow(r, listBox->hwnd, hwnd);
 
     DropDown::CreateArgs args;
     // parent to the dialog, not the listBox: a subclassed control (the listBox)
@@ -569,7 +603,7 @@ void AdvancedSettingsWnd::OnEnumSelectionChanged() {
     if (sel >= 0) {
         str::ReplaceWithCopy(&item->strVal, item->enumValues[sel]);
         SetItemChanged(item);
-        InvalidateRect(listBox->hwnd, nullptr, TRUE);
+        HwndInvalidate(listBox->hwnd, true);
     }
     // selecting with the mouse closes the list: dispose of the control then.
     // can't do it here (we're inside its notification), so check afterwards;
@@ -601,7 +635,7 @@ void AdvancedSettingsWnd::CloseEnumEdit(bool keepValue) {
     }
     editItemIdx = -1;
     delete tmp;
-    InvalidateRect(listBox->hwnd, nullptr, TRUE);
+    HwndInvalidate(listBox->hwnd, true);
     HwndSetFocus(listBox->hwnd);
 }
 
@@ -627,7 +661,7 @@ void AdvancedSettingsWnd::CommitEditValue() {
     }
     SetItemChanged(item);
     CancelEditValue();
-    InvalidateRect(listBox->hwnd, nullptr, TRUE);
+    HwndInvalidate(listBox->hwnd, true);
 }
 
 // activate a setting: toggle a bool, or begin editing an enum / value. A single
@@ -641,7 +675,7 @@ void AdvancedSettingsWnd::ActivateItem(int lbIdx) {
     if (item->type == SettingType::Bool) {
         item->boolVal = !item->boolVal;
         SetItemChanged(item);
-        InvalidateRect(listBox->hwnd, nullptr, TRUE);
+        HwndInvalidate(listBox->hwnd, true);
         return;
     }
     int idx = model->filtered[lbIdx];
@@ -684,11 +718,11 @@ void AdvancedSettingsWnd::ApplyChangesAndSave() {
         // SaveSettings() re-generates these strings from their parsed
         // representations, which would clobber the edit unless the parsed
         // representation is updated as well
-        if (str::EqI(item->name, "DefaultDisplayMode")) {
+        if (str::EqI(item->name, StrL("DefaultDisplayMode"))) {
             gGlobalPrefs->defaultDisplayModeEnum = DisplayModeFromString(item->strVal, DisplayMode::Automatic);
-        } else if (str::EqI(item->name, "DefaultZoom")) {
+        } else if (str::EqI(item->name, StrL("DefaultZoom"))) {
             gGlobalPrefs->defaultZoomFloat = ZoomFromString(item->strVal, kZoomActualSize);
-        } else if (str::EqI(item->name, "ImageUI.DefaultZoom")) {
+        } else if (str::EqI(item->name, StrL("ImageUI.DefaultZoom"))) {
             gGlobalPrefs->imageUI.defaultZoomFloat = ZoomFromString(item->strVal, 0);
         }
     }
@@ -729,6 +763,54 @@ void AdvancedSettingsWnd::OnSave() {
     ApplyChangesAndSave();
 }
 
+// Tab / Shift+Tab: filter → list → Save → Cancel → Open Settings File → Help
+void AdvancedSettingsWnd::AdvanceFocus(bool forward) {
+    HWND controls[] = {
+        editFilter ? editFilter->hwnd : nullptr,
+        listBox ? listBox->hwnd : nullptr,
+        btnSave ? btnSave->hwnd : nullptr,
+        btnCancel ? btnCancel->hwnd : nullptr,
+        btnOpenSettingsFile ? btnOpenSettingsFile->hwnd : nullptr,
+        btnHelp ? btnHelp->hwnd : nullptr,
+    };
+    HWND order[6]{};
+    int n = 0;
+    for (HWND h : controls) {
+        if (h && IsWindow(h)) {
+            order[n++] = h;
+        }
+    }
+    if (n == 0) {
+        return;
+    }
+
+    HWND focused = ::GetFocus();
+    int idx = -1;
+    for (int i = 0; i < n; i++) {
+        if (order[i] == focused || ::IsChild(order[i], focused)) {
+            idx = i;
+            break;
+        }
+    }
+    // in-place editors sit over the list; treat them as the list slot
+    if (idx < 0 && editValue && editValue->hwnd &&
+        (focused == editValue->hwnd || ::IsChild(editValue->hwnd, focused))) {
+        idx = 1; // list
+    }
+    if (idx < 0 && dropDownValue && dropDownValue->hwnd &&
+        (focused == dropDownValue->hwnd || ::IsChild(dropDownValue->hwnd, focused))) {
+        idx = 1; // list
+    }
+
+    int next;
+    if (forward) {
+        next = (idx + 1) % n;
+    } else {
+        next = (idx <= 0) ? n - 1 : idx - 1;
+    }
+    HwndSetFocus(order[next]);
+}
+
 bool AdvancedSettingsWnd::PreTranslateMessage(MSG& msg) {
     if (msg.message == WM_KEYDOWN) {
         bool isEditingValue = editValue && msg.hwnd == editValue->hwnd;
@@ -743,6 +825,16 @@ bool AdvancedSettingsWnd::PreTranslateMessage(MSG& msg) {
             }
             return true;
         }
+        if (msg.wParam == VK_TAB) {
+            // leave in-place editors before moving focus (Enter would commit too)
+            if (isEditingValue) {
+                CommitEditValue();
+            } else if (isEditingEnum) {
+                CloseEnumEdit(true);
+            }
+            AdvanceFocus(!IsShiftPressed());
+            return true;
+        }
         if (msg.wParam == VK_RETURN) {
             if (isEditingValue) {
                 CommitEditValue();
@@ -752,8 +844,21 @@ bool AdvancedSettingsWnd::PreTranslateMessage(MSG& msg) {
                 CloseEnumEdit(true);
                 return true;
             }
+            // focused button: Enter = click (PreTranslate would otherwise steal
+            // Enter for list-item activation)
+            HWND focused = ::GetFocus();
+            Button* buttons[] = {btnSave, btnCancel, btnOpenSettingsFile, btnHelp};
+            for (Button* b : buttons) {
+                if (b && b->hwnd && b->hwnd == focused) {
+                    SendMessageW(b->hwnd, BM_CLICK, 0, 0);
+                    return true;
+                }
+            }
+            // Activate the selected row (bool: toggle true↔false; else edit).
+            // Do not require list focus: after filter/arrow navigation the
+            // selection can be valid while focus is still on the filter.
             int lbIdx = listBox->GetCurrentSelection();
-            if (msg.hwnd == listBox->hwnd && lbIdx >= 0) {
+            if (lbIdx >= 0) {
                 ActivateItem(lbIdx);
                 return true;
             }
@@ -805,14 +910,14 @@ static int gAdvSettingsLastClientDx = 0;
 static int gAdvSettingsLastClientDy = 0;
 
 // re-layout the controls when the (resizable) window is resized
-void AdvancedSettingsWnd::OnSize(UINT, UINT, SIZE size) {
+void AdvancedSettingsWnd::OnSize(UINT, UINT, Size size) {
     // a WS_CAPTION/WS_THICKFRAME window gets WM_SIZE during CreateCustom,
     // before the child controls exist; ignore layout until they're created
     if (!layout || !listBox) {
         return;
     }
-    int dx = (int)size.cx;
-    int dy = (int)size.cy;
+    int dx = size.dx;
+    int dy = size.dy;
     if (dx == 0 || dy == 0) {
         return;
     }
@@ -822,7 +927,7 @@ void AdvancedSettingsWnd::OnSize(UINT, UINT, SIZE size) {
     // moves on resize, so close them
     CancelEditValue();
     LayoutToSize(layout, {dx, dy});
-    InvalidateRect(hwnd, nullptr, false);
+    HwndInvalidate(hwnd);
 }
 
 // a bold variant of the given font, for drawing changed settings
@@ -837,8 +942,8 @@ static HFONT CreateBoldFont(HFONT font) {
 
 // center the dialog over the main window frame
 static void PositionDialog(HWND hwnd, HWND hwndRelative) {
-    Rect rRelative = WindowRect(hwndRelative);
-    Rect r = WindowRect(hwnd);
+    Rect rRelative = HwndWindowRect(hwndRelative);
+    Rect r = HwndWindowRect(hwnd);
     int x = rRelative.x + (rRelative.dx / 2) - (r.dx / 2);
     int y = rRelative.y + (rRelative.dy / 2) - (r.dy / 2);
     r = {x, y, r.dx, r.dy};
@@ -955,37 +1060,45 @@ bool AdvancedSettingsWnd::Create(MainWindow* mainWin) {
     }
 
     {
+        // left: Save, Cancel, Open Settings File — right: Help
         auto hbox = new HBox();
-        hbox->alignMain = MainAxisAlign::MainCenter;
+        hbox->alignMain = MainAxisAlign::SpaceBetween;
         hbox->alignCross = CrossAxisAlign::CrossCenter;
         auto pad = Insets{4, 8, 4, 8};
 
-        Button* b;
-        b = CreateButton(hwnd, _TRA("Open Settings File"),
+        auto left = new HBox();
+        left->alignMain = MainAxisAlign::MainStart;
+        left->alignCross = CrossAxisAlign::CrossCenter;
+        btnSave =
+            CreateButton(hwnd, _TRA("Save"), MkMethod0<AdvancedSettingsWnd, &AdvancedSettingsWnd::OnSave>(this), isRtl);
+        left->AddChild(new Padding(btnSave, pad));
+        btnCancel = CreateButton(hwnd, _TRA("Cancel"),
+                                 MkMethod0<AdvancedSettingsWnd, &AdvancedSettingsWnd::OnCancel>(this), isRtl);
+        left->AddChild(new Padding(btnCancel, pad));
+        btnOpenSettingsFile =
+            CreateButton(hwnd, _TRA("Open Settings File"),
                          MkMethod0<AdvancedSettingsWnd, &AdvancedSettingsWnd::OnOpenSettingsFile>(this), isRtl);
-        hbox->AddChild(new Padding(b, pad));
-        b = CreateButton(hwnd, _TRA("Help"), MkMethod0<AdvancedSettingsWnd, &AdvancedSettingsWnd::OnHelp>(this), isRtl);
-        hbox->AddChild(new Padding(b, pad));
-        b = CreateButton(hwnd, _TRA("Cancel"), MkMethod0<AdvancedSettingsWnd, &AdvancedSettingsWnd::OnCancel>(this),
-                         isRtl);
-        hbox->AddChild(new Padding(b, pad));
-        b = CreateButton(hwnd, _TRA("Save"), MkMethod0<AdvancedSettingsWnd, &AdvancedSettingsWnd::OnSave>(this), isRtl);
-        hbox->AddChild(new Padding(b, pad));
+        left->AddChild(new Padding(btnOpenSettingsFile, pad));
+        hbox->AddChild(left);
+
+        btnHelp =
+            CreateButton(hwnd, _TRA("Help"), MkMethod0<AdvancedSettingsWnd, &AdvancedSettingsWnd::OnHelp>(this), isRtl);
+        hbox->AddChild(new Padding(btnHelp, pad));
         vbox->AddChild(hbox);
     }
 
     auto padding = new Padding(vbox, DpiScaledInsets(hwnd, 4, 8));
     layout = padding;
 
-    auto rc = ClientRect(win->hwndFrame);
+    auto rc = HwndClientRect(win->hwndFrame);
     // Default is wide enough that long setting names (e.g. InverseSearchCmdLine)
     // and long values don't crowd each other; reuse last size if the user
     // resized earlier this session (#5804).
     int dy = gAdvSettingsLastClientDy > 0 ? gAdvSettingsLastClientDy : limitValue(rc.dy - 72, 480, 900);
     int dx = gAdvSettingsLastClientDx > 0 ? gAdvSettingsLastClientDx : limitValue(rc.dx - 128, 760, 1100);
     LayoutAndSizeToContent(layout, dx, dy, hwnd);
-    gAdvSettingsLastClientDx = ClientRect(hwnd).dx;
-    gAdvSettingsLastClientDy = ClientRect(hwnd).dy;
+    gAdvSettingsLastClientDx = HwndClientRect(hwnd).dx;
+    gAdvSettingsLastClientDy = HwndClientRect(hwnd).dy;
     PositionDialog(hwnd, win->hwndFrame);
 
     SetIsVisible(true);

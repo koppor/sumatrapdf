@@ -10,11 +10,11 @@
 #include "GumboHelpers.h"
 #include "base/JsonParser.h"
 #include "base/Timer.h"
-#include "base/DirIter.h"
+#include "base/DirScan.h"
 
 #if OS_WIN
 #include "base/Win.h"
-#include "base/GdiPlus.h"
+#include "base/GdiPlusUtil.h"
 #endif
 
 extern "C" {
@@ -83,7 +83,7 @@ struct ImagePageInfo {
     Vec<IPageElement*> allElements;
     PageElementImage imageElement;
     bool hasImageElement = false;
-    RectF mediabox{};
+    RectF mediabox;
     PageInfoState state = PageInfoState::Unknown;
     // raw image bytes; populated lazily by GetImageData for file-backed
     // engines (EngineImage, EngineImageDir). Unused by EngineCbx (which
@@ -157,7 +157,7 @@ class EngineImages : public EngineBase {
     // Returns a non-owning view into engine-owned storage; the caller must
     // not free. Bytes stay valid until the engine is destroyed.
     virtual Str GetImageData(int pageNo) = 0;
-    virtual TempStr GetImagePathTemp(int pageNo) { return {}; }
+    virtual TempStr GetImagePathTemp(int /*pageNo*/) { return {}; }
     // Uncompressed image bytes for pageNo when known without decoding (-1 unknown).
     virtual i64 GetImageByteSize(int pageNo);
 
@@ -363,7 +363,7 @@ static Pixmap* FzPixmapToPixmap(fz_context* ctx, fz_pixmap* pixmap) {
         res->yres = (float)bgr->yres;
         int rowBytes = w * n;
         for (int y = 0; y < h; y++) {
-            memcpy(res->data + (size_t)y * res->stride, bgr->samples + (size_t)y * bgr->stride, rowBytes);
+            memcpy(res->data + ((size_t)y * res->stride), bgr->samples + ((size_t)y * bgr->stride), rowBytes);
         }
     }
     fz_drop_pixmap(ctx, bgr);
@@ -394,7 +394,7 @@ static inline int ClampInt(int v, int minVal, int maxVal) {
 
 static void GetPixmapPixelBgra(const Pixmap* pixmap, int x, int y, u8* bgra) {
     int bpp = PixmapBytesPerPixel(pixmap->format);
-    const u8* src = pixmap->data + (size_t)y * pixmap->stride + (size_t)x * bpp;
+    const u8* src = pixmap->data + ((size_t)y * pixmap->stride) + ((size_t)x * bpp);
     u8 r, g, b, a;
     if (pixmap->format == PixmapFormat::RGBA8) {
         r = src[0];
@@ -414,9 +414,9 @@ static void GetPixmapPixelBgra(const Pixmap* pixmap, int x, int y, u8* bgra) {
             g = (u8)std::min(255, g + (255 - a));
             r = (u8)std::min(255, r + (255 - a));
         } else {
-            b = (u8)((b * a + 255 * (255 - a)) / 255);
-            g = (u8)((g * a + 255 * (255 - a)) / 255);
-            r = (u8)((r * a + 255 * (255 - a)) / 255);
+            b = (u8)(((b * a) + (255 * (255 - a))) / 255);
+            g = (u8)(((g * a) + (255 * (255 - a))) / 255);
+            r = (u8)(((r * a) + (255 * (255 - a))) / 255);
         }
     }
     bgra[0] = b;
@@ -434,12 +434,12 @@ static uint32_t GetPixmapPixelRgbKey(const Pixmap* pixmap, int x, int y) {
 
 static void FillPixmapWhite(Pixmap* pixmap) {
     for (int y = 0; y < pixmap->height; y++) {
-        u8* row = pixmap->data + (size_t)y * pixmap->stride;
+        u8* row = pixmap->data + ((size_t)y * pixmap->stride);
         for (int x = 0; x < pixmap->width; x++) {
-            row[x * 4 + 0] = 255;
-            row[x * 4 + 1] = 255;
-            row[x * 4 + 2] = 255;
-            row[x * 4 + 3] = 255;
+            row[(x * 4) + 0] = 255;
+            row[(x * 4) + 1] = 255;
+            row[(x * 4) + 2] = 255;
+            row[(x * 4) + 3] = 255;
         }
     }
 }
@@ -591,7 +591,7 @@ Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
 
     RectF mediaBox = PageMediabox(pageNo);
     for (int y = 0; y < result->height; y++) {
-        u8* dst = result->data + (size_t)y * result->stride;
+        u8* dst = result->data + ((size_t)y * result->stride);
         for (int x = 0; x < result->width; x++) {
             PointF devPt((float)(screen.x + x) + 0.5f, (float)(screen.y + y) + 0.5f);
             PointF srcPt = TransformPoint(devPt, pageNo, zoom, rotation, true);
@@ -850,7 +850,7 @@ void EngineImages::DropPage(ImagePage* page, bool forceRemove) {
 }
 
 // Get content box for image by cropping out margins of similar color
-RectF EngineImages::PageContentBox(int pageNo, RenderTarget target) {
+RectF EngineImages::PageContentBox(int pageNo, RenderTarget /*target*/) {
     // try to load bitmap for the image
     auto page = GetPage(pageNo, true);
     if (!page) return RectF{};
@@ -1590,16 +1590,15 @@ TempStr EngineImageDir::GetPageLabeTemp(int pageNo) const {
 }
 
 int EngineImageDir::GetPageByLabel(Str label) const {
-    int nLabel = len(label);
     for (int i = 0; i < len(pageFileNames); i++) {
         Str pagePath = pageFileNames[i];
         TempStr fileName = path::GetBaseNameTemp(pagePath);
         TempStr ext = path::GetExtTemp(fileName);
-        if (!str::StartsWith(fileName, label)) {
+        Str maybeExt = fileName;
+        if (!str::TrimPrefix(maybeExt, label)) {
             continue;
         }
-        Str maybeExt(fileName.s + nLabel, fileName.len - nLabel);
-        if (str::Eq(maybeExt, ext) || nLabel == fileName.len) {
+        if (str::Eq(maybeExt, ext) || !maybeExt) {
             return i + 1;
         }
     }
@@ -1608,7 +1607,9 @@ int EngineImageDir::GetPageByLabel(Str label) const {
 }
 
 static TocItem* newImageDirTocItem(TocItem* parent, Str title, int pageNo) {
-    return new TocItem(parent, title, pageNo);
+    auto res = AllocTocItem(nullptr, title, pageNo);
+    res->parent = parent;
+    return res;
 };
 
 TocTree* EngineImageDir::GetToc() {
@@ -1624,7 +1625,7 @@ TocTree* EngineImageDir::GetToc() {
         item->id = i;
         root->AddSiblingAtEnd(item);
     }
-    auto realRoot = new TocItem();
+    auto realRoot = AllocTocItem(nullptr, {}, 0);
     realRoot->child = root;
     tocTree = new TocTree(realRoot);
     return tocTree;
@@ -1827,34 +1828,34 @@ void ComicInfoParser::Parse(Str xmlData) {
 // extract ComicBookInfo metadata
 // https://code.google.com/archive/p/comicbookinfo/
 bool ComicInfoParser::Visit(Str path, Str value, json::Type type) {
-    if (json::Type::String == type && str::Eq(path, "/ComicBookInfo/1.0/title")) {
+    if (json::Type::String == type && str::Eq(path, StrL("/ComicBookInfo/1.0/title"))) {
         str::Free(propTitle);
         propTitle = str::Dup(value);
-    } else if (json::Type::Number == type && str::Eq(path, "/ComicBookInfo/1.0/publicationYear")) {
+    } else if (json::Type::Number == type && str::Eq(path, StrL("/ComicBookInfo/1.0/publicationYear"))) {
         Str newDate = str::Dup(fmt("%s/%d", len(propDate) == 0 ? "" : propDate, ParseInt(value)));
         str::Free(propDate);
         propDate = newDate;
-    } else if (json::Type::Number == type && str::Eq(path, "/ComicBookInfo/1.0/publicationMonth")) {
+    } else if (json::Type::Number == type && str::Eq(path, StrL("/ComicBookInfo/1.0/publicationMonth"))) {
         Str newDate = str::Dup(fmt("%d%s", ParseInt(value), len(propDate) == 0 ? "" : propDate));
         str::Free(propDate);
         propDate = newDate;
-    } else if (json::Type::String == type && str::Eq(path, "/appID")) {
+    } else if (json::Type::String == type && str::Eq(path, StrL("/appID"))) {
         str::Free(propCreator);
         propCreator = str::Dup(value);
-    } else if (json::Type::String == type && str::Eq(path, "/lastModified")) {
+    } else if (json::Type::String == type && str::Eq(path, StrL("/lastModified"))) {
         str::Free(propModDate);
         propModDate = str::Dup(value);
-    } else if (json::Type::String == type && str::Eq(path, "/X-summary")) {
+    } else if (json::Type::String == type && str::Eq(path, StrL("/X-summary"))) {
         str::Free(propSummary);
         propSummary = str::Dup(value);
-    } else if (str::StartsWith(path, "/ComicBookInfo/1.0/credits[")) {
+    } else if (str::StartsWith(path, StrL("/ComicBookInfo/1.0/credits["))) {
         int idx = -1;
         Str prop = str::Parse(path, "/ComicBookInfo/1.0/credits[%d]/", &idx);
         if (prop) {
-            if (json::Type::String == type && str::Eq(prop, "person")) {
+            if (json::Type::String == type && str::Eq(prop, StrL("person"))) {
                 str::Free(propAuthorTmp);
                 propAuthorTmp = str::Dup(value);
-            } else if (json::Type::Bool == type && str::Eq(prop, "primary") && len(propAuthorTmp) > 0 &&
+            } else if (json::Type::Bool == type && str::Eq(prop, StrL("primary")) && len(propAuthorTmp) > 0 &&
                        !propAuthors.Contains(propAuthorTmp)) {
                 propAuthors.Append(propAuthorTmp);
             }
@@ -2014,7 +2015,7 @@ bool EngineCbx::FinishLoading() {
         if (!fileName) {
             continue;
         }
-        if (Archive::Format::Zip == cbxArchive->format && str::StartsWithI(fileName, "_rels/.rels")) {
+        if (Archive::Format::Zip == cbxArchive->format && str::StartsWithI(fileName, StrL("_rels/.rels"))) {
             // bail, if we accidentally try to load an XPS file
             return false;
         }
@@ -2022,21 +2023,30 @@ bool EngineCbx::FinishLoading() {
         FileType kind = GuessFileTypeFromName(fileName);
         if (IsEngineImageSupportedFileType(kind) &&
             // OS X occasionally leaves metadata with image extensions
-            !str::StartsWith(path::GetBaseNameTemp(fileName), ".")) {
+            !str::StartsWith(path::GetBaseNameTemp(fileName), StrL("."))) {
             pageFiles.Append(fileInfo);
         }
     }
 
-    auto* metadataFi = cbxArchive->GetFileDataByName("ComicInfo.xml");
+    constexpr int kMaxComicInfoSize = 4 * 1024 * 1024;
+    Archive::FileInfo* metadataFi = nullptr;
+    int metadataId = cbxArchive->GetFileId("ComicInfo.xml");
+    if (metadataId >= 0) {
+        auto* fi = fileInfos[metadataId];
+        if (fi->fileSizeUncompressed >= 0 && fi->fileSizeUncompressed <= kMaxComicInfoSize) {
+            metadataFi = cbxArchive->GetFileDataById(metadataId);
+        }
+    }
     if (metadataFi && metadataFi->data) {
         Str metadata = Str(metadataFi->data, metadataFi->fileSizeUncompressed);
         cip.Parse(metadata);
     }
+#if 0
     Str comment = cbxArchive->GetComment();
     if (comment) {
         json::Parse(comment, &cip);
     }
-
+#endif
     int nFiles = len(pageFiles);
     if (nFiles == 0) {
         delete cbxArchive;
@@ -2080,7 +2090,7 @@ bool EngineCbx::FinishLoading() {
     TocItem* tocBuildRoot = nullptr;
     TocItem* tocBuildCurr = nullptr;
     auto addTocItem = [&](Str title, int pageNo) {
-        TocItem* ti = new TocItem(nullptr, title, pageNo);
+        TocItem* ti = AllocTocItem(nullptr, title, pageNo);
         if (!tocBuildRoot) {
             tocBuildRoot = ti;
         } else if (tocBuildCurr) {
@@ -2113,7 +2123,7 @@ bool EngineCbx::FinishLoading() {
         }
     }
     if (tocBuildRoot) {
-        auto realRoot = new TocItem();
+        auto realRoot = AllocTocItem(nullptr, {}, 0);
         realRoot->child = tocBuildRoot;
         tocTree = new TocTree(realRoot);
     }
@@ -2279,13 +2289,9 @@ EngineBase* EngineCbx::CreateFromFile(Str path, Str password, Archive::Format* f
     // still surface `path` as the logical file path.
     Str openPath = realPath ? realPath : path;
 
-    // eagerly decompress small archives up front so we don't have to
-    // re-open the file for each page's image data.
-    constexpr i64 kMaxEagerLoadSize = 32 * 1024 * 1024;
-    i64 fileSize = file::GetSize(openPath);
-    bool eagerLoad = fileSize > 0 && fileSize < kMaxEagerLoadSize;
-
-    if (!archive->Open(openPath, eagerLoad, hintType, gArchiveProgressCb)) {
+    // The compressed file size does not bound the memory needed to expand it.
+    // Load individual pages on demand instead.
+    if (!archive->Open(openPath, /*eagerLoad=*/false, hintType, gArchiveProgressCb)) {
         delete archive;
         return nullptr;
     }

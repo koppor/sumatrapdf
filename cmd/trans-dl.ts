@@ -8,20 +8,22 @@
  * Flow:
  *   1. Extract _TR* strings from src + command names
  *   2. POST them to /api/dltransfor (marks active strings; returns sha1 + translations)
- *   3. If any language is missing translations:
+ *   3. Fix suspicious translations (trailing whitespace / \n / \r) via /api/edittranslation
+ *      as user "ai fix"
+ *   4. If any language is missing translations:
  *        - translate with Claude or Grok
  *        - submit each via /api/edittranslation as user "ai claude" / "ai grok"
- *   4. Re-download (should now include submitted translations)
- *   5. Write filtered .work/translations.txt and build .lzsa
+ *   5. Re-download (should now include submitted translations)
+ *   6. Write filtered .work/translations.txt and build .lzsa
  *
  * Usage:
  *   bun cmd/trans-dl.ts                 # production apptranslator + Claude if key set
  *   bun cmd/trans-dl.ts --local         # http://127.0.0.1:9311
  *   bun cmd/trans-dl.ts --server URL
  *   bun cmd/trans-dl.ts --ai=claude|grok|none
- *   bun cmd/trans-dl.ts --no-ai         # download + filter + lzsa only
+ *   bun cmd/trans-dl.ts --no-ai         # download + fix suspicious + filter + lzsa (no AI fill)
  *   bun cmd/trans-dl.ts --lang de       # only fill missing for one language
- *   bun cmd/trans-dl.ts --max-submit N  # cap AI submissions (for testing)
+ *   bun cmd/trans-dl.ts --max-submit N  # cap AI submissions (for testing; fixes always run)
  */
 
 import {
@@ -39,6 +41,7 @@ import { commands } from "./gen-commands";
 // strings that should not be sent for translation
 // (e.g. command names whose display text is set dynamically)
 const translationBlacklist: string[] = [
+  "don't use",
   "Toggle Windows Previewer",
   "Toggle Windows Search Filter",
 ];
@@ -331,6 +334,48 @@ function printBadTranslations(server: string, badTranslations: BadTranslation[])
   }
 }
 
+/**
+ * Sometimes translators press Enter at the end of a string, or leave trailing
+ * whitespace. The download escapes real newlines as \n/\r; fixTranslation strips
+ * those and surrounding whitespace. Push the cleaned value back so apptranslator
+ * stays the source of truth (local-only fix would reappear every download).
+ */
+async function submitFixedSuspicious(
+  server: string,
+  secret: string,
+  badTranslations: BadTranslation[],
+): Promise<number> {
+  if (badTranslations.length === 0) return 0;
+
+  console.log(`\n${badTranslations.length} suspicious translation(s) to fix via API:`);
+  printBadTranslations(server, badTranslations);
+
+  let n = 0;
+  let nSkip = 0;
+  for (const bt of badTranslations) {
+    const colonIdx = bt.fixed.indexOf(":");
+    if (colonIdx < 0) {
+      console.log(`  skip (no lang:): '${bt.fixed}'`);
+      nSkip++;
+      continue;
+    }
+    const lang = bt.fixed.slice(0, colonIdx);
+    const translation = bt.fixed.slice(colonIdx + 1);
+    // empty after cleanup would wipe the translation on the server
+    if (translation.length === 0) {
+      console.log(`  skip empty fix for ${lang}: ${bt.currString}`);
+      nSkip++;
+      continue;
+    }
+    await submitTranslation(server, secret, "ai fix", lang, bt.currString, translation);
+    n++;
+  }
+  console.log(
+    `submitted ${n} fixed suspicious translation(s)${nSkip > 0 ? ` (${nSkip} skipped)` : ""}`,
+  );
+  return n;
+}
+
 interface ParsedTranslations {
   perLang: Map<string, Map<string, string>>;
   allStrings: string[];
@@ -602,103 +647,168 @@ async function submitMany(
 // Prefer small batches: long UI strings + non-Latin output often truncate at max_tokens.
 const kAiBatchSize = 12;
 
+// Marker format avoids JSON breakage when translations contain unescaped " or newlines
+// (e.g. Chinese 按"取消" …). Models routinely emit invalid JSON for those.
+const kTransMarker = (i: number) => `<<<${i}>>>`;
+
 function buildTranslatePrompt(stringsToTranslate: string[], langCode: string): string {
-  // Array-in / array-out: same order, no English keys (avoids escape/match bugs
-  // with ·, quotes, HTML, etc. that break object-map responses).
+  const n = stringsToTranslate.length;
+  const inputBlocks = stringsToTranslate
+    .map((s, i) => `${kTransMarker(i)}\n${s}`)
+    .join("\n");
   return `Translate each English UI string to the language for locale code "${langCode}".
-Input is a JSON array of English strings.
-Return ONLY a JSON array of translated strings, same length and same order as the input.
-Keep placeholders like %s, %d, %1, etc. unchanged.
+
+There are exactly ${n} strings, numbered 0..${n - 1}.
+For each index i, output the marker <<<i>>> on its own line, then the translation on the following line(s).
+Do not put the marker inside the translation. Do not renumber. Do not skip indices.
+You may use quotes, newlines, and HTML freely inside translations — only the <<<i>>> lines are special.
+Keep placeholders like %s, %d, %1 unchanged.
 Keep access-key ampersands if present (e.g. "&File" → localized with & before the hotkey letter).
-Do not wrap in markdown. No explanation.
+No markdown fences. No explanation before or after.
 
 Input:
-${JSON.stringify(stringsToTranslate)}`;
+${inputBlocks}
+
+Output (example for 2 strings):
+<<<0>>>
+first translation
+<<<1>>>
+second translation`;
 }
 
-/** Extract a JSON value from model text (strips fences; tolerates leading prose). */
-function extractJsonText(text: string): string {
+/** Parse <<<i>>>…<<<i+1>>> marker blocks into translations[i]. */
+function parseMarkerTranslations(text: string, n: number): string[] | null {
+  // strip optional markdown fences
   let s = text.trim();
-  // full fence
+  const fence = s.match(/```(?:\w*)?\s*([\s\S]*?)```/);
+  if (fence) {
+    s = fence[1].trim();
+  }
+
+  const re = /<<<(\d+)>>>/g;
+  const matches: { idx: number; start: number; end: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s)) !== null) {
+    matches.push({ idx: parseInt(m[1], 10), start: m.index, end: m.index + m[0].length });
+  }
+  if (matches.length === 0) {
+    return null;
+  }
+
+  const out: (string | null)[] = new Array(n).fill(null);
+  for (let i = 0; i < matches.length; i++) {
+    const { idx, end } = matches[i];
+    if (idx < 0 || idx >= n) continue;
+    const nextStart = i + 1 < matches.length ? matches[i + 1].start : s.length;
+    let body = s.slice(end, nextStart);
+    // drop leading newline after marker
+    if (body.startsWith("\r\n")) body = body.slice(2);
+    else if (body.startsWith("\n")) body = body.slice(1);
+    // trim trailing whitespace/newlines between blocks
+    body = body.replace(/\s+$/, "");
+    if (body.length > 0) {
+      out[idx] = body;
+    }
+  }
+
+  const filled = out.filter((x) => x !== null).length;
+  if (filled === 0) return null;
+  return out.map((x) => x ?? "");
+}
+
+/** Legacy JSON array/object parse (may fail on unescaped quotes inside values). */
+function parseJsonTranslations(
+  text: string,
+  strings: string[],
+  stringsToTranslate: string[],
+): Map<string, string> | null {
+  let s = text.trim();
   const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fence) {
     s = fence[1].trim();
   } else if (s.startsWith("```")) {
-    // truncated fence opening only
-    s = s.replace(/^```(?:json)?\s*/i, "");
-    s = s.replace(/```\s*$/, "").trim();
+    s = s.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
   }
-  // Claude sometimes emits \xHH (not valid JSON); convert to \u00HH
   s = s.replace(/\\x([0-9a-fA-F]{2})/g, (_m, hex: string) => `\\u00${hex}`);
-  // prefer array (our prompt); fall back to object for older responses
+
   const arrStart = s.indexOf("[");
   const objStart = s.indexOf("{");
+  let jsonStr = s;
   if (arrStart >= 0 && (objStart < 0 || arrStart < objStart)) {
     const end = s.lastIndexOf("]");
-    if (end > arrStart) return s.slice(arrStart, end + 1);
-  }
-  if (objStart >= 0) {
+    if (end > arrStart) jsonStr = s.slice(arrStart, end + 1);
+  } else if (objStart >= 0) {
     const end = s.lastIndexOf("}");
-    if (end > objStart) return s.slice(objStart, end + 1);
+    if (end > objStart) jsonStr = s.slice(objStart, end + 1);
   }
-  return s;
-}
 
-function parseTranslationJson(
-  text: string,
-  strings: string[],
-  stringsToTranslate: string[],
-  langCode: string,
-): Map<string, string> {
-  const jsonStr = extractJsonText(text);
   let parsed: unknown;
   try {
     parsed = JSON.parse(jsonStr);
-  } catch (e) {
-    console.log(`AI response (invalid JSON, first 500 chars): ${text.slice(0, 500)}`);
-    throw new Error(`Invalid JSON in AI response for lang ${langCode}: ${e}`);
+  } catch {
+    return null;
   }
 
   const result = new Map<string, string>();
-
   if (Array.isArray(parsed)) {
-    if (parsed.length !== strings.length) {
-      throw new Error(
-        `AI array length ${parsed.length} != input ${strings.length} for lang ${langCode}`,
-      );
-    }
+    if (parsed.length !== strings.length) return null;
     for (let i = 0; i < strings.length; i++) {
       const v = parsed[i];
-      if (typeof v !== "string" || v.length === 0) {
-        console.log(`  skip empty/non-string translation at index ${i}`);
-        continue;
+      if (typeof v === "string" && v.length > 0) {
+        result.set(strings[i], v);
       }
-      result.set(strings[i], v);
     }
-    return result;
+    return result.size > 0 ? result : null;
   }
-
-  // legacy object map fallback
   if (parsed && typeof parsed === "object") {
     for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
       if (typeof value !== "string") continue;
       let idx = stringsToTranslate.indexOf(key);
       if (idx < 0) idx = strings.indexOf(key);
       if (idx < 0) {
-        // keys may have had & stripped or \\x decoded differently
         const keyNorm = key.replaceAll("&", "");
-        idx = stringsToTranslate.findIndex((s) => s === keyNorm || s.replaceAll("&", "") === keyNorm);
+        idx = stringsToTranslate.findIndex((t) => t === keyNorm || t.replaceAll("&", "") === keyNorm);
       }
-      if (idx < 0) {
-        console.log(`  skip unexpected key: '${key.slice(0, 60)}'`);
-        continue;
-      }
-      result.set(strings[idx], value);
+      if (idx >= 0) result.set(strings[idx], value);
     }
-    return result;
+    return result.size > 0 ? result : null;
+  }
+  return null;
+}
+
+function parseAiTranslations(
+  text: string,
+  strings: string[],
+  stringsToTranslate: string[],
+  langCode: string,
+): Map<string, string> {
+  // 1) preferred: marker blocks (safe with " and newlines in values)
+  const marked = parseMarkerTranslations(text, strings.length);
+  if (marked) {
+    const result = new Map<string, string>();
+    let nOk = 0;
+    for (let i = 0; i < strings.length; i++) {
+      if (marked[i] && marked[i].length > 0) {
+        result.set(strings[i], marked[i]);
+        nOk++;
+      }
+    }
+    if (nOk > 0) {
+      if (nOk < strings.length) {
+        console.log(`  marker parse: ${nOk}/${strings.length} translations for ${langCode}`);
+      }
+      return result;
+    }
   }
 
-  throw new Error(`AI response is neither array nor object for lang ${langCode}`);
+  // 2) fallback: JSON array/object
+  const fromJson = parseJsonTranslations(text, strings, stringsToTranslate);
+  if (fromJson && fromJson.size > 0) {
+    return fromJson;
+  }
+
+  console.log(`AI response (unparseable, first 500 chars): ${text.slice(0, 500)}`);
+  throw new Error(`Could not parse AI translations for lang ${langCode}`);
 }
 
 async function translateWithClaude(
@@ -736,7 +846,7 @@ async function translateWithClaude(
     throw new Error(`Claude truncated response (max_tokens) for lang ${langCode}, batch ${strings.length}`);
   }
   const text = data.content?.find((c) => c.type === "text")?.text ?? data.content?.[0]?.text ?? "";
-  return parseTranslationJson(text, strings, stringsToTranslate, langCode);
+  return parseAiTranslations(text, strings, stringsToTranslate, langCode);
 }
 
 async function translateWithGrok(
@@ -773,7 +883,7 @@ async function translateWithGrok(
     throw new Error(`Grok truncated response (length) for lang ${langCode}, batch ${strings.length}`);
   }
   const text = data.choices?.[0]?.message?.content ?? "";
-  return parseTranslationJson(text, strings, stringsToTranslate, langCode);
+  return parseAiTranslations(text, strings, stringsToTranslate, langCode);
 }
 
 /** Translate a batch; on truncation/parse failure, split and retry. */
@@ -1009,10 +1119,13 @@ async function main() {
     console.log("sha1 matches local cache (translations body unchanged for these strings)");
   }
 
-  // fix trailing junk on translation lines
-  const { fixed: fixedBody, badTranslations } = fixTranslations(dl.body);
+  // fix trailing junk on translation lines (local view + detect for API fix)
+  let { fixed: fixedBody, badTranslations } = fixTranslations(dl.body);
   // rebuild full text with same header + (possibly fixed) body
   let fullText = `AppTranslator: ${APP_NAME}\n${dl.sha1}\n${fixedBody}\n`;
+
+  // 2) push cleaned suspicious translations back to apptranslator (always, even --no-ai)
+  let nFixed = await submitFixedSuspicious(args.server, secret, badTranslations);
 
   // parse + auto-fill no-prefix candidates
   let pt = parseTranslations(fullText);
@@ -1039,29 +1152,36 @@ async function main() {
     `missing after auto no-prefix: ${nMissing} across ${missingAfterAuto.size} langs (auto-derived to submit: ${nAuto}); supported=${supportedLangs.length}`,
   );
 
+  let nAiSubmitted = 0;
   if (args.ai === "none") {
     if (nMissing > 0 || nAuto > 0) {
       console.log(
-        `skipping submit (--no-ai / --ai=none); re-run with --ai=claude|grok to fill ${nMissing + nAuto} missing`,
+        `skipping AI fill (--no-ai / --ai=none); re-run with --ai=claude|grok to fill ${nMissing + nAuto} missing`,
       );
     }
   } else if (nMissing > 0 || nAuto > 0) {
-    // 2) AI translate + submit (and auto no-prefix submit)
-    await fillMissingWithAiAndSubmit(args, secret, pt, autoAdded, ensureLangs);
+    // 3) AI translate + submit (and auto no-prefix submit)
+    nAiSubmitted = await fillMissingWithAiAndSubmit(args, secret, pt, autoAdded, ensureLangs);
+  }
 
-    // 3) re-download so cache is pure server truth
+  // 4) re-download so cache is pure server truth whenever we wrote anything
+  if (nFixed > 0 || nAiSubmitted > 0) {
     console.log("re-downloading after submissions...");
     dl = await downloadTranslations(args.server, strs, secret);
     const fixed2 = fixTranslations(dl.body);
+    if (fixed2.badTranslations.length > 0) {
+      console.log(
+        `warning: ${fixed2.badTranslations.length} suspicious translation(s) still present after fix submit`,
+      );
+      printBadTranslations(args.server, fixed2.badTranslations);
+    }
     fullText = `AppTranslator: ${APP_NAME}\n${dl.sha1}\n${fixed2.fixed}\n`;
     pt = parseTranslations(fullText);
     // local-only auto no-prefix for good subset (already on server if submitted above)
     autoAddNoPrefixTranslations(pt);
   }
 
-  printBadTranslations(args.server, badTranslations);
-
-  // 4) write filtered translations for the binary + lzsa
+  // 5) write filtered translations for the binary + lzsa
   //    (sha1 line is the full download sha1 for cache comparison on next run)
   writeTranslationsForBinary(pt, dl.sha1);
   if (!args.skipLzsa) {

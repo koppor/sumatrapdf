@@ -66,7 +66,7 @@ HWND TreeView::Create(const CreateArgs& args) {
     SetToolTipsDelayTime(TTDT_AUTOPOP, 32767);
 
     // TODO:
-    // must be done at the end. Doing  SetWindowStyle() sends bogus (?)
+    // must be done at the end. Doing  HwndSetWindowStyle() sends bogus (?)
     // TVN_ITEMCHANGED notification. As an alternative we could ignore TVN_ITEMCHANGED
     // if hItem doesn't point to an TreeItem
 
@@ -227,10 +227,14 @@ bool TreeView::IsExpanded(TreeItem ti) {
 }
 
 // https://docs.microsoft.com/en-us/windows/win32/api/commctrl/nf-commctrl-treeview_getitemrect
-bool TreeView::GetItemRect(TreeItem ti, bool justText, RECT& r) {
+bool TreeView::GetItemRect(TreeItem ti, bool justText, Rect& r) {
     HTREEITEM hi = GetHandleByTreeItem(ti);
     BOOL b = toBOOL(justText);
-    BOOL ok = TreeView_GetItemRect(hwnd, hi, &r, b);
+    RECT rc{};
+    BOOL ok = TreeView_GetItemRect(hwnd, hi, &rc, b);
+    if (ok) {
+        r = ToRect(rc);
+    }
     return ok == TRUE;
 }
 
@@ -463,7 +467,7 @@ TreeItemState TreeView::GetItemState(TreeItem ti) {
 // if via right-click, selects the item under the cursor
 // in both cases can return null
 // sets pt to screen position (for context menu coordinates)
-TreeItem GetOrSelectTreeItemAtPos(ContextMenuEvent* args, POINT& pt) {
+TreeItem GetOrSelectTreeItemAtPos(ContextMenuEvent* args, Point& pt) {
     TreeView* treeView = (TreeView*)args->w;
     // TreeModel* tm = treeView->treeModel;
     HWND hwnd = treeView->hwnd;
@@ -477,12 +481,12 @@ TreeItem GetOrSelectTreeItemAtPos(ContextMenuEvent* args, POINT& pt) {
         if (ti == TreeModel::kNullItem) {
             return TreeModel::kNullItem;
         }
-        RECT rcItem;
+        Rect rcItem;
         if (treeView->GetItemRect(ti, true, rcItem)) {
             // rcItem is local to window, map to global screen position
-            MapWindowPoints(hwnd, HWND_DESKTOP, (POINT*)&rcItem, 2);
-            pt.x = rcItem.left;
-            pt.y = rcItem.bottom;
+            Rect screenRect = HwndMapRectToWindow(rcItem, hwnd, HWND_DESKTOP);
+            pt.x = screenRect.x;
+            pt.y = screenRect.y + screenRect.dy;
         }
     } else {
         ti = treeView->GetItemAt(pt.x, pt.y);
@@ -499,7 +503,7 @@ TreeItem GetOrSelectTreeItemAtPos(ContextMenuEvent* args, POINT& pt) {
     return ti;
 }
 
-LRESULT TreeView::OnNotifyReflect(WPARAM wp, LPARAM lp) {
+LRESULT TreeView::OnNotifyReflect(WPARAM /*wp*/, LPARAM lp) {
     TreeView* w = this;
     NMTREEVIEWW* nmtv = (NMTREEVIEWW*)(lp);
     LRESULT res;
@@ -578,12 +582,11 @@ LRESULT TreeView::OnNotifyReflect(WPARAM wp, LPARAM lp) {
         DWORD pos = GetMessagePos();
         ev.mouseScreen.x = GET_X_LPARAM(pos);
         ev.mouseScreen.y = GET_Y_LPARAM(pos);
-        POINT pt = ToPOINT(ev.mouseScreen);
+        Point pt = ev.mouseScreen;
         if (pt.x != -1) {
-            MapWindowPoints(HWND_DESKTOP, nmhdr->hwndFrom, &pt, 1);
+            pt = HwndMapWindowPoint(HWND_DESKTOP, nmhdr->hwndFrom, pt);
         }
-        ev.mouseWindow.x = pt.x;
-        ev.mouseWindow.y = pt.y;
+        ev.mouseWindow = pt;
 
         // determine which item has been clicked (if any)
         TVHITTESTINFO ht{};

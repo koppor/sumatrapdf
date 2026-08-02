@@ -147,7 +147,7 @@ TempStr GetExistingInstallationDirTemp() {
     if (!dir) {
         return {};
     }
-    if (str::EndsWithI(dir, ".exe")) {
+    if (str::EndsWithI(dir, StrL(".exe"))) {
         dir = path::GetDirTemp(dir);
     }
     if (len(dir) > 0 && dir::Exists(dir)) {
@@ -164,6 +164,84 @@ bool IsOurExeInstalled() {
     }
     TempStr exeDir = GetSelfExeDirTemp();
     return str::EqI(installedDir, exeDir);
+}
+
+// Walk path and parents; true if any component equals dir (junction-aware via path::IsSame).
+static bool IsPathUnderOrEqualDir(Str path, Str dir) {
+    if (!path || !dir) {
+        return false;
+    }
+    TempStr cur = str::DupTemp(path);
+    while (cur) {
+        if (path::IsSame(dir, cur)) {
+            return true;
+        }
+        TempStr parent = path::GetDirTemp(cur);
+        if (!parent || len(parent) == 0 || len(parent) >= len(cur)) {
+            break;
+        }
+        cur = parent;
+    }
+    return false;
+}
+
+bool IsPathUnderProgramFiles(Str path) {
+    if (!path) {
+        return false;
+    }
+    TempStr pf = GetSpecialFolderTemp(CSIDL_PROGRAM_FILES);
+    if (IsPathUnderOrEqualDir(path, pf)) {
+        return true;
+    }
+    TempStr pfx86 = GetSpecialFolderTemp(CSIDL_PROGRAM_FILESX86);
+    if (IsPathUnderOrEqualDir(path, pfx86)) {
+        return true;
+    }
+    return false;
+}
+
+// Probe whether the current process can create a file under dir (or a parent that exists).
+static bool CanWriteToDirectory(Str dir) {
+    if (!dir) {
+        return false;
+    }
+    TempStr probeDir = str::DupTemp(dir);
+    while (probeDir && !dir::Exists(probeDir)) {
+        TempStr parent = path::GetDirTemp(probeDir);
+        if (!parent || len(parent) == 0 || len(parent) >= len(probeDir)) {
+            break;
+        }
+        probeDir = parent;
+    }
+    if (!probeDir || !dir::Exists(probeDir)) {
+        return false;
+    }
+    TempStr probe = path::JoinTemp(probeDir, fmt("sumatra-write-test-%u.tmp", GetCurrentProcessId()));
+    HANDLE h = CreateFileW(CWStrTemp(probe), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                           FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        logf("CanWriteToDirectory: CreateFile failed for '%s' err=%u\n", probe, GetLastError());
+        return false;
+    }
+    CloseHandle(h);
+    return true;
+}
+
+bool InstallNeedsElevation(Str installDir, bool allUsers) {
+    if (allUsers) {
+        return true;
+    }
+    if (IsPathUnderProgramFiles(installDir)) {
+        return true;
+    }
+    // Already admin: no further elevation needed even if write probe is odd.
+    if (IsProcessRunningElevated()) {
+        return false;
+    }
+    if (!CanWriteToDirectory(installDir)) {
+        return true;
+    }
+    return false;
 }
 
 void GetPreviousInstallInfo(PreviousInstallationInfo* info) {
@@ -186,6 +264,13 @@ void GetPreviousInstallInfo(PreviousInstallationInfo* info) {
         info->allUsers = true;
     } else {
         info->typ = PreviousInstallationType::User;
+        info->allUsers = false;
+    }
+    // HKCU-only uninstall key can still point at Program Files (broken / partial state).
+    // Treat as machine-style so upgrades elevate and write HKLM correctly.
+    if (!info->allUsers && IsPathUnderProgramFiles(info->installationDir)) {
+        logf("GetPreviousInstallInfo: dir under Program Files with only HKCU key; forcing allUsers\n");
+        info->allUsers = true;
     }
     logf("GetPreviousInstallInfo: dir '%s', search filter: %d, preview: %d, typ: %d, needsElevation: %d\n",
          info->installationDir, (int)info->searchFilterInstalled, (int)info->previewInstalled, (int)info->typ,
@@ -429,16 +514,17 @@ int KillProcessesWithModule(Str modulePath, bool waitUntilTerminated) {
 }
 
 // Kill processes that have any of our install-dir modules loaded:
-// libmupdf.dll, PdfFilter.dll, PdfPreview.dll, browser plugin, SumatraPDF.exe.
+// libsumatrapdf.dll, PdfFilter.dll, PdfPreview.dll, browser plugin, SumatraPDF.exe.
 // dllhost/prevhost/SearchFilterHost load the shell-extension DLLs; they may
-// keep PdfFilter.dll locked even after libmupdf.dll was renamed aside.
+// keep PdfFilter.dll locked even after libsumatrapdf.dll was renamed aside.
 // returns false if there are processes and we failed to kill them
 static bool KillProcessesUsingInstallationDir(Str dir) {
     logf("KillProcessesUsingInstallationDir('%s')\n", dir);
     if (!dir) {
         return true;
     }
-    TempStr libmupdf = path::JoinTemp(dir, StrL("libmupdf.dll"));
+    TempStr libsumatrapdf = path::JoinTemp(dir, StrL("libsumatrapdf.dll"));
+    TempStr libmupdfLegacy = path::JoinTemp(dir, StrL("libmupdf.dll")); // through 3.6
     TempStr browserPlugin = path::JoinTemp(dir, kBrowserPluginName);
     TempStr filterDll = path::JoinTemp(dir, kSearchFilterDllName);
     TempStr previewDll = path::JoinTemp(dir, kPreviewDllName);
@@ -455,8 +541,9 @@ static bool KillProcessesUsingInstallationDir(Str dir) {
     BOOL ok = Process32First(snap, &proc);
     while (ok) {
         DWORD procID = proc.th32ProcessID;
-        bool uses = IsProcessUsingFiles(procID, libmupdf, browserPlugin) ||
-                    IsProcessUsingFiles(procID, filterDll, previewDll) || IsProcessUsingFiles(procID, exePath, nullptr);
+        bool uses = IsProcessUsingFiles(procID, libsumatrapdf, libmupdfLegacy) ||
+                    IsProcessUsingFiles(procID, browserPlugin, filterDll) ||
+                    IsProcessUsingFiles(procID, previewDll, exePath);
         if (uses) {
             TempStr s = ToUtf8Temp(proc.szExeFile);
             logf("  attempting to kill process %d '%s'\n", (int)procID, s);
@@ -471,7 +558,7 @@ static bool KillProcessesUsingInstallationDir(Str dir) {
     }
 
     // Also target by module path (covers short-lived filter hosts).
-    const TempStr modulePaths[] = {libmupdf, filterDll, previewDll, exePath, browserPlugin};
+    const TempStr modulePaths[] = {libsumatrapdf, libmupdfLegacy, filterDll, previewDll, exePath, browserPlugin};
     for (TempStr mod : modulePaths) {
         if (file::Exists(mod)) {
             int n = KillProcessesWithModule(mod, true);
@@ -551,14 +638,15 @@ void RestoreShellExtensions(const ShellExtInstallState& state) {
 }
 
 // return names of processes that are running part of the installation
-// (i.e. have libmupdf.dll, PdfFilter.dll, PdfPreview.dll, or plugin loaded)
+// (i.e. have libsumatrapdf.dll, PdfFilter.dll, PdfPreview.dll, or plugin loaded)
 static void ProcessesUsingInstallation(StrVec& names) {
     log("ProcessesUsingInstallation()\n");
     TempStr dir = GetExistingInstallationDirTemp();
     if (!dir) {
         return;
     }
-    TempStr libmupdf = path::JoinTemp(dir, StrL("libmupdf.dll"));
+    TempStr libsumatrapdf = path::JoinTemp(dir, StrL("libsumatrapdf.dll"));
+    TempStr libmupdfLegacy = path::JoinTemp(dir, StrL("libmupdf.dll")); // through 3.6
     TempStr browserPlugin = path::JoinTemp(dir, kBrowserPluginName);
     TempStr filterDll = path::JoinTemp(dir, kSearchFilterDllName);
     TempStr previewDll = path::JoinTemp(dir, kPreviewDllName);
@@ -574,8 +662,9 @@ static void ProcessesUsingInstallation(StrVec& names) {
     BOOL ok = Process32First(snap, &proc);
     while (ok) {
         DWORD procID = proc.th32ProcessID;
-        bool uses = IsProcessUsingFiles(procID, libmupdf, browserPlugin) ||
-                    IsProcessUsingFiles(procID, filterDll, previewDll) || IsProcessUsingFiles(procID, exePath, nullptr);
+        bool uses = IsProcessUsingFiles(procID, libsumatrapdf, libmupdfLegacy) ||
+                    IsProcessUsingFiles(procID, browserPlugin, filterDll) ||
+                    IsProcessUsingFiles(procID, previewDll, exePath);
         if (uses) {
             // TODO: this kils ReadableProcName logic
             TempStr s = ToUtf8Temp(proc.szExeFile);
@@ -904,7 +993,7 @@ static void DrawFrame2(Graphics& g, Rect r, bool skipMessage) {
 static void DrawFrame(HWND hwnd, HDC dc, PAINTSTRUCT*, bool skipMessage) {
     // TODO: cache bmp object?
     Graphics g(dc);
-    Rect rc = ClientRect(hwnd);
+    Rect rc = HwndClientRect(hwnd);
     Bitmap bmp(rc.dx, rc.dy, &g);
     Graphics g2((Image*)&bmp);
     DrawFrame2(g2, rc, skipMessage);

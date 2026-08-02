@@ -78,12 +78,12 @@ static void TocCustomizeTooltip(TreeView::GetTooltipEvent* ev) {
     str::Builder infotip;
 
     // Display the item's full label, if it's overlong
-    RECT rcLine, rcLabel;
+    Rect rcLine, rcLabel;
     treeView->GetItemRect(ev->treeItem, false, rcLine);
     treeView->GetItemRect(ev->treeItem, true, rcLabel);
 
     // TODO: this causes a duplicate. Not sure what changed
-    if (false && rcLine.right + 2 < rcLabel.right) {
+    if (false && rcLine.x + rcLine.dx + 2 < rcLabel.x + rcLabel.dx) {
         Str currInfoTip = tm->Text(ti);
         infotip.Append(currInfoTip);
         infotip.Append("\r\n");
@@ -99,21 +99,159 @@ static void TocCustomizeTooltip(TreeView::GetTooltipEvent* ev) {
     str::BufSet(nm->pszText, nm->cchTextMax, ToStr(infotip));
 }
 
+// Deferred TOC navigation must not hold raw TocItem* / IPageDestination*
+// pointers: the TOC tree can be rebuilt or freed before the uitask runs
+// (while tab->ctrl still matches), which caused UAF in HandleLink
+// (crash 8bfe7adb1000001: EngineMupdf::HandleLink / dest->GetKind).
+
+// Own a stable copy of the destination at post time. Engine-private kinds
+// that hold fz_outline/fz_link (mupdf) are converted to scrollTo with
+// page/rect/zoom already resolved on the TocItem/dest.
+static IPageDestination* SnapshotDestForDeferredNav(IPageDestination* dest, int tocPageNo) {
+    if (!dest) {
+        return nullptr;
+    }
+    Kind k = dest->GetKind();
+    if (k == kindDestinationLaunchURL) {
+        Str url = ((PageDestinationURL*)dest)->url;
+        if (!url) {
+            url = PageDestGetValue(dest);
+        }
+        return url ? new PageDestinationURL(url) : nullptr;
+    }
+    if (k == kindDestinationLaunchFile) {
+        auto* f = (PageDestinationFile*)dest;
+        auto* copy = new PageDestinationFile(f->path, f->dest);
+        copy->openInNewWindow = f->openInNewWindow;
+        copy->rect = f->rect;
+        return copy;
+    }
+    if (k == kindDestinationLaunchEmbedded || k == kindDestinationAttachment) {
+        auto* p = (PageDestination*)dest;
+        auto* copy = new PageDestination();
+        copy->kind = k;
+        copy->pageNo = p->pageNo;
+        copy->rect = p->rect;
+        copy->zoom = p->zoom;
+        copy->value = str::Dup(p->value);
+        copy->name = str::Dup(p->name);
+        copy->embedObjNum = p->embedObjNum;
+        return copy;
+    }
+    if (k == kindDestinationScrollTo) {
+        auto* copy = new PageDestination();
+        copy->kind = k;
+        copy->pageNo = PageDestGetPageNo(dest);
+        if (copy->pageNo <= 0) {
+            copy->pageNo = tocPageNo;
+        }
+        copy->rect = PageDestGetRect(dest);
+        copy->zoom = PageDestGetZoom(dest);
+        copy->value = str::Dup(PageDestGetValue(dest));
+        copy->name = str::Dup(PageDestGetName(dest));
+        return copy;
+    }
+    // mupdf, djvu, none → page navigation snapshot
+    int pageNo = PageDestGetPageNo(dest);
+    if (pageNo <= 0) {
+        pageNo = tocPageNo;
+    }
+    if (pageNo <= 0) {
+        Str val = PageDestGetValue(dest);
+        if (val && IsExternalUrl(val)) {
+            return new PageDestinationURL(val);
+        }
+        return nullptr;
+    }
+    RectF r = PageDestGetRect(dest);
+    float zoom = PageDestGetZoom(dest);
+    if (k == kindDestinationMupdf) {
+        // Prefer resolved anchor; outline x/y can be 0 and scroll to the wrong place
+        RectF pt = PageDestGetDestPoint(dest);
+        if ((r.dx == 0 && r.dy == 0) || (r.dx == kDestUseDefault && r.dy == kDestUseDefault)) {
+            if (pt.x != 0 || pt.y != 0 || r.IsEmpty()) {
+                r = RectF{pt.x, pt.y, kDestUseDefault, kDestUseDefault};
+            }
+        }
+        zoom = dest->GetZoom2();
+    }
+    return NewSimpleDest(pageNo, r, zoom);
+}
+
+#if defined(DEBUG)
+bool TableOfContents_UnitTestSnapshotNamedDest() {
+    PageDestination source;
+    source.kind = kindDestinationScrollTo;
+    source.pageNo = 1;
+    source.rect = RectF(2, 3, 4, 5);
+    source.zoom = 125;
+    source.value = str::Dup(StrL("value"));
+    source.name = str::Dup(StrL("https://sumatrapdf.md/issue-5842.html#target-heading"));
+
+    IPageDestination* snapshot = SnapshotDestForDeferredNav(&source, 7);
+    bool ok = snapshot && snapshot->GetKind() == kindDestinationScrollTo && PageDestGetPageNo(snapshot) == 1 &&
+              PageDestGetRect(snapshot) == source.rect && PageDestGetZoom(snapshot) == source.zoom &&
+              str::Eq(PageDestGetValue(snapshot), source.value) && str::Eq(PageDestGetName(snapshot), source.name);
+    delete snapshot;
+    return ok;
+}
+#endif
+
+static TocItem* FindTocItemByTitlePage(TocItem* item, Str title, int pageNo) {
+    for (; item; item = item->next) {
+        if (pageNo > 0 && item->pageNo != pageNo) {
+            // keep searching children; same page can nest under different titles
+        } else if (title && item->title && str::Eq(title, item->title)) {
+            if (pageNo <= 0 || item->pageNo == pageNo) {
+                return item;
+            }
+        } else if (!title && pageNo > 0 && item->pageNo == pageNo) {
+            return item;
+        }
+        TocItem* found = FindTocItemByTitlePage(item->child, title, pageNo);
+        if (found) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
 struct GoToTocLinkData {
-    TocItem* tocItem;
-    WindowTab* tab;
-    DocController* ctrl;
+    WindowTab* tab = nullptr;
+    DocController* ctrl = nullptr;
+    // owned snapshot; may be null (then pageNo alone is used)
+    IPageDestination* dest = nullptr;
+    int pageNo = 0;
+    // owned; used to re-select in tree after palette-driven nav
+    Str title;
     // true when the navigation was driven from outside the tree (e.g. the
     // command palette), so afterwards we must move the tree's selection to the
     // item ourselves. For tree-driven navigation the tree is already selected.
     bool selectInTree = false;
+
+    ~GoToTocLinkData() {
+        delete dest;
+        str::Free(title);
+    }
 };
+
+static GoToTocLinkData* NewGoToTocLinkData(MainWindow* win, TocItem* tocItem, bool selectInTree) {
+    auto* data = new GoToTocLinkData;
+    data->ctrl = win->ctrl;
+    data->tab = win->CurrentTab();
+    data->pageNo = tocItem->pageNo;
+    data->dest = SnapshotDestForDeferredNav(tocItem->GetPageDestination(), tocItem->pageNo);
+    data->selectInTree = selectInTree;
+    if (selectInTree && tocItem->title) {
+        data->title = str::Dup(tocItem->title);
+    }
+    return data;
+}
 
 static void GoToTocLink(GoToTocLinkData* d) {
     AutoDelete delData(d);
 
     auto tab = d->tab;
-    auto tocItem = d->tocItem;
     auto ctrl = d->ctrl;
 
     // validate tab before dereferencing — it may have been freed
@@ -122,7 +260,7 @@ static void GoToTocLink(GoToTocLinkData* d) {
         return;
     }
     MainWindow* win = tab->win;
-    // tocItem is invalid if the DocController has been replaced
+    // destination snapshot is invalid if the DocController has been replaced
     if (!IsMainWindowValid(win) || win->CurrentTab() != tab || tab->ctrl != ctrl) {
         return;
     }
@@ -130,12 +268,10 @@ static void GoToTocLink(GoToTocLinkData* d) {
     // make sure that the tree item that the user selected
     // isn't unselected in UpdateTocSelection right again
     win->tocKeepSelection = true;
-    int pageNo = tocItem->pageNo;
-    IPageDestination* dest = tocItem->GetPageDestination();
-    if (dest) {
-        ctrl->HandleLink(dest, win->linkHandler);
-    } else if (pageNo) {
-        ctrl->GoToPage(pageNo, true);
+    if (d->dest) {
+        ctrl->HandleLink(d->dest, win->linkHandler);
+    } else if (d->pageNo) {
+        ctrl->GoToPage(d->pageNo, true);
     }
     win->tocKeepSelection = false;
 
@@ -144,12 +280,19 @@ static void GoToTocLink(GoToTocLinkData* d) {
     // the tree still shows the old item. Move the selection to this item now
     // (programmatic SelectItem doesn't re-navigate -- see TocTreeSelectionChanged).
     if (d->selectInTree && win->tocLoaded && win->tocTreeView) {
-        TreeView* treeView = win->tocTreeView;
-        HTREEITEM hi = treeView->GetHandleByTreeItem((TreeItem)tocItem);
-        if (hi) {
-            TreeView_EnsureVisible(treeView->hwnd, hi);
+        TocTree* tree = tab->currToc;
+        TocItem* tocItem = nullptr;
+        if (tree && tree->root) {
+            tocItem = FindTocItemByTitlePage(tree->root, d->title, d->pageNo);
         }
-        treeView->SelectItem((TreeItem)tocItem);
+        if (tocItem) {
+            TreeView* treeView = win->tocTreeView;
+            HTREEITEM hi = treeView->GetHandleByTreeItem((TreeItem)tocItem);
+            if (hi) {
+                TreeView_EnsureVisible(treeView->hwnd, hi);
+            }
+            treeView->SelectItem((TreeItem)tocItem);
+        }
     }
 }
 
@@ -160,11 +303,7 @@ void GoToTocItem(MainWindow* win, TocItem* tocItem) {
     if (!win || !tocItem) {
         return;
     }
-    auto data = new GoToTocLinkData;
-    data->ctrl = win->ctrl;
-    data->tocItem = tocItem;
-    data->tab = win->CurrentTab();
-    data->selectInTree = true; // palette-driven: sync the tree selection too
+    auto data = NewGoToTocLinkData(win, tocItem, true);
     auto fn = MkFunc0<GoToTocLinkData>(GoToTocLink, data);
     uitask::Post(fn, "TaskGoToTocFromPalette");
 }
@@ -186,10 +325,7 @@ static void GoToTocTreeItem(MainWindow* win, TreeItem ti, bool allowExternal) {
     bool isScroll = IsScrollToLink(tocItem->GetPageDestination());
     if (validPage || (allowExternal || isScroll)) {
         // delay changing the page until the tree messages have been handled
-        auto data = new GoToTocLinkData;
-        data->ctrl = win->ctrl;
-        data->tocItem = tocItem;
-        data->tab = win->CurrentTab();
+        auto data = NewGoToTocLinkData(win, tocItem, false);
         auto fn = MkFunc0<GoToTocLinkData>(GoToTocLink, data);
         uitask::Post(fn, "TaskGoToTocTreeItem");
     }
@@ -334,7 +470,7 @@ static void SetTocMultiHighlight(MainWindow* win, TreeView* treeView, TocItem* b
     // TreeView selection paint won't cover the extra matches; repaint so
     // OnTocCustomDraw can draw them.
     if (treeView->hwnd) {
-        InvalidateRect(treeView->hwnd, nullptr, TRUE);
+        HwndInvalidate(treeView->hwnd, true);
     }
 }
 
@@ -720,7 +856,7 @@ static void TocContextMenu(ContextMenuEvent* ev) {
     MainWindow* win = FindMainWindowByHwnd(ev->w->hwnd);
     Str filePath = win->ctrl->GetFilePath();
 
-    POINT pt{};
+    Point pt{};
 
     TreeView* treeView = (TreeView*)ev->w;
     TreeItem ti = GetOrSelectTreeItemAtPos(ev, pt);
@@ -749,7 +885,7 @@ static void TocContextMenu(ContextMenuEvent* ev) {
         path = embeddedFile->path;
         // this is name of the file as set inside PDF file
         fileName = PageDestGetName(dest);
-        bool canOpenEmbedded = str::EndsWithI(fileName, ".pdf");
+        bool canOpenEmbedded = str::EndsWithI(fileName, StrL(".pdf"));
         if (!canOpenEmbedded) {
             MenuRemove(popup, CmdOpenEmbeddedPDF);
         }
@@ -770,7 +906,7 @@ static void TocContextMenu(ContextMenuEvent* ev) {
         // hack: attachmentNo is saved in pageNo see
         // PdfLoadAttachments and DestFromAttachment
         attachmentNo = pageNo;
-        bool canOpenEmbedded = str::EndsWithI(fileName, ".pdf");
+        bool canOpenEmbedded = str::EndsWithI(fileName, StrL(".pdf"));
         if (!canOpenEmbedded) {
             MenuRemove(popup, CmdOpenAttachment);
         }
@@ -957,11 +1093,11 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
     }
 
     TreeView* tv = ev->treeView;
-    RECT labelRect{};
+    Rect labelRect{};
     if (!tv->GetItemRect(ev->treeItem, true, labelRect)) {
         return;
     }
-    RECT itemRect{};
+    Rect itemRect{};
     tv->GetItemRect(ev->treeItem, false, itemRect);
 
     NMTVCUSTOMDRAW* tvcd = ev->nm;
@@ -1004,16 +1140,17 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
     GetTocFilterWords(win, words);
     bool filterActive = len(words) > 0;
 
-    // Nothing to repaint unless we need page numbers, filter bars, or a
-    // secondary multi-match highlight (the real selection is already painted).
-    if (!showPage && !filterActive && !(isMultiMatch && !isTreeSelected)) {
+    // Always repaint selected / multi-match rows so themed selection colors
+    // replace Explorer's light inactive-selection face (issue #5848). Also
+    // when page numbers or filter bars need drawing.
+    if (!showPage && !filterActive && !isSelected) {
         return;
     }
 
     // Label area extends to the visible right edge so the page number stays
     // right-aligned against the sidebar, not under a long title.
-    RECT drawRc = labelRect;
-    drawRc.right = std::min(itemRect.right, cd->rc.right);
+    RECT drawRc = ToRECT(labelRect);
+    drawRc.right = std::min(itemRect.x + itemRect.dx, (int)cd->rc.right);
     if (drawRc.right <= drawRc.left) {
         return;
     }
@@ -1027,42 +1164,44 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
     }
 
     TempWStr pageW{};
-    SIZE pageSize{};
+    Size pageSize{};
     int pageReserve = 0;
     if (showPage) {
         pageW = ToWStrTemp(pageLabel);
         if (pageW.len > 0) {
-            GetTextExtentPoint32W(hdc, pageW.s, pageW.len, &pageSize);
-            pageReserve = pageSize.cx + DpiScale(tv->hwnd, 8);
+            pageSize = HdcGetTextExtentPoint32(hdc, pageLabel);
+            pageReserve = pageSize.dx + DpiScale(tv->hwnd, 8);
         } else {
             showPage = false;
         }
     }
 
+    Rect drawRect = ToRect(drawRc);
     HBRUSH brushBg = CreateSolidBrush(bgCol);
-    FillRect(hdc, &drawRc, brushBg);
+    HdcFillRect(hdc, drawRect, brushBg);
     DeleteObject(brushBg);
 
-    RECT titleRc = drawRc;
-    titleRc.right = std::max(titleRc.left, drawRc.right - pageReserve);
-    InflateRect(&titleRc, -2, -1);
+    Rect titleRect = drawRect;
+    titleRect.dx = std::max(0, titleRect.dx - pageReserve);
+    titleRect.Inflate(-2, -1);
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, txtCol);
     SetBkColor(hdc, bgCol);
 
     if (filterActive) {
-        DrawTreeItemFilterHighlight(hdc, titleRc, tocItem->title, words, bgCol, txtCol, font);
+        DrawTreeItemFilterHighlight(hdc, titleRect, tocItem->title, words, bgCol, txtCol, font);
     } else {
-        TempWStr titleW = ToWStrTemp(tocItem->title);
-        DrawTextW(hdc, titleW.s, titleW.len, &titleRc,
-                  DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_WORD_ELLIPSIS | DT_LEFT);
+        HdcDrawText(hdc, tocItem->title, titleRect,
+                    DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_WORD_ELLIPSIS | DT_LEFT);
     }
 
     if (showPage && pageW.len > 0) {
-        RECT pageRc = drawRc;
-        InflateRect(&pageRc, -2, -1);
-        pageRc.left = std::max(pageRc.left, pageRc.right - pageSize.cx);
+        Rect pageRect = drawRect;
+        pageRect.Inflate(-2, -1);
+        int right = pageRect.x + pageRect.dx;
+        pageRect.x = std::max(pageRect.x, right - pageSize.dx);
+        pageRect.dx = right - pageRect.x;
         // Slightly muted vs title when not selected (keeps numbers secondary).
         if (!(isTreeSelected && hasFocus)) {
             COLORREF muted =
@@ -1070,7 +1209,7 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
                     (GetBValue(txtCol) * 2 + GetBValue(bgCol)) / 3);
             SetTextColor(hdc, muted);
         }
-        DrawTextW(hdc, pageW.s, pageW.len, &pageRc, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_RIGHT);
+        HdcDrawText(hdc, pageW, pageRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_RIGHT);
     }
 
     if ((cd->uItemState & CDIS_FOCUS) && isTreeSelected && hasFocus) {
@@ -1100,17 +1239,41 @@ void OnTocCustomDraw(TreeView::CustomDrawEvent* ev) {
         if (!tocItem) {
             return;
         }
+        TreeView* tv = ev->treeView;
+        bool isTreeSelected = (cd->uItemState & CDIS_SELECTED) != 0;
+        if (!isTreeSelected) {
+            HTREEITEM hSel = TreeView_GetSelection(tv->hwnd);
+            HTREEITEM hItem = tv->GetHandleByTreeItem(ev->treeItem);
+            isTreeSelected = hSel && hItem && hSel == hItem;
+        }
+        bool isMultiMatch = TocItemIsMultiHighlight(win, tocItem);
+        bool isSelected = isTreeSelected || isMultiMatch;
+        bool hasFocus = isTreeSelected && (GetFocus() == tv->hwnd);
+
         LRESULT res = 0;
-        if (tocItem->color != kColorUnset) {
+        if (isSelected) {
+            // Theme-aware selection fill/text; strip CDIS_SELECTED so Explorer
+            // theme does not paint a light inactive selection over dark text.
+            COLORREF bgCol, txtCol;
+            ResolveTreeFilterItemColors(cd->hdc, ToRect(cd->rc), tv->bgColor, tv->textColor, true, hasFocus, &bgCol,
+                                        &txtCol);
+            if (!(isTreeSelected && hasFocus) && tocItem->color != kColorUnset) {
+                txtCol = tocItem->color;
+            }
+            tvcd->clrText = txtCol;
+            tvcd->clrTextBk = bgCol;
+            cd->uItemState &= ~(CDIS_SELECTED | CDIS_FOCUS);
+            res |= CDRF_NEWFONT;
+        } else if (tocItem->color != kColorUnset) {
             tvcd->clrText = tocItem->color;
         }
         if (tocItem->fontFlags != 0) {
             UpdateFont(cd->hdc, ev->treeView->hwnd, tocItem->fontFlags);
-            res = CDRF_NEWFONT;
+            res |= CDRF_NEWFONT;
         }
-        // POSTPAINT redraws title + optional page number / filter / multi-match.
-        bool needPost = filterActive || (showPageNumbers && tocItem->pageNo > 0) ||
-                        (multiHighlight && TocItemIsMultiHighlight(win, tocItem));
+        // POSTPAINT: selection colors (issue #5848), page numbers, filter, multi-match.
+        bool needPost =
+            isSelected || filterActive || (showPageNumbers && tocItem->pageNo > 0) || (multiHighlight && isMultiMatch);
         if (needPost) {
             res |= CDRF_NOTIFYPOSTPAINT;
         }
@@ -1268,12 +1431,13 @@ static void LayoutTocContainer(MainWindow* win) {
     if (!win->tocLayout) {
         return;
     }
-    Rect rc = WindowRect(win->hwndTocBox);
+    Rect rc = HwndWindowRect(win->hwndTocBox);
     win->tocLayout->Layout(Tight(Size{rc.dx, rc.dy}));
     win->tocLayout->SetBounds(Rect{0, 0, rc.dx, rc.dy});
 }
 
-static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR subclassId, DWORD_PTR data) {
+static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR /*subclassId*/,
+                                      DWORD_PTR /*data*/) {
     MainWindow* win = FindMainWindowByHwnd(hwnd);
     if (!win) {
         return DefSubclassProc(hwnd, msg, wp, lp);
@@ -1348,9 +1512,7 @@ static TocItem* FilterTocItemRec(TocItem* item, const StrVec& words) {
         bool titleMatches = si->title && FilterMatches(si->title, words);
         if (titleMatches) {
             // keep this node; only fully-matching children stay nested under it
-            auto* copy = new TocItem();
-            copy->title = str::Dup(si->title);
-            copy->pageNo = si->pageNo;
+            auto* copy = AllocTocItem(nullptr, si->title, si->pageNo);
             copy->id = si->id;
             copy->fontFlags = si->fontFlags;
             copy->color = si->color;
@@ -1408,7 +1570,7 @@ static void ApplyTocFilter(MainWindow* win, Str filter) {
     // TreeView populates Root()'s children only (the root itself is invisible).
     // Promote-filter returns a sibling list of matching items, so wrap them in
     // a dummy root — same shape every engine uses for the unfiltered TocTree.
-    auto* wrapRoot = new TocItem();
+    auto* wrapRoot = AllocTocItem(nullptr, {}, 0);
     wrapRoot->child = filteredItems;
     for (TocItem* c = filteredItems; c; c = c->next) {
         c->parent = wrapRoot;
@@ -1431,7 +1593,7 @@ static void OnTocFilterTextChanged(MainWindow* win) {
     TocFilterChanged(win);
 }
 
-static LRESULT CALLBACK WndProcTocFilterEdit(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR subclassId,
+static LRESULT CALLBACK WndProcTocFilterEdit(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR /*subclassId*/,
                                              DWORD_PTR data) {
     MainWindow* win = (MainWindow*)data;
     if (msg == WM_KEYDOWN) {

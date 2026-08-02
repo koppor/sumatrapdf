@@ -57,7 +57,7 @@ void _uploadDebugReportIfFunc(__unused bool cond, __unused Str condStr) {
     // no-op implementation to satisfy SubmitBugReport()
 }
 
-int APIENTRY WinMain(HINSTANCE hInstance, __unused HINSTANCE hPrevInstance, __unused LPSTR lpCmdLine,
+int APIENTRY WinMain(HINSTANCE /*hInstance*/, __unused HINSTANCE hPrevInstance, __unused LPSTR lpCmdLine,
                      __unused int nCmdShow) {
     // SetProcessDpiAwareness(PROCESS_SYSTEM_DPI_AWARE);
     // SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
@@ -90,7 +90,7 @@ int APIENTRY WinMain(HINSTANCE hInstance, __unused HINSTANCE hPrevInstance, __un
         }
         //auto c = Loose(Size{dx, dy});
         LayoutToSize(l, {dx, dy});
-        InvalidateRect(hwnd, nullptr, false);
+        HwndInvalidate(hwnd);
     };
 
     // important to call this after hooking up onSize to ensure

@@ -403,7 +403,7 @@ again:
         if ((idx >= 0) && (idx % 2 == 1)) {
             buf[0] = shiftKeys.s[idx - 1];
             toFind = Str(buf, 1);
-            accel.key = buf[0];
+            accel.key = (WORD)(unsigned char)buf[0];
             accel.fVirt |= (FSHIFT | FVIRTKEY);
             usedShiftKeyMap = true;
         }
@@ -442,27 +442,26 @@ again:
         if (key == -1) {
             logf("can't map char 0x%x\n", (int)wc);
             return false;
-        } else {
-            // https://docs.microsoft.com/en-gb/windows/win32/api/winuser/nf-winuser-vkkeyscanexw
-            // ... high-order byte contains the shift state,
-            // 1 Either SHIFT key is pressed.
-            // 2 Either CTRL key is pressed.
-            // 4 Either ALT key is pressed.
-            BYTE shiftState = HIBYTE(key);
-            BYTE k = LOBYTE(key);
-            // logf("mapped char 0x%x as %d (0x%x), shift state: %d\n", (int)wc, (int)k, (int)k, (int)shiftState);
-            key = (SHORT)k;
-            if (shiftState & 0x1) {
-                accel.fVirt |= (FSHIFT | FVIRTKEY);
-            }
-            if (shiftState & 0x2) {
-                accel.fVirt |= (FCONTROL | FVIRTKEY);
-            }
-            if (shiftState & 0x4) {
-                accel.fVirt |= (FALT | FVIRTKEY);
-            }
-            accel.fVirt |= FVIRTKEY;
         }
+        // https://docs.microsoft.com/en-gb/windows/win32/api/winuser/nf-winuser-vkkeyscanexw
+        // ... high-order byte contains the shift state,
+        // 1 Either SHIFT key is pressed.
+        // 2 Either CTRL key is pressed.
+        // 4 Either ALT key is pressed.
+        BYTE shiftState = HIBYTE(key);
+        BYTE k = LOBYTE(key);
+        // logf("mapped char 0x%x as %d (0x%x), shift state: %d\n", (int)wc, (int)k, (int)k, (int)shiftState);
+        key = (SHORT)k;
+        if (shiftState & 0x1) {
+            accel.fVirt |= (FSHIFT | FVIRTKEY);
+        }
+        if (shiftState & 0x2) {
+            accel.fVirt |= (FCONTROL | FVIRTKEY);
+        }
+        if (shiftState & 0x4) {
+            accel.fVirt |= (FALT | FVIRTKEY);
+        }
+        accel.fVirt |= FVIRTKEY;
         accel.key = (WORD)key;
         return true;
     }
@@ -494,7 +493,7 @@ again:
             c -= ('a' - 'A');
         }
     }
-    accel.key = c;
+    accel.key = (WORD)(unsigned char)c;
     return true;
 }
 
@@ -510,8 +509,8 @@ bool ParseShortcutString(Str shortcut, ACCEL& accel) {
 
 static TempStr appendAccelKeyToMenuStringTemp(TempStr menuStr, const ACCEL& a) {
     auto lang = trans::GetCurrentLangCode();
-    bool isEng = len(lang) == 0 || str::Eq(lang, "en");
-    bool isGerman = str::Eq(lang, "de");
+    bool isEng = len(lang) == 0 || str::Eq(lang, StrL("en"));
+    bool isGerman = str::Eq(lang, StrL("de"));
     bool isAscii = false;
 
     str::Builder str;

@@ -46,6 +46,18 @@ const gdi32 = dlopen("gdi32.dll", {
   SelectObject: { args: [FFIType.u64, FFIType.u64], returns: FFIType.u64 },
   DeleteObject: { args: [FFIType.u64], returns: FFIType.bool },
   DeleteDC: { args: [FFIType.u64], returns: FFIType.bool },
+  BitBlt: {
+    args: [FFIType.u64, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.u64, FFIType.i32, FFIType.i32, FFIType.u32],
+    returns: FFIType.bool,
+  },
+  StretchBlt: {
+    args: [
+      FFIType.u64, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32,
+      FFIType.u64, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.u32,
+    ],
+    returns: FFIType.bool,
+  },
+  SetStretchBltMode: { args: [FFIType.u64, FFIType.i32], returns: FFIType.i32 },
 });
 
 const gdiplus = dlopen("gdiplus.dll", {
@@ -54,6 +66,79 @@ const gdiplus = dlopen("gdiplus.dll", {
   GdipSaveImageToFile: { args: [FFIType.u64, FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.u32 },
   GdipDisposeImage: { args: [FFIType.u64], returns: FFIType.u32 },
 });
+
+const kernel32 = dlopen("kernel32.dll", {
+  CreateProcessW: {
+    args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.bool, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr],
+    returns: FFIType.bool,
+  },
+  CloseHandle: { args: [FFIType.u64], returns: FFIType.bool },
+  GetLastError: { args: [], returns: FFIType.u32 },
+});
+
+// Authenticode helpers (mirror src/base/Crypto_win.cpp GetExecutableSignerTemp / IsPEFileSigned).
+// crypt32 for embedded PKCS#7 signer name; wintrust for signature validity.
+const crypt32 = dlopen("crypt32.dll", {
+  CryptQueryObject: {
+    args: [
+      FFIType.u32,
+      FFIType.ptr,
+      FFIType.u32,
+      FFIType.u32,
+      FFIType.u32,
+      FFIType.ptr,
+      FFIType.ptr,
+      FFIType.ptr,
+      FFIType.ptr,
+      FFIType.ptr,
+      FFIType.ptr,
+    ],
+    returns: FFIType.bool,
+  },
+  CryptMsgGetParam: {
+    args: [FFIType.u64, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.ptr],
+    returns: FFIType.bool,
+  },
+  CryptMsgClose: { args: [FFIType.u64], returns: FFIType.bool },
+  CertCloseStore: { args: [FFIType.u64, FFIType.u32], returns: FFIType.bool },
+  CertFindCertificateInStore: {
+    args: [FFIType.u64, FFIType.u32, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.ptr],
+    returns: FFIType.ptr,
+  },
+  CertGetNameStringA: {
+    args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.u32],
+    returns: FFIType.u32,
+  },
+  CertFreeCertificateContext: { args: [FFIType.ptr], returns: FFIType.bool },
+});
+
+const wintrust = dlopen("wintrust.dll", {
+  WinVerifyTrust: { args: [FFIType.ptr, FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
+});
+
+const CERT_QUERY_OBJECT_FILE = 1;
+const CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED = 0x400;
+const CERT_QUERY_FORMAT_FLAG_BINARY = 2;
+const CMSG_SIGNER_INFO_PARAM = 6;
+const X509_ASN_ENCODING = 0x1;
+const PKCS_7_ASN_ENCODING = 0x10000;
+const CERT_FIND_SUBJECT_CERT = 11 << 16; // CERT_COMPARE_SUBJECT_CERT << CERT_COMPARE_SHIFT
+const CERT_NAME_SIMPLE_DISPLAY_TYPE = 4;
+
+// WINTRUST_ACTION_GENERIC_VERIFY_V2 = {00AAC56B-CD44-11d0-8CC2-00C04FC295EE}
+const WINTRUST_ACTION_GENERIC_VERIFY_V2 = new Uint8Array([
+  0x6b, 0xc5, 0xaa, 0x00, 0x44, 0xcd, 0xd0, 0x11, 0x8c, 0xc2, 0x00, 0xc0, 0x4f, 0xc2, 0x95, 0xee,
+]);
+const WTD_UI_NONE = 2;
+const WTD_REVOKE_NONE = 0;
+const WTD_CHOICE_FILE = 1;
+const WTD_STATEACTION_IGNORE = 0;
+const WTD_SAFER_FLAG = 0x100;
+const ERROR_SUCCESS = 0;
+
+// CreateProcess creation flags
+const DETACHED_PROCESS = 0x00000008;
+const CREATE_NEW_PROCESS_GROUP = 0x00000200;
 
 // window messages
 export const WM_CLOSE = 0x0010;
@@ -71,6 +156,7 @@ export const WM_RBUTTONUP = 0x0205;
 export const WM_MBUTTONDOWN = 0x0207;
 export const WM_CONTEXTMENU = 0x007b;
 export const WM_COMMAND = 0x0111;
+export const WM_COPYDATA = 0x004a;
 // virtual-key / mouse-button flags
 export const MK_LBUTTON = 0x0001;
 export const MK_MBUTTON = 0x0010;
@@ -84,6 +170,8 @@ export const VK_RIGHT = 0x27;
 export const VK_DOWN = 0x28;
 // PrintWindow flags
 export const PW_RENDERFULLCONTENT = 0x00000002;
+export const SRCCOPY = 0x00cc0020;
+export const COLORONCOLOR = 3; // StretchBlt mode: no smoothing
 // ShowWindow commands
 export const SW_RESTORE = 9;
 // scrollbar bars + SCROLLINFO flags
@@ -256,6 +344,18 @@ export function sendMessage(hwnd: number, msg: number, wParam: number | bigint, 
   return user32.symbols.SendMessageW(hwnd, msg, BigInt(wParam), BigInt(lParam)) as bigint;
 }
 
+// Send a null-terminated UTF-16 WM_COPYDATA payload. COPYDATASTRUCT is 24
+// bytes on x64: ULONG_PTR dwData, DWORD cbData + padding, PVOID lpData.
+export function sendCopyDataW(hwnd: number, dataId: number, text: string): bigint {
+  const payload = wideZ(text);
+  const cds = new Uint8Array(24);
+  const view = new DataView(cds.buffer);
+  view.setBigUint64(0, BigInt(dataId), true);
+  view.setUint32(8, payload.byteLength, true);
+  view.setBigUint64(16, BigInt(ptr(payload)), true);
+  return sendMessage(hwnd, WM_COPYDATA, 0, BigInt(ptr(cds)));
+}
+
 // --- TreeView (SysTreeView32) helpers; item handles are opaque bigints ---
 
 export function treeGetNextItem(tree: number, flag: number, item: bigint = 0n): bigint {
@@ -326,7 +426,26 @@ export function getWindowText(hwnd: number): string {
   return s;
 }
 
-// Full window/control text (large buffer; GetWindowTextW works cross-process).
+// Text of a control (Edit, Static, ...) in another process. GetWindowTextW only
+// returns the caption of foreign windows, so child controls come back empty --
+// WM_GETTEXT is marshalled across processes by user32 and does work.
+export function getControlText(hwnd: number, maxChars = 1 << 20): string {
+  const n = Number(sendMessage(hwnd, WM_GETTEXTLENGTH, 0, 0));
+  if (n <= 0) {
+    return "";
+  }
+  const cap = Math.min(n + 1, maxChars);
+  const buf = new Uint16Array(cap);
+  const got = Number(sendMessage(hwnd, WM_GETTEXT, cap, BigInt(ptr(buf))));
+  let s = "";
+  for (let i = 0; i < got; i++) {
+    s += String.fromCharCode(buf[i]);
+  }
+  return s;
+}
+
+// Full window text (large buffer). For child controls of another process use
+// getControlText instead.
 export function getWindowTextFull(hwnd: number, maxChars = 16384): string {
   const buf = new Uint16Array(maxChars);
   const n = user32.symbols.GetWindowTextW(hwnd, ptr(buf), maxChars);
@@ -401,4 +520,214 @@ export function captureWindowToPng(hwnd: number, outPath: string): boolean {
   gdi32.symbols.DeleteDC(memDC);
   user32.symbols.ReleaseDC(hwnd, winDC);
   return status === 0;
+}
+
+// Capture a window by BitBlt-ing from its window DC instead of PrintWindow.
+// Use this to verify NON-CLIENT drawing (native scrollbars, custom NC frames):
+// PrintWindow re-renders the window's content and leaves the NC area blank,
+// while the window DC holds what is actually on screen for that window. Under
+// DWM this works for background windows too, but NOT for minimized ones.
+export function captureWindowDCToPng(hwnd: number, outPath: string): boolean {
+  ensureGdiplus();
+  const r = getWindowRect(hwnd);
+  const w = r.right - r.left;
+  const h = r.bottom - r.top;
+  if (w <= 0 || h <= 0) {
+    return false;
+  }
+  const winDC = user32.symbols.GetWindowDC(hwnd);
+  const memDC = gdi32.symbols.CreateCompatibleDC(winDC);
+  const bmp = gdi32.symbols.CreateCompatibleBitmap(winDC, w, h);
+  const oldObj = gdi32.symbols.SelectObject(memDC, bmp);
+  gdi32.symbols.BitBlt(memDC, 0, 0, w, h, winDC, 0, 0, SRCCOPY);
+  gdi32.symbols.SelectObject(memDC, oldObj);
+
+  const gpBmp = new BigUint64Array(1);
+  gdiplus.symbols.GdipCreateBitmapFromHBITMAP(bmp, 0n, ptr(gpBmp));
+  const status = gdiplus.symbols.GdipSaveImageToFile(gpBmp[0], ptr(wideZ(outPath)), ptr(PNG_ENCODER_CLSID), 0);
+  gdiplus.symbols.GdipDisposeImage(gpBmp[0]);
+
+  gdi32.symbols.DeleteObject(bmp);
+  gdi32.symbols.DeleteDC(memDC);
+  user32.symbols.ReleaseDC(hwnd, winDC);
+  return status === 0;
+}
+
+// Like captureWindowDCToPng but only a sub-rect (window-relative, so 0,0 is the
+// top-left of the NON-client area), optionally magnified `zoom` times with
+// nearest-neighbour so thin things like a scrollbar are legible in the PNG.
+export function captureWindowDCRegionToPng(
+  hwnd: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  outPath: string,
+  zoom = 1,
+): boolean {
+  ensureGdiplus();
+  if (w <= 0 || h <= 0) {
+    return false;
+  }
+  const winDC = user32.symbols.GetWindowDC(hwnd);
+  const memDC = gdi32.symbols.CreateCompatibleDC(winDC);
+  const bmp = gdi32.symbols.CreateCompatibleBitmap(winDC, w * zoom, h * zoom);
+  const oldObj = gdi32.symbols.SelectObject(memDC, bmp);
+  gdi32.symbols.SetStretchBltMode(memDC, COLORONCOLOR);
+  gdi32.symbols.StretchBlt(memDC, 0, 0, w * zoom, h * zoom, winDC, x, y, w, h, SRCCOPY);
+  gdi32.symbols.SelectObject(memDC, oldObj);
+
+  const gpBmp = new BigUint64Array(1);
+  gdiplus.symbols.GdipCreateBitmapFromHBITMAP(bmp, 0n, ptr(gpBmp));
+  const status = gdiplus.symbols.GdipSaveImageToFile(gpBmp[0], ptr(wideZ(outPath)), ptr(PNG_ENCODER_CLSID), 0);
+  gdiplus.symbols.GdipDisposeImage(gpBmp[0]);
+
+  gdi32.symbols.DeleteObject(bmp);
+  gdi32.symbols.DeleteDC(memDC);
+  user32.symbols.ReleaseDC(hwnd, winDC);
+  return status === 0;
+}
+
+// Simple display name of the Authenticode signer (e.g. "Krzysztof Kowalczyk",
+// "Microsoft Windows"), or null if the file is unsigned / unreadable.
+// Mirrors GetExecutableSignerTemp in src/base/Crypto_win.cpp.
+export function getExecutableSigner(filePath: string): string | null {
+  const pathW = wideZ(filePath);
+  const hStore = new BigUint64Array(1);
+  const hMsg = new BigUint64Array(1);
+  const ok = crypt32.symbols.CryptQueryObject(
+    CERT_QUERY_OBJECT_FILE,
+    ptr(pathW),
+    CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
+    CERT_QUERY_FORMAT_FLAG_BINARY,
+    0,
+    null,
+    null,
+    null,
+    ptr(hStore),
+    ptr(hMsg),
+    null,
+  );
+  if (!ok || hStore[0] === 0n || hMsg[0] === 0n) {
+    return null;
+  }
+
+  try {
+    const sizeBuf = new Uint32Array(1);
+    if (!crypt32.symbols.CryptMsgGetParam(hMsg[0], CMSG_SIGNER_INFO_PARAM, 0, null, ptr(sizeBuf)) || sizeBuf[0] === 0) {
+      return null;
+    }
+    const signerInfo = new Uint8Array(sizeBuf[0]);
+    if (!crypt32.symbols.CryptMsgGetParam(hMsg[0], CMSG_SIGNER_INFO_PARAM, 0, ptr(signerInfo), ptr(sizeBuf))) {
+      return null;
+    }
+
+    // x64 CMSG_SIGNER_INFO: Issuer CRYPTOAPI_BLOB at +8, SerialNumber at +24.
+    // CERT_INFO for CERT_FIND_SUBJECT_CERT only needs SerialNumber (+8) and Issuer (+48).
+    const certInfo = new Uint8Array(64);
+    certInfo.set(signerInfo.subarray(24, 40), 8); // SerialNumber
+    certInfo.set(signerInfo.subarray(8, 24), 48); // Issuer
+
+    const certCtx = crypt32.symbols.CertFindCertificateInStore(
+      hStore[0],
+      X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
+      0,
+      CERT_FIND_SUBJECT_CERT,
+      ptr(certInfo),
+      null,
+    );
+    if (!certCtx) {
+      return null;
+    }
+    try {
+      const nameBuf = new Uint8Array(512);
+      const n = crypt32.symbols.CertGetNameStringA(
+        certCtx,
+        CERT_NAME_SIMPLE_DISPLAY_TYPE,
+        0,
+        null,
+        ptr(nameBuf),
+        nameBuf.length,
+      );
+      if (n <= 1) {
+        return null;
+      }
+      // n includes the trailing NUL
+      return new TextDecoder().decode(nameBuf.subarray(0, n - 1));
+    } finally {
+      crypt32.symbols.CertFreeCertificateContext(certCtx);
+    }
+  } finally {
+    crypt32.symbols.CryptMsgClose(hMsg[0]);
+    crypt32.symbols.CertCloseStore(hStore[0], 0);
+  }
+}
+
+// True if WinVerifyTrust accepts the embedded Authenticode signature.
+// Mirrors IsPEFileSigned in src/base/Crypto_win.cpp.
+export function isPeFileSigned(filePath: string): boolean {
+  const pathW = wideZ(filePath);
+
+  // WINTRUST_FILE_INFO (x64): cbStruct@0, pcwszFilePath@8, hFile@16, pgKnownSubject@24 → 32 bytes
+  const fileInfo = new Uint8Array(32);
+  const fi = new DataView(fileInfo.buffer);
+  fi.setUint32(0, 32, true); // cbStruct
+  fi.setBigUint64(8, BigInt(ptr(pathW)), true); // pcwszFilePath
+
+  // WINTRUST_DATA (x64, with pSignatureSettings) → 88 bytes
+  // cbStruct@0, pPolicy@8, pSIP@16, dwUIChoice@24, fdwRevocation@28,
+  // dwUnionChoice@32, pFile@40, dwStateAction@48, hWVTStateData@56,
+  // pwszURLReference@64, dwProvFlags@72, dwUIContext@76, pSignatureSettings@80
+  const trustData = new Uint8Array(88);
+  const td = new DataView(trustData.buffer);
+  td.setUint32(0, 88, true); // cbStruct
+  td.setUint32(24, WTD_UI_NONE, true); // dwUIChoice
+  td.setUint32(28, WTD_REVOKE_NONE, true); // fdwRevocationChecks
+  td.setUint32(32, WTD_CHOICE_FILE, true); // dwUnionChoice
+  td.setBigUint64(40, BigInt(ptr(fileInfo)), true); // pFile
+  td.setUint32(48, WTD_STATEACTION_IGNORE, true); // dwStateAction
+  td.setUint32(72, WTD_SAFER_FLAG, true); // dwProvFlags
+
+  const status = wintrust.symbols.WinVerifyTrust(null, ptr(WINTRUST_ACTION_GENERIC_VERIFY_V2), ptr(trustData));
+  return status === ERROR_SUCCESS;
+}
+
+// Launch a process fully detached from this one (via CreateProcessW) and return
+// its pid, WITHOUT waiting for it to exit. Unlike Bun.spawn, the child is not
+// placed in Bun's job object, so it keeps running after this script exits.
+// Use for launching a long-lived GUI app from a short-lived launcher script.
+export function launchDetached(exePath: string, args: string[] = []): number {
+  const quoted =
+    `"${exePath}"` + (args.length ? " " + args.map((a) => `"${a}"`).join(" ") : "");
+  const appW = wideZ(exePath);
+  const cmdW = wideZ(quoted); // CreateProcessW may modify this buffer in place
+
+  const si = new Uint8Array(104); // STARTUPINFOW (x64)
+  new DataView(si.buffer).setUint32(0, 104, true); // cb = sizeof(STARTUPINFOW)
+  const pi = new Uint8Array(24); // PROCESS_INFORMATION (x64)
+
+  const ok = kernel32.symbols.CreateProcessW(
+    ptr(appW),
+    ptr(cmdW),
+    null,
+    null,
+    false,
+    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+    null,
+    null,
+    ptr(si),
+    ptr(pi),
+  );
+  if (!ok) {
+    const err = kernel32.symbols.GetLastError();
+    throw new Error(`CreateProcessW('${exePath}') failed, GetLastError=${err}`);
+  }
+
+  const dv = new DataView(pi.buffer);
+  const hProcess = dv.getBigUint64(0, true);
+  const hThread = dv.getBigUint64(8, true);
+  const pid = dv.getUint32(16, true);
+  kernel32.symbols.CloseHandle(hProcess); // we don't wait on the child
+  kernel32.symbols.CloseHandle(hThread);
+  return pid;
 }

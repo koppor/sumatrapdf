@@ -228,7 +228,7 @@ struct PageDestination : IPageDestination {
 IPageDestination* NewSimpleDest(int pageNo, RectF rect, float zoom = 0.f, Str value = {});
 
 // use in PageDestination::GetDestRect for values that don't matter
-#define DEST_USE_DEFAULT -999.9f
+constexpr float kDestUseDefault = -999.9f;
 
 extern Kind kindPageElementDest;
 extern Kind kindPageElementImage;
@@ -312,9 +312,9 @@ extern Kind kindTocDjvu;
 
 // an item in a document's Table of Content
 struct TocItem {
-    HTREEITEM hItem = nullptr;
+    HTREEITEM hItem;
 
-    TocItem* parent = nullptr;
+    TocItem* parent;
 
     // the item's visible label
     Str title;
@@ -322,46 +322,38 @@ struct TocItem {
     // in some formats, the document can specify the tree item
     // is expanded by default. We keep track if user toggled
     // expansion state of the tree item
-    bool isOpenDefault = false;
-    bool isOpenToggled = false;
+    bool isOpenDefault;
+    bool isOpenToggled;
 
-    bool isUnchecked = false;
+    bool isUnchecked;
 
     // page this item points to (-1 for non-page destinations)
     // if GetLink() returns a destination to a page, the two should match
-    int pageNo = 0;
+    int pageNo;
 
     // arbitrary number allowing to distinguish this TocItem
     // from any other of the same ToC tree (must be constant
     // between runs so that it can be persisted in FileState::tocState)
-    int id = 0;
+    int id;
 
-    int fontFlags = 0; // fontBitBold, fontBitItalic
-    COLORREF color{kColorUnset};
+    int fontFlags; // fontBitBold, fontBitItalic
+    COLORREF color;
 
-    IPageDestination* dest = nullptr;
-    bool destNotOwned = false;
+    IPageDestination* dest;
+    bool destNotOwned;
 
     // first child item
-    TocItem* child = nullptr;
+    TocItem* child;
     // next sibling
-    TocItem* next = nullptr;
+    TocItem* next;
 
     // caching to speed up ChildAt
-    TocItem* currChild = nullptr;
-    int currChildNo = 0;
-
-    TocItem() = default;
-
-    explicit TocItem(TocItem* parent, Str title, int pageNo);
-
-    ~TocItem();
+    TocItem* currChild;
+    int currChildNo;
 
     void AddSibling(TocItem* sibling);
     void AddSiblingAtEnd(TocItem* sibling);
     void AddChild(TocItem* child);
-
-    void DeleteJustSelf();
 
     IPageDestination* GetPageDestination() const;
 
@@ -371,6 +363,9 @@ struct TocItem {
 
     bool PageNumbersMatch() const;
 };
+
+TocItem* AllocTocItem(Arena* arena, Str title, int pageNo);
+void FreeTocItemRec(Arena* arena, TocItem* item);
 
 struct TocTree : TreeModel {
     TocItem* root = nullptr;

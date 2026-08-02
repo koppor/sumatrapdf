@@ -46,7 +46,7 @@ constexpr COLORREF kFindOtherMatchColor = RGB(0xff, 0x96, 0x32);
 
 struct FindMatchPaintPageRect {
     int pageNo = 0;
-    Rect rect{};
+    Rect rect;
 };
 
 // references a [firstPos, firstPos + len) slice of gFindMatchPaintCache.positions
@@ -99,6 +99,11 @@ static DocController* BrowserFindCtrl(MainWindow* win) {
 // asynchronously via BrowserFindResultReceived() / BrowserFindAllResultReceived()
 static void BrowserFindStartSearch(MainWindow* win, DocController* md) {
     TempStr term = HwndGetTextTemp(win->hwndFindEdit);
+    if (len(term) == 0) {
+        return;
+    }
+    // intentional search start (Sioyek-style "/" mark; session-only, #5862)
+    SetSearchStartFavorite(win);
     str::ReplaceWithCopy(&win->browserFindTerm, term);
     ClearFindMatches(win); // also resets browserFindPageCurrent / browserFindCurrent / browserFindTotal
     win->browserFindGen++;
@@ -253,13 +258,11 @@ bool NeedsFindUI(MainWindow* win) {
 }
 
 void FindFirst(MainWindow* win) {
-    // When starting a search from the document (not re-focusing an already-active
-    // find box), remember the current page as favorite "/" so the user can jump
-    // back after navigating matches (Sioyek-style mark, issue #5726).
+    // Only open/focus the find UI here. The search-start favorite ("/") is set
+    // when a real search begins (non-empty term in FindTextOnThread /
+    // BrowserFindStartSearch), not merely when the find box is opened
+    // (issue #5862 / #5726).
     bool hadFindFocus = win && win->hwndFindEdit && HwndIsFocused(win->hwndFindEdit);
-    if (!hadFindFocus) {
-        SetSearchStartFavorite(win);
-    }
 
     if (BrowserFindCtrl(win)) {
         // chm / markdown in a webview: our own find bar drives the search
@@ -322,9 +325,12 @@ constexpr UINT kFindDebounceShortDelayMs = 1000;
 static void StartIncrementalFind(MainWindow* win) {
     DocController* md = BrowserFindCtrl(win);
     if (md) {
-        BrowserFindStartSearch(win, md);
+        BrowserFindStartSearch(win, md); // sets search-start mark
         return;
     }
+    // find-as-you-type is an intentional search start even when Edit_GetModify
+    // is false (e.g. Ctrl+F copied selection via HwndSetText after SetLastResult)
+    SetSearchStartFavorite(win);
     // the full-document count (n/m + results list) is kicked from FindEndTask,
     // after this find thread exits, so the two never touch the engine's text
     // extraction concurrently (mupdf isn't safe for that)
@@ -493,6 +499,9 @@ void FindSelection(MainWindow* win, TextSearch::Direction direction) {
     Edit_SetModify(win->hwndFindEdit, FALSE);
     dm->textSearch->SetLastResult(dm->textSelection);
 
+    // wasModified stays false so FindNext continues from the selection; still
+    // record the search-start page as session-only favorite "/" (#5726 / #5862)
+    SetSearchStartFavorite(win);
     FindTextOnThread(win, direction, true);
 }
 
@@ -1197,7 +1206,7 @@ static void FindThread(FindThreadData* ftd) {
     textSearch->progressCb = MkFunc1<FindThreadData, ProgressUpdateData*>(UpdateSearchProgress, ftd);
     textSearch->SetDirection(ftd->direction);
     if (ftd->wasModified || !ctrl->ValidPageNo(textSearch->GetCurrentPageNo()) ||
-        !dm->GetPageInfo(textSearch->GetCurrentPageNo())->visibleRatio) {
+        !(bool)dm->GetPageInfo(textSearch->GetCurrentPageNo())->visibleRatio) {
         rect = textSearch->FindFirst(ctrl->CurrentPageNo(), ftd->text);
     } else {
         rect = textSearch->FindNext();
@@ -1289,6 +1298,11 @@ void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, Str text
         if (!str::Eq(searchText, dm->textSearch->lastText)) {
             wasModified = true;
         }
+    }
+    // New/changed term: record search-start page as session-only favorite "/"
+    // (issue #5726 / #5862). Find Next/Prev for the same term does not update it.
+    if (wasModified) {
+        SetSearchStartFavorite(win);
     }
     FindThreadData* ftd = new FindThreadData(win, direction, text, wasModified);
     ftd->ShowUI(showProgress);
@@ -1556,7 +1570,7 @@ void PaintForwardSearchMark(MainWindow* win, HDC hdc) {
         rect = dm->CvtToScreen(pageNo, ToRectF(rect));
         if (hiLiOff > 0) {
             float zoom = dm->GetZoomReal(pageNo);
-            rect.x = std::max(pageInfo->pageOnScreen.x, 0) + (int)(hiLiOff * zoom);
+            rect.x = std::max(pageInfo->pageOnScreen.x, 0) + (int)((float)hiLiOff * zoom);
             rect.dx = (int)((hiLiWidth > 0 ? hiLiWidth : 15.0) * zoom);
             rect.y -= 4;
             rect.dy += 8;
@@ -1564,7 +1578,8 @@ void PaintForwardSearchMark(MainWindow* win, HDC hdc) {
         rects.Append(rect);
     }
 
-    u8 alpha = (u8)(0x5f * 1.0f * (HIDE_FWDSRCHMARK_STEPS - win->fwdSearchMark.hideStep) / HIDE_FWDSRCHMARK_STEPS);
+    u8 alpha =
+        (u8)(0x5f * 1.0f * (float)(HIDE_FWDSRCHMARK_STEPS - win->fwdSearchMark.hideStep) / HIDE_FWDSRCHMARK_STEPS);
     ParsedColor* parsedCol = GetPrefsColor(gGlobalPrefs->forwardSearch.highlightColor);
     PaintTransparentRectangles(hdc, win->canvasRc, rects, parsedCol->col, alpha);
 }
@@ -1617,7 +1632,7 @@ bool OnInverseSearch(MainWindow* win, int x, int y) {
 
     // Clear the last forward-search result
     win->fwdSearchMark.rects.Reset();
-    InvalidateRect(win->hwndCanvas, nullptr, FALSE);
+    HwndInvalidate(win->hwndCanvas);
 
     // On double-clicking error message will be shown to the user
     // if the PDF does not have a synchronization file
@@ -1735,7 +1750,7 @@ void ShowForwardSearchResult(MainWindow* win, Str fileName, int line, int /* col
     } else if (ret == PDFSYNCERR_SYNCFILE_CANNOT_BE_OPENED) {
         args.msg = _TRA("Synchronization file cannot be opened");
     } else if (ret == PDFSYNCERR_INVALID_PAGE_NUMBER) {
-        buf = fmt(_TRA("Page number %u nonexistent").s, page);
+        buf = fmt(_TRA("Page %u does not exist").s, page);
     } else if (ret == PDFSYNCERR_NO_SYNC_AT_LOCATION) {
         args.msg = _TRA("No synchronization info at this position");
     } else if (ret == PDFSYNCERR_UNKNOWN_SOURCEFILE) {
@@ -2180,11 +2195,11 @@ static Str HandlePageCmd(HWND hwnd, Str cmd, bool* ack) {
         }
     }
 
-    if (!win->ctrl->ValidPageNo(page)) {
+    if (!win->ctrl->ValidPageNo((int)page)) {
         return next;
     }
 
-    win->ctrl->GoToPage(page, true);
+    win->ctrl->GoToPage((int)page, true);
     *ack = true;
     win->Focus();
     return next;
@@ -2254,14 +2269,13 @@ Open new window.
 */
 static Str HandleNewWindowCmd(Str cmd, bool* ack) {
     Str kNewWindowCmd = "[NewWindow]";
-    if (!str::StartsWith(cmd, kNewWindowCmd)) {
+    if (!str::TrimPrefix(cmd, kNewWindowCmd)) {
         return {};
     }
     logf("HandleNewWindowCmd\n");
-    Str next = Str(cmd.s + kNewWindowCmd.len, cmd.len - kNewWindowCmd.len);
     CreateAndShowMainWindow(nullptr);
     *ack = true;
-    return next;
+    return cmd;
 }
 
 /*
@@ -2289,7 +2303,7 @@ Returns:
 error: <error message>
 if file doesn't exist or no opened file
 */
-static Str HandleGetFileStateCmd(HWND hwnd, Str cmd, bool* ack, str::Builder& res) {
+static Str HandleGetFileStateCmd(Str cmd, bool* ack, str::Builder& res) {
     TempStr filePath;
     Str next = str::Parse(cmd, "[GetFileState(\"%s\")]", &filePath);
     if (str::IsNull(next)) {
@@ -2497,14 +2511,14 @@ static bool HandleExecuteCmds(HWND hwnd, Str cmd) {
     return didHandle;
 }
 
-static bool HandleRequestCmds(HWND hwnd, Str cmd, str::Builder& rsp) {
+static bool HandleRequestCmds(HWND /*hwnd*/, Str cmd, str::Builder& rsp) {
     bool didHandle = false;
     while (cmd) {
         {
             logf("HandleRequestCmds: '%s'\n", cmd);
         }
 
-        Str nextCmd = HandleGetFileStateCmd(hwnd, cmd, &didHandle, rsp);
+        Str nextCmd = HandleGetFileStateCmd(cmd, &didHandle, rsp);
         if (str::IsNull(nextCmd)) {
             nextCmd = HandleGetOpenFilesCmd(cmd, &didHandle, rsp);
         }
@@ -2623,6 +2637,39 @@ struct OpenCopyDataAsync {
     u32 newWindow;
 };
 
+struct OpenManyCopyDataAsync {
+    StrVec paths;
+    HWND hwnd;
+    u32 newWindow;
+};
+
+static void OpenManyCopyDataAsyncRun(OpenManyCopyDataAsync* d) {
+    MainWindow* win = nullptr;
+    if (d->newWindow) {
+        MainWindow* emptyExistingWin = nullptr;
+        for (auto& w : gWindows) {
+            if (!w->HasDocsLoaded()) {
+                emptyExistingWin = w;
+                break;
+            }
+        }
+        win = emptyExistingWin ? emptyExistingWin : CreateAndShowMainWindow(nullptr);
+    } else {
+        win = FindMainWindowByHwnd(d->hwnd);
+        if (!win) {
+            win = FindMainWindowByHwnd(gLastActiveFrameHwnd);
+        }
+        if (!win && len(gWindows) > 0) {
+            win = gWindows[0];
+        }
+    }
+    if (win) {
+        win->Focus();
+    }
+    StartLoadDocuments(d->paths, win);
+    delete d;
+}
+
 static void OpenCopyDataAsyncRun(OpenCopyDataAsync* d) {
     // Pick a target window the same way HandleOpenCmd would, then kick off
     // the load on a worker thread. We stay off the UI thread for the heavy
@@ -2720,6 +2767,44 @@ LRESULT OnCopyData(HWND hwnd, WPARAM wp, LPARAM lp) {
         d->newWindow = data->newWindow;
         auto fn = MkFunc0<OpenCopyDataAsync>(OpenCopyDataAsyncRun, d);
         uitask::Post(fn, "OnCopyData/Open");
+        return TRUE;
+    }
+
+    if (cds->dwData == kCopyDataOpenMany) {
+        if (cds->cbData < sizeof(SumatraOpenManyCopyData) + 1) {
+            return FALSE;
+        }
+        auto* data = (const SumatraOpenManyCopyData*)cds->lpData;
+        if (data->pathCount == 0) {
+            return FALSE;
+        }
+        const char* s = (const char*)(data + 1);
+        size_t bytesLeft = cds->cbData - sizeof(*data);
+        StrVec paths;
+        for (u32 i = 0; i < data->pathCount; i++) {
+            size_t pathLen = strnlen_s(s, bytesLeft);
+            if (pathLen >= bytesLeft) {
+                return FALSE;
+            }
+            paths.Append(Str(s, (int)pathLen));
+            s += pathLen + 1;
+            bytesLeft -= pathLen + 1;
+        }
+        if (gIsStartup) {
+            for (Str path : paths) {
+                TempStr normalized = path::NormalizeTemp(path);
+                if (!IsDocumentOpenOrLoading(normalized)) {
+                    AppendIfNotExists(&gDdeOpenOnStartup, normalized);
+                }
+            }
+            return TRUE;
+        }
+        auto* d = new OpenManyCopyDataAsync;
+        d->paths = paths;
+        d->hwnd = hwnd;
+        d->newWindow = data->newWindow;
+        auto fn = MkFunc0<OpenManyCopyDataAsync>(OpenManyCopyDataAsyncRun, d);
+        uitask::Post(fn, "OnCopyData/OpenMany");
         return TRUE;
     }
 

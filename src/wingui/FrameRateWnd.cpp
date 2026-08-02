@@ -25,25 +25,25 @@ that it's actually a part of that window.
 #define COL_BLACK RGB(0, 0, 0)
 
 static void FrameRatePaint(FrameRateWnd* w, HDC hdc, PAINTSTRUCT&) {
-    RECT rc = ClientRECT(w->hwnd);
+    Rect rc = HwndClientRect(w->hwnd);
+    RECT r = ToRECT(rc);
     AutoDeleteBrush brush = CreateSolidBrush(COL_BLACK);
-    FillRect(hdc, &rc, brush);
+    HdcFillRect(hdc, ToRect(r), brush);
 
     SetTextColor(hdc, COL_WHITE);
 
     ScopedSelectObject selFont(hdc, w->font);
     TempStr txt = fmt("%d", w->frameRate);
-    DrawCenteredText(hdc, rc, txt);
+    HdcDrawCenteredText(hdc, rc, txt);
 }
 
-static void PositionWindow(FrameRateWnd* w, SIZE s) {
-    RECT rc = ClientRECT(w->hwndAssociatedWith);
-    POINT p = {rc.right - s.cx, rc.top};
-    ClientToScreen(w->hwndAssociatedWith, &p);
-    MoveWindow(w->hwnd, p.x, p.y, s.cx, s.cy, TRUE);
+static void PositionWindow(FrameRateWnd* w, Size s) {
+    Rect rc = HwndClientRect(w->hwndAssociatedWith);
+    Point p = HwndClientToScreen(w->hwndAssociatedWith, Point(rc.x + rc.dx - s.dx, rc.y));
+    MoveWindow(w->hwnd, p.x, p.y, s.dx, s.dy, TRUE);
 }
 
-static SIZE GetIdealSize(FrameRateWnd* w) {
+static Size GetIdealSize(FrameRateWnd* w) {
     TempStr txt = fmt("%d", w->frameRate);
     Size s = HwndMeasureText(w->hwnd, txt);
 
@@ -53,11 +53,11 @@ static SIZE GetIdealSize(FrameRateWnd* w) {
 
     // we wan't to avoid the window to grow/shrink when the number changes
     // so we keep the largest size so far, since the difference isn't big
-    if (s.dx > w->maxSizeSoFar.cx) {
-        w->maxSizeSoFar.cx = s.dx;
+    if (s.dx > w->maxSizeSoFar.dx) {
+        w->maxSizeSoFar.dx = s.dx;
     }
-    if (s.dy > w->maxSizeSoFar.cy) {
-        w->maxSizeSoFar.cy = s.dy;
+    if (s.dy > w->maxSizeSoFar.dy) {
+        w->maxSizeSoFar.dy = s.dy;
     }
     return w->maxSizeSoFar;
 }
@@ -160,7 +160,7 @@ void FrameRateWnd::ShowFrameRate(int frameRate) {
         return;
     }
     this->frameRate = frameRate;
-    SIZE s = GetIdealSize(this);
+    Size s = GetIdealSize(this);
     PositionWindow(this, s);
     HwndScheduleRepaint(this->hwnd);
 }

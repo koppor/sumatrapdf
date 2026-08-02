@@ -8,6 +8,14 @@
 #include "TipText.h"
 #include "Commands.h"
 
+#if defined(DEBUG)
+void TextSelection_UnitTests();
+bool TableOfContents_UnitTestSnapshotNamedDest();
+bool MarkdownModel_UnitTestBrowserNavigationUrl();
+bool MarkdownToc_UnitTestHtmlLinks();
+bool EbookDoc_UnitTestNormalizeURL();
+#endif
+
 // must be last to over-write assert()
 #include "base/UtAssert.h"
 
@@ -70,6 +78,13 @@ static void ParseTip_UnitTests() {
 
 int RunAppUnitTests() {
     ParseTip_UnitTests();
+#if defined(DEBUG)
+    TextSelection_UnitTests();
+    utassert(TableOfContents_UnitTestSnapshotNamedDest());
+    utassert(MarkdownModel_UnitTestBrowserNavigationUrl());
+    utassert(MarkdownToc_UnitTestHtmlLinks());
+    utassert(EbookDoc_UnitTestNormalizeURL());
+#endif
     return utassert_print_results();
 }
 

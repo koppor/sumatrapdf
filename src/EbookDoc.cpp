@@ -81,7 +81,7 @@ static TempStr GetXmlPIAttrTemp(Str xmlPI, Str attrName) {
 // tries to extract an encoding from <?xml encoding="..."?>
 // returns CP_ACP on failure
 static uint GetCodepageFromPI(Str xmlPI) {
-    if (!str::StartsWith(xmlPI, "<?xml")) {
+    if (!str::StartsWith(xmlPI, StrL("<?xml"))) {
         return CP_ACP;
     }
     int xmlPIEnd = str::IndexOf(xmlPI, StrL("?>"));
@@ -139,17 +139,15 @@ static bool IsValidUtf8(Str string) {
 }
 
 static TempStr DecodeTextToUtf8Temp(Str s, bool isXML = false) {
-    if (str::StartsWith(s, UTF8_BOM)) {
-        return str::DupTemp(Str(s.s + 3, s.len - 3));
+    if (str::TrimPrefix(s, UTF8_BOM)) {
+        return str::DupTemp(s);
     }
-    if (str::StartsWith(s, UTF16_BOM)) {
-        s = Str(s.s + 2, s.len - 2);
+    if (str::TrimPrefix(s, UTF16_BOM)) {
         WStr ws = str::CastToWCHAR(s);
         return ToUtf8Temp(ws);
     }
-    if (str::StartsWith(s, UTF16BE_BOM)) {
+    if (str::TrimPrefix(s, UTF16BE_BOM)) {
         // convert from utf16 big endian to utf16
-        s = Str(s.s + 2, s.len - 2);
         int n = str::CastToWCHAR(s).len;
         for (int i = 0; i < n; i++) {
             int idx = i * 2;
@@ -196,19 +194,27 @@ TempStr NormalizeURLTemp(Str url, Str base) {
     TempStr basePath = basePathLen > 0 ? str::DupTemp(Str(base.s, basePathLen)) : Str{};
     TempStr norm = str::JoinTemp(basePath, url);
 
+    // Collapse /./ and /../. For /../, consume only "/.." so the trailing '/'
+    // stays for the next iteration — otherwise consecutive ../../ leaves a
+    // literal ".." (issue #5846: OEBPS/html/../../cover.jpg → cover.jpg).
     int dst = 0;
     for (int src = 0; src < norm.len; src++) {
         char c = norm.s[src];
         if (c != '/') {
             norm.s[dst++] = c;
-        } else if (str::StartsWith(Str(norm.s + src, norm.len - src), "/./")) {
+        } else if (str::StartsWith(Str(norm.s + src, norm.len - src), StrL("/./"))) {
             src++;
-        } else if (str::StartsWith(Str(norm.s + src, norm.len - src), "/../")) {
+        } else if (str::StartsWith(Str(norm.s + src, norm.len - src), StrL("/../")) ||
+                   str::Eq(Str(norm.s + src, norm.len - src), StrL("/.."))) {
             while (dst > 0 && norm.s[dst - 1] != '/') {
                 dst--;
             }
-            src += 3;
-        } else {
+            if (dst > 0) {
+                dst--; // drop the segment separator; re-added when trailing '/' is processed
+            }
+            src += 2; // leave trailing '/' (if any) for the next iteration
+        } else if (dst > 0) {
+            // skip a leading '/' so results stay relative to the ZIP root
             norm.s[dst++] = '/';
         }
     }
@@ -219,13 +225,13 @@ TempStr NormalizeURLTemp(Str url, Str base) {
 
 inline char decode64(char c) {
     if ('A' <= c && c <= 'Z') {
-        return c - 'A';
+        return (char)(c - 'A');
     }
     if ('a' <= c && c <= 'z') {
-        return c - 'a' + 26;
+        return (char)(c - 'a' + 26);
     }
     if ('0' <= c && c <= '9') {
-        return c - '0' + 52;
+        return (char)(c - '0' + 52);
     }
     if ('+' == c) {
         return 62;
@@ -257,15 +263,15 @@ static TempStr Base64DecodeTemp(Str data) {
                 c = n;
                 break;
             case 1:
-                *curr++ = (c << 2) | (n >> 4);
-                c = n & 0xF;
+                *curr++ = (char)((c << 2) | (n >> 4));
+                c = (char)(n & 0xF);
                 break;
             case 2:
-                *curr++ = (c << 4) | (n >> 2);
-                c = n & 0x3;
+                *curr++ = (char)((c << 4) | (n >> 2));
+                c = (char)(n & 0x3);
                 break;
             case 3:
-                *curr++ = (c << 6) | (n >> 0);
+                *curr++ = (char)((c << 6) | (n >> 0));
                 break;
         }
     }
@@ -373,19 +379,19 @@ EpubDoc::~EpubDoc() {
 
 // TODO: switch to seqstring
 static bool isHtmlMediaType(Str mediatype) {
-    if (str::Eq(mediatype, "application/xhtml+xml")) {
+    if (str::Eq(mediatype, StrL("application/xhtml+xml"))) {
         return true;
     }
-    if (str::Eq(mediatype, "application/html+xml")) {
+    if (str::Eq(mediatype, StrL("application/html+xml"))) {
         return true;
     }
-    if (str::Eq(mediatype, "application/x-dtbncx+xml")) {
+    if (str::Eq(mediatype, StrL("application/x-dtbncx+xml"))) {
         return true;
     }
-    if (str::Eq(mediatype, "text/html")) {
+    if (str::Eq(mediatype, StrL("text/html"))) {
         return true;
     }
-    if (str::Eq(mediatype, "text/xml")) {
+    if (str::Eq(mediatype, StrL("text/xml"))) {
         return true;
     }
     return false;
@@ -393,7 +399,8 @@ static bool isHtmlMediaType(Str mediatype) {
 
 // TODO: switch to seqstring
 static bool isImageMediaType(Str mediatype) {
-    return str::Eq(mediatype, "image/png") || str::Eq(mediatype, "image/jpeg") || str::Eq(mediatype, "image/gif");
+    return str::Eq(mediatype, StrL("image/png")) || str::Eq(mediatype, StrL("image/jpeg")) ||
+           str::Eq(mediatype, StrL("image/gif"));
 }
 
 static void ParseMetadata(Str content, Props& props);
@@ -515,7 +522,8 @@ bool EpubDoc::Load() {
             TempStr htmlId = GumboAttributeValueTemp(node, "id");
             // EPUB 3 ToC
             TempStr properties = GumboAttributeValueTemp(node, "properties");
-            if (properties && str::Contains(properties, StrL("nav")) && str::Eq(mediaType, "application/xhtml+xml")) {
+            if (properties && str::Contains(properties, StrL("nav")) &&
+                str::Eq(mediaType, StrL("application/xhtml+xml"))) {
                 str::Free(tocPath);
                 tocPath = str::Join(contentPath, htmlPath);
             }
@@ -547,7 +555,7 @@ bool EpubDoc::Load() {
     }
     TempStr readingDir = GumboAttributeValueTemp(node, "page-progression-direction");
     if (readingDir) {
-        isRtlDoc = str::EqI(readingDir, "rtl");
+        isRtlDoc = str::EqI(readingDir, StrL("rtl"));
     }
 
     const GumboNode* spine = node;
@@ -845,7 +853,8 @@ static bool ParseNcxToc(Str data, Str pagePath, EbookTocVisitor* visitor) {
                 level--;
             }
         } else if (tok->IsStartTag() && tok->NameIsNS(StrL("text"), EPUB_NCX_NS())) {
-            if ((tok = parser.Next()) == nullptr || tok->IsError()) {
+            tok = parser.Next();
+            if (tok == nullptr || tok->IsError()) {
                 break;
             }
             if (tok->IsText()) {
@@ -969,9 +978,9 @@ static Str loadFromFile(Fb2Doc* doc) {
     // .url files in addition (TODO: anything else?)
     for (auto&& fileInfo : fileInfos) {
         auto path = fileInfo->name;
-        if (str::EndsWithI(path, ".fb2") && len(data) == 0) {
+        if (str::EndsWithI(path, StrL(".fb2")) && len(data) == 0) {
             data = takeFileData(archive, fileInfo->fileId);
-        } else if (!str::EndsWithI(path, ".url")) {
+        } else if (!str::EndsWithI(path, StrL(".url"))) {
             return {};
         }
     }
@@ -998,9 +1007,9 @@ static Str loadFromData(Fb2Doc* doc, Str srcData) {
     Str data;
     for (auto&& fileInfo : fileInfos) {
         auto path = fileInfo->name;
-        if (str::EndsWithI(path, ".fb2") && len(data) == 0) {
+        if (str::EndsWithI(path, StrL(".fb2")) && len(data) == 0) {
             data = takeFileData(archive, fileInfo->fileId);
-        } else if (!str::EndsWithI(path, ".url")) {
+        } else if (!str::EndsWithI(path, StrL(".url"))) {
             str::Free(data);
             return {};
         }
@@ -1055,7 +1064,8 @@ bool Fb2Doc::Load(Str srcData) {
         } else if (inDocInfo && tok->IsEndTag() && tok->NameIsNS(StrL("document-info"), FB2_MAIN_NS())) {
             inDocInfo--;
         } else if (inTitleInfo && tok->IsStartTag() && tok->NameIsNS(StrL("book-title"), FB2_MAIN_NS())) {
-            if ((tok = parser.Next()) == nullptr || tok->IsError()) {
+            tok = parser.Next();
+            if (tok == nullptr || tok->IsError()) {
                 break;
             }
             if (tok->IsText()) {
@@ -1096,7 +1106,8 @@ bool Fb2Doc::Load(Str srcData) {
                 AddPropOwned(props, DocProp::ModificationDate, val);
             }
         } else if (inDocInfo && tok->IsStartTag() && tok->NameIsNS(StrL("program-used"), FB2_MAIN_NS())) {
-            if ((tok = parser.Next()) == nullptr || tok->IsError()) {
+            tok = parser.Next();
+            if (tok == nullptr || tok->IsError()) {
                 break;
             }
             if (tok->IsText()) {
@@ -1291,9 +1302,9 @@ static Str HandleTealDocTag(str::Builder& builder, StrVec& tocEntries, Str text,
         builder.Append("&lt;");
         return text;
     }
-    if (!str::StartsWithI(text, "<BOOKMARK") && !str::StartsWithI(text, "<HEADER") &&
-        !str::StartsWithI(text, "<HRULE") && !str::StartsWithI(text, "<LABEL") && !str::StartsWithI(text, "<LINK") &&
-        !str::StartsWithI(text, "<TEALPAINT")) {
+    if (!str::StartsWithI(text, StrL("<BOOKMARK")) && !str::StartsWithI(text, StrL("<HEADER")) &&
+        !str::StartsWithI(text, StrL("<HRULE")) && !str::StartsWithI(text, StrL("<LABEL")) &&
+        !str::StartsWithI(text, StrL("<LINK")) && !str::StartsWithI(text, StrL("<TEALPAINT"))) {
         goto Fallback;
     }
     GumboHtmlParser parser(Str(text.s, n));
@@ -1538,7 +1549,7 @@ Str HtmlDoc::GetFileData(Str relPath) {
 }
 
 Str HtmlDoc::LoadURL(Str url) {
-    if (str::StartsWith(url, "data:")) {
+    if (str::StartsWith(url, StrL("data:"))) {
         return str::Dup(DecodeDataURITemp(url));
     }
     if (str::ContainsChar(url, ':')) {
@@ -1596,6 +1607,9 @@ static TempStr DecompressTcrTextTemp(Str data) {
         }
         dict[n] = curr;
         int step = 1 + (u8)curr.s[0];
+        if (step > curr.len) {
+            return str::DupTemp(data);
+        }
         curr = Str(curr.s + step, curr.len - step);
     }
 
@@ -1683,7 +1697,7 @@ static Str TextFindEmailEnd(str::Builder& htmlData, Str curr) {
         // copy (not a view): htmlData is mutated below before beforeAt is appended back
         beforeAt = str::DupTemp(Str(&htmlData[idx]));
     } else {
-        ReportIf(!str::StartsWith(curr, "mailto:"));
+        ReportIf(!str::StartsWith(curr, StrL("mailto:")));
         rest = Str(curr.s + 7, curr.len - 7);
         if (!rest.len || !IsEmailUsernameChar(rest.s[0])) {
             return {};
@@ -1753,7 +1767,7 @@ bool TxtDoc::Load() {
 
     TempStr text;
     Str raw = fileContent;
-    if (str::EndsWithI(fileName, ".tcr") && str::StartsWith(raw, TCR_HEADER)) {
+    if (str::EndsWithI(fileName, StrL(".tcr")) && str::StartsWith(raw, TCR_HEADER)) {
         text = DecompressTcrTextTemp(raw);
     } else {
         text = DecodeTextToUtf8Temp(raw);
@@ -1791,12 +1805,12 @@ bool TxtDoc::Load() {
             if (end) {
                 linkEndPos = (int)(end.s - text.s);
             }
-        } else if ('w' == c && str::StartsWith(curr, "www.")) {
+        } else if ('w' == c && str::StartsWith(curr, StrL("www."))) {
             Str end = TextFindLinkEnd(htmlData, curr, i > 0 ? text.s[i - 1] : ' ', true);
             if (end) {
                 linkEndPos = (int)(end.s - text.s);
             }
-        } else if ('m' == c && str::StartsWith(curr, "mailto:")) {
+        } else if ('m' == c && str::StartsWith(curr, StrL("mailto:"))) {
             Str end = TextFindEmailEnd(htmlData, curr);
             if (end) {
                 linkEndPos = (int)(end.s - text.s);
@@ -1817,7 +1831,7 @@ bool TxtDoc::Load() {
             continue;
         }
 
-        if (isRFC && i > 0 && '\n' == text.s[i - 1] && (str::IsDigit(c) || str::StartsWith(curr, "APPENDIX"))) {
+        if (isRFC && i > 0 && '\n' == text.s[i - 1] && (str::IsDigit(c) || str::StartsWith(curr, StrL("APPENDIX")))) {
             Str lineBefore, lineAfter;
             if (str::CutChar(curr, '\n', &lineBefore, &lineAfter) && !str::IsNull(str::Parse(lineAfter, "%?\r\n"))) {
                 htmlData.Append(fmt("<b id='section%d' title=\"", ++sectionCount));
@@ -1924,3 +1938,51 @@ TxtDoc* TxtDoc::CreateFromFile(Str path) {
     }
     return doc;
 }
+
+#if defined(DEBUG)
+// issue #5846: consecutive ../../ must fully resolve
+bool EbookDoc_UnitTestNormalizeURL() {
+    auto eq = [](Str url, Str base, Str expected) -> bool { return str::Eq(NormalizeURLTemp(url, base), expected); };
+    // consecutive parent segments from OEBPS/html/ (EPUB cover layout)
+    if (!eq("../../cover.jpg", "OEBPS/html/titlepage.xhtml", "cover.jpg")) {
+        return false;
+    }
+    if (!eq("../../root.jpg", "OEBPS/html/page.xhtml", "root.jpg")) {
+        return false;
+    }
+    if (!eq("../../img/c.jpg", "a/b/p.xhtml", "img/c.jpg")) {
+        return false;
+    }
+    if (!eq("../../../c.jpg", "a/b/x/p.xhtml", "c.jpg")) {
+        return false;
+    }
+    // single ../ still works
+    if (!eq("../ok.jpg", "OEBPS/html/page.xhtml", "OEBPS/ok.jpg")) {
+        return false;
+    }
+    if (!eq("../Images/x.jpg", "OEBPS/Text/y.xhtml", "OEBPS/Images/x.jpg")) {
+        return false;
+    }
+    if (!eq("text/../cover.jpg", "page.xhtml", "cover.jpg")) {
+        return false;
+    }
+    // ./ collapse and over-pop
+    if (!eq("./y", "x/z", "x/y")) {
+        return false;
+    }
+    if (!eq("../../b", "a/c.xhtml", "b")) {
+        return false;
+    }
+    // absolute / scheme URLs left alone
+    if (!eq("/abs/path", "OEBPS/html/p.xhtml", "/abs/path")) {
+        return false;
+    }
+    if (!eq("http://example.com/x", "OEBPS/html/p.xhtml", "http://example.com/x")) {
+        return false;
+    }
+    if (!eq("#frag", "OEBPS/html/p.xhtml#old", "OEBPS/html/p.xhtml#frag")) {
+        return false;
+    }
+    return true;
+}
+#endif

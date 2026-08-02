@@ -8,7 +8,7 @@
 
 #include "base/Base.h"
 #include "base/CmdLineArgsIter.h"
-#include "base/GdiPlus.h"
+#include "base/GdiPlusUtil.h"
 
 #include "RegistryPreview.h"
 
@@ -25,7 +25,7 @@ void TestPreview(WStr cmdLine) {
     // find args after -test-preview
     int idx = -1;
     for (int i = 0; i < len(argList); i++) {
-        if (str::EqI(argList[i], "-test-preview")) {
+        if (str::EqI(argList[i], StrL("-test-preview"))) {
             idx = i;
             break;
         }

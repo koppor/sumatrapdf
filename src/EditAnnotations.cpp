@@ -29,6 +29,7 @@ extern "C" {
 #include "Toolbar.h"
 #include "WindowTab.h"
 #include "EditAnnotations.h"
+#include "FormFields.h"
 #include "SumatraPDF.h"
 #include "DarkModeSubclass.h"
 
@@ -147,7 +148,7 @@ struct EditAnnotationsWindow : Wnd {
     str::Builder currCustomColor;
     str::Builder currCustomInteriorColor;
 
-    void OnSize(UINT msg, UINT type, SIZE size) override;
+    void OnSize(UINT msg, UINT type, Size size) override;
     void OnFocus() override;
     bool PreTranslateMessage(MSG&) override;
 
@@ -192,6 +193,42 @@ static Annotation* FindAnnotationOnSamePage(WindowTab* tab, Annotation* annot) {
     return nullptr;
 }
 
+static void RebuildAnnotationsListBox(EditAnnotationsWindow* ew);
+
+void DetachAnnotationFromUI(Annotation* annot) {
+    if (!annot) {
+        return;
+    }
+    CancelFormFieldEditIfWidget(annot);
+    for (MainWindow* win : gWindows) {
+        if (win->annotationBeingDragged == annot) {
+            win->annotationBeingDragged = nullptr;
+            win->annotationBeingResized = false;
+        }
+        if (win->annotationUnderCursor == annot) {
+            win->annotationUnderCursor = nullptr;
+        }
+        int nTabs = win->TabCount();
+        for (int i = 0; i < nTabs; i++) {
+            WindowTab* t = win->GetTab(i);
+            if (t && t->selectedAnnotation == annot) {
+                t->selectedAnnotation = nullptr;
+            }
+        }
+    }
+}
+
+void InvalidateEditAnnotationsOnEngineChange(WindowTab* tab) {
+    if (!tab || !tab->editAnnotsWindow) {
+        return;
+    }
+    EditAnnotationsWindow* ew = tab->editAnnotsWindow;
+    // selectedAnnotation is usually already null; do not FlushContents into a
+    // dying engine. Drop non-owning list entries before ~EngineMupdf frees them.
+    ew->annotations.Clear();
+    RebuildAnnotationsListBox(ew);
+}
+
 void DeleteAnnotationAndUpdateUI(WindowTab* tab, Annotation* annot) {
     EditAnnotationsWindow* ew = tab->editAnnotsWindow;
     Annotation* selectNext = nullptr;
@@ -203,23 +240,12 @@ void DeleteAnnotationAndUpdateUI(WindowTab* tab, Annotation* annot) {
         selectNext = FindAnnotationOnSamePage(tab, annot);
     }
 
+    // Clear all UI holders before DeleteAnnotation frees the wrapper.
+    DetachAnnotationFromUI(annot);
     DeleteAnnotation(annot);
-    // Deleted annot must not remain selected (use-after-free on subsequent UI).
-    if (tab->selectedAnnotation == annot) {
-        tab->selectedAnnotation = nullptr;
-    }
     if (ew != nullptr) {
         // can be null if called from Menu.cpp and annotations window is not visible
-        // ew->skipGoToPage = true;
-        // int currSelIdx = ew ? ew->listBox->GetCurrentSelection() : -1;
         UpdateAnnotationsList(ew);
-#if 0
-        if ((selectNext == nullptr) && (currSelIdx >= 0)) {
-            // if we're deleting currently selected, pick
-            // next to select
-            annot = PickNewSelectedAnnotation(ew, currSelIdx);
-        }
-#endif
     }
     SetSelectedAnnotation(tab, selectNext);
 }
@@ -336,8 +362,8 @@ bool CloseAndDeleteEditAnnotationsWindow(WindowTab* tab) {
 EditAnnotationsWindow::~EditAnnotationsWindow() {
     // hacky: we want the position of the main window
     // but the size of client area
-    tab->lastEditAnnotsWindowPos = WindowRect(hwnd);
-    auto cr = ClientRect(hwnd);
+    tab->lastEditAnnotsWindowPos = HwndWindowRect(hwnd);
+    auto cr = HwndClientRect(hwnd);
     tab->lastEditAnnotsWindowPos.dx = cr.dx;
     tab->lastEditAnnotsWindowPos.dy = cr.dy;
 
@@ -378,6 +404,9 @@ static void UpdateSaveButtonLabels(EditAnnotationsWindow* ew) {
 }
 
 static void EnableSaveIfAnnotationsChanged(EditAnnotationsWindow* ew) {
+    if (!ew || !ew->buttonSaveToCurrentFile || !ew->buttonSaveToNewFile) {
+        return;
+    }
     bool didChange = DidAnnotationsChange(ew);
     ew->buttonSaveToCurrentFile->SetIsEnabled(didChange);
     ew->buttonSaveToNewFile->SetIsEnabled(didChange);
@@ -405,11 +434,11 @@ static void RebuildAnnotationsListBox(EditAnnotationsWindow* ew) {
         model->strings.Append(ToStr(s));
     }
 
-    auto topIdx = ListBoxGetTopIndex(ew->listBox->hwnd);
+    auto topIdx = LbGetTopIndex(ew->listBox->hwnd);
     ew->listBox->SetModel(model);
     topIdx = std::min(ew->listBox->GetCount() - 1, topIdx);
     if (topIdx >= 0) {
-        ListBoxSetTopIndex(ew->listBox->hwnd, topIdx);
+        LbSetTopIndex(ew->listBox->hwnd, topIdx);
     }
     EnableSaveIfAnnotationsChanged(ew);
 }
@@ -476,21 +505,23 @@ extern bool SaveAnnotationsToMaybeNewPdfFile(WindowTab*);
 static void ButtonSaveToNewFileHandler(EditAnnotationsWindow* ew) {
     FlushContentsFromEdit(ew);
     WindowTab* tab = ew->tab;
+    // On success SaveAnnotationsToMaybeNewPdfFile closes this window (and may
+    // open a new one). Do not touch ew after a successful return.
     bool ok = SaveAnnotationsToMaybeNewPdfFile(tab);
     if (!ok) {
         return;
     }
-    // Path may have changed to the new file; refresh the existing-save label.
-    UpdateSaveButtonLabels(ew);
-    EnableSaveIfAnnotationsChanged(ew);
+    // New window (if any) is created inside Save*; labels/enabled state are
+    // set when it opens. Old ew is already deleted.
 }
 
 extern bool SaveAnnotationsToExistingFile(WindowTab* tab);
 
 static void ButtonSaveToCurrentPDFHandler(EditAnnotationsWindow* ew) {
     FlushContentsFromEdit(ew);
+    // SaveAnnotationsToExistingFile closes this window and reloads the PDF
+    // (engine/Annotation* become invalid). Do not touch ew after this call.
     SaveAnnotationsToExistingFile(ew->tab);
-    EnableSaveIfAnnotationsChanged(ew);
 }
 
 constexpr int kMaxControls = 18;
@@ -499,7 +530,7 @@ static void AdvanceFocus(EditAnnotationsWindow* ew, bool forward) {
     HWND controls[kMaxControls];
     int n = 0;
     auto addIfVisible = [&](HWND h) {
-        if (h && IsWindowVisible(h)) {
+        if (h && HwndIsVisible(h)) {
             ReportIf(n >= kMaxControls);
             controls[n++] = h;
         }
@@ -560,7 +591,7 @@ bool EditAnnotationsWindow::PreTranslateMessage(MSG& msg) {
             // outside an edit control (issue #5815).
             HWND focused = ::GetFocus();
             TempStr cls = HwndGetClassName(focused);
-            if (str::EqI(cls, "Edit")) {
+            if (str::EqI(cls, StrL("Edit"))) {
                 return false;
             }
             // Ctrl+Delete (and plain Delete) remove the selected annotation
@@ -686,10 +717,7 @@ static void FlushContentsFromEdit(EditAnnotationsWindow* ew) {
         return;
     }
     Annotation* a = ew->tab->selectedAnnotation;
-    if (!a || !a->engine || !a->pdfannot) {
-        return;
-    }
-    if (ew->annotations.Find(a) < 0) {
+    if (!AnnotationIsLive(a) || ew->annotations.Find(a) < 0) {
         return;
     }
     auto txt = ew->editContents->GetTextTemp();
@@ -1065,7 +1093,7 @@ static void UpdateUIForSelectedAnnotation(EditAnnotationsWindow* ew, Annotation*
 
     // Prefer the live client size so re-layout matches the window after resize;
     // fall back to last layout bounds if the window is not sized yet.
-    Rect client = ClientRect(ew->hwnd);
+    Rect client = HwndClientRect(ew->hwnd);
     int dx = client.dx;
     int dy = client.dy;
     if (dx <= 0 || dy <= 0) {
@@ -1156,7 +1184,7 @@ static void ButtonEmbedAttachment(EditAnnotationsWindow* ew) {
         return;
     }
     EngineMupdf* engine = GetEngineMupdf(ew);
-    if (!engine || !engine->pdfdoc || !annot->pdfannot) {
+    if (!engine || !engine->pdfdoc || !AnnotationIsLive(annot)) {
         return;
     }
 
@@ -1173,6 +1201,11 @@ static void ButtonEmbedAttachment(EditAnnotationsWindow* ew) {
     ofn.nFilterIndex = 1;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
     if (!GetOpenFileNameW(&ofn)) {
+        return;
+    }
+
+    // Dialog can pump messages (reload/close); re-check after return.
+    if (!AnnotationIsLive(annot)) {
         return;
     }
 
@@ -1246,7 +1279,7 @@ void SetSelectedAnnotation(WindowTab* tab, Annotation* annot, bool isNew, EditAn
     // go to page with a given annotations before triggering repaint
     if (ew) {
         UpdateUIForSelectedAnnotation(ew, annot, isNew, focus);
-        HwndMakeVisible(ew->hwnd);
+        HwndShowWithoutActivate(ew->hwnd);
     }
     MainWindowRerender(win);
     ToolbarUpdateStateForWindow(win, false);
@@ -1297,7 +1330,7 @@ static void ContentsChanged(EditAnnotationsWindow* ew) {
         return;
     }
     Annotation* a = ew->tab->selectedAnnotation;
-    if (!a || !a->engine) {
+    if (!AnnotationIsLive(a)) {
         return;
     }
     auto txt = ew->editContents->GetTextTemp();
@@ -1327,19 +1360,19 @@ static void ContentsChanged(EditAnnotationsWindow* ew) {
     });
 }
 
-void EditAnnotationsWindow::OnSize(UINT msg, UINT, SIZE size) {
+void EditAnnotationsWindow::OnSize(UINT msg, UINT, Size size) {
     if (msg != WM_SIZE) {
         return;
     }
     if (!mainLayout) {
         return;
     }
-    int dx = (int)size.cx;
-    int dy = (int)size.cy;
+    int dx = size.dx;
+    int dy = size.dy;
     if (dx == 0 || dy == 0) {
         return;
     }
-    InvalidateRect(hwnd, nullptr, false);
+    HwndInvalidate(hwnd);
     if (false && mainLayout->lastBounds.EqSize(dx, dy)) {
         // avoid un-necessary layout
         return;
@@ -1777,12 +1810,12 @@ static void CreateMainLayout(EditAnnotationsWindow* ew) {
     HidePerAnnotControls(ew);
 }
 
-static void LimitEditAnnotationsClientSizeToScreen(HWND hwnd, HWND hwndRelative, SIZE& size) {
-    Rect work = GetWorkAreaRect(WindowRect(hwndRelative), hwndRelative);
+static void LimitEditAnnotationsClientSizeToScreen(HWND hwnd, HWND hwndRelative, Size& size) {
+    Rect work = GetWorkAreaRect(HwndWindowRect(hwndRelative), hwndRelative);
     WINDOWINFO wi{};
     wi.cbSize = sizeof(wi);
     if (!GetWindowInfo(hwnd, &wi)) {
-        LimitWindowSizeToScreen(hwndRelative, size);
+        size = HwndLimitSizeToScreen(hwndRelative, size);
         return;
     }
 
@@ -1790,11 +1823,11 @@ static void LimitEditAnnotationsClientSizeToScreen(HWND hwnd, HWND hwndRelative,
     int nonClientDy = RectDy(wi.rcWindow) - RectDy(wi.rcClient);
     int maxClientDx = work.dx - nonClientDx;
     int maxClientDy = work.dy - nonClientDy;
-    if (size.cx > maxClientDx) {
-        size.cx = maxClientDx;
+    if (size.dx > maxClientDx) {
+        size.dx = maxClientDx;
     }
-    if (size.cy > maxClientDy) {
-        size.cy = maxClientDy;
+    if (size.dy > maxClientDy) {
+        size.dy = maxClientDy;
     }
 }
 
@@ -1809,7 +1842,7 @@ void ShowEditAnnotationsWindow(WindowTab* tab, Annotation* annot, EditAnnotFocus
     EditAnnotationsWindow* ew = tab->editAnnotsWindow;
     if (ew) {
         bool isNew = annot != ew->tab->win->annotationUnderCursor;
-        HwndMakeVisible(ew->hwnd);
+        HwndShowWithoutActivate(ew->hwnd);
         SetForegroundWindow(ew->hwnd);
         if (ew->listBox && ew->listBox->model->ItemsCount() > 0) {
             HwndSetFocus(ew->listBox->hwnd);
@@ -1836,9 +1869,9 @@ void ShowEditAnnotationsWindow(WindowTab* tab, Annotation* annot, EditAnnotFocus
     args.font = GetAppFont(tab->win ? tab->win->hwndFrame : nullptr);
 
     // PositionCloseTo(w, args->hwndRelatedTo);
-    // SIZE winSize = {w->initialSize.dx, w->initialSize.Height};
-    // LimitWindowSizeToScreen(args->hwndRelatedTo, winSize);
-    // w->initialSize = {winSize.cx, winSize.cy};
+    // Size winSize = {w->initialSize.dx, w->initialSize.Height};
+    // winSize = HwndLimitSizeToScreen(args->hwndRelatedTo, winSize);
+    // w->initialSize = {winSize.dx, winSize.dy};
     ew->CreateCustom(args);
 
     CreateMainLayout(ew);
@@ -1855,7 +1888,7 @@ void ShowEditAnnotationsWindow(WindowTab* tab, Annotation* annot, EditAnnotFocus
         minDy = 720;
         // TODO: this is slightly less that wanted
         HWND hwnd = tab->win->hwndCanvas;
-        auto rc = ClientRect(hwnd);
+        auto rc = HwndClientRect(hwnd);
         if (rc.dy > 0) {
             minDy = rc.dy;
         }
@@ -1868,17 +1901,17 @@ void ShowEditAnnotationsWindow(WindowTab* tab, Annotation* annot, EditAnnotFocus
     }
 
     if (lastPos.IsEmpty()) {
-        SIZE size = {520, minDy};
+        Size size = {520, minDy};
         LimitEditAnnotationsClientSizeToScreen(ew->hwnd, tab->win->hwndFrame, size);
-        LayoutAndSizeToContent(ew->mainLayout, size.cx, size.cy, ew->hwnd);
+        LayoutAndSizeToContent(ew->mainLayout, size.dx, size.dy, ew->hwnd);
         HwndPositionToTheRightOf(ew->hwnd, tab->win->hwndFrame);
     } else {
-        SIZE size = {lastPos.dx, minDy};
+        Size size = {lastPos.dx, minDy};
         LimitEditAnnotationsClientSizeToScreen(ew->hwnd, tab->win->hwndFrame, size);
-        LayoutAndSizeToContent(ew->mainLayout, size.cx, size.cy, ew->hwnd);
+        LayoutAndSizeToContent(ew->mainLayout, size.dx, size.dy, ew->hwnd);
         // pass nullptr for hwnd so ShiftRectToWorkArea uses the saved rect
         // to find the correct monitor (not the monitor the hwnd is currently on)
-        Rect r = WindowRect(ew->hwnd);
+        Rect r = HwndWindowRect(ew->hwnd);
         r.x = lastPos.x;
         r.y = lastPos.y;
         r = ShiftRectToWorkArea(r, nullptr, true);

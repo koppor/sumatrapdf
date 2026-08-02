@@ -37,13 +37,10 @@ extern "C" void fz_set_optind(int val);
 static int CalcDlgWidth(HWND hwndParent, HFONT font, Str path, int minW, int padding) {
     HDC hdc = GetDC(nullptr);
     HFONT oldFont = (HFONT)SelectObject(hdc, font);
-    int pathCch;
-    WCHAR* pathW = CWStrTemp(path, pathCch);
-    SIZE sz{};
-    GetTextExtentPoint32W(hdc, pathW, pathCch, &sz);
+    Size size = HdcGetTextExtentPoint32(hdc, path);
     SelectObject(hdc, oldFont);
     ReleaseDC(nullptr, hdc);
-    int dlgW = sz.cx + 2 * padding + DpiScale(hwndParent, 32);
+    int dlgW = size.dx + (2 * padding) + DpiScale(hwndParent, 32);
     dlgW = std::max(dlgW, minW);
     int screenW = GetSystemMetrics(SM_CXSCREEN);
     dlgW = std::min(dlgW, screenW * 80 / 100);
@@ -59,7 +56,8 @@ static HICON GetAppIcon() {
 // Seeds the dialog with the edit's current text and writes the chosen path back.
 static void BrowseForDest(HWND owner, Edit* edit, WStr filter, WStr defExt) {
     WCHAR dstFileName[MAX_PATH + 1]{};
-    GetWindowTextW(edit->hwnd, dstFileName, MAX_PATH);
+    TempWStr currentFileName = ToWStrTemp(HwndGetTextTemp(edit->hwnd));
+    wstr::BufSet(WStr(dstFileName, MAX_PATH), currentFileName);
 
     OPENFILENAME ofn{};
     ofn.lStructSize = sizeof(ofn);
@@ -73,6 +71,18 @@ static void BrowseForDest(HWND owner, Edit* edit, WStr filter, WStr defExt) {
     if (GetSaveFileNameW(&ofn)) {
         edit->SetText(ToUtf8Temp(dstFileName));
     }
+}
+
+// Esc closes PDF tool dialogs (Bake/Compress/etc.); same as other app dialogs (#5856).
+static bool PdfToolPreTranslateEsc(MSG& msg, Wnd* dlg) {
+    if (!dlg) {
+        return false;
+    }
+    if ((msg.message == WM_KEYDOWN || msg.message == WM_CHAR) && msg.wParam == VK_ESCAPE) {
+        dlg->Close();
+        return true;
+    }
+    return false;
 }
 
 // create the source-path Static used as the first row of the PDF tool dialogs,
@@ -110,6 +120,7 @@ struct PdfBakeDialog : Wnd {
     void OnBrowse();
     void DoBake();
     void OnCancel();
+    bool PreTranslateMessage(MSG& msg) override { return PdfToolPreTranslateEsc(msg, this); }
 };
 
 PdfBakeDialog::~PdfBakeDialog() {
@@ -264,7 +275,7 @@ bool PdfBakeDialog::Create(MainWindow* w, WindowTab* tab) {
     mainLayout->SetBounds(bounds);
     ResizeHwndToClientArea(hwnd, size.dx, size.dy, false);
 
-    CenterDialog(hwnd, w->hwndFrame);
+    HwndCenterDialog(hwnd, w->hwndFrame);
     if (UseDarkModeLib()) {
         DarkMode::setDarkWndSafe(hwnd);
         DarkMode::setWindowEraseBgSubclass(hwnd);
@@ -315,6 +326,7 @@ struct PdfExtractTextDialog : Wnd {
     void OnBrowse();
     void DoExtract();
     void OnCancel();
+    bool PreTranslateMessage(MSG& msg) override { return PdfToolPreTranslateEsc(msg, this); }
 };
 
 PdfExtractTextDialog::~PdfExtractTextDialog() {
@@ -541,7 +553,7 @@ bool PdfExtractTextDialog::Create(MainWindow* w, WindowTab* tab) {
     mainLayout->SetBounds(bounds);
     ResizeHwndToClientArea(hwnd, size.dx, size.dy, false);
 
-    CenterDialog(hwnd, w->hwndFrame);
+    HwndCenterDialog(hwnd, w->hwndFrame);
     if (UseDarkModeLib()) {
         DarkMode::setDarkWndSafe(hwnd);
         DarkMode::setWindowEraseBgSubclass(hwnd);
@@ -587,6 +599,7 @@ struct PdfCompressDialog : Wnd {
     void OnBrowse();
     void DoCompress();
     void OnCancel();
+    bool PreTranslateMessage(MSG& msg) override { return PdfToolPreTranslateEsc(msg, this); }
 };
 
 PdfCompressDialog::~PdfCompressDialog() {
@@ -738,7 +751,7 @@ bool PdfCompressDialog::Create(MainWindow* w, WindowTab* tab) {
     mainLayout->SetBounds(bounds);
     ResizeHwndToClientArea(hwnd, size.dx, size.dy, false);
 
-    CenterDialog(hwnd, w->hwndFrame);
+    HwndCenterDialog(hwnd, w->hwndFrame);
     if (UseDarkModeLib()) {
         DarkMode::setDarkWndSafe(hwnd);
         DarkMode::setWindowEraseBgSubclass(hwnd);
@@ -787,6 +800,7 @@ struct PdfDecompressDialog : Wnd {
     void OnBrowse();
     void DoDecompress();
     void OnCancel();
+    bool PreTranslateMessage(MSG& msg) override { return PdfToolPreTranslateEsc(msg, this); }
 };
 
 PdfDecompressDialog::~PdfDecompressDialog() {
@@ -937,7 +951,7 @@ bool PdfDecompressDialog::Create(MainWindow* w, WindowTab* tab) {
     mainLayout->SetBounds(bounds);
     ResizeHwndToClientArea(hwnd, size.dx, size.dy, false);
 
-    CenterDialog(hwnd, w->hwndFrame);
+    HwndCenterDialog(hwnd, w->hwndFrame);
     if (UseDarkModeLib()) {
         DarkMode::setDarkWndSafe(hwnd);
         DarkMode::setWindowEraseBgSubclass(hwnd);
@@ -993,6 +1007,7 @@ struct PdfDeletePageDialog : Wnd {
     void DoIt();
     void OnCancel();
     void UpdateButton();
+    bool PreTranslateMessage(MSG& msg) override { return PdfToolPreTranslateEsc(msg, this); }
 };
 
 PdfDeletePageDialog::~PdfDeletePageDialog() {
@@ -1033,12 +1048,12 @@ static bool ParseDeletePages(Str s, int pageCount, Vec<int>& pagesToDelete) {
             // "8-" means "8-N" (from page 8 to the last page)
             bool endIsEmpty = !endStr;
             int start, end;
-            if (str::EqI(startStr, "N")) {
+            if (str::EqI(startStr, StrL("N"))) {
                 start = pageCount;
             } else {
                 start = !str::IsNull(str::Parse(startStr, "%d%$", &start)) ? start : -1;
             }
-            if (endIsEmpty || str::EqI(endStr, "N")) {
+            if (endIsEmpty || str::EqI(endStr, StrL("N"))) {
                 end = pageCount;
             } else {
                 end = !str::IsNull(str::Parse(endStr, "%d%$", &end)) ? end : -1;
@@ -1052,7 +1067,7 @@ static bool ParseDeletePages(Str s, int pageCount, Vec<int>& pagesToDelete) {
         } else {
             // single page
             int page;
-            if (str::EqI(part, "N")) {
+            if (str::EqI(part, StrL("N"))) {
                 page = pageCount;
             } else {
                 page = !str::IsNull(str::Parse(part, "%d%$", &page)) ? page : -1;
@@ -1381,7 +1396,7 @@ bool PdfDeletePageDialog::Create(MainWindow* w, WindowTab* tab, bool isExtractAr
     pagesEdit->onTextChanged = MkMethod0<PdfDeletePageDialog, &PdfDeletePageDialog::UpdateButton>(this);
     UpdateButton();
 
-    CenterDialog(hwnd, w->hwndFrame);
+    HwndCenterDialog(hwnd, w->hwndFrame);
     if (UseDarkModeLib()) {
         DarkMode::setDarkWndSafe(hwnd);
         DarkMode::setWindowEraseBgSubclass(hwnd);
@@ -1447,6 +1462,7 @@ struct PdfEncryptDialog : Wnd {
     void DoEncrypt();
     void OnCancel();
     void UpdateButton();
+    bool PreTranslateMessage(MSG& msg) override { return PdfToolPreTranslateEsc(msg, this); }
 };
 
 PdfEncryptDialog::~PdfEncryptDialog() {
@@ -1641,7 +1657,7 @@ bool PdfEncryptDialog::Create(MainWindow* w, WindowTab* tab) {
     passwordEdit->onTextChanged = MkMethod0<PdfEncryptDialog, &PdfEncryptDialog::UpdateButton>(this);
     encryptBtn->SetIsEnabled(false);
 
-    CenterDialog(hwnd, w->hwndFrame);
+    HwndCenterDialog(hwnd, w->hwndFrame);
     if (UseDarkModeLib()) {
         DarkMode::setDarkWndSafe(hwnd);
         DarkMode::setWindowEraseBgSubclass(hwnd);
@@ -1696,6 +1712,7 @@ struct PdfDecryptDialog : Wnd {
     void OnBrowse();
     void DoDecrypt();
     void OnCancel();
+    bool PreTranslateMessage(MSG& msg) override { return PdfToolPreTranslateEsc(msg, this); }
 };
 
 PdfDecryptDialog::~PdfDecryptDialog() {
@@ -1851,7 +1868,7 @@ bool PdfDecryptDialog::Create(MainWindow* w, WindowTab* tab, Str pwd) {
     mainLayout->SetBounds(bounds);
     ResizeHwndToClientArea(hwnd, size.dx, size.dy, false);
 
-    CenterDialog(hwnd, w->hwndFrame);
+    HwndCenterDialog(hwnd, w->hwndFrame);
     if (UseDarkModeLib()) {
         DarkMode::setDarkWndSafe(hwnd);
         DarkMode::setWindowEraseBgSubclass(hwnd);

@@ -103,7 +103,7 @@ void TabGroupsWnd::LayoutToClient() {
     if (!layout || !hwnd) {
         return;
     }
-    Rect rc = ClientRect(hwnd);
+    Rect rc = HwndClientRect(hwnd);
     Constraints bc = Tight({rc.dx, rc.dy});
     layout->Layout(bc);
     layout->SetBounds({0, 0, rc.dx, rc.dy});
@@ -232,7 +232,7 @@ static void DrawTabGroupItem(TabGroupsWnd* w, ListBox::DrawItemEvent* ev) {
     }
 
     HDC hdc = ev->hdc;
-    RECT rc = ev->itemRect;
+    Rect rc = ev->itemRect;
     ListBox* lb = ev->listBox;
 
     COLORREF colBg = IsSpecialColor(lb->bgColor) ? GetSysColor(COLOR_WINDOW) : lb->bgColor;
@@ -242,7 +242,7 @@ static void DrawTabGroupItem(TabGroupsWnd* w, ListBox::DrawItemEvent* ev) {
     }
 
     SetBkColor(hdc, colBg);
-    ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
+    HdcFillRectWithBkColor(hdc, rc);
 
     SetTextColor(hdc, colText);
     SetBkMode(hdc, TRANSPARENT);
@@ -253,25 +253,22 @@ static void DrawTabGroupItem(TabGroupsWnd* w, ListBox::DrawItemEvent* ev) {
     }
 
     int padX = DpiScale(lb->hwnd, 4);
-    rc.left += padX;
-    rc.right -= padX;
+    rc.x += padX;
+    rc.dx -= 2 * padX;
 
     // draw group name on the left
     Str name = w->model->Item(ev->itemIndex);
-    WCHAR* nameW = CWStrTemp(name);
     uint fmt = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_LEFT;
-    DrawTextW(hdc, nameW, -1, &rc, fmt);
+    HdcDrawText(hdc, name, rc, fmt);
 
     // draw tab count on the right
     int nTabs = w->model->TabCount(ev->itemIndex);
     char buf[32];
     snprintf(buf, sizeof(buf), "%d tabs", nTabs);
-    WCHAR* countW = CWStrTemp(buf);
     COLORREF rightCol = AccentColor(colText, 80);
     SetTextColor(hdc, rightCol);
-    RECT rcRight = rc;
     fmt = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_RIGHT;
-    DrawTextW(hdc, countW, -1, &rcRight, fmt);
+    HdcDrawText(hdc, Str(buf), rc, fmt);
 
     if (oldFont) {
         SelectFont(hdc, oldFont);
@@ -457,8 +454,8 @@ bool TabGroupsWnd::Create(MainWindow* winIn, TabGroupDialogMode modeIn) {
     int winH = DpiScale(hwnd, 350);
     SetWindowPos(hwnd, nullptr, 0, 0, winW, winH, SWP_NOMOVE | SWP_NOZORDER);
     LayoutToClient();
-    CenterDialog(hwnd, hwndParent);
-    HwndEnsureVisible(hwnd);
+    HwndCenterDialog(hwnd, hwndParent);
+    HwndEnsureOnScreen(hwnd);
     UpdateTheme();
     UpdateDeleteButton();
     SetIsVisible(true);

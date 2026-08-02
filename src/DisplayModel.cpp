@@ -202,6 +202,17 @@ bool DisplayModel::CanScrollLeft() const {
     return viewPort.x > 0;
 }
 
+bool DisplayModel::CanScrollDown() const {
+    if (viewPort.dy >= canvasSize.dy) {
+        return false;
+    }
+    return viewPort.y + viewPort.dy < canvasSize.dy;
+}
+
+bool DisplayModel::CanScrollUp() const {
+    return viewPort.y > 0;
+}
+
 Size DisplayModel::GetCanvasSize() const {
     return canvasSize;
 }
@@ -530,7 +541,7 @@ void DisplayModel::SetInitialViewSettings(DisplayMode newDisplayMode, int newSta
         // would make dpiFactor and therefore zoomReal negative
         screenDPI = 96;
     }
-    dpiFactor = 1.0f * screenDPI / engine->GetFileDPI();
+    dpiFactor = 1.0f * (float)screenDPI / engine->GetFileDPI();
     if (ValidPageNo(newStartPage)) {
         startPage = newStartPage;
     }
@@ -625,7 +636,7 @@ bool DisplayModel::PageVisibleNearby(int pageNo) const {
     int columns = ColumnsFromDisplayMode(mode);
 
     pageNo = FirstPageInARowNo(pageNo, columns, IsBookView(mode));
-    for (int i = pageNo - columns; i < pageNo + 2 * columns; i++) {
+    for (int i = pageNo - columns; i < pageNo + (2 * columns); i++) {
         if (ValidPageNo(i) && PageVisible(i)) {
             return true;
         }
@@ -708,12 +719,12 @@ float DisplayModel::ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) co
 
             contentBox.x += row.dx;
             box = box.Union(contentBox);
-            row.dx += pageBox.dx + pageSpacing.dx;
+            row.dx += pageBox.dx + (float)pageSpacing.dx;
         }
         row = box.Size();
     } else {
         row = PageSizeAfterRotation(pageNo, fitToContent);
-        row.dx *= columns;
+        row.dx *= (float)columns;
         row.dx += (float)((double)pageSpacing.dx * (double)(columns - 1));
     }
 
@@ -727,8 +738,8 @@ float DisplayModel::ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) co
         return 0;
     }
 
-    float zoomX = areaForPagesDx / row.dx;
-    float zoomY = areaForPagesDy / row.dy;
+    float zoomX = (float)areaForPagesDx / row.dx;
+    float zoomY = (float)areaForPagesDy / row.dy;
     float zoom;
     if (kZoomFitWidth == zoomVirtual) {
         zoom = zoomX;
@@ -895,7 +906,7 @@ void DisplayModel::Relayout(float newZoomVirtual, int newRotation) {
 
         int newViewPortOffsetX = 0;
         if (0 != currZoomReal && kInvalidZoom != currZoomReal) {
-            newViewPortOffsetX = (int)(viewPort.x * zoomReal / currZoomReal);
+            newViewPortOffsetX = (int)((float)viewPort.x * zoomReal / currZoomReal);
         }
         viewPort.x = newViewPortOffsetX;
 
@@ -1034,7 +1045,7 @@ int DisplayModel::GetPageNextToPoint(Point pt) const {
         }
 
         Rect r = pageInfo->pageOnScreen;
-        unsigned int dist = distSq(pt.x - r.x - r.dx / 2, pt.y - r.y - r.dy / 2);
+        unsigned int dist = distSq(pt.x - r.x - (r.dx / 2), pt.y - r.y - (r.dy / 2));
         if (dist < maxDist) {
             closest = pageNo;
             maxDist = dist;
@@ -1083,8 +1094,8 @@ Point DisplayModel::CvtToScreen(int pageNo, PointF pt) {
     PointF p = engine->Transform(pt, pageNo, zoom, rotation);
     // don't add the full 0.5 for rounding to account for precision errors
     Rect r = pageInfo->pageOnScreen;
-    p.x += 0.499f + r.x;
-    p.y += 0.499f + r.y;
+    p.x += 0.499f + (float)r.x;
+    p.y += 0.499f + (float)r.y;
 
     return ToPoint(p);
 }
@@ -1108,7 +1119,7 @@ PointF DisplayModel::CvtFromScreen(Point pt, int pageNo) {
 
     // don't add the full 0.5 for rounding to account for precision errors
     Rect r = pageInfo->pageOnScreen;
-    PointF p = PointF(pt.x - 0.499f - r.x, pt.y - 0.499f - r.y);
+    PointF p = PointF((float)pt.x - 0.499f - (float)r.x, (float)pt.y - 0.499f - (float)r.y);
 
     float zoom = getZoomSafe(this, pageNo, pageInfo);
     return engine->Transform(p, pageNo, zoom, rotation, true);
@@ -1496,6 +1507,21 @@ bool DisplayModel::GoToNextPage() {
     return true;
 }
 
+bool DisplayModel::IsAtDocumentEnd() const {
+    if (CanScrollDown()) {
+        return false;
+    }
+    // continuous: one canvas for the whole document
+    if (IsContinuous(GetDisplayMode())) {
+        return true;
+    }
+    // non-continuous: also on the last page row (GoToNextPage would fail)
+    int columns = ColumnsFromDisplayMode(GetDisplayMode());
+    int currPageNo = CurrentPageNo();
+    int firstPageInNewRow = FirstPageInARowNo(currPageNo + columns, columns, IsBookView(GetDisplayMode()));
+    return firstPageInNewRow > PageCount();
+}
+
 bool DisplayModel::GoToPrevPage(int scrollY) {
     int columns = ColumnsFromDisplayMode(GetDisplayMode());
     int currPageNo = CurrentPageNo();
@@ -1598,6 +1624,8 @@ void DisplayModel::ScrollYTo(int yOff) {
     viewPort.y = yOff;
     RecalcVisibleParts();
     RenderVisibleParts();
+    // Match ScrollXTo: keep scrollbar thumb (and smart overlay reveal) in sync.
+    cb->UpdateScrollbars(canvasSize);
 
     int newPageNo = CurrentPageNo();
     if (newPageNo != currPageNo) {
@@ -1947,18 +1975,18 @@ bool DisplayModel::ScrollScreenToRect(int pageNo, Rect rec) {
     // the search direction remains obvious and we still display some
     // context before and after the found text
     if (rec.y < viewPort.dy * 2 / 5) {
-        sy = rec.y - viewPort.dy * 2 / 5;
+        sy = rec.y - (viewPort.dy * 2 / 5);
     } else if (rec.y + rec.dy > viewPort.dy * 3 / 5) {
-        sy = std::min(rec.y + rec.dy - viewPort.dy * 3 / 5, rec.y + rec.dy / 2 - viewPort.dy * 2 / 5);
+        sy = std::min(rec.y + rec.dy - (viewPort.dy * 3 / 5), rec.y + (rec.dy / 2) - (viewPort.dy * 2 / 5));
     }
 
     // horizontally, we try to position the search result at the
     // center of the screen, but don't scroll further than page
     // boundaries, so that as much context as possible remains visible
     if (rec.x < 0) {
-        sx = std::max(rec.x + rec.dx / 2 - viewPort.dx / 2, pageInfo->pageOnScreen.x);
+        sx = std::max(rec.x + (rec.dx / 2) - (viewPort.dx / 2), pageInfo->pageOnScreen.x);
     } else if (rec.x + rec.dx >= viewPort.dx) {
-        sx = std::min(rec.x + rec.dx / 2 - viewPort.dx / 2,
+        sx = std::min(rec.x + (rec.dx / 2) - (viewPort.dx / 2),
                       pageInfo->pageOnScreen.x + pageInfo->pageOnScreen.dx - viewPort.dx);
     }
 
@@ -2165,20 +2193,20 @@ void DisplayModel::ScrollTo(int pageNo, RectF rect, float zoom) {
     // when pages have varying sizes in fit-width/fit-page mode
     float pageZoom = GetZoomReal(pageNo);
 
-    if (rect.IsEmpty() || (rect.dx == DEST_USE_DEFAULT && rect.dy == DEST_USE_DEFAULT)) {
+    if (rect.IsEmpty() || (rect.dx == kDestUseDefault && rect.dy == kDestUseDefault)) {
         // PDF: /XYZ, /Fit, /FitB — scroll to rect.TL() (defaults = page top)
         PointF scrollD = engine->Transform(rect.TL(), pageNo, pageZoom, rotation);
         scroll = ToPoint(scrollD);
 
         // Unspecified X: keep horizontal scroll.
-        if (DEST_USE_DEFAULT == rect.x) {
+        if (kDestUseDefault == rect.x) {
             scroll.x = -1;
         }
         // Unspecified Y (page-level /Fit, /XYZ with null top): land at the top
         // of the *target* page. Reusing the current page's on-screen offset
         // often scrolls continuous view so the next page is most visible
         // ("bookmark lands one page ahead", #2799 / #3310).
-        if (DEST_USE_DEFAULT == rect.y) {
+        if (kDestUseDefault == rect.y) {
             if (pageNo == CurrentPageNo()) {
                 PageInfo* pageInfo = GetPageInfo(pageNo);
                 scroll.y = -(pageInfo->pageOnScreen.y - windowMargin.top);
@@ -2186,11 +2214,11 @@ void DisplayModel::ScrollTo(int pageNo, RectF rect, float zoom) {
                 scroll.y = 0;
             }
         }
-    } else if (rect.dx != DEST_USE_DEFAULT && rect.dy != DEST_USE_DEFAULT) {
+    } else if (rect.dx != kDestUseDefault && rect.dy != kDestUseDefault) {
         // PDF: /FitR left bottom right top
         RectF rectD = engine->Transform(rect, pageNo, pageZoom, rotation);
         scroll = ToPoint(rectD.TL());
-    } else if (rect.y != DEST_USE_DEFAULT) {
+    } else if (rect.y != kDestUseDefault) {
         // PDF: /FitH top  or  /FitBH top
         PointF scrollD = engine->Transform(rect.TL(), pageNo, pageZoom, rotation);
         scroll.y = (int)scrollD.y;
@@ -2207,11 +2235,11 @@ void DisplayModel::ScrollTo(int pageNo, RectF rect, float zoom) {
     } else {
         GoToPage(pageNo, scroll.y, true, -1);
     }
-    if (rect.x != DEST_USE_DEFAULT) {
-        float docY = (rect.y != DEST_USE_DEFAULT) ? rect.y : 0.f;
+    if (rect.x != kDestUseDefault) {
+        float docY = (rect.y != kDestUseDefault) ? rect.y : 0.f;
         Rect destScreen = CvtToScreen(pageNo, RectF(rect.x, docY, 1, 1));
         ScrollScreenToRect(pageNo, destScreen);
-    } else if (rect.dx != DEST_USE_DEFAULT && rect.dy != DEST_USE_DEFAULT) {
+    } else if (rect.dx != kDestUseDefault && rect.dy != kDestUseDefault) {
         Rect destScreen = CvtToScreen(pageNo, rect);
         ScrollScreenToRect(pageNo, destScreen);
     }

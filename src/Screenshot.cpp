@@ -98,7 +98,7 @@ static bool ShouldCaptureWindow(HWND hwnd, HWND overlayHwnd) {
     if (hwnd == overlayHwnd) {
         return false;
     }
-    if (!IsWindowVisible(hwnd)) {
+    if (!HwndIsVisible(hwnd)) {
         return false;
     }
     if (hwnd == GetDesktopWindow()) {
@@ -107,11 +107,11 @@ static bool ShouldCaptureWindow(HWND hwnd, HWND overlayHwnd) {
     WCHAR className[256];
     bool isMenu = false;
     if (GetClassNameW(hwnd, className, 256) > 0) {
-        if (wstr::Eq(className, L"Progman") || wstr::Eq(className, L"WorkerW")) {
+        if (wstr::Eq(className, WStrL(L"Progman")) || wstr::Eq(className, WStrL(L"WorkerW"))) {
             return false;
         }
         // #32768 is the Win32 menu window class (context menus, popups etc.)
-        isMenu = wstr::Eq(className, L"#32768");
+        isMenu = wstr::Eq(className, WStrL(L"#32768"));
     }
     // our own floating UI (e.g. the find bar) is a tool window owned by a frame;
     // capture it even though the tool/owned-window filters below would drop it
@@ -152,9 +152,7 @@ static bool ShouldCaptureWindow(HWND hwnd, HWND overlayHwnd) {
     if (ownedByApp && (w < 20 || h < 20)) {
         return false;
     }
-    WCHAR title[256];
-    int titleLen = GetWindowTextW(hwnd, title, 256);
-    if (titleLen == 0) {
+    if (HwndGetTextLen(hwnd) == 0) {
         LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
         if (!(style & WS_POPUP)) {
             return false;
@@ -197,7 +195,7 @@ static bool IsEdgeMostlyBlackEx(DWORD* pixels, int stride, int x0, int y0, int w
     switch (edge) {
         case 0: // left column
             for (int y = y0; y < y0 + h; y++) {
-                if (IsNearBlack(RgbToCOLORREF(pixels[y * stride + x0] & 0x00FFFFFF))) {
+                if (IsNearBlack(RgbToCOLORREF(pixels[(y * stride) + x0] & 0x00FFFFFF))) {
                     blackCount++;
                 }
                 total++;
@@ -205,7 +203,7 @@ static bool IsEdgeMostlyBlackEx(DWORD* pixels, int stride, int x0, int y0, int w
             break;
         case 1: // right column
             for (int y = y0; y < y0 + h; y++) {
-                if (IsNearBlack(RgbToCOLORREF(pixels[y * stride + x0 + w - 1] & 0x00FFFFFF))) {
+                if (IsNearBlack(RgbToCOLORREF(pixels[(y * stride) + x0 + w - 1] & 0x00FFFFFF))) {
                     blackCount++;
                 }
                 total++;
@@ -213,7 +211,7 @@ static bool IsEdgeMostlyBlackEx(DWORD* pixels, int stride, int x0, int y0, int w
             break;
         case 2: // top row
             for (int x = x0; x < x0 + w; x++) {
-                if (IsNearBlack(RgbToCOLORREF(pixels[y0 * stride + x] & 0x00FFFFFF))) {
+                if (IsNearBlack(RgbToCOLORREF(pixels[(y0 * stride) + x] & 0x00FFFFFF))) {
                     blackCount++;
                 }
                 total++;
@@ -221,7 +219,7 @@ static bool IsEdgeMostlyBlackEx(DWORD* pixels, int stride, int x0, int y0, int w
             break;
         case 3: // bottom row
             for (int x = x0; x < x0 + w; x++) {
-                if (IsNearBlack(RgbToCOLORREF(pixels[(y0 + h - 1) * stride + x] & 0x00FFFFFF))) {
+                if (IsNearBlack(RgbToCOLORREF(pixels[((y0 + h - 1) * stride) + x] & 0x00FFFFFF))) {
                     blackCount++;
                 }
                 total++;
@@ -345,12 +343,12 @@ static void FixRoundedCorners(HBITMAP hbm, int w, int h, COLORREF bgColor, int r
             // distance from corner center to pixel
             int dx = radius - 1 - cx;
             int dy = radius - 1 - cy;
-            if (dx * dx + dy * dy > radius * radius) {
+            if ((dx * dx) + (dy * dy) > radius * radius) {
                 // outside the rounded corner — replace with background if black
-                replaceIfBlack(cy * w + cx);                     // top-left
-                replaceIfBlack(cy * w + (w - 1 - cx));           // top-right
-                replaceIfBlack((h - 1 - cy) * w + cx);           // bottom-left
-                replaceIfBlack((h - 1 - cy) * w + (w - 1 - cx)); // bottom-right
+                replaceIfBlack((cy * w) + cx);                     // top-left
+                replaceIfBlack((cy * w) + (w - 1 - cx));           // top-right
+                replaceIfBlack(((h - 1 - cy) * w) + cx);           // bottom-left
+                replaceIfBlack(((h - 1 - cy) * w) + (w - 1 - cx)); // bottom-right
             }
         }
     }
@@ -740,7 +738,7 @@ static void ComputeLayout(ScreenshotOverlayData* data) {
 }
 
 // Get the bounding rect for thumbnail at index i (in client coords)
-static RECT GetThumbRect(ScreenshotOverlayData* data, int idx) {
+static Rect GetThumbRect(ScreenshotOverlayData* data, int idx) {
     int col = idx % data->cols;
     int row = idx / data->cols;
     auto& cs = data->captures[idx];
@@ -753,26 +751,20 @@ static RECT GetThumbRect(ScreenshotOverlayData* data, int idx) {
     int thumbAreaH = data->rowHeights[row] - kLabelGap - kLabelHeight;
 
     // center thumbnail in cell
-    int tx = cellX + (cellW - cs.thumbW) / 2;
-    int ty = cellY + kGridPaddingY + (thumbAreaH - (2 * kGridPaddingY) - cs.thumbH) / 2;
+    int tx = cellX + ((cellW - cs.thumbW) / 2);
+    int ty = cellY + kGridPaddingY + ((thumbAreaH - (2 * kGridPaddingY) - cs.thumbH) / 2);
 
-    RECT rc;
-    rc.left = tx;
-    rc.top = ty;
-    rc.right = tx + cs.thumbW;
-    rc.bottom = ty + cs.thumbH;
-    return rc;
+    return {tx, ty, cs.thumbW, cs.thumbH};
 }
 
 // Hit test: returns index of thumbnail under point, or -1
 static int HitTestThumb(ScreenshotOverlayData* data, int mx, int my) {
     int n = len(data->captures);
     for (int i = 0; i < n; i++) {
-        RECT rc = GetThumbRect(data, i);
+        Rect rc = GetThumbRect(data, i);
         // expand hit area to include the label
-        rc.bottom += kLabelGap + kLabelHeight;
-        POINT pt = {mx, my};
-        if (PtInRect(&rc, pt)) {
+        rc.dy += kLabelGap + kLabelHeight;
+        if (rc.Contains({mx, my})) {
             return i;
         }
     }
@@ -868,36 +860,30 @@ static void PaintOverlayLayered(HWND hwnd, ScreenshotOverlayData* data) {
     HGDIOBJ oldFont = SelectObject(hdcTemp, guiFont);
 
     // white background for the temp surface
-    RECT fullRect = {0, 0, w, h};
+    Rect fullRect = {0, 0, w, h};
     HBRUSH brWhite = CreateSolidBrush(RGB(255, 255, 255));
-    FillRect(hdcTemp, &fullRect, brWhite);
+    HdcFillRect(hdcTemp, fullRect, brWhite);
     DeleteObject(brWhite);
 
     int n = len(data->captures);
     for (int i = 0; i < n; i++) {
         auto& cs = data->captures[i];
-        RECT rc = GetThumbRect(data, i);
+        Rect rc = GetThumbRect(data, i);
 
         // draw thumbnail onto temp DC
         HDC hdcSrc = CreateCompatibleDC(hdcTemp);
         HGDIOBJ prev = SelectObject(hdcSrc, cs.thumb);
-        BitBlt(hdcTemp, rc.left, rc.top, cs.thumbW, cs.thumbH, hdcSrc, 0, 0, SRCCOPY);
+        BitBlt(hdcTemp, rc.x, rc.y, cs.thumbW, cs.thumbH, hdcSrc, 0, 0, SRCCOPY);
         SelectObject(hdcSrc, prev);
         DeleteDC(hdcSrc);
 
         // draw label below thumbnail: process name on left, dimensions on right
-        RECT labelRect;
-        labelRect.left = rc.left + 4;
-        labelRect.right = rc.right - 4;
-        labelRect.top = rc.bottom + kLabelGap;
-        labelRect.bottom = rc.bottom + kLabelGap + kLabelHeight;
+        Rect labelRect = {rc.x + 4, rc.y + rc.dy + kLabelGap, rc.dx - 8, kLabelHeight};
         SetTextColor(hdcTemp, RGB(0, 0, 0));
         SetBkMode(hdcTemp, TRANSPARENT);
-        WCHAR* nameW = CWStrTemp(cs.processName);
-        DrawTextW(hdcTemp, nameW, -1, &labelRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        HdcDrawText(hdcTemp, cs.processName, labelRect, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         TempStr dimStr = fmt("%dx%d", cs.origW, cs.origH);
-        WCHAR* dimW = CWStrTemp(dimStr);
-        DrawTextW(hdcTemp, dimW, -1, &labelRect, DT_RIGHT | DT_SINGLELINE);
+        HdcDrawText(hdcTemp, dimStr, labelRect, DT_RIGHT | DT_SINGLELINE);
 
         // draw selection border around thumbnail and label
         if (i == data->selected) {
@@ -905,10 +891,10 @@ static void PaintOverlayLayered(HWND hwnd, ScreenshotOverlayData* data) {
             HGDIOBJ oldPen = SelectObject(hdcTemp, pen);
             HGDIOBJ oldBrush = SelectObject(hdcTemp, GetStockObject(NULL_BRUSH));
             int b = (kBorderThickness / 2) + 1;
-            int selLeft = std::min((int)rc.left, (int)labelRect.left) - b;
-            int selTop = rc.top - b;
-            int selRight = std::max((int)rc.right, (int)labelRect.right) + b;
-            int selBottom = labelRect.bottom + b;
+            int selLeft = std::min(rc.x, labelRect.x) - b;
+            int selTop = rc.y - b;
+            int selRight = std::max(rc.x + rc.dx, labelRect.x + labelRect.dx) + b;
+            int selBottom = labelRect.y + labelRect.dy + b;
             Rectangle(hdcTemp, selLeft, selTop, selRight, selBottom);
             SelectObject(hdcTemp, oldBrush);
             SelectObject(hdcTemp, oldPen);
@@ -926,13 +912,9 @@ static void PaintOverlayLayered(HWND hwnd, ScreenshotOverlayData* data) {
     DeleteObject(borderPen);
 
     // Draw info bar at the top with solid blue background
-    RECT infoRect;
-    infoRect.left = 0;
-    infoRect.right = w;
-    infoRect.top = 0;
-    infoRect.bottom = kInfoBarHeight;
+    Rect infoRect = {0, 0, w, kInfoBarHeight};
     HBRUSH brBlue = CreateSolidBrush(RGB(0, 90, 180));
-    FillRect(hdcTemp, &infoRect, brBlue);
+    HdcFillRect(hdcTemp, infoRect, brBlue);
     DeleteObject(brBlue);
 
     // Use bigger bold font for info text
@@ -946,8 +928,8 @@ static void PaintOverlayLayered(HWND hwnd, ScreenshotOverlayData* data) {
 
     SetTextColor(hdcTemp, RGB(255, 255, 255));
     SetBkMode(hdcTemp, TRANSPARENT);
-    DrawTextW(hdcTemp, L"Select screenshot to save. ↑ ↓ to navigate. Enter to select. Esc to cancel", -1, &infoRect,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    HdcDrawText(hdcTemp, WStrL(L"Select screenshot to save. ↑ ↓ to navigate. Enter to select. Esc to cancel"), infoRect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     SelectObject(hdcTemp, prevInfoFont);
     DeleteObject(infoFont);
@@ -977,19 +959,19 @@ static void PaintOverlayLayered(HWND hwnd, ScreenshotOverlayData* data) {
     // Copy thumbnail and label regions with full opacity into the DIB
     for (int i = 0; i < n; i++) {
         auto& cs = data->captures[i];
-        RECT rc = GetThumbRect(data, i);
+        Rect rc = GetThumbRect(data, i);
 
         // expand region to include border and label
         int b = (kBorderThickness / 2) + 2;
-        int x0 = std::max(0, (int)rc.left - b);
-        int y0 = std::max(0, (int)rc.top - b);
-        int x1 = std::min(w, (int)rc.right + b);
-        int y1 = std::min(h, (int)rc.bottom + 4 + kLabelHeight + b);
+        int x0 = std::max(0, rc.x - b);
+        int y0 = std::max(0, rc.y - b);
+        int x1 = std::min(w, rc.x + rc.dx + b);
+        int y1 = std::min(h, rc.y + rc.dy + 4 + kLabelHeight + b);
 
         for (int y = y0; y < y1; y++) {
             for (int x = x0; x < x1; x++) {
-                COLORREF c = RgbToCOLORREF(tempPixels[y * w + x] & 0x00FFFFFF);
-                pixels[y * w + x] = PremultiplyPixel(c, 255);
+                COLORREF c = RgbToCOLORREF(tempPixels[(y * w) + x] & 0x00FFFFFF);
+                pixels[(y * w) + x] = PremultiplyPixel(c, 255);
             }
         }
     }
@@ -998,8 +980,8 @@ static void PaintOverlayLayered(HWND hwnd, ScreenshotOverlayData* data) {
     {
         for (int y = 0; y < kInfoBarHeight; y++) {
             for (int x = 0; x < w; x++) {
-                COLORREF c = RgbToCOLORREF(tempPixels[y * w + x] & 0x00FFFFFF);
-                pixels[y * w + x] = PremultiplyPixel(c, 255);
+                COLORREF c = RgbToCOLORREF(tempPixels[(y * w) + x] & 0x00FFFFFF);
+                pixels[(y * w) + x] = PremultiplyPixel(c, 255);
             }
         }
     }
@@ -1010,16 +992,16 @@ static void PaintOverlayLayered(HWND hwnd, ScreenshotOverlayData* data) {
         DWORD px = tempPixels[x];
         pixels[x] = (255u << 24) | (px & 0xFFFFFF);
         // bottom edge
-        px = tempPixels[(h - 1) * w + x];
-        pixels[(h - 1) * w + x] = (255u << 24) | (px & 0xFFFFFF);
+        px = tempPixels[((h - 1) * w) + x];
+        pixels[((h - 1) * w) + x] = (255u << 24) | (px & 0xFFFFFF);
     }
     for (int y = 0; y < h; y++) {
         // left edge
-        DWORD px = tempPixels[y * w];
-        pixels[y * w] = (255u << 24) | (px & 0xFFFFFF);
+        DWORD px = tempPixels[(size_t)y * w];
+        pixels[(size_t)y * w] = (255u << 24) | (px & 0xFFFFFF);
         // right edge
-        px = tempPixels[y * w + w - 1];
-        pixels[y * w + w - 1] = (255u << 24) | (px & 0xFFFFFF);
+        px = tempPixels[(y * w) + w - 1];
+        pixels[(y * w) + w - 1] = (255u << 24) | (px & 0xFFFFFF);
     }
 
     free(tempPixels);
@@ -1036,9 +1018,8 @@ static void PaintOverlayLayered(HWND hwnd, ScreenshotOverlayData* data) {
     blend.SourceConstantAlpha = 255;
     blend.AlphaFormat = AC_SRC_ALPHA;
 
-    RECT winRect;
-    GetWindowRect(hwnd, &winRect);
-    POINT ptDst = {winRect.left, winRect.top};
+    Rect winRect = HwndWindowRect(hwnd);
+    POINT ptDst = {winRect.x, winRect.y};
     UpdateLayeredWindow(hwnd, hdcScreen, &ptDst, &szWnd, hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
 
     SelectObject(hdcMem, oldBmp);
@@ -1236,7 +1217,7 @@ static bool IsOtherSumatraProcessRunning() {
 static Str FindScreenshotShortcut() {
     // check gGlobalPrefs->shortcuts first (may have been updated at runtime)
     for (Shortcut* sc : *gGlobalPrefs->shortcuts) {
-        if (str::EqI(sc->cmd, "CmdScreenshot") && sc->key) {
+        if (str::EqI(sc->cmd, StrL("CmdScreenshot")) && sc->key) {
             return sc->key;
         }
     }
@@ -1341,7 +1322,7 @@ static TempStr SerializeHotkeyTemp(UINT vk, bool ctrl, bool shift, bool alt) {
 // find existing Shortcut entry for CmdScreenshot, or nullptr
 static Shortcut* FindScreenshotShortcutEntry() {
     for (Shortcut* sc : *gGlobalPrefs->shortcuts) {
-        if (str::EqI(sc->cmd, "CmdScreenshot")) {
+        if (str::EqI(sc->cmd, StrL("CmdScreenshot"))) {
             return sc;
         }
     }
@@ -1390,7 +1371,7 @@ struct SetHotkeyWnd : Wnd {
     void DoSet();
     void DoRemove();
     void OnCancel();
-    void CleanupHook();
+    static void CleanupHook();
     void ScheduleDelete();
 };
 
@@ -1662,7 +1643,7 @@ bool SetHotkeyWnd::Create(HWND owner) {
 
     int minDx = DpiScale(hwnd, 320);
     LayoutAndSizeToContent(layout, minDx, 0, hwnd);
-    CenterDialog(hwnd, owner);
+    HwndCenterDialog(hwnd, owner);
     UpdateTheme();
     UpdateUI();
 

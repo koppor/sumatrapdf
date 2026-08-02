@@ -199,7 +199,7 @@ void AIChatLog(AIChatLogger* logger, Str direction, Str text) {
 
 constexpr int kBtnIdAIChatLearnMore = 100;
 
-static HRESULT CALLBACK AIChatNotInstalledDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+static HRESULT CALLBACK AIChatNotInstalledDialogCallback(HWND /*hwnd*/, UINT msg, WPARAM wParam, LPARAM /*lParam*/,
                                                          LONG_PTR lpRefData) {
     Str docUri = lpRefData ? *(Str*)lpRefData : Str{};
     switch (msg) {
@@ -236,7 +236,7 @@ void AIChatShowNotInstalledDialog(const AIChatNotInstalledDialogArgs& args) {
     dialogConfig.pszMainInstruction = CWStrTemp(args.mainInstruction);
     dialogConfig.pszContent = CWStrTemp(content);
     dialogConfig.nDefaultButton = IDOK;
-    dialogConfig.dwFlags = flags;
+    dialogConfig.dwFlags = (TASKDIALOG_FLAGS)flags;
     dialogConfig.pfCallback = AIChatNotInstalledDialogCallback;
     dialogConfig.lpCallbackData = (LONG_PTR)&args.docUri;
     dialogConfig.pButtons = buttons;
@@ -331,7 +331,7 @@ bool AIChatGetMarkedJsResource(void* ctx, Str path, WebViewResourceResult* res) 
     if (!data || !res || len(path) == 0) {
         return false;
     }
-    if (!str::EqI(path, "/marked.min.js") && !str::EqI(path, "marked.min.js")) {
+    if (!str::EqI(path, StrL("/marked.min.js")) && !str::EqI(path, StrL("marked.min.js"))) {
         return false;
     }
     res->data = data->data;
@@ -391,6 +391,34 @@ function addError(text) {
   chatDiv.appendChild(d);
   scrollToBottom();
 }
+function sanitizedMarkdown(markdown) {
+  var t = document.createElement('template');
+  t.innerHTML = marked.parse(markdown);
+  var allowed = new Set(['A', 'BLOCKQUOTE', 'BR', 'CODE', 'DEL', 'EM', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+                         'HR', 'LI', 'OL', 'P', 'PRE', 'STRONG', 'TABLE', 'TBODY', 'TD', 'TH', 'THEAD', 'TR', 'UL']);
+  var nodes = Array.from(t.content.querySelectorAll('*'));
+  for (var el of nodes) {
+    if (!allowed.has(el.tagName)) {
+      el.replaceWith(document.createTextNode(el.textContent || ''));
+      continue;
+    }
+    for (var attr of Array.from(el.attributes)) {
+      var keep = el.tagName === 'A' && (attr.name === 'href' || attr.name === 'title');
+      if (!keep) {
+        el.removeAttribute(attr.name);
+      }
+    }
+    if (el.tagName === 'A' && el.hasAttribute('href')) {
+      try {
+        var u = new URL(el.getAttribute('href'), location.href);
+        if (!['http:', 'https:', 'mailto:'].includes(u.protocol)) el.removeAttribute('href');
+      } catch (_) {
+        el.removeAttribute('href');
+      }
+    }
+  }
+  return t.content;
+}
 function appendText(text) {
   if (!currentBlock) {
     currentBlock = document.createElement('div');
@@ -400,7 +428,7 @@ function appendText(text) {
   }
   currentRaw += text;
   if (typeof marked !== 'undefined') {
-    currentBlock.innerHTML = marked.parse(currentRaw);
+    currentBlock.replaceChildren(sanitizedMarkdown(currentRaw));
   } else {
     currentBlock.textContent = currentRaw;
   }
@@ -506,7 +534,7 @@ int AIChatLabelMaxTextDx(HWND labelHwnd, int labelDx) {
     int padX = DpiScale(labelHwnd, kAIChatLabelPadX);
     int btnDx = DpiScale(labelHwnd, kAIChatLabelCloseBtnDx);
     int spaceDx = DpiScale(labelHwnd, kAIChatLabelCloseBtnSpaceDx);
-    int maxDx = labelDx - btnDx - spaceDx - 2 * padX;
+    int maxDx = labelDx - btnDx - spaceDx - (2 * padX);
     return maxDx > 0 ? maxDx : 0;
 }
 

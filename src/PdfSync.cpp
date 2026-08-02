@@ -42,7 +42,7 @@ struct PdfsyncPoint {
 struct Pdfsync : Synchronizer {
     Pdfsync(Str syncfilename, Str pdffilename, EngineBase* engine)
         : Synchronizer(syncfilename, pdffilename), engine(engine) {
-        ReportIf(!str::EndsWithI(syncfilename, ".pdfsync"));
+        ReportIf(!str::EndsWithI(syncfilename, StrL(".pdfsync")));
     }
 
     int DocToSource(int pageNo, Point pt, Str& filename, int* line, int* col) override;
@@ -64,7 +64,7 @@ struct SyncTex : Synchronizer {
     SyncTex(Str syncfilename, Str pdffilename, EngineBase* engineIn) : Synchronizer(syncfilename, pdffilename) {
         engine = engineIn;
         scanner = nullptr;
-        ReportIf(!str::EndsWithI(syncfilename, ".synctex"));
+        ReportIf(!str::EndsWithI(syncfilename, StrL(".synctex")));
     }
 
     ~SyncTex() override { synctex_scanner_free(scanner); }
@@ -138,7 +138,7 @@ int Synchronizer::Create(Str pdffilename, EngineBase* engine, Synchronizer** syn
         return PDFSYNCERR_INVALID_ARGUMENT;
     }
 
-    if (!str::EndsWithI(pdffilename, ".pdf")) {
+    if (!str::EndsWithI(pdffilename, StrL(".pdf"))) {
         return PDFSYNCERR_INVALID_ARGUMENT;
     }
 
@@ -325,10 +325,10 @@ int Pdfsync::RebuildIndexIfNeeded() {
 }
 
 // convert a coordinate from the sync file into a PDF coordinate
-#define SYNC_TO_PDF_COORDINATE(c) (c / 65781.76)
+#define SYNC_TO_PDF_COORDINATE(c) ((c) / 65781.76)
 
 static int cmpLineRecords(const void* a, const void* b) {
-    return ((PdfsyncLine*)a)->record - ((PdfsyncLine*)b)->record;
+    return (int)((PdfsyncLine*)a)->record - (int)((PdfsyncLine*)b)->record;
 }
 
 // If `srcfilepath` doesn't exist on disk, checks whether it's been moved to sit
@@ -375,7 +375,7 @@ int Pdfsync::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
         // check whether it is closer than the closest point found so far
         UINT dx = abs(pt.x - (int)SYNC_TO_PDF_COORDINATE(points[i].x));
         UINT dy = abs(pt.y - (int)SYNC_TO_PDF_COORDINATE(points[i].y));
-        UINT dist = dx * dx + dy * dy;
+        UINT dist = (dx * dx) + (dy * dy);
         if (dist < PDFSYNC_EPSILON_SQUARE && dist < closest_xydist) {
             selected_record = points[i].record;
             closest_xydist = dist;
@@ -494,7 +494,7 @@ int Pdfsync::SourceToDoc(Str srcfilename, int line, int col, int* page, Vec<Rect
     Vec<int> found_records;
     UINT ret = SourceToRecord(srcfilename, line, col, found_records);
     if (ret != PDFSYNCERR_SUCCESS || len(found_records) == 0) {
-        return ret;
+        return (int)ret;
     }
 
     rects.Reset();
@@ -622,43 +622,42 @@ TempStr DealPlainSync(TempStr pathSync) {
     if (wlen != 0) {
         logf("DealPlainSync: '%s' is utf-8 (created by lualatex)\n", pathSync);
         return pathSync;
-    } else {
-        logf("DealPlainSync: '%s' NOT utf-8, decode by local ansi and write utf-8 to temp file\n", pathSync);
-        Str converted = ConvertLocalToUTF8(srcZ);
-        if (!converted) {
-            logfa("DealPlainSync: unable to convert '%s' from local ansi to utf-8.\n", pathSync);
-            return {};
-        }
-        Str dst = converted;
-
-        if (len(dst) == 0) {
-            logfa("DealPlainSync: decoded content is empty.\n", pathSync);
-            return {};
-        }
-        TempStr tempPath = GetTempFilePathTemp("stx"); // stxabcdef.tmp
-        if (!tempPath) {
-            str::Free(dst);
-            logfa("DealPlainSync: unable to get temp file path. error: %d.\n", errno);
-            return {};
-        }
-        bool ok = file::WriteFile(tempPath, dst);
-        str::Free(dst);
-        if (!ok) {
-            logfa("DealPlainSync: unable to write temp file '%s'. error: %d.\n", tempPath, errno);
-            return {};
-        }
-        logfa("DealPlainSync: utf-8 written to temp file '%s'.\n", tempPath);
-
-        TempStr tempPathNoExt = path::GetPathNoExtTemp(tempPath);              // stxabcdef
-        TempStr tempPathSync = str::JoinTemp(tempPathNoExt, StrL(".synctex")); // stxabcdef.synctex
-        int ret = rename(tempPath.s, tempPathSync.s);
-        if (ret) {
-            logfa("DealPlainSync: unable rename from '%s' to '%s'. error: %d.\n", tempPath, tempPathSync, errno);
-            return {};
-        }
-        logfa("DealPlainSync: copied '%s' to '%s'\n", pathSync, tempPathSync);
-        return tempPathSync;
     }
+    logf("DealPlainSync: '%s' NOT utf-8, decode by local ansi and write utf-8 to temp file\n", pathSync);
+    Str converted = ConvertLocalToUTF8(srcZ);
+    if (!converted) {
+        logfa("DealPlainSync: unable to convert '%s' from local ansi to utf-8.\n", pathSync);
+        return {};
+    }
+    Str dst = converted;
+
+    if (len(dst) == 0) {
+        logfa("DealPlainSync: decoded content is empty.\n", pathSync);
+        return {};
+    }
+    TempStr tempPath = GetTempFilePathTemp("stx"); // stxabcdef.tmp
+    if (!tempPath) {
+        str::Free(dst);
+        logfa("DealPlainSync: unable to get temp file path. error: %d.\n", errno);
+        return {};
+    }
+    bool ok = file::WriteFile(tempPath, dst);
+    str::Free(dst);
+    if (!ok) {
+        logfa("DealPlainSync: unable to write temp file '%s'. error: %d.\n", tempPath, errno);
+        return {};
+    }
+    logfa("DealPlainSync: utf-8 written to temp file '%s'.\n", tempPath);
+
+    TempStr tempPathNoExt = path::GetPathNoExtTemp(tempPath);              // stxabcdef
+    TempStr tempPathSync = str::JoinTemp(tempPathNoExt, StrL(".synctex")); // stxabcdef.synctex
+    int ret = rename(tempPath.s, tempPathSync.s);
+    if (ret) {
+        logfa("DealPlainSync: unable rename from '%s' to '%s'. error: %d.\n", tempPath, tempPathSync, errno);
+        return {};
+    }
+    logfa("DealPlainSync: copied '%s' to '%s'\n", pathSync, tempPathSync);
+    return tempPathSync;
 }
 
 static bool IsGzipFile(Str path) {
@@ -679,7 +678,9 @@ TempStr ungzipToTempSync(Str gzPath) {
         return {};
     }
     logf("ungzipToTempSync: file::ReadFile() did read '%s'\n", gzPath);
-    Str uncompr = Ungzip(compr);
+    constexpr int kMaxSyncTexSize = 256 * 1024 * 1024;
+    int expansionLimit = (int)std::min((i64)kMaxSyncTexSize, (i64)len(compr) * 1000);
+    Str uncompr = Ungzip(compr, expansionLimit);
     if (len(uncompr) == 0) {
         str::Free(compr);
         return {};
@@ -930,7 +931,7 @@ int SyncTex::SourceToDoc(Str srcfilename, int line, int col, int* page, Vec<Rect
             if (firstpage <= 0 || firstpage > engine->PageCount()) {
                 continue;
             }
-            *page = (UINT)firstpage;
+            *page = (int)(UINT)firstpage;
         }
         if (synctex_node_page(node) != firstpage) {
             continue;

@@ -6,7 +6,7 @@
 #include "base/File.h"
 #include "base/Win.h"
 #include "base/Dpi.h"
-#include "base/GdiPlus.h"
+#include "base/GdiPlusUtil.h"
 #include "ImageReader.h"
 
 #include "wingui/UIModels.h"
@@ -356,13 +356,12 @@ static bool TriggerImageEditMnemonic(ImageEditWindow* ew, WCHAR key) {
         if (!btn || !btn->hwnd || !IsWindowEnabled(btn->hwnd)) {
             continue;
         }
-        WCHAR buf[256]{};
-        GetWindowTextW(btn->hwnd, buf, dimof(buf) - 1);
-        WCHAR* amp = wcschr(buf, L'&');
-        if (!amp || amp[1] == L'\0') {
+        TempWStr text = ToWStrTemp(HwndGetTextTemp(btn->hwnd));
+        int ampIdx = wstr::IndexOfChar(text, L'&');
+        if (ampIdx < 0 || ampIdx + 1 >= len(text)) {
             continue;
         }
-        if (UpperW(amp[1]) == key) {
+        if (UpperW(text.s[ampIdx + 1]) == key) {
             if (btn->onClick.IsValid()) {
                 btn->onClick.Call();
             }
@@ -377,7 +376,7 @@ static int DisplayToImageX(ImageEditWindow* ew, int dx) {
     if (ew->imgDisplayW <= 0) {
         return 0;
     }
-    int v = (int)((float)(dx - ew->imgDisplayX) * ew->imgW / ew->imgDisplayW);
+    int v = (int)((float)(dx - ew->imgDisplayX) * (float)ew->imgW / (float)ew->imgDisplayW);
     return setMinMax(v, 0, ew->imgW);
 }
 
@@ -385,7 +384,7 @@ static int DisplayToImageY(ImageEditWindow* ew, int dy) {
     if (ew->imgDisplayH <= 0) {
         return 0;
     }
-    int v = (int)((float)(dy - ew->imgDisplayY) * ew->imgH / ew->imgDisplayH);
+    int v = (int)((float)(dy - ew->imgDisplayY) * (float)ew->imgH / (float)ew->imgDisplayH);
     return setMinMax(v, 0, ew->imgH);
 }
 
@@ -394,14 +393,14 @@ static int ImageToDisplayX(ImageEditWindow* ew, int ix) {
     if (ew->imgW <= 0) {
         return ew->imgDisplayX;
     }
-    return ew->imgDisplayX + (int)((float)ix * ew->imgDisplayW / ew->imgW);
+    return ew->imgDisplayX + (int)((float)ix * (float)ew->imgDisplayW / (float)ew->imgW);
 }
 
 static int ImageToDisplayY(ImageEditWindow* ew, int iy) {
     if (ew->imgH <= 0) {
         return ew->imgDisplayY;
     }
-    return ew->imgDisplayY + (int)((float)iy * ew->imgDisplayH / ew->imgH);
+    return ew->imgDisplayY + (int)((float)iy * (float)ew->imgDisplayH / (float)ew->imgH);
 }
 
 // Convert display-scale sizes to image-scale sizes (resize mode)
@@ -409,14 +408,14 @@ static int DisplayToImageW(ImageEditWindow* ew, int dispW) {
     if (ew->imgDisplayW <= 0) {
         return 0;
     }
-    return (int)((float)dispW * ew->imgW / ew->imgDisplayW);
+    return (int)((float)dispW * (float)ew->imgW / (float)ew->imgDisplayW);
 }
 
 static int DisplayToImageH(ImageEditWindow* ew, int dispH) {
     if (ew->imgDisplayH <= 0) {
         return 0;
     }
-    return (int)((float)dispH * ew->imgH / ew->imgDisplayH);
+    return (int)((float)dispH * (float)ew->imgH / (float)ew->imgDisplayH);
 }
 
 // Convert image size to display size (resize mode)
@@ -424,14 +423,14 @@ static int ImageToDisplayW(ImageEditWindow* ew, int iw) {
     if (ew->imgW <= 0) {
         return 0;
     }
-    return (int)((float)iw * ew->imgDisplayW / ew->imgW);
+    return (int)((float)iw * (float)ew->imgDisplayW / (float)ew->imgW);
 }
 
 static int ImageToDisplayH(ImageEditWindow* ew, int ih) {
     if (ew->imgH <= 0) {
         return 0;
     }
-    return (int)((float)ih * ew->imgDisplayH / ew->imgH);
+    return (int)((float)ih * (float)ew->imgDisplayH / (float)ew->imgH);
 }
 
 static void LayoutControls(ImageEditWindow* ew);
@@ -525,8 +524,8 @@ static TempStr FormatCropInfoTemp(int srcW, int srcH, int cropW, int cropH, int 
 }
 
 static TempStr FormatResizeInfoTemp(int srcW, int srcH, int newW, int newH) {
-    float pctW = (srcW > 0) ? (float)newW * 100.0f / srcW : 0.0f;
-    float pctH = (srcH > 0) ? (float)newH * 100.0f / srcH : 0.0f;
+    float pctW = (srcW > 0) ? (float)newW * 100.0f / (float)srcW : 0.0f;
+    float pctH = (srcH > 0) ? (float)newH * 100.0f / (float)srcH : 0.0f;
     return fmt("%d x %d => %d x %d (%.2f%% x %.2f%%)", srcW, srcH, newW, newH, pctW, pctH);
 }
 
@@ -547,10 +546,10 @@ static void UpdateInfoLabel(ImageEditWindow* ew) {
 
 // invalidate only the image area, not the control area below
 static void InvalidateImageArea(ImageEditWindow* ew) {
-    RECT rc = {0, 0, 0, 0};
-    GetClientRect(ew->hwnd, &rc);
-    rc.bottom = ew->imgAreaH;
-    InvalidateRect(ew->hwnd, &rc, FALSE);
+    Rect imageRect = HwndClientRect(ew->hwnd);
+    imageRect.dy = ew->imgAreaH;
+    RECT rc = ToRECT(imageRect);
+    HwndInvalidateRect(ew->hwnd, imageRect, false);
 }
 
 static int GetControlAreaDy(ImageEditWindow* ew) {
@@ -577,8 +576,8 @@ static Size CalcImageEditWindowSizeEx(HWND dpiHwnd, HWND hwndParent, bool fromRe
             controlDy -= DpiScale(dpiHwnd, 16) + DpiScale(dpiHwnd, kRowPadding);
         }
     }
-    int wantW = imgW + 2 * imagePadding;
-    int wantH = imgH + 2 * imagePadding + controlDy;
+    int wantW = imgW + (2 * imagePadding);
+    int wantH = imgH + (2 * imagePadding) + controlDy;
     RECT rc = {0, 0, wantW, wantH};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
     int winW = rc.right - rc.left;
@@ -619,14 +618,14 @@ static void ResizeImageEditWindowToImage(ImageEditWindow* ew, int prevW, int pre
     ImageEditLayoutDimensions(ew, ew->imgW, ew->imgH, downsizing, &layoutW, &layoutH);
     Size winSize = CalcImageEditWindowSizeEx(ew->hwnd, ew->hwndParent, ew->fromRenderedBitmap, layoutW, layoutH, ew);
     SetWindowPos(ew->hwnd, nullptr, 0, 0, winSize.dx, winSize.dy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-    CenterDialog(ew->hwnd, ew->hwndParent);
+    HwndCenterDialog(ew->hwnd, ew->hwndParent);
     CalcImageLayout(ew);
     LayoutControls(ew);
-    InvalidateRect(ew->hwnd, nullptr, TRUE);
+    HwndInvalidate(ew->hwnd, true);
 }
 
 static void CalcImageLayout(ImageEditWindow* ew) {
-    Rect cRc = ClientRect(ew->hwnd);
+    Rect cRc = HwndClientRect(ew->hwnd);
     ew->imgAreaH = cRc.dy - GetControlAreaDy(ew);
     if (ew->imgAreaH < 10) {
         ew->imgAreaH = 10;
@@ -634,8 +633,8 @@ static void CalcImageLayout(ImageEditWindow* ew) {
 
     int imgPad = ImageEditImagePadding(ew);
     // fit image within image area with padding
-    int availW = cRc.dx - 2 * imgPad;
-    int availH = ew->imgAreaH - 2 * imgPad;
+    int availW = cRc.dx - (2 * imgPad);
+    int availH = ew->imgAreaH - (2 * imgPad);
     if (availW <= 0 || availH <= 0 || ew->imgW <= 0 || ew->imgH <= 0) {
         ew->imgDisplayX = imgPad;
         ew->imgDisplayY = imgPad;
@@ -644,19 +643,19 @@ static void CalcImageLayout(ImageEditWindow* ew) {
         return;
     }
 
-    float scaleX = (float)availW / ew->imgW;
-    float scaleY = (float)availH / ew->imgH;
+    float scaleX = (float)availW / (float)ew->imgW;
+    float scaleY = (float)availH / (float)ew->imgH;
     float scale = std::min(scaleX, scaleY);
     // don't upscale beyond 100%
     if (scale > 1.0f) {
         scale = 1.0f;
     }
 
-    ew->imgDisplayW = (int)(ew->imgW * scale);
-    ew->imgDisplayH = (int)(ew->imgH * scale);
+    ew->imgDisplayW = (int)((float)ew->imgW * scale);
+    ew->imgDisplayH = (int)((float)ew->imgH * scale);
     // center in available area
-    ew->imgDisplayX = imgPad + (availW - ew->imgDisplayW) / 2;
-    ew->imgDisplayY = imgPad + (availH - ew->imgDisplayH) / 2;
+    ew->imgDisplayX = imgPad + ((availW - ew->imgDisplayW) / 2);
+    ew->imgDisplayY = imgPad + ((availH - ew->imgDisplayH) / 2);
 }
 
 // Grow the window if the new-size rectangle exceeds the image display area (resize mode only).
@@ -665,10 +664,10 @@ static void CalcImageLayout(ImageEditWindow* ew) {
 static void GrowWindowIfNeeded(ImageEditWindow* ew, DragEdge edge) {
     int imgPad = ImageEditImagePadding(ew);
     // calculate how much display space the new size needs
-    int neededDispW = ImageToDisplayW(ew, ew->newW) + 2 * imgPad;
-    int neededDispH = ImageToDisplayH(ew, ew->newH) + 2 * imgPad;
+    int neededDispW = ImageToDisplayW(ew, ew->newW) + (2 * imgPad);
+    int neededDispH = ImageToDisplayH(ew, ew->newH) + (2 * imgPad);
 
-    Rect cRc = ClientRect(ew->hwnd);
+    Rect cRc = HwndClientRect(ew->hwnd);
     int availW = cRc.dx;
     int availH = ew->imgAreaH;
 
@@ -693,12 +692,11 @@ static void GrowWindowIfNeeded(ImageEditWindow* ew, DragEdge edge) {
     int screenR = mi.rcWork.right;
     int screenB = mi.rcWork.bottom;
 
-    RECT winRc;
-    GetWindowRect(ew->hwnd, &winRc);
-    int winX = winRc.left;
-    int winY = winRc.top;
-    int winW = winRc.right - winRc.left;
-    int winH = winRc.bottom - winRc.top;
+    Rect winRc = HwndWindowRect(ew->hwnd);
+    int winX = winRc.x;
+    int winY = winRc.y;
+    int winW = winRc.dx;
+    int winH = winRc.dy;
 
     int newWinW = winW + extraW;
     int newWinH = winH + extraH;
@@ -812,11 +810,11 @@ static DragEdge HitTestResizeEdge(ImageEditWindow* ew, int mx, int my) {
     // the "new size" rectangle, centered in the display area
     int dispNewW = ImageToDisplayW(ew, ew->newW);
     int dispNewH = ImageToDisplayH(ew, ew->newH);
-    int cx = ew->imgDisplayX + ew->imgDisplayW / 2;
-    int cy = ew->imgDisplayY + ew->imgDisplayH / 2;
-    int left = cx - dispNewW / 2;
+    int cx = ew->imgDisplayX + (ew->imgDisplayW / 2);
+    int cy = ew->imgDisplayY + (ew->imgDisplayH / 2);
+    int left = cx - (dispNewW / 2);
     int right = left + dispNewW;
-    int top = cy - dispNewH / 2;
+    int top = cy - (dispNewH / 2);
     int bottom = top + dispNewH;
 
     int t = kResizeEdgeThreshold;
@@ -926,9 +924,9 @@ static HCURSOR GetCursorForEdge(DragEdge edge) {
 }
 
 static void PaintSaveImage(ImageEditWindow* ew, HDC hdc) {
-    Rect cRc = ClientRect(ew->hwnd);
+    Rect cRc = HwndClientRect(ew->hwnd);
 
-    PaintCheckerboard(hdc, 0, 0, cRc.dx, ew->imgAreaH);
+    HdcPaintCheckerboard(hdc, 0, 0, cRc.dx, ew->imgAreaH);
 
     if (!ew->srcBitmap || ew->imgDisplayW <= 0 || ew->imgDisplayH <= 0) {
         return;
@@ -939,9 +937,9 @@ static void PaintSaveImage(ImageEditWindow* ew, HDC hdc) {
 }
 
 static void PaintCropImage(ImageEditWindow* ew, HDC hdc) {
-    Rect cRc = ClientRect(ew->hwnd);
+    Rect cRc = HwndClientRect(ew->hwnd);
 
-    PaintCheckerboard(hdc, 0, 0, cRc.dx, ew->imgAreaH);
+    HdcPaintCheckerboard(hdc, 0, 0, cRc.dx, ew->imgAreaH);
 
     if (!ew->srcBitmap || ew->imgDisplayW <= 0 || ew->imgDisplayH <= 0) {
         return;
@@ -1018,9 +1016,9 @@ static void PaintCropImage(ImageEditWindow* ew, HDC hdc) {
 }
 
 static void PaintResizeImage(ImageEditWindow* ew, HDC hdc) {
-    Rect cRc = ClientRect(ew->hwnd);
+    Rect cRc = HwndClientRect(ew->hwnd);
 
-    PaintCheckerboard(hdc, 0, 0, cRc.dx, ew->imgAreaH);
+    HdcPaintCheckerboard(hdc, 0, 0, cRc.dx, ew->imgAreaH);
 
     if (!ew->srcBitmap || ew->imgDisplayW <= 0 || ew->imgDisplayH <= 0) {
         return;
@@ -1039,10 +1037,10 @@ static void PaintResizeImage(ImageEditWindow* ew, HDC hdc) {
     // draw the "new size" rectangle showing the resized portion, centered
     int dispNewW = ImageToDisplayW(ew, ew->newW);
     int dispNewH = ImageToDisplayH(ew, ew->newH);
-    int cx = ew->imgDisplayX + ew->imgDisplayW / 2;
-    int cy = ew->imgDisplayY + ew->imgDisplayH / 2;
-    int newLeft = cx - dispNewW / 2;
-    int newTop = cy - dispNewH / 2;
+    int cx = ew->imgDisplayX + (ew->imgDisplayW / 2);
+    int cy = ew->imgDisplayY + (ew->imgDisplayH / 2);
+    int newLeft = cx - (dispNewW / 2);
+    int newTop = cy - (dispNewH / 2);
 
     // redraw the image portion at the new size area (clear overlay there)
     // clip source to full image, draw scaled into the new rect
@@ -1056,8 +1054,8 @@ static void PaintResizeImage(ImageEditWindow* ew, HDC hdc) {
     // draw drag handles
     int hs = kDragHandleSize;
     int hh = hs / 2;
-    int midX = newLeft + dispNewW / 2;
-    int midY = newTop + dispNewH / 2;
+    int midX = newLeft + (dispNewW / 2);
+    int midY = newTop + (dispNewH / 2);
     int right = newLeft + dispNewW;
     int bottom = newTop + dispNewH;
 
@@ -1083,9 +1081,9 @@ static void LayoutControls(ImageEditWindow* ew) {
     if (!ew->controlLayout) {
         return;
     }
-    Rect cRc = ClientRect(ew->hwnd);
+    Rect cRc = HwndClientRect(ew->hwnd);
     int btnPad = ImageEditButtonPadding(ew);
-    int w = cRc.dx - 2 * btnPad;
+    int w = cRc.dx - (2 * btnPad);
     Constraints bc = Loose({w, Inf});
     Size layoutSize = ew->controlLayout->Layout(bc);
     ew->controlLayout->SetBounds({0, ew->imgAreaH, cRc.dx, layoutSize.dy});
@@ -1573,7 +1571,7 @@ LRESULT CALLBACK WndProcImageEdit(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (ew->mode == ImageEditMode::Crop) {
                     InvalidateImageArea(ew);
                 } else {
-                    InvalidateRect(hwnd, nullptr, TRUE);
+                    HwndInvalidate(hwnd, true);
                 }
             }
             return 0;
@@ -1589,7 +1587,7 @@ LRESULT CALLBACK WndProcImageEdit(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 ImageEditApplyFont(ew);
                 CalcImageLayout(ew);
                 LayoutControls(ew);
-                InvalidateRect(hwnd, nullptr, TRUE);
+                HwndInvalidate(hwnd, true);
             }
             return 0;
         }
@@ -1600,7 +1598,7 @@ LRESULT CALLBACK WndProcImageEdit(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
             // double-buffer only the image area to avoid flicker
-            Rect cRc = ClientRect(hwnd);
+            Rect cRc = HwndClientRect(hwnd);
             int paintH = ew->imgAreaH;
             if (paintH > cRc.dy) {
                 paintH = cRc.dy;
@@ -1628,10 +1626,9 @@ LRESULT CALLBACK WndProcImageEdit(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!ew) return 0;
             // paint control area background, skip image area (double-buffered)
             HDC hdc = (HDC)wp;
-            RECT crc;
-            GetClientRect(hwnd, &crc);
-            RECT ctrlRc = {0, ew->imgAreaH, crc.right, crc.bottom};
-            FillRect(hdc, &ctrlRc, GetSysColorBrush(COLOR_BTNFACE));
+            Rect crc = HwndClientRect(hwnd);
+            Rect ctrlRc = {0, ew->imgAreaH, crc.dx, crc.dy - ew->imgAreaH};
+            HdcFillRect(hdc, ctrlRc, GetSysColorBrush(COLOR_BTNFACE));
             return 1;
         }
 
@@ -1744,17 +1741,17 @@ LRESULT CALLBACK WndProcImageEdit(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
                     // left/right edges change width
                     if (edge == DragEdge::Left || edge == DragEdge::TopLeft || edge == DragEdge::BottomLeft) {
-                        nw = ew->dragNewW - imgDx * 2; // symmetric resize
+                        nw = ew->dragNewW - (imgDx * 2); // symmetric resize
                     }
                     if (edge == DragEdge::Right || edge == DragEdge::TopRight || edge == DragEdge::BottomRight) {
-                        nw = ew->dragNewW + imgDx * 2;
+                        nw = ew->dragNewW + (imgDx * 2);
                     }
                     // top/bottom edges change height
                     if (edge == DragEdge::Top || edge == DragEdge::TopLeft || edge == DragEdge::TopRight) {
-                        nh = ew->dragNewH - imgDy * 2;
+                        nh = ew->dragNewH - (imgDy * 2);
                     }
                     if (edge == DragEdge::Bottom || edge == DragEdge::BottomLeft || edge == DragEdge::BottomRight) {
-                        nh = ew->dragNewH + imgDy * 2;
+                        nh = ew->dragNewH + (imgDy * 2);
                     }
 
                     if (nw < 1) {
@@ -1855,9 +1852,7 @@ LRESULT CALLBACK WndProcImageEdit(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_SETCURSOR: {
             ew = FindImageEditWindowByHwnd(hwnd);
             if (ew && ew->mode != ImageEditMode::Save && LOWORD(lp) == HTCLIENT) {
-                POINT pt;
-                GetCursorPos(&pt);
-                ScreenToClient(hwnd, &pt);
+                Point pt = HwndGetCursorPos(hwnd);
                 DragEdge edge;
                 if (ew->mode == ImageEditMode::Crop) {
                     edge = HitTestCropEdge(ew, pt.x, pt.y);
@@ -2244,8 +2239,8 @@ void ShowImageEditWindow(MainWindow* win, ImageEditMode mode, Str filePath, Rend
     LayoutControls(ew);
     UpdateSaveButtonText(ew);
 
-    CenterDialog(hwnd, win->hwndFrame);
-    HwndEnsureVisible(hwnd);
+    HwndCenterDialog(hwnd, win->hwndFrame);
+    HwndEnsureOnScreen(hwnd);
     if (UseDarkModeLib()) {
         DarkMode::setDarkWndSafe(hwnd);
         DarkMode::setWindowEraseBgSubclass(hwnd);

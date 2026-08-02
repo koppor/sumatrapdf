@@ -287,12 +287,11 @@ struct LoadArgs {
     FileArgs* fileArgs = nullptr;
 
     TabState* tabState = nullptr;
+    WindowTab* targetTab = nullptr;
 
     // if set, called on the UI thread when the load finishes,
     // with true if the document was loaded successfully
     Func1<bool> onFinished;
-    // corner for the "Loading ..." notification; zero-init is TopLeft
-    NotifCorner loadingNotifCorner{};
 
   private:
     Str fileName;
@@ -304,6 +303,7 @@ struct PasswordUI;
 MainWindow* LoadDocument(LoadArgs* args);
 MainWindow* LoadDocumentFinish(LoadArgs* args);
 void StartLoadDocument(LoadArgs* args);
+void StartLoadDocuments(StrVec& paths, MainWindow* win);
 MainWindow* CreateAndShowMainWindow(SessionData* data = nullptr, bool showWin = true);
 void ShowMainWindow(MainWindow* win, int windowState);
 DocController* CreateControllerForEngineOrFile(EngineBase* engine, Str path, PasswordUI* pwdUI, MainWindow* win);
@@ -331,6 +331,10 @@ SettingsApplyState GetSettingsApplyState();
 void ApplyChangedSettingsAndRelayout(const SettingsApplyState& before);
 
 void SwitchToDisplayMode(MainWindow* win, DisplayMode displayMode, bool keepContinuous = false);
+// vertical scroll intent for discoverability of "open next file in folder":
+// scroll-down at document end may show a next-file hint; scroll-up dismisses it
+void OnDocumentVerticalScrollIntent(MainWindow* win, bool down);
+void DismissNextFileScrollHint(MainWindow* win);
 void MainWindowRerender(MainWindow* win, bool includeNonClientArea = false);
 LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 void ShutdownCleanup();

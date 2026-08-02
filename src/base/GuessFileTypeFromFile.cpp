@@ -35,10 +35,10 @@ static bool IsEpubArchive(Archive* archive) {
     }
 
     Str mtStr = Str(mt, n);
-    if (str::Eq(mtStr, "application/epub+zip")) {
+    if (str::Eq(mtStr, StrL("application/epub+zip"))) {
         return true;
     }
-    return str::Eq(mtStr, "application/x-ibooks+zip");
+    return str::Eq(mtStr, StrL("application/x-ibooks+zip"));
 }
 
 static bool IsXpsArchive(Archive* archive) {
@@ -54,7 +54,7 @@ static bool IsFb2Archive(Archive* archive) {
     }
     auto fi = files[0];
     auto name = fi->name;
-    return str::EndsWithI(name, ".fb2");
+    return str::EndsWithI(name, StrL(".fb2"));
 }
 
 FileType GuessFileTypeFromFile(Str path) {

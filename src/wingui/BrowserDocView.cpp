@@ -241,10 +241,8 @@ void BrowserWebviewWnd::OnBrowserMessage(Str msg) {
         return;
     }
     // note: "mdfindall" must be tested before "mdfind" (shared prefix)
-    constexpr int kMdFindAllPrefixLen = 10; // "mdfindall "
-    if (owner && owner->cb && str::StartsWith(msg, "mdfindall ")) {
-        Str payload = Str(msg.s + kMdFindAllPrefixLen, msg.len - kMdFindAllPrefixLen);
-        owner->cb->OnFindAllResult(payload);
+    if (owner && owner->cb && str::TrimPrefix(msg, StrL("mdfindall "))) {
+        owner->cb->OnFindAllResult(msg);
         return;
     }
     int gen = 0;
@@ -340,7 +338,8 @@ void BrowserDocView::UnsubclassParent() {
     subclassId = 0;
 }
 
-LRESULT BrowserDocView::ParentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR subclassId, DWORD_PTR data) {
+LRESULT BrowserDocView::ParentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR /*subclassId*/,
+                                      DWORD_PTR data) {
     auto* view = reinterpret_cast<BrowserDocView*>(data);
     if (!view) {
         return DefSubclassProc(hwnd, msg, wp, lp);
@@ -349,7 +348,7 @@ LRESULT BrowserDocView::ParentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     switch (msg) {
         case WM_SIZE:
             if (view->wv && view->wv->hwnd) {
-                Rect rc = ClientRect(hwnd);
+                Rect rc = HwndClientRect(hwnd);
                 view->wv->SetBounds(rc);
                 view->wv->UpdateWebviewSize();
             }
@@ -394,6 +393,7 @@ bool BrowserDocView::CreateWebView2() {
     wv->events.navigationCompleted = NavigationCompleted;
     wv->events.historyChanged = HistoryChanged;
     wv->events.resolveAccelCmd = ChmResolveAccelCmd;
+    wv->allowClipboardRead = false;
     // forward app accelerators (Ctrl+W close tab, Ctrl+K command palette, etc.)
     // to the main window so they work while the WebView2 has keyboard focus
     wv->forwardAppAccelerators = true;
@@ -401,7 +401,7 @@ bool BrowserDocView::CreateWebView2() {
     // instead of being swallowed by the WebView2 control
     wv->allowExternalDrop = false;
 
-    Rect rc = ClientRect(hwndParent);
+    Rect rc = HwndClientRect(hwndParent);
     CreateWebViewArgs cargs;
     cargs.parent = hwndParent;
     cargs.pos = rc;

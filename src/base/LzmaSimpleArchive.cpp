@@ -2,11 +2,12 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#include <LzmaDec.h>
-#include <Bra.h>
-#include "base/ByteOrderDecoder.h"
+#include "base/ByteReaderWriter.h"
 #include "base/LzmaSimpleArchive.h"
 #include "base/File.h"
+
+#include <LzmaDec.h>
+#include <Bra.h>
 
 /*
 Implements extracting data from a simple archive format, made up by me.
@@ -15,8 +16,8 @@ Archives are simple to create (in SumatraPDF, we used to use lzma.exe and a pyth
 there's a tool for creating them in ../MakeLzSA.cpp
 
 LzmaDecode / x86_Convert come from ext/lzma/C (LzmaDec.c, Bra86.c) compiled into
-base and SumatraPDF.exe — not from libmupdf.dll (libarchive uses liblzma instead).
-The installer must decompress IDR_DLL_PAK (which contains libmupdf.dll) without
+base and SumatraPDF.exe — not from libsumatrapdf.dll (libarchive uses liblzma instead).
+The installer must decompress IDR_DLL_PAK (which contains libsumatrapdf.dll) without
 calling into that DLL.
 */
 
@@ -144,21 +145,21 @@ Integers are little-endian.
 #define HEADER_START_SIZE (4 + 4)
 
 // 4 * u32 + FILETIME + name
-#define FILE_ENTRY_MIN_SIZE (4 * 4 + 8 + 1)
+#define FILE_ENTRY_MIN_SIZE ((4 * 4) + 8 + 1)
 
 bool ParseSimpleArchive(const u8* archiveHeader, int dataLen, SimpleArchive* archiveOut) {
     if (dataLen < HEADER_START_SIZE) {
         return false;
     }
 
-    ByteOrderDecoder br(archiveHeader, dataLen, ByteOrderDecoder::LittleEndian);
-    u32 magic_id = br.UInt32();
+    ByteReader br(archiveHeader, dataLen);
+    u32 magic_id = br.UInt32LE();
     if (magic_id != LZMA_MAGIC_ID) {
         return false;
     }
 
-    u32 filesCount = br.UInt32();
-    archiveOut->filesCount = filesCount;
+    u32 filesCount = br.UInt32LE();
+    archiveOut->filesCount = (int)filesCount;
     if (filesCount > dimof(archiveOut->files)) {
         return false;
     }
@@ -169,7 +170,7 @@ bool ParseSimpleArchive(const u8* archiveHeader, int dataLen, SimpleArchive* arc
             return false;
         }
 
-        u32 fileHeaderSize = br.UInt32();
+        u32 fileHeaderSize = br.UInt32LE();
         if (fileHeaderSize < FILE_ENTRY_MIN_SIZE || fileHeaderSize > 1024) {
             return false;
         }
@@ -179,11 +180,11 @@ bool ParseSimpleArchive(const u8* archiveHeader, int dataLen, SimpleArchive* arc
         }
 
         fi = &archiveOut->files[i];
-        fi->compressedSize = br.UInt32();
-        fi->uncompressedSize = br.UInt32();
-        fi->uncompressedCrc32 = br.UInt32();
-        fi->ftModified.dwLowDateTime = br.UInt32();
-        fi->ftModified.dwHighDateTime = br.UInt32();
+        fi->compressedSize = br.UInt32LE();
+        fi->uncompressedSize = br.UInt32LE();
+        fi->uncompressedCrc32 = br.UInt32LE();
+        fi->ftModified.dwLowDateTime = br.UInt32LE();
+        fi->ftModified.dwHighDateTime = br.UInt32LE();
         fi->name = Str((char*)archiveHeader + br.Offset());
         br.Skip(fileHdrSize - FILE_ENTRY_MIN_SIZE);
         if (br.Char() != '\0') {
@@ -196,7 +197,7 @@ bool ParseSimpleArchive(const u8* archiveHeader, int dataLen, SimpleArchive* arc
     }
 
     int headerSize = br.Offset();
-    u32 headerCrc32 = br.UInt32();
+    u32 headerCrc32 = br.UInt32LE();
     u32 realCrc = lzma_crc32(0, archiveHeader, (u32)headerSize);
     if (headerCrc32 != realCrc) {
         return false;
@@ -226,14 +227,18 @@ int GetIdxFromName(SimpleArchive* archive, Str fileName) {
 }
 
 u8* GetFileDataByIdx(SimpleArchive* archive, int idx, Arena* a) {
-    if (idx >= archive->filesCount) {
+    if (idx < 0 || idx >= archive->filesCount) {
         return nullptr;
     }
 
     FileInfo* fi = &archive->files[idx];
+    if (fi->uncompressedSize > INT_MAX - 2) {
+        return nullptr;
+    }
 
     // over-allocate by 2 bytes and zero them so the result is always null-terminated
-    u8* uncompressed = (u8*)Alloc(a, (size_t)(fi->uncompressedSize + 2));
+    size_t allocSize = (size_t)fi->uncompressedSize + 2;
+    u8* uncompressed = (u8*)Alloc(a, allocSize);
     if (!uncompressed) {
         return nullptr;
     }

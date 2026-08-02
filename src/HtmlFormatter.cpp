@@ -12,7 +12,7 @@
 #include "HtmlFormatter.h"
 
 #if OS_WIN
-#include "base/GdiPlus.h"
+#include "base/GdiPlusUtil.h"
 #include "mui/Mui.h"
 #endif
 
@@ -481,7 +481,7 @@ float HtmlFormatter::CurrLineDy() {
 // indentation inside lists)
 float HtmlFormatter::NewLineX() const {
     // TODO: indent based on font size instead?
-    float x = 15.f * listDepth;
+    float x = 15.f * (float)listDepth;
     if (x < pageDx - 20.f) {
         return x;
     }
@@ -789,7 +789,7 @@ bool HtmlFormatter::EmitImage(Str img) {
     // move overly large images to a new page
     // (if they don't fit even when scaled down to 75%)
     float scalePage = std::min((pageDx - currX) / newSize.dx, pageDy / newSize.dy);
-    if (currY > 0 && currY + newSize.dy * std::min(scalePage, 0.75f) > pageDy) {
+    if (currY > 0 && currY + (newSize.dy * std::min(scalePage, 0.75f)) > pageDy) {
         ForceNewPage();
     }
     // if image is bigger than the available space, scale it down
@@ -945,18 +945,17 @@ void HtmlFormatter::EmitTextRun(Str s) {
             continue;
         }
 
+        if (lenThatFits < len(buf) && lenThatFits > 0 && buf.s[lenThatFits - 1] >= 0xD800 &&
+            buf.s[lenThatFits - 1] <= 0xDBFF && buf.s[lenThatFits] >= 0xDC00 && buf.s[lenThatFits] <= 0xDFFF) {
+            lenThatFits = lenThatFits == 1 ? 2 : lenThatFits - 1;
+        }
         textMeasure->SetFont(CurrFont());
         bbox = MeasureTextCached(WStr(buf.s, lenThatFits));
         ReportIf(bbox.dx > pageDx);
-        // s is UTF-8 and buf is UTF-16, so one
-        // WCHAR doesn't always equal one char
-        // TODO: this usually fails for non-BMP characters (i.e. hardly ever)
-        for (int i = lenThatFits; i > 0; i--) {
-            lenThatFits += buf.s[i - 1] < 0x80 ? 0 : buf.s[i - 1] < 0x800 ? 1 : 2;
-        }
-        AppendInstr(DrawInstr::Text(Str(run.s, lenThatFits), bbox, dirRtl));
+        int utf8LenThatFits = len(ToUtf8Temp(WStr(buf.s, lenThatFits)));
+        AppendInstr(DrawInstr::Text(Str(run.s, utf8LenThatFits), bbox, dirRtl));
         currX += bbox.dx;
-        run = Str(run.s + lenThatFits, run.len - lenThatFits);
+        run = Str(run.s + utf8LenThatFits, run.len - utf8LenThatFits);
     }
 }
 
@@ -1672,7 +1671,7 @@ void DrawHtmlPage(Gdiplus::Graphics* g, mui::ITextRender* textDraw, Vec<DrawInst
         bbox.y += offY;
         if (DrawInstrType::Line == i.type) {
             // hr is a line drawn in the middle of bounding box
-            float y = floorf(bbox.y + bbox.dy / 2.f + 0.5f);
+            float y = floorf(bbox.y + (bbox.dy / 2.f) + 0.5f);
             Gdiplus::PointF p1(bbox.x, y);
             Gdiplus::PointF p2(bbox.x + bbox.dx, y);
             if (showBbox) {

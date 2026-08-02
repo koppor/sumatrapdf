@@ -186,7 +186,7 @@ static INT_PTR CALLBACK Dialog_GetPassword_Proc(HWND hDlg, UINT msg, WPARAM wp, 
         if (UseDarkModeLib()) {
             DarkMode::setDarkWndSafe(hDlg);
         }
-        HwndSetVisibility(GetDlgItem(hDlg, IDC_REMEMBER_PASSWORD), data->remember != nullptr);
+        HwndSetVisible(GetDlgItem(hDlg, IDC_REMEMBER_PASSWORD), data->remember != nullptr);
 
         TempStr txt = fmt(_TRA("Enter password for %s").s, data->fileName);
         HwndSetDlgItemText(hDlg, IDC_GET_PASSWORD_LABEL, txt);
@@ -200,10 +200,10 @@ static INT_PTR CALLBACK Dialog_GetPassword_Proc(HWND hDlg, UINT msg, WPARAM wp, 
             CheckDlgButton(hDlg, IDC_SHOW_PASSWORD, BST_CHECKED);
             HWND hwndEdit = GetDlgItem(hDlg, IDC_GET_PASSWORD_EDIT);
             SendMessageW(hwndEdit, EM_SETPASSWORDCHAR, 0, 0);
-            InvalidateRect(hwndEdit, nullptr, TRUE);
+            HwndInvalidate(hwndEdit, true);
         }
 
-        CenterDialog(hDlg);
+        HwndCenterDialog(hDlg);
         HwndSetFocus(GetDlgItem(hDlg, IDC_GET_PASSWORD_EDIT));
         BringWindowToTop(hDlg);
         return FALSE;
@@ -236,7 +236,7 @@ static INT_PTR CALLBACK Dialog_GetPassword_Proc(HWND hDlg, UINT msg, WPARAM wp, 
                         *data->showPassword = show;
                     }
                     SendMessageW(hwndEdit, EM_SETPASSWORDCHAR, show ? 0 : (WPARAM)L'\x25CF', 0);
-                    InvalidateRect(hwndEdit, nullptr, TRUE);
+                    HwndInvalidate(hwndEdit, true);
                     return TRUE;
                 }
             }
@@ -304,7 +304,7 @@ static INT_PTR CALLBACK Dialog_GoToPage_Proc(HWND hDlg, UINT msg, WPARAM wp, LPA
         HwndSetDlgItemText(hDlg, IDOK, _TRA("Go to page"));
         HwndSetDlgItemText(hDlg, IDCANCEL, _TRA("Cancel"));
 
-        CenterDialog(hDlg);
+        HwndCenterDialog(hDlg);
         HwndSetFocus(editPageNo);
         return FALSE;
     }
@@ -384,7 +384,7 @@ static INT_PTR CALLBACK Dialog_Find_Proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM 
                                                           (LONG_PTR)Dialog_Find_Edit_Proc);
             EditSelectAll(GetDlgItem(hDlg, IDC_FIND_EDIT));
 
-            CenterDialog(hDlg);
+            HwndCenterDialog(hDlg);
             HwndSetFocus(GetDlgItem(hDlg, IDC_FIND_EDIT));
             return FALSE;
             //] ACCESSKEY_GROUP Find Dialog
@@ -439,7 +439,7 @@ static Vec<int>* gLangListMap = nullptr;
 
 static void FilterLangList(HWND hDlg, Str filter, Str currLangCode) {
     HWND langList = GetDlgItem(hDlg, IDC_CHANGE_LANG_LANG_LIST);
-    ListBox_ResetContent(langList);
+    LbResetContent(langList);
 
     delete gLangListMap;
     gLangListMap = new Vec<int>();
@@ -459,7 +459,7 @@ static void FilterLangList(HWND hDlg, Str filter, Str currLangCode) {
         gLangListMap->Append(i);
     }
     if (len(*gLangListMap) > 0) {
-        ListBox_SetCurSel(langList, itemToSelect);
+        LbSetCurrentSelection(langList, itemToSelect);
     }
 }
 
@@ -489,11 +489,11 @@ static INT_PTR CALLBACK Dialog_ChangeLanguage_Proc(HWND hDlg, UINT msg, WPARAM w
 
         langList = GetDlgItem(hDlg, IDC_CHANGE_LANG_LANG_LIST);
         // the language list is meant to be laid out left-to-right
-        SetWindowExStyle(langList, WS_EX_LAYOUTRTL, false);
+        HwndSetWindowExStyle(langList, WS_EX_LAYOUTRTL, false);
         HwndSetDlgItemText(hDlg, IDOK, _TRA("OK"));
         HwndSetDlgItemText(hDlg, IDCANCEL, _TRA("Cancel"));
 
-        CenterDialog(hDlg);
+        HwndCenterDialog(hDlg);
         HwndSetFocus(GetDlgItem(hDlg, IDC_CHANGE_LANG_SEARCH));
         return FALSE;
     }
@@ -510,7 +510,7 @@ static INT_PTR CALLBACK Dialog_ChangeLanguage_Proc(HWND hDlg, UINT msg, WPARAM w
                 ReportIf(IDC_CHANGE_LANG_LANG_LIST != LOWORD(wp));
                 langList = GetDlgItem(hDlg, IDC_CHANGE_LANG_LANG_LIST);
                 ReportIf(langList != (HWND)lp);
-                int idx = (int)ListBox_GetCurSel(langList);
+                int idx = LbGetCurrentSelection(langList);
                 if (gLangListMap && idx >= 0 && idx < len(*gLangListMap)) {
                     int langIdx = (*gLangListMap)[idx];
                     data->langCode = trans::GetLangCodeByIdxTemp(langIdx);
@@ -521,7 +521,7 @@ static INT_PTR CALLBACK Dialog_ChangeLanguage_Proc(HWND hDlg, UINT msg, WPARAM w
             switch (LOWORD(wp)) {
                 case IDOK: {
                     langList = GetDlgItem(hDlg, IDC_CHANGE_LANG_LANG_LIST);
-                    int idx = ListBox_GetCurSel(langList);
+                    int idx = LbGetCurrentSelection(langList);
                     if (gLangListMap && idx >= 0 && idx < len(*gLangListMap)) {
                         int langIdx = (*gLangListMap)[idx];
                         data->langCode = trans::GetLangCodeByIdxTemp(langIdx);
@@ -624,7 +624,7 @@ static void AddZoomLevel(float zoomLevel, HWND hwnd, Vec<float>* levels) {
 }
 
 static void SetupZoomComboBox(HWND hDlg, UINT idComboBox, bool forChm, float currZoom) {
-    HWND hwnd = GetDlgItem(hDlg, idComboBox);
+    HWND hwnd = GetDlgItem(hDlg, (int)idComboBox);
 
     auto prefs = gGlobalPrefs;
     auto customZoomLevels = prefs->zoomLevels;
@@ -661,9 +661,9 @@ static void SetupZoomComboBox(HWND hDlg, UINT idComboBox, bool forChm, float cur
         }
     }
 
-    if (SendDlgItemMessage(hDlg, idComboBox, CB_GETCURSEL, 0, 0) == -1) {
+    if (SendDlgItemMessage(hDlg, (int)idComboBox, CB_GETCURSEL, 0, 0) == -1) {
         TempStr customZoom = fmt("%.0f%%", currZoom);
-        SetDlgItemTextW(hDlg, idComboBox, CWStrTemp(customZoom));
+        SetDlgItemTextW(hDlg, (int)idComboBox, CWStrTemp(customZoom));
     }
     delete gCurrZoomLevels;
     gCurrZoomLevels = currZoomLevels;
@@ -673,7 +673,7 @@ static float GetZoomComboBoxValue(HWND hDlg, UINT idComboBox, float defaultZoom)
     float newZoom = defaultZoom;
     int idx = ComboBox_GetCurSel(GetDlgItem(hDlg, idComboBox));
     if (idx == -1) {
-        TempStr customZoom = HwndGetTextTemp(GetDlgItem(hDlg, idComboBox));
+        TempStr customZoom = HwndGetTextTemp(GetDlgItem(hDlg, (int)idComboBox));
         float zoom = (float)atof(customZoom.s);
         newZoom = limitValue(zoom, kZoomMin, kZoomMax);
         return newZoom;
@@ -709,7 +709,7 @@ static INT_PTR CALLBACK Dialog_CustomZoom_Proc(HWND hDlg, UINT msg, WPARAM wp, L
             HwndSetDlgItemText(hDlg, IDOK, _TRA("Zoom"));
             HwndSetDlgItemText(hDlg, IDCANCEL, _TRA("Cancel"));
 
-            CenterDialog(hDlg);
+            HwndCenterDialog(hDlg);
             HwndSetFocus(GetDlgItem(hDlg, IDC_DEFAULT_ZOOM));
             return FALSE;
             //] ACCESSKEY_GROUP Zoom Dialog
@@ -752,18 +752,18 @@ static INT_PTR CALLBACK Dialog_ChangeScrollbar_Proc(HWND hDlg, UINT msg, WPARAM 
             }
             Str s = gGlobalPrefs->scrollbars;
             int checkId = IDC_SCROLLBAR_WINDOWS;
-            if (str::EqI(s, "smart")) {
+            if (str::EqI(s, StrL("smart"))) {
                 checkId = IDC_SCROLLBAR_SMART;
-            } else if (str::EqI(s, "overlay")) {
+            } else if (str::EqI(s, StrL("overlay"))) {
                 checkId = IDC_SCROLLBAR_OVERLAY;
-            } else if (str::EqI(s, "hidden")) {
+            } else if (str::EqI(s, StrL("hidden"))) {
                 checkId = IDC_SCROLLBAR_HIDDEN;
             }
             CheckRadioButton(hDlg, IDC_SCROLLBAR_WINDOWS, IDC_SCROLLBAR_HIDDEN, checkId);
             HwndSetText(hDlg, _TRA("Change Scrollbar"));
             HwndSetDlgItemText(hDlg, IDOK, _TRA("OK"));
             HwndSetDlgItemText(hDlg, IDCANCEL, _TRA("Cancel"));
-            CenterDialog(hDlg);
+            HwndCenterDialog(hDlg);
             return TRUE;
         }
         case WM_COMMAND:
@@ -830,14 +830,14 @@ static void ApplyInverseSearchSettings(GlobalPrefs* prefs, HWND hwndComboBox) {
 
 static void RemoveDialogItem(HWND hDlg, int itemId, int prevId = 0) {
     HWND hItem = GetDlgItem(hDlg, itemId);
-    Rect itemRc = MapRectToWindow(WindowRect(hItem), HWND_DESKTOP, hDlg);
+    Rect itemRc = HwndMapRectToWindow(HwndWindowRect(hItem), HWND_DESKTOP, hDlg);
     // shrink by the distance to the previous item
     HWND hPrev = prevId ? GetDlgItem(hDlg, prevId) : GetWindow(hItem, GW_HWNDPREV);
-    Rect prevRc = MapRectToWindow(WindowRect(hPrev), HWND_DESKTOP, hDlg);
+    Rect prevRc = HwndMapRectToWindow(HwndWindowRect(hPrev), HWND_DESKTOP, hDlg);
     int shrink = itemRc.y - prevRc.y + itemRc.dy - prevRc.dy;
     // move items below up, shrink container items and hide contained items
     for (HWND item = GetWindow(hDlg, GW_CHILD); item; item = GetWindow(item, GW_HWNDNEXT)) {
-        Rect rc = MapRectToWindow(WindowRect(item), HWND_DESKTOP, hDlg);
+        Rect rc = HwndMapRectToWindow(HwndWindowRect(item), HWND_DESKTOP, hDlg);
         if (rc.y >= itemRc.y + itemRc.dy) { // below
             MoveWindow(item, rc.x, rc.y - shrink, rc.dx, rc.dy, TRUE);
         } else if (rc.Intersect(itemRc) == rc) { // contained (or self)
@@ -847,7 +847,7 @@ static void RemoveDialogItem(HWND hDlg, int itemId, int prevId = 0) {
         }
     }
     // shrink the dialog
-    Rect dlgRc = WindowRect(hDlg);
+    Rect dlgRc = HwndWindowRect(hDlg);
     MoveWindow(hDlg, dlgRc.x, dlgRc.y, dlgRc.dx, dlgRc.dy - shrink, TRUE);
 }
 
@@ -898,9 +898,9 @@ static INT_PTR CALLBACK Dialog_Settings_Proc(HWND hDlg, UINT msg, WPARAM wp, LPA
             HwndSetDlgItemText(hDlg, IDC_USE_TABS, _TRA("Use &tabs"));
             HwndSetDlgItemText(hDlg, IDC_CHECK_FOR_UPDATES, _TRA("Automatically check for &updates"));
             HwndSetDlgItemText(hDlg, IDC_REMEMBER_OPENED_FILES, _TRA("Remember &opened files"));
-            HwndSetDlgItemText(hDlg, IDC_SECTION_INVERSESEARCH, _TRA("Set inverse search command-line"));
+            HwndSetDlgItemText(hDlg, IDC_SECTION_INVERSESEARCH, _TRA("Set inverse search command line"));
             HwndSetDlgItemText(hDlg, IDC_CMDLINE_LABEL,
-                               _TRA("Enter the command-line to invoke when you double-click on the PDF document:"));
+                               _TRA("Enter the command line to invoke when you double-click on the PDF document:"));
             HwndSetDlgItemText(hDlg, IDOK, _TRA("OK"));
             HwndSetDlgItemText(hDlg, IDCANCEL, _TRA("Cancel"));
 
@@ -910,7 +910,7 @@ static INT_PTR CALLBACK Dialog_Settings_Proc(HWND hDlg, UINT msg, WPARAM wp, LPA
                 RemoveDialogItem(hDlg, IDC_SECTION_INVERSESEARCH, IDC_SECTION_ADVANCED);
             }
 
-            CenterDialog(hDlg);
+            HwndCenterDialog(hDlg);
             HwndSetFocus(GetDlgItem(hDlg, IDC_DEFAULT_LAYOUT));
             return FALSE;
             //] ACCESSKEY_GROUP Settings Dialog
@@ -971,15 +971,15 @@ static INT_PTR CALLBACK Dialog_SetInverseSearch_Proc(HWND hDlg, UINT msg, WPARAM
             if (UseDarkModeLib()) {
                 DarkMode::setDarkWndSafe(hDlg);
             }
-            HwndSetText(hDlg, _TRA("Set inverse search command-line"));
-            HwndSetDlgItemText(hDlg, IDC_SECTION_INVERSESEARCH, _TRA("Set inverse search command-line"));
+            HwndSetText(hDlg, _TRA("Set inverse search command line"));
+            HwndSetDlgItemText(hDlg, IDC_SECTION_INVERSESEARCH, _TRA("Set inverse search command line"));
             HwndSetDlgItemText(hDlg, IDC_CMDLINE_LABEL,
-                               _TRA("Enter the command-line to invoke when you double-click on the PDF document:"));
+                               _TRA("Enter the command line to invoke when you double-click on the PDF document:"));
             HwndSetDlgItemText(hDlg, IDC_INVERSE_SEARCH_HELP, _TRA("Help"));
             HwndSetDlgItemText(hDlg, IDOK, _TRA("OK"));
             HwndSetDlgItemText(hDlg, IDCANCEL, _TRA("Cancel"));
             FillInverseSearchCombo(GetDlgItem(hDlg, IDC_CMDLINE), prefs->inverseSearchCmdLine);
-            CenterDialog(hDlg);
+            HwndCenterDialog(hDlg);
             HwndSetFocus(GetDlgItem(hDlg, IDC_CMDLINE));
             return FALSE;
 
@@ -1169,7 +1169,7 @@ static INT_PTR CALLBACK Dialog_AddFav_Proc(HWND hDlg, UINT msg, WPARAM wp, LPARA
             HwndSetDlgItemText(hDlg, IDC_FAV_NAME_EDIT, data->favName);
             EditSelectAll(GetDlgItem(hDlg, IDC_FAV_NAME_EDIT));
         }
-        CenterDialog(hDlg);
+        HwndCenterDialog(hDlg);
         HwndSetFocus(GetDlgItem(hDlg, IDC_FAV_NAME_EDIT));
         return FALSE;
     }
@@ -1188,7 +1188,8 @@ static INT_PTR CALLBACK Dialog_AddFav_Proc(HWND hDlg, UINT msg, WPARAM wp, LPARA
             }
             EndDialog(hDlg, IDOK);
             return TRUE;
-        } else if (IDCANCEL == cmd) {
+        }
+        if (IDCANCEL == cmd) {
             EndDialog(hDlg, IDCANCEL);
             return TRUE;
         }
@@ -1318,22 +1319,22 @@ static void PaintColorArea(HDC hdc, RECT* rc) {
         return;
     }
     // rows must be DWORD-aligned; each pixel is 3 bytes (BGR)
-    int stride = (w * 3 + 3) & ~3;
+    int stride = ((w * 3) + 3) & ~3;
     // cast before multiply so the product cannot overflow int→size_t
     u8* bits = (u8*)malloc((size_t)stride * (size_t)h);
     if (!bits) {
         return;
     }
     for (int y = 0; y < h; y++) {
-        float val = 1.0f - (float)y / (float)h;
-        u8* row = bits + y * stride;
+        float val = 1.0f - ((float)y / (float)h);
+        u8* row = bits + ((size_t)y * stride);
         for (int x = 0; x < w; x++) {
             float hue = (float)x / (float)w * 360.0f;
             u8 r, g, b;
             HsvToRgb(hue, 1.0f, val, r, g, b);
-            row[x * 3] = b;
-            row[x * 3 + 1] = g;
-            row[x * 3 + 2] = r;
+            row[(size_t)x * 3] = b;
+            row[(x * 3) + 1] = g;
+            row[(x * 3) + 2] = r;
         }
     }
     BITMAPINFO bmi{};
@@ -1353,10 +1354,10 @@ static void SelectPreviewButton(HWND hDlg, BgColorDlgData* data) {
     data->selectedCustomIdx = -1;
     data->previewSelected = true;
     if (prevCustom >= 0) {
-        InvalidateRect(GetDlgItem(hDlg, IDC_BGCOL_CUSTOM_FIRST + prevCustom), nullptr, TRUE);
+        HwndInvalidate(GetDlgItem(hDlg, IDC_BGCOL_CUSTOM_FIRST + prevCustom), true);
     }
     if (!wasPreview) {
-        InvalidateRect(GetDlgItem(hDlg, IDC_BGCOL_PREVIEW), nullptr, TRUE);
+        HwndInvalidate(GetDlgItem(hDlg, IDC_BGCOL_PREVIEW), true);
     }
 }
 
@@ -1366,20 +1367,20 @@ static void SelectCustomButton(HWND hDlg, BgColorDlgData* data, int idx) {
     data->selectedCustomIdx = idx;
     data->previewSelected = false;
     if (prevCustom >= 0 && prevCustom != idx) {
-        InvalidateRect(GetDlgItem(hDlg, IDC_BGCOL_CUSTOM_FIRST + prevCustom), nullptr, TRUE);
+        HwndInvalidate(GetDlgItem(hDlg, IDC_BGCOL_CUSTOM_FIRST + prevCustom), true);
     }
     if (wasPreview) {
-        InvalidateRect(GetDlgItem(hDlg, IDC_BGCOL_PREVIEW), nullptr, TRUE);
+        HwndInvalidate(GetDlgItem(hDlg, IDC_BGCOL_PREVIEW), true);
     }
-    InvalidateRect(GetDlgItem(hDlg, IDC_BGCOL_CUSTOM_FIRST + idx), nullptr, TRUE);
+    HwndInvalidate(GetDlgItem(hDlg, IDC_BGCOL_CUSTOM_FIRST + idx), true);
 }
 
 static void InvalidatePreview(HWND hDlg, BgColorDlgData* data) {
     if (data->selectedCustomIdx >= 0) {
-        InvalidateRect(GetDlgItem(hDlg, IDC_BGCOL_CUSTOM_FIRST + data->selectedCustomIdx), nullptr, TRUE);
+        HwndInvalidate(GetDlgItem(hDlg, IDC_BGCOL_CUSTOM_FIRST + data->selectedCustomIdx), true);
     }
     if (data->previewSelected) {
-        InvalidateRect(GetDlgItem(hDlg, IDC_BGCOL_PREVIEW), nullptr, TRUE);
+        HwndInvalidate(GetDlgItem(hDlg, IDC_BGCOL_PREVIEW), true);
     }
 }
 
@@ -1419,9 +1420,7 @@ static bool TryParseBgColorEdit(HWND hDlg, BgColorDlgData* data) {
 }
 
 static void PickColorFromArea(HWND hwndCA, BgColorDlgData* data, HWND hDlg) {
-    POINT pt;
-    GetCursorPos(&pt);
-    ScreenToClient(hwndCA, &pt);
+    Point pt = HwndGetCursorPos(hwndCA);
     HDC hdcCA = GetDC(hwndCA);
     COLORREF picked = GetPixel(hdcCA, pt.x, pt.y);
     ReleaseDC(hwndCA, hdcCA);
@@ -1487,7 +1486,7 @@ static INT_PTR CALLBACK Dialog_ChangeBgColor_Proc(HWND hDlg, UINT msg, WPARAM wp
             // subclass color area for mouse drag tracking
             HWND hwndCA = GetDlgItem(hDlg, IDC_BGCOL_COLORAREA);
             gOrigColorAreaProc = (WNDPROC)SetWindowLongPtrW(hwndCA, GWLP_WNDPROC, (LONG_PTR)ColorAreaSubclassProc);
-            CenterDialog(hDlg);
+            HwndCenterDialog(hDlg);
             return TRUE;
         }
 
@@ -1500,16 +1499,16 @@ static INT_PTR CALLBACK Dialog_ChangeBgColor_Proc(HWND hDlg, UINT msg, WPARAM wp
             }
             // preview button shows the currently selected color
             if (ctlId == IDC_BGCOL_PREVIEW) {
-                RECT rc = dis->rcItem;
+                Rect rc = ToRect(dis->rcItem);
                 if (data->previewSelected) {
-                    FillRect(dis->hDC, &rc, (HBRUSH)(COLOR_HIGHLIGHT + 1));
-                    InflateRect(&rc, -3, -3);
+                    HdcFillRect(dis->hDC, rc, (HBRUSH)(COLOR_HIGHLIGHT + 1));
+                    rc.Inflate(-3, -3);
                 }
                 if (data->isCheckered) {
-                    PaintCheckerboard(dis->hDC, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+                    HdcPaintCheckerboard(dis->hDC, rc.x, rc.y, rc.dx, rc.dy);
                 } else {
                     HBRUSH br = CreateSolidBrush(data->currentColor);
-                    FillRect(dis->hDC, &rc, br);
+                    HdcFillRect(dis->hDC, rc, br);
                     DeleteObject(br);
                 }
                 return TRUE;
@@ -1519,11 +1518,11 @@ static INT_PTR CALLBACK Dialog_ChangeBgColor_Proc(HWND hDlg, UINT msg, WPARAM wp
                 int idx = ctlId - IDC_BGCOL_PRESET_FIRST;
                 COLORREF col = kBgPresetColors[idx];
                 if (col == kColorUnset) {
-                    PaintCheckerboard(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right - dis->rcItem.left,
-                                      dis->rcItem.bottom - dis->rcItem.top);
+                    HdcPaintCheckerboard(dis->hDC, dis->rcItem.left, dis->rcItem.top,
+                                         dis->rcItem.right - dis->rcItem.left, dis->rcItem.bottom - dis->rcItem.top);
                 } else {
                     HBRUSH br = CreateSolidBrush(col);
-                    FillRect(dis->hDC, &dis->rcItem, br);
+                    HdcFillRect(dis->hDC, ToRect(dis->rcItem), br);
                     DeleteObject(br);
                 }
                 // draw focus rect if focused
@@ -1535,33 +1534,35 @@ static INT_PTR CALLBACK Dialog_ChangeBgColor_Proc(HWND hDlg, UINT msg, WPARAM wp
             // custom color buttons
             if (ctlId >= IDC_BGCOL_CUSTOM_FIRST && ctlId < IDC_BGCOL_CUSTOM_FIRST + kMaxCustomColors) {
                 int idx = ctlId - IDC_BGCOL_CUSTOM_FIRST;
-                RECT rc = dis->rcItem;
+                Rect rc = ToRect(dis->rcItem);
                 bool isSelected = (idx == data->selectedCustomIdx);
                 if (isSelected) {
                     // draw selection outline: fill background, then inset for 2px gap
-                    FillRect(dis->hDC, &rc, (HBRUSH)(COLOR_HIGHLIGHT + 1));
-                    InflateRect(&rc, -3, -3);
+                    HdcFillRect(dis->hDC, rc, (HBRUSH)(COLOR_HIGHLIGHT + 1));
+                    rc.Inflate(-3, -3);
                 }
                 if (data->customColorSet[idx]) {
                     HBRUSH br = CreateSolidBrush(data->customColors[idx]);
-                    FillRect(dis->hDC, &rc, br);
+                    HdcFillRect(dis->hDC, rc, br);
                     DeleteObject(br);
                 } else {
                     // empty slot: window background with accent border and diagonal X
-                    FillRect(dis->hDC, &rc, (HBRUSH)(COLOR_WINDOW + 1));
+                    HdcFillRect(dis->hDC, rc, (HBRUSH)(COLOR_WINDOW + 1));
                     HPEN pen = CreatePen(PS_SOLID, 1, GetSysColor(COLOR_BTNSHADOW));
                     HPEN oldPen = (HPEN)SelectObject(dis->hDC, pen);
+                    int right = rc.x + rc.dx;
+                    int bottom = rc.y + rc.dy;
                     // border
-                    MoveToEx(dis->hDC, rc.left, rc.top, nullptr);
-                    LineTo(dis->hDC, rc.right - 1, rc.top);
-                    LineTo(dis->hDC, rc.right - 1, rc.bottom - 1);
-                    LineTo(dis->hDC, rc.left, rc.bottom - 1);
-                    LineTo(dis->hDC, rc.left, rc.top);
+                    MoveToEx(dis->hDC, rc.x, rc.y, nullptr);
+                    LineTo(dis->hDC, right - 1, rc.y);
+                    LineTo(dis->hDC, right - 1, bottom - 1);
+                    LineTo(dis->hDC, rc.x, bottom - 1);
+                    LineTo(dis->hDC, rc.x, rc.y);
                     // diagonal lines
-                    MoveToEx(dis->hDC, rc.left, rc.top, nullptr);
-                    LineTo(dis->hDC, rc.right - 1, rc.bottom - 1);
-                    MoveToEx(dis->hDC, rc.right - 1, rc.top, nullptr);
-                    LineTo(dis->hDC, rc.left, rc.bottom - 1);
+                    MoveToEx(dis->hDC, rc.x, rc.y, nullptr);
+                    LineTo(dis->hDC, right - 1, bottom - 1);
+                    MoveToEx(dis->hDC, right - 1, rc.y, nullptr);
+                    LineTo(dis->hDC, rc.x, bottom - 1);
                     SelectObject(dis->hDC, oldPen);
                     DeleteObject(pen);
                 }
@@ -1648,7 +1649,7 @@ static INT_PTR CALLBACK Dialog_ChangeBgColor_Proc(HWND hDlg, UINT msg, WPARAM wp
                     if (data->selectedCustomIdx == idx) {
                         SelectPreviewButton(hDlg, data);
                     }
-                    InvalidateRect(hwndClicked, nullptr, TRUE);
+                    HwndInvalidate(hwndClicked, true);
                 }
                 return TRUE;
             }

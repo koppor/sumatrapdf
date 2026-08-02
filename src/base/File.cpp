@@ -2,9 +2,6 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-
-#include <limits.h>
-
 #include "base/File.h"
 
 // we pad data read with 3 zeros for convenience. That way returned
@@ -221,11 +218,11 @@ bool Match(Str path, Str filter) {
 }
 
 bool IsWslUnc(Str path) {
-    return str::StartsWithI(path, "\\\\wsl.localhost\\") || str::StartsWithI(path, "\\\\wsl$\\");
+    return str::StartsWithI(path, StrL("\\\\wsl.localhost\\")) || str::StartsWithI(path, StrL("\\\\wsl$\\"));
 }
 
 bool IsWslMount(Str path) {
-    if (!path || !str::StartsWithI(path, "/mnt/")) {
+    if (!path || !str::StartsWithI(path, StrL("/mnt/"))) {
         return false;
     }
     if (path.len < 6) {
@@ -241,9 +238,9 @@ TempStr WslUncToUnixTemp(Str path) {
     }
 
     int off = 0;
-    if (str::StartsWithI(path, "\\\\wsl.localhost\\")) {
+    if (str::StartsWithI(path, StrL("\\\\wsl.localhost\\"))) {
         off = LenL("\\\\wsl.localhost\\");
-    } else if (str::StartsWithI(path, "\\\\wsl$\\")) {
+    } else if (str::StartsWithI(path, StrL("\\\\wsl$\\"))) {
         off = LenL("\\\\wsl$\\");
     } else {
         return {};
@@ -377,13 +374,7 @@ bool StartsWith(Str path, Str s) {
 
 namespace dir {
 
-bool CreateAll(Str dir) {
-    TempStr parent = path::GetDirTemp(dir);
-    if (!str::Eq(parent, dir) && !Exists(parent)) {
-        CreateAll(parent);
-    }
-    return Create(dir);
-}
+// CreateAll is platform-specific (File_win.cpp / File_posix.cpp).
 
 bool CreateForFile(Str path) {
     TempStr dir = path::GetDirTemp(path);

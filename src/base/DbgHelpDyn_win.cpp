@@ -108,7 +108,7 @@ constexpr int kMaxSymLen = 512;
 
 // check if has access to valid .pdb symbols file by trying to resolve a symbol
 NO_INLINE bool CanSymbolizeAddress(DWORD64 addr) {
-    char buf[sizeof(SYMBOL_INFO) + kMaxSymLen * sizeof(char)];
+    char buf[sizeof(SYMBOL_INFO) + (kMaxSymLen * sizeof(char))];
     SYMBOL_INFO* symInfo = (SYMBOL_INFO*)buf;
 
     memset(buf, 0, sizeof(buf));
@@ -120,7 +120,7 @@ NO_INLINE bool CanSymbolizeAddress(DWORD64 addr) {
     if (!ok) {
         return false;
     }
-    int symLen = symInfo->NameLen;
+    int symLen = (int)symInfo->NameLen;
     if (symLen < 4) {
         return false;
     }
@@ -267,7 +267,7 @@ static void AppendAddress(str::Builder& s, DWORD64 addr) {
 void GetAddressInfo(str::Builder& s, DWORD64 addr, bool compact) {
     static const int MAX_SYM_LEN = 512;
 
-    char buf[sizeof(SYMBOL_INFO) + MAX_SYM_LEN * sizeof(char)];
+    char buf[sizeof(SYMBOL_INFO) + (MAX_SYM_LEN * sizeof(char))];
     SYMBOL_INFO* symInfo = (SYMBOL_INFO*)buf;
 
     memset(buf, 0, sizeof(buf));
@@ -539,7 +539,8 @@ void GetExceptionInfo(str::Builder& s, EXCEPTION_POINTERS* excPointers) {
             ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx, ctx->Rsi, ctx->Rdi, ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12,
             ctx->R13, ctx->R14, ctx->R15));
     s.Append(fmt("CS:RIP:%04X:%016I64X\n", ctx->SegCs, ctx->Rip));
-    s.Append(fmt("SS:RSP:%04X:%016X  RBP:%08X\n", ctx->SegSs, (unsigned int)ctx->Rsp, (unsigned int)ctx->Rbp));
+    // full 64-bit RSP/RBP (casting to unsigned int truncated high bits, issue #crash-format)
+    s.Append(fmt("SS:RSP:%04X:%016I64X  RBP:%016I64X\n", ctx->SegSs, ctx->Rsp, ctx->Rbp));
     s.Append(fmt("DS:%04X  ES:%04X  FS:%04X  GS:%04X\n", ctx->SegDs, ctx->SegEs, ctx->SegFs, ctx->SegGs));
     s.Append(fmt("Flags:%08X\n", ctx->EFlags));
 #elif IS_INTEL_32 == 1

@@ -35,8 +35,7 @@
 #include "Theme.h"
 #include "PdfDarkMode.h"
 #include "TextToSpeech.h"
-
-#include <Notifications.h>
+#include "Notifications.h"
 
 // workaround for OnMenuExit
 // if this flag is set, CloseWindow will not save prefs before closing the window.
@@ -167,7 +166,7 @@ static int GetWeekCount() {
     BOOL ok = SystemTimeToFileTime(&date20110101, &origTime);
     ReportIf(!ok);
     GetSystemTimeAsFileTime(&currTime);
-    return (currTime.dwHighDateTime - origTime.dwHighDateTime) / 1408;
+    return (int)(currTime.dwHighDateTime - origTime.dwHighDateTime) / 1408;
     // 1408 == (10 * 1000 * 1000 * 60 * 60 * 24 * 7) / (1 << 32)
 }
 
@@ -408,7 +407,7 @@ bool LoadSettings() {
         str::ReplaceWithCopy(&gprefs->toolbar, gprefs->showToolbar ? "show" : "hide");
     } else {
         // keep the legacy bool consistent with the mode
-        gprefs->showToolbar = !str::EqI(gprefs->toolbar, "hide");
+        gprefs->showToolbar = !str::EqI(gprefs->toolbar, StrL("hide"));
     }
 
     if (SeqStrIndexIS(gToolbarPositionNames, gprefs->toolbarPosition) < 0) {

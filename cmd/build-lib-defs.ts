@@ -104,15 +104,11 @@ export const chmdec: LibDef = {
 };
 
 export const zopfli: LibDef = {
-  name: "zopfli",
+  name: "a-zopfli",
   alwaysOptimize: true,
   defines: ["_CRT_SECURE_NO_WARNINGS"],
-  includes: ["ext/zopfli/src"],
-  files: [
-    { dir: "ext/zopfli/src/zopfli", patterns: ["*.c"] },
-    { dir: "ext/zopfli/src/zopflipng", patterns: ["*.cc"] },
-    { dir: "ext/zopfli/src/zopflipng/lodepng", patterns: ["*.cpp"] },
-  ],
+  includes: ["ext/a-zopfli"],
+  files: [{ dir: "ext/a-zopfli", patterns: ["zopfli.cpp"] }],
 };
 
 export const libarchive: LibDef = {
@@ -231,7 +227,7 @@ export const libarchive: LibDef = {
       dir: "ext/a-bzip2",
       patterns: ["bzip2.c"],
     },
-    // LzmaDec/Bra* live in base/exe for LzSA (not in libmupdf/libarchive)
+    // LzmaDec/Bra* live in base/exe for LzSA (not in libsumatrapdf/libarchive)
     {
       dir: "ext/liblzma",
       patterns: [
@@ -419,10 +415,6 @@ const mupdfThirdPartySources: LibDef = {
     // jbig2dec
     "HAVE_STRING_H=1",
     "JBIG_NO_MEMENTO",
-    // openjpeg
-    "USE_JPIP",
-    "OPJ_STATIC",
-    "OPJ_EXPORTS",
     // freetype
     "FT2_BUILD_LIBRARY",
     'FT_CONFIG_MODULES_H="slimftmodules.h"',
@@ -444,8 +436,8 @@ const mupdfThirdPartySources: LibDef = {
     "ext/freetype/include",
     "ext/lcms2/include",
     "ext/harfbuzz/src/hb-ucdn",
-    "ext/mujs",
-    "ext/extract/include",
+    "ext/a-mujs",
+    "ext/a-extract",
     "ext/brotli/c/include",
     "ext/a-zlib",
   ],
@@ -557,38 +549,6 @@ const mupdfThirdPartySources: LibDef = {
         "jbig2_segment.c",
         "jbig2_symbol_dict.c",
         "jbig2_text.c",
-      ],
-    },
-    // ── openjpeg ──
-    {
-      dir: "ext/openjpeg/src/lib/openjp2",
-      patterns: [
-        "bio.c",
-        "cidx_manager.c",
-        "cio.c",
-        "dwt.c",
-        "event.c",
-        "function_list.c",
-        "ht_dec.c",
-        "image.c",
-        "invert.c",
-        "j2k.c",
-        "jp2.c",
-        "mct.c",
-        "mqc.c",
-        "openjpeg.c",
-        "opj_clock.c",
-        "phix_manager.c",
-        "pi.c",
-        "ppix_manager.c",
-        "sparse_array.c",
-        "t1.c",
-        "t2.c",
-        "tcd.c",
-        "tgt.c",
-        "thix_manager.c",
-        "thread.c",
-        "tpix_manager.c",
       ],
     },
     // ── freetype ──
@@ -706,35 +666,6 @@ const mupdfThirdPartySources: LibDef = {
         "hb-ucd.cc",
       ],
     },
-    // ── mujs ──
-    { dir: "ext/mujs", patterns: ["one.c"] },
-    // ── extract ──
-    {
-      dir: "ext/extract/src",
-      patterns: [
-        "alloc.c",
-        "astring.c",
-        "boxer.c",
-        "buffer.c",
-        "document.c",
-        "docx.c",
-        "docx_template.c",
-        "extract.c",
-        "html.c",
-        "join.c",
-        "json.c",
-        "mem.c",
-        "memento.c",
-        "odt_template.c",
-        "odt.c",
-        "outf.c",
-        "rect.c",
-        "sys.c",
-        "text.c",
-        "xml.c",
-        "zip.c",
-      ],
-    },
     // ── brotli ──
     { dir: "ext/brotli/c/common", patterns: ["*.c"] },
     { dir: "ext/brotli/c/dec", patterns: ["*.c"] },
@@ -800,13 +731,13 @@ export const freetype = thirdPartyLib({
     "ext/freetype/include",
     "ext/brotli/c/include",
   ],
-  files: sourceFiles(4, 5),
+  files: sourceFiles(3, 4),
 });
 
 export const lcms2 = thirdPartyLib({
   name: "lcms2",
   includes: ["ext/lcms2/include"],
-  files: sourceFiles(6),
+  files: sourceFiles(5),
 });
 
 const harfbuzzAllocDefines = [
@@ -830,27 +761,30 @@ export const harfbuzz = thirdPartyLib({
     "mupdf/scripts/freetype",
     "ext/freetype/include",
   ],
-  files: sourceFiles(7),
+  files: sourceFiles(6),
   debugExtraDefines: ["HAVE_ATEXIT", ...harfbuzzAllocDefines],
   releaseExtraDefines: harfbuzzAllocDefines,
 });
 
 export const mujs = thirdPartyLib({
-  name: "mujs",
-  includes: ["ext/mujs"],
-  files: sourceFiles(8),
+  name: "a-mujs",
+  includes: ["ext/a-mujs"],
+  files: [{ dir: "ext/a-mujs", patterns: ["mujs.c"] }],
 });
 
 export const extract = thirdPartyLib({
-  name: "extract",
-  includes: ["ext/extract/include", "ext/extract/src", "ext/a-zlib"],
-  files: sourceFiles(9),
+  name: "a-extract",
+  // mupdf provides memento.obj; skip extract's amalgamated memento body so the
+  // final link does not get duplicate Memento symbols
+  defines: ["EXTRACT_NO_OWN_MEMENTO"],
+  includes: ["ext/a-extract", "ext/a-zlib"],
+  files: [{ dir: "ext/a-extract", patterns: ["extract.c"] }],
 });
 
 export const brotli = thirdPartyLib({
   name: "brotli",
   includes: ["ext/brotli/c/include"],
-  files: sourceFiles(10, 11, 12),
+  files: sourceFiles(7, 8, 9),
 });
 
 export const cmarkGfm = thirdPartyLib({
@@ -937,12 +871,12 @@ export const mupdf: LibDef = {
     "ext/a-openjpeg",
     "mupdf/scripts/freetype",
     "ext/freetype/include",
-    "ext/mujs",
+    "ext/a-mujs",
     "ext/brotli/c/include",
     "ext/harfbuzz/src",
     "ext/lcms2/include",
     "ext/a-gumbo",
-    "ext/extract/include",
+    "ext/a-extract",
     "ext/a-zlib",
     "ext/libarchive",
   ],

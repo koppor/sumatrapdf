@@ -20,7 +20,7 @@ Button::Button() {
     kind = kindButton;
 }
 
-bool Button::OnCommand(WPARAM wparam, LPARAM lparam) {
+bool Button::OnCommand(WPARAM wparam, LPARAM /*lparam*/) {
     auto code = HIWORD(wparam);
     if (code == BN_CLICKED) {
         if (onClick.IsValid()) {
@@ -31,7 +31,7 @@ bool Button::OnCommand(WPARAM wparam, LPARAM lparam) {
     return false;
 }
 
-LRESULT Button::OnMessageReflect(UINT msg, WPARAM wparam, LPARAM lparam) {
+LRESULT Button::OnMessageReflect(UINT msg, WPARAM /*wparam*/, LPARAM /*lparam*/) {
     if (msg == WM_CTLCOLORBTN) {
         // TODO: implement me
         return 0;
@@ -96,15 +96,12 @@ Button* CreateDefaultButton(HWND parent, Str s, bool isRtl) {
     auto* b = new Button();
     b->Create(args);
 
-    RECT r = ClientRECT(parent);
+    Rect rc = HwndClientRect(parent);
     Size size = b->GetIdealSize();
     int margin = DpiScale(parent, kButtonMargin);
-    int x = RectDx(r) - size.dx - margin;
-    int y = RectDy(r) - size.dy - margin;
-    r.left = x;
-    r.right = x + size.dx;
-    r.top = y;
-    r.bottom = y + size.dy;
+    int x = rc.dx - size.dx - margin;
+    int y = rc.dy - size.dy - margin;
+    Rect r = {x, y, size.dx, size.dy};
     b->SetPos(&r);
     return b;
 }

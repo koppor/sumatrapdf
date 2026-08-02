@@ -21,19 +21,158 @@ Type GetType(Str pathA) {
         return Type::None;
     }
 
-    WIN32_FILE_ATTRIBUTE_DATA fileInfo;
-    BOOL res = GetFileAttributesEx(CWStrTemp(pathA), GetFileExInfoStandard, &fileInfo);
-    if (0 == res) {
+    DWORD attrs = GetCachedAttributes(pathA);
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
         return Type::None;
     }
-    if (fileInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+    if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
         return Type::Dir;
     }
     return Type::File;
 }
 
+// Network-drive attribute cache: GetFileAttributesExW on UNC/mapped drives is
+// slow and menu rebuild / Exists / GetSize can hit the same path repeatedly.
+// One entry stores full WIN32_FILE_ATTRIBUTE_DATA for both GetCachedAttributes
+// and GetCachedAttributesEx.
+struct AttrsCacheEntry {
+    char* path = nullptr; // owned heap string
+    bool ok = false;      // last GetFileAttributesEx result
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    u64 tickMs = 0;
+};
+
+static Mutex gAttrsCacheMutex;
+static Vec<AttrsCacheEntry> gAttrsCache;
+constexpr u64 kAttrsCacheTtlMs = 60ull * 60ull * 1000ull; // 1 hour
+constexpr int kAttrsCacheMaxEntries = 512;
+
+static void FreeAttrsCacheEntry(AttrsCacheEntry& e) {
+    free(e.path);
+    e.path = nullptr;
+    e.ok = false;
+    e.data = {};
+    e.tickMs = 0;
+}
+
+// Look up a non-expired cache entry. Caller holds gAttrsCacheMutex.
+// Returns true if a live entry was found (ok or failed query).
+static bool LookupAttrsCache(Str path, u64 now, bool* okOut, WIN32_FILE_ATTRIBUTE_DATA* dataOut) {
+    for (int i = 0; i < len(gAttrsCache); i++) {
+        AttrsCacheEntry& e = gAttrsCache[i];
+        if (!e.path || !str::EqI(Str(e.path), path)) {
+            continue;
+        }
+        if (now - e.tickMs > kAttrsCacheTtlMs) {
+            FreeAttrsCacheEntry(e);
+            return false;
+        }
+        *okOut = e.ok;
+        *dataOut = e.data;
+        return true;
+    }
+    return false;
+}
+
+// Insert or update cache entry. Caller holds gAttrsCacheMutex.
+static void StoreAttrsCache(Str path, u64 now, bool ok, const WIN32_FILE_ATTRIBUTE_DATA& data) {
+    int freeIdx = -1;
+    int oldestIdx = -1;
+    u64 oldestTick = UINT64_MAX;
+    for (int i = 0; i < len(gAttrsCache); i++) {
+        AttrsCacheEntry& e = gAttrsCache[i];
+        if (!e.path) {
+            if (freeIdx < 0) {
+                freeIdx = i;
+            }
+            continue;
+        }
+        if (str::EqI(Str(e.path), path)) {
+            e.ok = ok;
+            e.data = data;
+            e.tickMs = now;
+            return;
+        }
+        if (e.tickMs < oldestTick) {
+            oldestTick = e.tickMs;
+            oldestIdx = i;
+        }
+    }
+    if (freeIdx < 0 && len(gAttrsCache) < kAttrsCacheMaxEntries) {
+        freeIdx = len(gAttrsCache);
+        gAttrsCache.AppendBlanks(1);
+    }
+    if (freeIdx < 0) {
+        freeIdx = oldestIdx;
+    }
+    if (freeIdx < 0) {
+        return;
+    }
+    AttrsCacheEntry& e = gAttrsCache[freeIdx];
+    FreeAttrsCacheEntry(e);
+    Str owned = str::Dup(path);
+    e.path = owned.s;
+    e.ok = ok;
+    e.data = data;
+    e.tickMs = now;
+}
+
+bool GetCachedAttributesEx(Str path, WIN32_FILE_ATTRIBUTE_DATA* out) {
+    if (out) {
+        *out = {};
+    }
+    if (!path || !out) {
+        return false;
+    }
+
+    const bool network = IsOnNetworkDrive(path);
+    if (network) {
+        const u64 now = GetTickCount64();
+        bool ok = false;
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        {
+            ScopedMutex lock(&gAttrsCacheMutex);
+            if (LookupAttrsCache(path, now, &ok, &data)) {
+                logf("path::GetCachedAttributesEx: network path='%s' ok=%d attrs=0x%x cache=hit\n", path, (int)ok,
+                     data.dwFileAttributes);
+                if (ok) {
+                    *out = data;
+                }
+                return ok;
+            }
+        }
+    }
+
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    BOOL ok = GetFileAttributesExW(CWStrTemp(path), GetFileExInfoStandard, &data);
+    if (!ok) {
+        data = {};
+    }
+
+    if (network) {
+        logf("path::GetCachedAttributesEx: network path='%s' ok=%d attrs=0x%x cache=miss\n", path, (int)(ok != 0),
+             data.dwFileAttributes);
+        ScopedMutex lock(&gAttrsCacheMutex);
+        StoreAttrsCache(path, GetTickCount64(), ok != 0, data);
+    }
+
+    if (ok) {
+        *out = data;
+        return true;
+    }
+    return false;
+}
+
+DWORD GetCachedAttributes(Str path) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    if (!GetCachedAttributesEx(path, &data)) {
+        return INVALID_FILE_ATTRIBUTES;
+    }
+    return data.dwFileAttributes;
+}
+
 bool IsDirectory(Str path) {
-    DWORD attrs = GetFileAttributesW(CWStrTemp(path));
+    DWORD attrs = GetCachedAttributes(path);
     if (INVALID_FILE_ATTRIBUTES == attrs) {
         return false;
     }
@@ -42,19 +181,36 @@ bool IsDirectory(Str path) {
 
 static TempWStr NormalizeTemp(WStr path) {
     WCHAR* pathZ = CWStrTemp(path);
+    // GetFullPathNameW is path-string math only (relative→absolute, collapse
+    // . / ..). It does not require the path to exist and does not hit the
+    // network for UNC/mapped paths the way GetLongPathNameW does.
     DWORD cch = GetFullPathNameW(pathZ, 0, nullptr, nullptr);
     if (!cch) {
         return str::DupTemp(path);
     }
 
-    WCHAR* fullPathBuf = AllocArrayTemp<WCHAR>(cch);
+    WCHAR* fullPathBuf = AllocArrayTemp<WCHAR>((int)cch);
     DWORD nChars = GetFullPathNameW(pathZ, cch, fullPathBuf, nullptr);
     TempWStr fullPath = WStr(fullPathBuf, (int)nChars);
+
+    // GetLongPathNameW / GetShortPathNameW query the filesystem (each path
+    // component) and are very slow on network drives when called on the UI
+    // thread (open, tab switch, menu rebuild). Skip them for network paths —
+    // absolute form from GetFullPathNameW is enough.
+    if (PathIsNetworkPathW(fullPath.s) || PathIsNetworkPathW(pathZ)) {
+        if (wstr::StartsWith(fullPath.s, WStrL(L"\\\\?\\"))) {
+            return fullPath;
+        }
+        if (len(fullPath) >= MAX_PATH) {
+            return str::JoinTemp(WStrL(L"\\\\?\\"), fullPath);
+        }
+        return fullPath;
+    }
 
     TempWStr normPath = fullPath;
     cch = GetLongPathNameW(fullPath.s, nullptr, 0);
     if (cch > 0) {
-        WCHAR* longBuf = AllocArrayTemp<WCHAR>(cch);
+        WCHAR* longBuf = AllocArrayTemp<WCHAR>((int)cch);
         DWORD nLong = GetLongPathNameW(fullPath.s, longBuf, cch);
         normPath = WStr(longBuf, (int)nLong);
         if (cch <= MAX_PATH) {
@@ -64,11 +220,11 @@ static TempWStr NormalizeTemp(WStr path) {
 
     cch = GetShortPathNameW(fullPath.s, nullptr, 0);
     if (cch && cch <= MAX_PATH) {
-        WCHAR* shortBuf = AllocArrayTemp<WCHAR>(cch);
+        WCHAR* shortBuf = AllocArrayTemp<WCHAR>((int)cch);
         DWORD nShort = GetShortPathNameW(fullPath.s, shortBuf, cch);
         return WStr(shortBuf, (int)nShort);
     }
-    if (wstr::StartsWith(normPath.s, L"\\\\?\\")) {
+    if (wstr::StartsWith(normPath.s, WStrL(L"\\\\?\\"))) {
         return normPath;
     }
     if (len(normPath) >= MAX_PATH) {
@@ -77,6 +233,8 @@ static TempWStr NormalizeTemp(WStr path) {
     return normPath;
 }
 
+// Absolute path form. Local drives also expand 8.3 names via GetLongPathNameW;
+// network paths skip that (too slow on the UI thread) and only use GetFullPathNameW.
 TempStr NormalizeTemp(Str path) {
     TempWStr s = ToWStrTemp(path);
     TempWStr ws = NormalizeTemp(s);
@@ -90,7 +248,7 @@ TempStr ShortPathTemp(Str path) {
     if (!cch) {
         return ToUtf8Temp(normPath);
     }
-    TempWStr shortPath = WStr(AllocArrayTemp<WCHAR>(cch + 1), (int)cch + 1);
+    TempWStr shortPath = WStr(AllocArrayTemp<WCHAR>((int)cch + 1), (int)cch + 1);
     GetShortPathNameW(normPath.s, shortPath.s, cch);
     return ToUtf8Temp(shortPath);
 }
@@ -189,7 +347,7 @@ bool IsOnNetworkDrive(Str path) {
 }
 
 bool IsCloudPlaceholder(Str path) {
-    DWORD attrs = GetFileAttributesW(CWStrTemp(path));
+    DWORD attrs = GetCachedAttributes(path);
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         return false;
     }
@@ -229,7 +387,7 @@ bool SupportsChangeNotifications(Str pathA) {
     if (!GetVolumeInformationW(root, nullptr, 0, nullptr, nullptr, nullptr, fsName, dimof(fsName))) {
         return false;
     }
-    return wstr::EqI(fsName, L"NTFS") || wstr::EqI(fsName, L"ReFS");
+    return wstr::EqI(fsName, WStrL(L"NTFS")) || wstr::EqI(fsName, WStrL(L"ReFS"));
 }
 
 bool IsAbsolute(Str path) {
@@ -252,9 +410,7 @@ TempStr GetNonVirtualTemp(Str virtualPath) {
     }
 
     TempStr res = ToUtf8Temp(realPath);
-    if (str::StartsWith(res, "\\\\?\\")) {
-        res = Str(res.s + 4, res.len - 4);
-    }
+    str::TrimPrefix(res, StrL("\\\\?\\"));
     return res;
 }
 
@@ -350,13 +506,13 @@ bool Exists(Str path) {
     if (!path) {
         return false;
     }
-
-    WIN32_FILE_ATTRIBUTE_DATA fileInfo;
-    BOOL res = GetFileAttributesEx(CWStrTemp(path), GetFileExInfoStandard, &fileInfo);
-    if (0 == res) {
+    // GetCachedAttributes: network paths cached 1hr (avoids UI-thread stalls in
+    // menu/toolbar rebuild → CanViewExternally → file::Exists).
+    DWORD attrs = path::GetCachedAttributes(path);
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
         return false;
     }
-    return (fileInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+    return (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
 i64 GetSize(FileHandle h) {
@@ -423,11 +579,7 @@ void MemoryUnmap(Mapping* m) {
 }
 
 static bool GetInfo(Str path, WIN32_FILE_ATTRIBUTE_DATA& fileInfo) {
-    if (!path) {
-        return false;
-    }
-    BOOL ok = GetFileAttributesEx(CWStrTemp(path), GetFileExInfoStandard, &fileInfo);
-    return ok != 0;
+    return path::GetCachedAttributesEx(path, &fileInfo);
 }
 
 i64 GetSize(Str path) {
@@ -531,7 +683,7 @@ FILETIME GetModificationTime(Str filePath) {
 }
 
 DWORD GetAttributes(Str path) {
-    return GetFileAttributesW(CWStrTemp(path));
+    return path::GetCachedAttributes(path);
 }
 
 bool SetAttributes(Str path, DWORD attrs) {
@@ -549,7 +701,7 @@ bool SetModificationTime(Str path, FILETIME lastMod) {
 
 int GetZoneIdentifier(Str filePath) {
     TempStr path = str::JoinTemp(filePath, StrL(":Zone.Identifier"));
-    return GetPrivateProfileIntW(L"ZoneTransfer", L"ZoneId", URLZONE_INVALID, CWStrTemp(path));
+    return (int)GetPrivateProfileIntW(L"ZoneTransfer", L"ZoneId", URLZONE_INVALID, CWStrTemp(path));
 }
 
 bool SetZoneIdentifier(Str filePath, int zoneId) {
@@ -638,7 +790,7 @@ static ULARGE_INTEGER FileTimeToLargeInteger(const FILETIME& ft) {
 int FileTimeDiffInSecs(const FILETIME& ft1, const FILETIME& ft2) {
     ULARGE_INTEGER t1 = FileTimeToLargeInteger(ft1);
     ULARGE_INTEGER t2 = FileTimeToLargeInteger(ft2);
-    LONGLONG diff = t1.QuadPart - t2.QuadPart;
+    LONGLONG diff = (LONGLONG)t1.QuadPart - (LONGLONG)t2.QuadPart;
     diff = diff / (LONGLONG)10000000L;
     return (int)diff;
 }
@@ -649,24 +801,18 @@ bool Exists(WStr dir) {
     if (!dir) {
         return false;
     }
-    WIN32_FILE_ATTRIBUTE_DATA fileInfo;
-    BOOL res = GetFileAttributesEx(CWStrTemp(dir), GetFileExInfoStandard, &fileInfo);
-    if (0 == res) {
-        return false;
-    }
-    return (fileInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    return Exists(ToUtf8Temp(dir));
 }
 
 bool Exists(Str dir) {
     if (!dir) {
         return false;
     }
-    WIN32_FILE_ATTRIBUTE_DATA fileInfo;
-    BOOL res = GetFileAttributesEx(CWStrTemp(dir), GetFileExInfoStandard, &fileInfo);
-    if (0 == res) {
+    DWORD attrs = path::GetCachedAttributes(dir);
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
         return false;
     }
-    return (fileInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    return (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
 bool Create(Str dir) {
@@ -675,6 +821,23 @@ bool Create(Str dir) {
         return true;
     }
     return ERROR_ALREADY_EXISTS == GetLastError();
+}
+
+// Create dir and all missing parents (like mkdir -p). Uses SHCreateDirectoryExW
+// so intermediates are created in one call instead of recursive CreateDirectory.
+bool CreateAll(Str dir) {
+    if (!dir) {
+        return false;
+    }
+    if (Exists(dir)) {
+        return true;
+    }
+    int err = (int)SHCreateDirectoryExW(nullptr, CWStrTemp(dir), nullptr);
+    // ALREADY_EXISTS / FILE_EXISTS can mean a file is in the way; require a directory.
+    if (err == ERROR_SUCCESS || err == ERROR_ALREADY_EXISTS || err == ERROR_FILE_EXISTS) {
+        return Exists(dir);
+    }
+    return false;
 }
 
 bool RemoveAll(Str dir) {
@@ -709,7 +872,7 @@ TempStr GetHomeDirTemp() {
     WCHAR buf[MAX_PATH];
     DWORD n = GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH);
     if (n > 0 && n < MAX_PATH) {
-        return ToUtf8Temp(WStr(buf, n));
+        return ToUtf8Temp(WStr(buf, (int)n));
     }
 
     WCHAR drive[MAX_PATH];
@@ -735,7 +898,7 @@ TempStr ExpandEnvVarTemp(Str varName) {
     WCHAR buf[MAX_PATH];
     DWORD n = GetEnvironmentVariableW(CWStrTemp(varName), buf, MAX_PATH);
     if (n > 0 && n < MAX_PATH) {
-        return ToUtf8Temp(WStr(buf, n));
+        return ToUtf8Temp(WStr(buf, (int)n));
     }
     return {};
 }
@@ -744,7 +907,7 @@ TempStr ToAbsolutePathTemp(Str path) {
     WCHAR buf[MAX_PATH];
     DWORD n = GetFullPathNameW(CWStrTemp(path), MAX_PATH, buf, nullptr);
     if (n > 0 && n < MAX_PATH) {
-        return ToUtf8Temp(WStr(buf, n));
+        return ToUtf8Temp(WStr(buf, (int)n));
     }
     return path;
 }

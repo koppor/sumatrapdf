@@ -18,9 +18,12 @@ bool HttpGet(Str urlA, HttpRsp* rspOut) {
     DWORD infoLevel;
     DWORD headerBuffSize = sizeof(DWORD);
     WCHAR* url = CWStrTemp(urlA);
-    DWORD flags = INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_RELOAD | INTERNET_FLAG_IGNORE_CERT_CN_INVALID;
+    // NB: do NOT add INTERNET_FLAG_IGNORE_CERT_CN_INVALID here - it disables TLS
+    // hostname validation, letting a network attacker with any trusted cert
+    // impersonate our update-check / crash-symbol hosts (GHSA-mjwr-9w29-jp96).
+    DWORD flags = INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_RELOAD;
 
-    if (str::StartsWithI(urlA, "https")) {
+    if (str::StartsWithI(urlA, StrL("https"))) {
         flags |= INTERNET_FLAG_SECURE;
     }
 
@@ -86,7 +89,7 @@ Error:
 constexpr const int kBufSize = 256 * 1024;
 
 // Download content of a url to a file
-bool HttpGetToFile(Str urlA, Str destFilePath, const Func1<HttpProgress*>& cbProgress) {
+bool HttpGetToFile(Str urlA, Str destFilePath, const Func1<HttpProgress*>& cbProgress, i64 maxSize) {
     logf("HttpGetToFile: url: '%s', file: '%s'\n", urlA, destFilePath);
     bool ok = false;
     HINTERNET hReq = nullptr, hInet = nullptr;
@@ -136,6 +139,9 @@ bool HttpGetToFile(Str urlA, Str destFilePath, const Func1<HttpProgress*>& cbPro
         }
         if (dwRead == 0) {
             break;
+        }
+        if (maxSize >= 0 && progress.nDownloaded > maxSize - (i64)dwRead) {
+            goto Exit;
         }
         DWORD size;
         BOOL wroteOk = WriteFile(hf, buf, dwRead, &size, nullptr);

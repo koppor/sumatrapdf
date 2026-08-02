@@ -16,9 +16,9 @@ def chdir_top():
 
 Template_Defines = """\
 #define CS1(c1)             (c1)
-#define CS2(c1, c2)         (CS1(c1) | (c2 << 8))
-#define CS3(c1, c2, c3)     (CS2(c1, c2) | (c3 << 16))
-#define CS4(c1, c2, c3, c4) (CS3(c1, c2, c3) | (c4 << 24))
+#define CS2(c1, c2)         (CS1(c1) | ((c2) << 8))
+#define CS3(c1, c2, c3)     (CS2(c1, c2) | ((c3) << 16))
+#define CS4(c1, c2, c3, c4) (CS3(c1, c2, c3) | ((c4) << 24))
 
 #define STR1(s) ((s)[0])
 #define STR2(s) (STR1(s) | ((s)[1] << 8))
@@ -38,8 +38,18 @@ Template_Find_Function = """\
 {
 	const char *name = nameIn.s;
 	size_t len = (size_t)nameIn.len;
-	u32 key = 0 == len ? 0 : 1 == len ? STR1i(name) :
-	               2 == len ? STR2i(name) : 3 == len ? STR3i(name) : STR4i(name);
+	u32 key;
+	if (0 == len) {
+		key = 0;
+	} else if (1 == len) {
+		key = STR1i(name);
+	} else if (2 == len) {
+		key = STR2i(name);
+	} else if (3 == len) {
+		key = STR3i(name);
+	} else {
+		key = STR4i(name);
+	}
 	switch (key) {
 	%s
 	}

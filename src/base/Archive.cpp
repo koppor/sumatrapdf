@@ -89,11 +89,17 @@ static void EagerLoadEntry(struct archive* a, Archive::FileInfo* fileInfo) {
 }
 
 bool Archive::ParseEntries(struct archive* a, bool eagerLoad, const ArchiveExtractProgressCb& cbProgress) {
+    constexpr i64 kMaxEagerArchiveSize = 256LL * 1024 * 1024;
+    constexpr int kMaxArchiveEntries = 100'000;
     struct archive_entry* entry;
     int fileId = 0;
+    i64 eagerSize = 0;
     ArchiveExtractProgress prog{};
     prog.nTotal = -1; // libarchive streams; total is only known at end
     while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+        if (fileId >= kMaxArchiveEntries) {
+            return false;
+        }
         Str entryName;
         const char* nameZ = archive_entry_pathname_utf8(entry);
         if (nameZ) {
@@ -102,9 +108,19 @@ bool Archive::ParseEntries(struct archive* a, bool eagerLoad, const ArchiveExtra
             nameZ = archive_entry_pathname(entry);
             entryName = nameZ ? Str(nameZ) : Str{};
         }
+        i64 entrySize = archive_entry_size(entry);
+        if (entrySize < 0 || entrySize > INT_MAX) {
+            return false;
+        }
+        if (eagerLoad) {
+            eagerSize += entrySize;
+            if (eagerSize > kMaxEagerArchiveSize) {
+                return false;
+            }
+        }
         FileInfo* i = AllocArray<FileInfo>(this->a);
         i->fileId = fileId;
-        i->fileSizeUncompressed = (int)archive_entry_size(entry);
+        i->fileSizeUncompressed = (int)entrySize;
         i->filePos = (i64)fileId; // use fileId as position identifier
         i->fileTime = (i64)archive_entry_mtime(entry);
         i->name = str::Dup(this->a, entryName);
@@ -241,7 +257,6 @@ bool Archive::OpenFromData(Str data) {
     int r = archive_read_open_memory(a, data.s, (size_t)data.len);
     if (r != ARCHIVE_OK) {
         archive_read_free(a);
-        str::Free(data);
         return false;
     }
     // no file path to re-open from, so load all file data now; no
@@ -440,11 +455,6 @@ Str Archive::GetFileDataPartById(int fileId, int sizeHint) {
         idx++;
     }
     archive_read_free(a);
-    return {};
-}
-
-Str Archive::GetComment() {
-    // libarchive doesn't support zip global comments
     return {};
 }
 

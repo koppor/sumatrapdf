@@ -197,7 +197,7 @@ bool FindWindowWnd::Create(MainWindow* mainWin) {
         status = new Static();
         status->SetColors(colTxt, colBg);
         status->Create(args);
-        SetWindowStyle(status->hwnd, SS_CENTERIMAGE, true);
+        HwndSetWindowStyle(status->hwnd, SS_CENTERIMAGE, true);
     }
 
     {
@@ -210,12 +210,12 @@ bool FindWindowWnd::Create(MainWindow* mainWin) {
         // drop the visual-style button background so the flat toolbar shows the
         // window's themed background instead of a light box in dark themes
         SetWindowTheme(hwndBtns, L"", L"");
-        SendMessageW(hwndBtns, TB_BUTTONSTRUCTSIZE, (WPARAM)sizeof(TBBUTTON), 0);
+        TbSetButtonStructSize(hwndBtns, (int)sizeof(TBBUTTON));
 
         int isz = RoundUp(DpiScale(hwnd, 16), 4);
         himl = BuildStdToolbarImageList(isz);
-        SendMessageW(hwndBtns, TB_SETIMAGELIST, 0, (LPARAM)himl);
-        SendMessageW(hwndBtns, TB_SETBUTTONSIZE, 0, MAKELONG(isz, isz));
+        TbSetImageList(hwndBtns, himl);
+        TbSetButtonSize(hwndBtns, Size(isz, isz));
 
         TBBUTTON b[5]{};
         b[0].iBitmap = (int)TbIcon::ChevronUp;
@@ -238,8 +238,8 @@ bool FindWindowWnd::Create(MainWindow* mainWin) {
         b[4].idCommand = kFindWinPinCmdId;
         b[4].fsState = TBSTATE_ENABLED;
         b[4].fsStyle = BTNS_BUTTON;
-        SendMessageW(hwndBtns, TB_ADDBUTTONS, 5, (LPARAM)&b);
-        SendMessageW(hwndBtns, TB_AUTOSIZE, 0, 0);
+        TbAddButtons(hwndBtns, 5, b);
+        TbAutosIZE(hwndBtns);
     }
 
     {
@@ -264,19 +264,18 @@ void FindWindowWnd::Layout() {
     if (!edit || !status || !hwndBtns || !results) {
         return;
     }
-    Rect rc = ClientRect(hwnd);
+    Rect rc = HwndClientRect(hwnd);
     int pad = DpiScale(hwnd, 8);
     int gap = DpiScale(hwnd, 6);
     int statusDx = DpiScale(hwnd, 90);
     int minEditDx = DpiScale(hwnd, 48);
 
     int editDy = edit->GetIdealSize().dy;
-    SIZE tbSz{};
-    SendMessageW(hwndBtns, TB_GETMAXSIZE, 0, (LPARAM)&tbSz);
-    int tbW = (int)tbSz.cx;
-    int tbH = (int)tbSz.cy;
+    Size tbSz = TbGetMaxSize(hwndBtns);
+    int tbW = tbSz.dx;
+    int tbH = tbSz.dy;
 
-    int contentDx = std::max(0, rc.dx - 2 * pad);
+    int contentDx = std::max(0, rc.dx - (2 * pad));
     // minimum width for [edit][status][toolbar] on one row without overlap
     int singleRowDx = minEditDx + gap + statusDx + gap + tbW;
 
@@ -288,9 +287,9 @@ void FindWindowWnd::Layout() {
         int tbX = pad + contentDx - tbW;
         int statusX = tbX - gap - statusDx;
         int editDx = statusX - gap - pad;
-        MoveWindow(hwndBtns, tbX, y + (headerDy - tbH) / 2, tbW, tbH, TRUE);
-        MoveWindow(status->hwnd, statusX, y + (headerDy - editDy) / 2, statusDx, editDy, TRUE);
-        MoveWindow(edit->hwnd, pad, y + (headerDy - editDy) / 2, editDx, editDy, TRUE);
+        MoveWindow(hwndBtns, tbX, y + ((headerDy - tbH) / 2), tbW, tbH, TRUE);
+        MoveWindow(status->hwnd, statusX, y + ((headerDy - editDy) / 2), statusDx, editDy, TRUE);
+        MoveWindow(edit->hwnd, pad, y + ((headerDy - editDy) / 2), editDx, editDy, TRUE);
     } else {
         // narrow: full-width edit, then [n/m][toolbar] (issue #5692)
         MoveWindow(edit->hwnd, pad, y, contentDx, editDy, TRUE);
@@ -298,9 +297,9 @@ void FindWindowWnd::Layout() {
         headerDy = editDy + gap + std::max(editDy, tbH);
         int row2Dy = std::max(editDy, tbH);
         int statusW = std::max(0, contentDx - gap - tbW);
-        MoveWindow(status->hwnd, pad, y + (row2Dy - editDy) / 2, statusW, editDy, TRUE);
+        MoveWindow(status->hwnd, pad, y + ((row2Dy - editDy) / 2), statusW, editDy, TRUE);
         int tbX = pad + contentDx - tbW;
-        MoveWindow(hwndBtns, tbX, y + (row2Dy - tbH) / 2, tbW, tbH, TRUE);
+        MoveWindow(hwndBtns, tbX, y + ((row2Dy - tbH) / 2), tbW, tbH, TRUE);
     }
 
     // the results list fills the rest of the window below the header
@@ -311,7 +310,7 @@ void FindWindowWnd::Layout() {
     // Erase margins (and any area the list just vacated when shrinking) so
     // snippet/page-number pixels don't ghost at the bottom/side of the window
     // when the dialog is resized narrower than the previous text (#5796).
-    InvalidateRect(hwnd, nullptr, TRUE);
+    HwndInvalidate(hwnd, true);
 }
 
 void FindWindowWnd::RefreshResults(bool allowNavigation) {
@@ -357,12 +356,12 @@ void FindWindowWnd::DrawResultItem(ListBox::DrawItemEvent* ev) {
         return;
     }
     HDC hdc = ev->hdc;
-    RECT rc = ev->itemRect;
+    Rect rc = ev->itemRect;
 
     // clip the whole row so a partially visible last item (LBS_NOINTEGRALHEIGHT)
     // and highlight fill cannot paint outside the item / list client (#5796)
     int rowDC = SaveDC(hdc);
-    IntersectClipRect(hdc, rc.left, rc.top, rc.right, rc.bottom);
+    IntersectClipRect(hdc, rc.x, rc.y, rc.x + rc.dx, rc.y + rc.dy);
 
     COLORREF colBg = IsSpecialColor(lb->bgColor) ? GetSysColor(COLOR_WINDOW) : lb->bgColor;
     COLORREF colText = IsSpecialColor(lb->textColor) ? GetSysColor(COLOR_WINDOWTEXT) : lb->textColor;
@@ -370,36 +369,35 @@ void FindWindowWnd::DrawResultItem(ListBox::DrawItemEvent* ev) {
         colBg = AccentColor(colBg, 30);
     }
     SetBkColor(hdc, colBg);
-    ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
+    HdcFillRectWithBkColor(hdc, rc);
     SetBkMode(hdc, TRANSPARENT);
 
     HFONT oldFont = lb->font ? SelectFont(hdc, lb->font) : nullptr;
     int pad = DpiScale(lb->hwnd, 6);
-    RECT rcText = rc;
-    rcText.left += pad;
-    rcText.right -= pad;
+    Rect rcText = rc;
+    rcText.x += pad;
+    rcText.dx -= 2 * pad;
 
     // Fixed-width page column (room for multi-digit labels) so the right edge
     // stays stable while the window is resized; long snippets ellipsize into it
     // instead of fighting a per-row measured width (#5692 / #5796).
     const FindMatch& fm = win->findMatches[ev->itemIndex];
     TempStr pageStr = fmt("%s", win->ctrl->GetPageLabeTemp(fm.startPage));
-    int pageCch;
-    WCHAR* pageW = CWStrTemp(pageStr, pageCch);
+    TempWStr pageW = ToWStrTemp(pageStr);
     int pageGap = DpiScale(lb->hwnd, 10);
     int pageColDx = DpiScale(lb->hwnd, 40);
-    SIZE pSz{};
-    GetTextExtentPoint32W(hdc, pageW, pageCch, &pSz);
-    if ((int)pSz.cx + DpiScale(lb->hwnd, 4) > pageColDx) {
-        pageColDx = (int)pSz.cx + DpiScale(lb->hwnd, 4);
+    Size pageSize = HdcGetTextExtentPoint32(hdc, pageStr);
+    if (pageSize.dx + DpiScale(lb->hwnd, 4) > pageColDx) {
+        pageColDx = pageSize.dx + DpiScale(lb->hwnd, 4);
     }
-    RECT rcPage = rcText;
-    rcPage.left = std::max(rcText.left, (LONG)(rcText.right - pageColDx));
+    Rect rcPage = rcText;
+    rcPage.x = std::max(rcText.x, rcText.x + rcText.dx - pageColDx);
+    rcPage.dx = rcText.x + rcText.dx - rcPage.x;
 
     // snippet on the left, with the matched term highlighted
-    RECT rcSnippet = rcText;
-    rcSnippet.right = std::max(rcSnippet.left, rcPage.left - pageGap);
-    if (rcSnippet.right > rcSnippet.left) {
+    Rect rcSnippet = rcText;
+    rcSnippet.dx = std::max(0, rcPage.x - pageGap - rcSnippet.x);
+    if (rcSnippet.dx > 0) {
         SetTextColor(hdc, colText);
         uint drawFmt = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_LEFT | DT_END_ELLIPSIS;
         // clip snippet drawing so match highlights cannot bleed into the page
@@ -407,7 +405,7 @@ void FindWindowWnd::DrawResultItem(ListBox::DrawItemEvent* ev) {
         // SaveDC/RestoreDC (rather than SelectClipRgn(nullptr)) so the outer
         // listbox-client clip stays in effect afterwards
         int snippetDC = SaveDC(hdc);
-        IntersectClipRect(hdc, rcSnippet.left, rcSnippet.top, rcSnippet.right, rcSnippet.bottom);
+        IntersectClipRect(hdc, rcSnippet.x, rcSnippet.y, rcSnippet.x + rcSnippet.dx, rcSnippet.y + rcSnippet.dy);
         DrawMaybeHighlightedText(hdc, rcSnippet, fm.snippet, filterWords, hlScratch, colBg, false,
                                  win->findMatchWholeWord, drawFmt);
         RestoreDC(hdc, snippetDC);
@@ -415,10 +413,10 @@ void FindWindowWnd::DrawResultItem(ListBox::DrawItemEvent* ev) {
 
     // repaint the page column on top in case a prior draw left stray pixels
     SetBkColor(hdc, colBg);
-    ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &rcPage, nullptr, 0, nullptr);
+    HdcFillRectWithBkColor(hdc, rcPage);
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, AccentColor(colText, 80));
-    DrawTextW(hdc, pageW, -1, &rcPage, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_RIGHT | DT_END_ELLIPSIS);
+    HdcDrawText(hdc, pageW, rcPage, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_RIGHT | DT_END_ELLIPSIS);
 
     if (oldFont) {
         SelectFont(hdc, oldFont);
@@ -573,10 +571,10 @@ bool FindWindowWnd::MoveResultSelection(WPARAM vkey) {
 }
 
 void FindWindowWnd::SavePos() {
-    if (!IsWindowVisible(hwnd)) {
+    if (!HwndIsVisible(hwnd)) {
         return;
     }
-    Rect r = WindowRect(hwnd);
+    Rect r = HwndWindowRect(hwnd);
     gGlobalPrefs->searchUIWindowPos = r;
 }
 
@@ -600,7 +598,7 @@ void FindWindowWnd::UpdateTheme() {
         int isz = RoundUp(DpiScale(hwnd, 16), 4);
         HIMAGELIST oldHiml = himl;
         himl = BuildStdToolbarImageList(isz);
-        SendMessageW(hwndBtns, TB_SETIMAGELIST, 0, (LPARAM)himl);
+        TbSetImageList(hwndBtns, himl);
         if (oldHiml) {
             ImageList_Destroy(oldHiml);
         }
@@ -637,9 +635,9 @@ LRESULT FindWindowWnd::WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             // full client erase: margins + list, so nothing left over from the
             // pre-resize layout at the bottom of the window (#5796)
-            InvalidateRect(h, nullptr, TRUE);
+            HwndInvalidate(h, true);
             if (results) {
-                InvalidateRect(results->hwnd, nullptr, TRUE);
+                HwndInvalidate(results->hwnd, true);
             }
             SavePos();
             break;
@@ -651,15 +649,14 @@ LRESULT FindWindowWnd::WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             int tbH = DpiScale(h, 24);
             int tbW = DpiScale(h, 120);
             if (hwndBtns) {
-                SIZE tbSz{};
-                SendMessageW(hwndBtns, TB_GETMAXSIZE, 0, (LPARAM)&tbSz);
-                tbW = (int)tbSz.cx;
-                tbH = (int)tbSz.cy;
+                Size tbSz = TbGetMaxSize(hwndBtns);
+                tbW = tbSz.dx;
+                tbH = tbSz.dy;
             }
             int row2Dy = std::max(editDy, tbH);
             // narrow two-row header: edit, then status+toolbar
-            mmi->ptMinTrackSize.x = 2 * pad + std::max(tbW, DpiScale(h, 160));
-            mmi->ptMinTrackSize.y = 2 * pad + editDy + gap + row2Dy + pad + DpiScale(h, 48);
+            mmi->ptMinTrackSize.x = (2 * pad) + std::max(tbW, DpiScale(h, 160));
+            mmi->ptMinTrackSize.y = (2 * pad) + editDy + gap + row2Dy + pad + DpiScale(h, 48);
             return 0;
         }
         case WM_CLOSE:
@@ -677,7 +674,7 @@ LRESULT FindWindowWnd::WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (stage == CDDS_PREPAINT || stage == CDDS_ITEMPREPAINT) {
                     // reuse the window's cached background brush (rebuilt on theme
                     // change via SetColors) instead of allocating one per paint
-                    FillRect(cd->nmcd.hdc, &cd->nmcd.rc, BackgroundBrush());
+                    HdcFillRect(cd->nmcd.hdc, ToRect(cd->nmcd.rc), BackgroundBrush());
                     return stage == CDDS_PREPAINT ? CDRF_NOTIFYITEMDRAW : CDRF_DODEFAULT;
                 }
             }
@@ -811,7 +808,7 @@ static void PositionFindWindow(FindWindowWnd* w) {
     Rect r = gGlobalPrefs->searchUIWindowPos;
     if (r.IsEmpty()) {
         // default: a reasonable size near the top-right of the frame
-        Rect fr = WindowRect(win->hwndFrame);
+        Rect fr = HwndWindowRect(win->hwndFrame);
         int dx = DpiScale(w->hwnd, 520);
         int dy = DpiScale(w->hwnd, 360);
         r = {fr.x + fr.dx - dx - DpiScale(w->hwnd, 40), fr.y + DpiScale(w->hwnd, 80), dx, dy};
@@ -867,7 +864,7 @@ void HideFindWindow(MainWindow* win) {
 }
 
 bool IsFindWindowVisible(MainWindow* win) {
-    return win->findWindow && IsWindowVisible(win->findWindow->hwnd);
+    return win->findWindow && HwndIsVisible(win->findWindow->hwnd);
 }
 
 void FindWindowSetStatus(MainWindow* win, Str s) {
@@ -878,14 +875,13 @@ void FindWindowSetStatus(MainWindow* win, Str s) {
 
 void FindWindowSetMatchCaseChecked(MainWindow* win, bool checked) {
     if (win->findWindow && win->findWindow->hwndBtns) {
-        SendMessageW(win->findWindow->hwndBtns, TB_CHECKBUTTON, CmdFindToggleMatchCase, MAKELONG(checked ? 1 : 0, 0));
+        TbSetButtonChecked(win->findWindow->hwndBtns, CmdFindToggleMatchCase, checked);
     }
 }
 
 void FindWindowSetMatchWholeWordChecked(MainWindow* win, bool checked) {
     if (win->findWindow && win->findWindow->hwndBtns) {
-        SendMessageW(win->findWindow->hwndBtns, TB_CHECKBUTTON, CmdFindToggleMatchWholeWord,
-                     MAKELONG(checked ? 1 : 0, 0));
+        TbSetButtonChecked(win->findWindow->hwndBtns, CmdFindToggleMatchWholeWord, checked);
     }
 }
 

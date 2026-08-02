@@ -5,7 +5,7 @@
 #include "base/ScopedWin.h"
 #include "base/Win.h"
 #include "base/Dpi.h"
-#include "base/GdiPlus.h"
+#include "base/GdiPlusUtil.h"
 
 #include "wingui/UIModels.h"
 
@@ -185,7 +185,7 @@ static void StrokeRoundedRect(HDC hdc, const Rect& rc, int radius, COLORREF col)
 }
 
 // Clip the popup to a rounded rect. Use the intended layout size — not
-// ClientRect — because CreateWindow starts at 0x0 and ClientRect is still empty
+// HwndClientRect — because CreateWindow starts at 0x0 and client rect is still empty
 // until after SetWindowPos (a 1x1 region left the toolbar invisible).
 static void UpdateToolbarWindowRgn(HWND hwnd, int cornerRadius, int dx, int dy) {
     if (dx < 1) {
@@ -225,8 +225,8 @@ static void LayoutToolbar(SelectionToolbar* tb) {
     for (int i = 0; i < n; i++) {
         SelectionToolbarButton& b = tb->buttons[i];
         Size s = HwndMeasureText(hwnd, _TRA(b.label), tb->font);
-        int dx = s.dx + 2 * padX;
-        int dy = s.dy + 2 * padY;
+        int dx = s.dx + (2 * padX);
+        int dy = s.dy + (2 * padY);
         b.rc = Rect(x, margin, dx, dy);
         x += dx + gap;
         if (dy > maxDy) {
@@ -239,7 +239,7 @@ static void LayoutToolbar(SelectionToolbar* tb) {
     for (int i = 0; i < n; i++) {
         tb->buttons[i].rc.dy = maxDy;
     }
-    tb->size = Size(x + margin, maxDy + 2 * margin);
+    tb->size = Size(x + margin, maxDy + (2 * margin));
 }
 
 static int ButtonFromPoint(SelectionToolbar* tb, int x, int y) {
@@ -265,13 +265,13 @@ static bool GetSelectionEndPoint(MainWindow* win, Point& out) {
     if (r.IsEmpty()) {
         return false;
     }
-    out = Point(r.x + r.dx, r.y + r.dy / 2);
+    out = Point(r.x + r.dx, r.y + (r.dy / 2));
     return true;
 }
 
 static void PaintToolbar(SelectionToolbar* tb, HDC hdc) {
     HWND hwnd = tb->hwnd;
-    Rect rc = ClientRect(hwnd);
+    Rect rc = HwndClientRect(hwnd);
     COLORREF bgCol = SelBarBg();
     COLORREF hoverBg = SelBarHoverBg(bgCol);
     int cornerRadius = DpiScale(hwnd, kCornerRadius);
@@ -291,7 +291,7 @@ static void PaintToolbar(SelectionToolbar* tb, HDC hdc) {
             FillRoundedRect(hdc, b.rc, btnRadius, hoverBg);
         }
         SetTextColor(hdc, b.enabled ? textCol : mutedCol);
-        DrawCenteredText(hdc, b.rc, _TRA(b.label));
+        HdcDrawCenteredText(hdc, b.rc, _TRA(b.label));
     }
 }
 
@@ -453,7 +453,7 @@ static bool PositionToolbar(SelectionToolbar* tb, const Rect& sel) {
     int w = tb->size.dx;
     int h = tb->size.dy;
 
-    int x = sel.x + sel.dx / 2 - w / 2;
+    int x = sel.x + (sel.dx / 2) - (w / 2);
     int y = sel.y - gap - h;
     if (y < canvas.y) {
         y = sel.y + sel.dy + gap;
@@ -474,8 +474,7 @@ static bool PositionToolbar(SelectionToolbar* tb, const Rect& sel) {
         y = canvas.y;
     }
 
-    POINT p{x, y};
-    ClientToScreen(win->hwndCanvas, &p);
+    Point p = HwndClientToScreen(win->hwndCanvas, Point(x, y));
     Rect placed(p.x, p.y, w, h);
     if (placed == tb->lastPlaced) {
         return false;
@@ -560,13 +559,13 @@ void UpdateSelectionToolbarPosition(MainWindow* win) {
     // Hide during drag so the bar does not chase the rubber-band selection.
     if (IsActivelySelecting(win)) {
         SelectionToolbar* activeTb = win->selectionToolbar;
-        if (activeTb && activeTb->hwnd && IsWindowVisible(activeTb->hwnd)) {
+        if (activeTb && activeTb->hwnd && HwndIsVisible(activeTb->hwnd)) {
             HideSelectionToolbar(win);
         }
         return;
     }
     SelectionToolbar* tb = win->selectionToolbar;
-    if (!tb || !tb->hwnd || !IsWindowVisible(tb->hwnd)) {
+    if (!tb || !tb->hwnd || !HwndIsVisible(tb->hwnd)) {
         if (win->showSelection) {
             ShowSelectionToolbar(win);
         }
@@ -610,7 +609,7 @@ void HideSelectionToolbar(MainWindow* win) {
     if (!tb || !tb->hwnd) {
         return;
     }
-    if (IsWindowVisible(tb->hwnd)) {
+    if (HwndIsVisible(tb->hwnd)) {
         ShowWindow(tb->hwnd, SW_HIDE);
     }
     tb->hotIndex = -1;

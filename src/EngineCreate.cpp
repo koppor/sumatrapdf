@@ -120,16 +120,21 @@ bool IsSupportedFileType(FileType kind, bool enableEngineEbooks) {
     }
     if (IsEngineMupdfSupportedFileType(kind)) {
         return true;
-    } else if (IsEngineDjVuSupportedFileType(kind)) {
+    }
+    if (IsEngineDjVuSupportedFileType(kind)) {
         return true;
-    } else if (IsEngineImageSupportedFileType(kind)) {
+    }
+    if (IsEngineImageSupportedFileType(kind)) {
         return true;
-    } else if (kind == FileType::Directory) {
+    }
+    if (kind == FileType::Directory) {
         // TODO: more complex
         return false;
-    } else if (IsEngineCbxSupportedFileType(kind)) {
+    }
+    if (IsEngineCbxSupportedFileType(kind)) {
         return true;
-    } else if (IsEnginePsSupportedFileType(kind)) {
+    }
+    if (IsEnginePsSupportedFileType(kind)) {
         return true;
     }
 
@@ -139,17 +144,23 @@ bool IsSupportedFileType(FileType kind, bool enableEngineEbooks) {
 
     if (kind == FileType::Epub) {
         return true;
-    } else if (kind == FileType::Fb2) {
+    }
+    if (kind == FileType::Fb2) {
         return true;
-    } else if (kind == FileType::Fb2z) {
+    }
+    if (kind == FileType::Fb2z) {
         return true;
-    } else if (kind == FileType::Mobi) {
+    }
+    if (kind == FileType::Mobi) {
         return true;
-    } else if (kind == FileType::PalmDoc) {
+    }
+    if (kind == FileType::PalmDoc) {
         return true;
-    } else if (kind == FileType::HTML) {
+    }
+    if (kind == FileType::HTML) {
         return true;
-    } else if (kind == FileType::Txt) {
+    }
+    if (kind == FileType::Txt) {
         return true;
     }
     return false;
@@ -244,7 +255,7 @@ static EngineBase* CreateEngineForKind(FileType kind, FileType contentHintKind, 
 EngineBase* CreateEngineFromFile(Str path, PasswordUI* pwdUI, bool enableChmEngine) {
     ReportIf(len(path) == 0);
 
-    if (str::EndsWithI(path, ".p7m")) {
+    if (str::EndsWithI(path, StrL(".p7m"))) {
         Str fileData = file::ReadFile(path);
         Str extracted = ExtractP7m(fileData);
         str::Free(fileData);

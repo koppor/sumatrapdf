@@ -344,7 +344,7 @@ TempStr ShortenStringUtf8Temp(Str s, int maxRunes) {
     if (keep < 0) {
         keep = 0;
     }
-    char* ret = AllocArrayTemp<char>(maxRunes * 4 + 1);
+    char* ret = AllocArrayTemp<char>((maxRunes * 4) + 1);
     int src = 0;
     int tmp = 0;
     int n;
@@ -385,7 +385,7 @@ TempStr ShortenStringUtf8InTheMiddleTemp(Str s, int maxRunes) {
     }
     int toRemove = (nRunes - maxRunes) + 3;
     int removeStartingAt = (nRunes / 2) - (toRemove / 2);
-    char* ret = AllocArrayTemp<char>(maxRunes * 4 + 1);
+    char* ret = AllocArrayTemp<char>((maxRunes * 4) + 1);
     int src = 0;
     int tmp = 0;
     int n;
@@ -491,7 +491,7 @@ WStr ToWStrTemp(Str s) {
     }
 #if OS_WIN
     int wideLen = MultiByteToWideChar(CP_UTF8, 0, s.s, s.len, nullptr, 0);
-    wchar_t* wide = (wchar_t*)AllocTemp((wideLen + 1) * sizeof(wchar_t));
+    wchar_t* wide = (wchar_t*)AllocTemp((int)((wideLen + 1) * sizeof(wchar_t)));
     MultiByteToWideChar(CP_UTF8, 0, s.s, s.len, wide, wideLen);
 #else
     int wideLen = 0;

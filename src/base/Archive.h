@@ -30,7 +30,7 @@ struct Archive {
 
     struct FileInfo {
         int fileId = 0;
-        Str name = {};
+        Str name;
         i64 fileTime = 0; // this is typedef'ed as time64_t in unrar.h
         int fileSizeUncompressed = 0;
         bool isDir = false;
@@ -74,8 +74,6 @@ struct Archive {
     FileInfo* GetFileDataByName(Str filename);
     FileInfo* GetFileDataById(int fileId);
     Str GetFileDataPartById(int fileId, int sizeHint);
-
-    Str GetComment();
 
     // password for encrypted archives (owned by this object)
     Str password;

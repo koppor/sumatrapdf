@@ -150,7 +150,7 @@ bool FindBarWnd::Create(MainWindow* mainWin) {
         status->Create(args);
         // vertically center the single line of text so it lines up with the
         // (taller, bordered) edit box's text instead of sitting at the top
-        SetWindowStyle(status->hwnd, SS_CENTERIMAGE, true);
+        HwndSetWindowStyle(status->hwnd, SS_CENTERIMAGE, true);
     }
 
     {
@@ -164,12 +164,12 @@ bool FindBarWnd::Create(MainWindow* mainWin) {
         // bar's themed background instead of a light box in dark themes (the
         // background is painted from NM_CUSTOMDRAW in WndProc)
         SetWindowTheme(hwndBtns, L"", L"");
-        SendMessageW(hwndBtns, TB_BUTTONSTRUCTSIZE, (WPARAM)sizeof(TBBUTTON), 0);
+        TbSetButtonStructSize(hwndBtns, (int)sizeof(TBBUTTON));
 
         int isz = RoundUp(DpiScale(hwnd, 16), 4);
         himl = BuildStdToolbarImageList(isz);
-        SendMessageW(hwndBtns, TB_SETIMAGELIST, 0, (LPARAM)himl);
-        SendMessageW(hwndBtns, TB_SETBUTTONSIZE, 0, MAKELONG(isz, isz));
+        TbSetImageList(hwndBtns, himl);
+        TbSetButtonSize(hwndBtns, Size(isz, isz));
 
         TBBUTTON b[6]{};
         b[0].iBitmap = (int)TbIcon::ChevronUp;
@@ -196,8 +196,8 @@ bool FindBarWnd::Create(MainWindow* mainWin) {
         b[5].idCommand = kFindBarCloseCmdId;
         b[5].fsState = TBSTATE_ENABLED;
         b[5].fsStyle = BTNS_BUTTON;
-        SendMessageW(hwndBtns, TB_ADDBUTTONS, 6, (LPARAM)&b);
-        SendMessageW(hwndBtns, TB_AUTOSIZE, 0, 0);
+        TbAddButtons(hwndBtns, 6, b);
+        TbAutosIZE(hwndBtns);
     }
 
     Layout();
@@ -212,19 +212,18 @@ void FindBarWnd::Layout() {
 
     int editDy = edit->GetIdealSize().dy;
 
-    SIZE tbSz{};
-    SendMessageW(hwndBtns, TB_GETMAXSIZE, 0, (LPARAM)&tbSz);
+    Size tbSz = TbGetMaxSize(hwndBtns);
 
-    int innerDy = std::max(editDy, (int)tbSz.cy);
-    barDy = innerDy + 2 * p;
-    barDx = p + editDx + gap + statusDx + gap + (int)tbSz.cx + p;
+    int innerDy = std::max(editDy, tbSz.dy);
+    barDy = innerDy + (2 * p);
+    barDx = p + editDx + gap + statusDx + gap + tbSz.dx + p;
 
     int x = p;
     MoveWindow(edit->hwnd, x, (barDy - editDy) / 2, editDx, editDy, TRUE);
     x += editDx + gap;
     MoveWindow(status->hwnd, x, (barDy - editDy) / 2, statusDx, editDy, TRUE);
     x += statusDx + gap;
-    MoveWindow(hwndBtns, x, (barDy - (int)tbSz.cy) / 2, (int)tbSz.cx, (int)tbSz.cy, TRUE);
+    MoveWindow(hwndBtns, x, (barDy - tbSz.dy) / 2, tbSz.dx, tbSz.dy, TRUE);
 
     SetWindowPos(hwnd, nullptr, 0, 0, barDx, barDy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
@@ -241,9 +240,7 @@ LRESULT FindBarWnd::WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HBRUSH br = BackgroundBrush();
         if (br) {
             HDC hdc = (HDC)wp;
-            RECT rc;
-            GetClientRect(h, &rc);
-            FillRect(hdc, &rc, br);
+            HdcFillRect(hdc, HwndClientRect(h), br);
             return 1;
         }
     }
@@ -258,7 +255,7 @@ LRESULT FindBarWnd::WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (stage == CDDS_PREPAINT || stage == CDDS_ITEMPREPAINT) {
                 // reuse the bar's cached background brush (rebuilt on theme change
                 // via SetColors) instead of allocating one per paint
-                FillRect(cd->nmcd.hdc, &cd->nmcd.rc, BackgroundBrush());
+                HdcFillRect(cd->nmcd.hdc, ToRect(cd->nmcd.rc), BackgroundBrush());
                 return stage == CDDS_PREPAINT ? CDRF_NOTIFYITEMDRAW : CDRF_DODEFAULT;
             }
         }
@@ -364,7 +361,7 @@ void RecreateFindBar(MainWindow* win) {
     }
     // stop any in-flight find/count that captured the old bar's state
     AbortFinding(win, true);
-    bool wasVisible = IsWindowVisible(win->findBar->hwnd);
+    bool wasVisible = HwndIsVisible(win->findBar->hwnd);
     TempStr text = wasVisible ? str::DupTemp(HwndGetTextTemp(win->hwndFindEdit)) : nullptr;
     DeleteFindBar(win);
     win->findBar = CreateFindBar(win);
@@ -387,17 +384,17 @@ void RecreateFindBar(MainWindow* win) {
 static void PositionFindBar(FindBarWnd* bar) {
     MainWindow* win = bar->win;
     Rect btn = GetToolbarButtonScreenRect(win, CmdFindFirst);
-    Rect fr = WindowRect(win->hwndFrame);
+    Rect fr = HwndWindowRect(win->hwndFrame);
     // Align to the right edge of the client area, not the outer window rect:
-    // WindowRect includes the resize border (and sits off-screen when maximized),
+    // HwndWindowRect includes the resize border (and sits off-screen when maximized),
     // which pushed the bar a few pixels too far right (#5762).
-    Rect frClient = MapLtrClientRectToScreen(win->hwndFrame, ClientRect(win->hwndFrame));
+    Rect frClient = HwndMapLtrClientRectToScreen(win->hwndFrame, HwndClientRect(win->hwndFrame));
     int cx = frClient.x + frClient.dx - bar->barDx;
     int cy;
     if (btn.IsEmpty()) {
         cy = fr.y + bar->barDy;
     } else {
-        cy = btn.y + btn.dy / 2 - bar->barDy / 2;
+        cy = btn.y + (btn.dy / 2) - (bar->barDy / 2);
     }
     Rect r{cx, cy, bar->barDx, bar->barDy};
     r = ShiftRectToWorkArea(r, win->hwndFrame, true);
@@ -465,7 +462,7 @@ void HideFindBar(MainWindow* win) {
 // note: the floating window is not anchored to the search icon, so "visible"
 // here means specifically the compact bar (used to reposition it on move)
 bool IsFindBarVisible(MainWindow* win) {
-    return win->findBar && IsWindowVisible(win->findBar->hwnd);
+    return win->findBar && HwndIsVisible(win->findBar->hwnd);
 }
 
 bool IsFindUIVisible(MainWindow* win) {
@@ -532,7 +529,7 @@ void FindBarSetMatchCaseChecked(MainWindow* win, bool checked) {
         return;
     }
     if (win->findBar && win->findBar->hwndBtns) {
-        SendMessageW(win->findBar->hwndBtns, TB_CHECKBUTTON, CmdFindToggleMatchCase, MAKELONG(checked ? 1 : 0, 0));
+        TbSetButtonChecked(win->findBar->hwndBtns, CmdFindToggleMatchCase, checked);
     }
 }
 
@@ -542,6 +539,6 @@ void FindBarSetMatchWholeWordChecked(MainWindow* win, bool checked) {
         return;
     }
     if (win->findBar && win->findBar->hwndBtns) {
-        SendMessageW(win->findBar->hwndBtns, TB_CHECKBUTTON, CmdFindToggleMatchWholeWord, MAKELONG(checked ? 1 : 0, 0));
+        TbSetButtonChecked(win->findBar->hwndBtns, CmdFindToggleMatchWholeWord, checked);
     }
 }

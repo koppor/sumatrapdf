@@ -12,7 +12,6 @@
 import { buildApp, formatDuration, isSilentArg, runTest } from "./util.ts";
 import { testit as lintCommandIds } from "./lint-command-ids.ts";
 import { testit as combiningMarkFirst } from "./combining-mark-first.ts";
-import { testit as cmdStartAutoScroll } from "./cmd-start-autoscroll.ts";
 import { testit as issue1998 } from "./issue-1998.ts";
 import { testit as issue2693 } from "./issue-2693.ts";
 import { testit as issue906 } from "./issue-906.ts";
@@ -45,12 +44,18 @@ import { testit as issue1201 } from "./issue-1201.ts";
 import { testit as issue1189 } from "./issue-1189.ts";
 import { testit as issue5792 } from "./issue-5792.ts";
 import { testit as issue4576 } from "./issue-4576.ts";
+import { testit as issue5840 } from "./issue-5840.ts";
+import { testit as issue5842 } from "./issue-5842.ts";
+import { testit as issue5845 } from "./issue-5845.ts";
+import { testit as issue5846 } from "./issue-5846.ts";
+import { testit as issue5865 } from "./issue-5865.ts";
 import { testit as parseTipBrackets } from "./parse-tip-brackets.ts";
+import { testit as ghsaP2ph2rvmQ37m } from "./security-ghsa-p2ph-2rvm-q37m.ts";
+import { testit as ghsaCrhmW5qrWjj4 } from "./security-ghsa-crhm-w5qr-wjj4.ts";
 
 const tests: [string, () => void | Promise<void>][] = [
   ["lint-command-ids", lintCommandIds],
   ["combining-mark-first", combiningMarkFirst],
-  ["cmd-start-autoscroll", cmdStartAutoScroll],
   ["issue-1998", issue1998],
   ["issue-2693", issue2693],
   ["issue-906", issue906],
@@ -83,7 +88,14 @@ const tests: [string, () => void | Promise<void>][] = [
   ["issue-1189", issue1189],
   ["issue-5792", issue5792],
   ["issue-4576", issue4576],
+  ["issue-5840", issue5840],
+  ["issue-5842", issue5842],
+  ["issue-5845", issue5845],
+  ["issue-5846", issue5846],
+  ["issue-5865", issue5865],
   ["parse-tip-brackets", parseTipBrackets],
+  ["security-ghsa-p2ph-2rvm-q37m", ghsaP2ph2rvmQ37m],
+  ["security-ghsa-crhm-w5qr-wjj4", ghsaCrhmW5qrWjj4],
 ];
 
 export type AllTestOptions = {

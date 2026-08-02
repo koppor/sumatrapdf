@@ -4,6 +4,7 @@
 
 Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 
+- Renamed the companion engine DLL from `libmupdf.dll` to `libsumatrapdf.dll` (through 3.6 the name was `libmupdf.dll`; 3.7 and later use `libsumatrapdf.dll`). Installer upgrades move the old name aside; see [Portable vs installer](SumatraPDF-portable.md) and [Failed to load libsumatrapdf.dll](Failed-to-load-libmupdf.md)
 - Themes can set optional UI colors (`DisabledTextColor`, `DarkerTextColor`, `HotBackgroundColor`, `EdgeColor`, `HotEdgeColor`, `DisabledEdgeColor`, `ErrorBackgroundColor`, and notification highlight colors) so disabled and hover states are not derived only from `TextColor` / backgrounds; built-in themes (including Dracula) set them so tinted foregrounds no longer look muddy yellow (issue #4721)
 - new built-in themes: **One Dark**, **Monokai**, **Nord**, **GitHub Dark**, **Catppuccin Mocha**, **Tokyo Night**, **Gruvbox**, **Night Owl**, **Ayu**, and **Palenight** (common palettes from VS Code and other editors)
 - theme list cleanup: removed **Darker** (folded into **Charcoal**, the former “Dark background Bright text”); settings that still name `Darker` or the old long name keep working
@@ -12,16 +13,19 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - Favorites can open as a full-window tab so long paths and names use the whole window; the sidebar Favorites panel still works independently. The sidebar Favorites/ToC width can also be dragged past half the window (keeps ~200px for the document)
 - Favorites list has a search box (like Bookmarks), in both the sidebar panel and the Favorites tab
 - Favorites can be sorted alphabetically by name (or page label) within each file instead of by page number: `SortFavoritesByName = true`, or the **Sort By Name** checkbox in the Favorites tree context menu (fixes #2277)
+- rename `CmdDiscardAnnotations` to `CmdDiscardChanges` ("Discard Changes"): reloads the current document from disk, dropping unsaved annotations and form changes; available from the tab context menu when there are unsaved changes and from the `Ctrl + K` command palette
 
 - fix UI (tabs, toolbar, bookmarks/favorites trees, caption) not rescaling when moving the window between monitors with different DPI/scaling (issue #5827)
 - PDF bookmark / link destinations now apply Adobe-style view modes (`/Fit`, `/FitH`, `/FitV`, `/FitB`, `/FitBH`, `/FitBV`, `/XYZ` zoom) instead of only jumping to the page (fixes #5828)
 - fix Advanced Settings list jumping scroll position on the first click after open or filter change (fixes #5829)
+- fix mouse-wheel / touchpad scrolling doing nothing (and 100% CPU use) after restoring a session that was left in fullscreen: the hidden tab bar repainted in a loop, starving the timer that drives smooth scrolling (fixes #5865)
 - Bookmarks sidebar: **Collapse All** expands a single top-level root one level when that is all the outline has (typical Word-export TOC), and the context menu has **Expand to Level 1/2/3** for explicit depth control (fixes #5239)
 - Bookmarks context menu **Collapse Same Level** collapses every outline entry that shares the parent of the selected/clicked item (siblings at that nesting level) (fixes #1895)
 - FB2 document properties (`Ctrl+D`) now show the book annotation from `title-info` as Subject (fixes #2254)
 - fix portable self-update failing to replace the running exe when installing from the update dialog
 - new `Advanced Settings...` dialog (`Ctrl + K` command palette): a filterable list of the advanced settings where you can toggle booleans, pick enum values from a drop-down and edit strings, colors and numbers in-place, then `Save`. Replaces the per-setting toggle commands (`CmdToggleSmoothScroll`, `CmdToggleEscToExit`, `CmdToggleReuseInstance` etc.), which were removed
 - can open and view Markdown documents (`.md`, `.markdown`): they render as formatted text (GitHub Flavored Markdown, including tables, task lists and strikethrough) via the rendering engine, and the installer registers the file association so they open from Explorer and drag&drop
+- Markdown documents have a **Show Generated HTML** command (`Ctrl + K` command palette) that saves the rendered HTML to a temporary `.html` file and opens it in Notepad
 - HEIC / HEIF still images now decode with a built-in decoder (no Windows HEIC codec required for most phone photos); AVIF still uses dav1d. The system WIC path remains as a fallback if built-in decode fails
 - Read Aloud: adjustable playback speed — pick 0.5x .. 3x in the new `Speed` submenu (next to `Voice` in the Read Aloud menu, toolbar dropdown and context menu) or click the speed button on the playback bar to cycle presets (right-click cycles backwards); the speed persists across sessions via the `ReadAloudSpeed` advanced setting
 - updated the bundled MuPDF rendering engine to 1.28.0
@@ -143,11 +147,13 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 
 - `CmdAIChatWithClaudeCode` : "AI Chat"
 - `CmdChangeBackgroundColor` : "Change Background Color"
+- `CmdChangeTheme` : "Change Theme..." — dialog to pick a UI theme and document-color follow mode
 - `CmdChangeScrollbar` : "Change Scrollbar"
 - `CmdCommandPalette *` : command palette table-of-contents mode (`CmdCommandPaletteTOC`, `Shift + F12`)
 - `CmdCommandPalette $` : command palette favorites mode (`CmdCommandPaletteFavorites`)
 - `CmdCommandPaletteFavorites` : "Command Palette: Favorites"
 - `CmdContinueReadAloud` : "Continue Reading"
+- `CmdDeleteFileAndOpenNext` : "Delete File And Open Next" — opens the next file in the folder, then moves the previous file to the Recycle Bin (discussion #5845)
 - `CmdFavoriteShowInTab` : "Show Favorites in Tab" — full-window Favorites tab (sidebar Favorites still works)
 - `CmdToggleFavoritesSort` : "Sort Favorites By Name" — Favorites tree context menu checkbox; toggles `SortFavoritesByName` (fixes #2277)
 - `CmdZoomFitHeight` : "Zoom: Fit Height" — scale page height to the window (fixes #1714)
@@ -180,10 +186,12 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - `CmdPdShowInfo` : "Show PDF Info"
 - `CmdReadAloud` : "Read Aloud"
 - `CmdRemoveDeletedFilesFromHistory` : "Remove Deleted Files From History"
+- `CmdDeleteCachedFiles` : "Delete Cached Files" — deletes local network-drive comic book cache (`cbx-cache`)
 - `CmdResizeImage` : "Resize Image"
 - `CmdScreenshot` : "Take Screenshot"
 - `CmdSetScreenshotHotkey` : "Set Screenshot Hotkey"
 - `CmdSetInverseSearch` : "Set Inverse Search Command Line" — opens a dialog to configure the SyncTeX inverse-search command (`Ctrl + k` command palette)
+- `CmdShowGeneratedHTML` : "Show Generated HTML" — available for Markdown documents
 - `CmdSetTabColor` : "Set Tab Color"
 - `CmdStartAutoScroll` : "Start Auto-Scroll"
 - `CmdTabGroupRestore` : "Restore Tab Group"
@@ -195,6 +203,7 @@ Available in [pre-release](https://www.sumatrapdfreader.org/prerelease) builds.
 - `CmdTogglePreservePdfImages` : "Toggle Preserve PDF Image Colors in Dark Mode" — session-only toggle
 - `CmdToggleWindowsPreviewer` : "Toggle Windows Previewer"
 - `CmdToggleWindowsSearchFilter` : "Toggle Windows Search Filter"
+- `CmdTranslateSelection` : "Translate Selection..." — dialog to translate the current selection
 - `CmdTranslateSelectionWithClaudeCode` : "Translate Selection with Claude Code"
 - `CmdTranslateSelectionWithGrokBuild` : "Translate Selection with Grok Build"
 - `CmdTranslateSelectionWithOpenAICodex` : "Translate Selection with OpenAI Codex"

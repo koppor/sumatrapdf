@@ -909,23 +909,19 @@
     <ClInclude Include="..\src\base\Archive.h" />
     <ClInclude Include="..\src\base\Arena.h" />
     <ClInclude Include="..\src\base\Base.h" />
-    <ClInclude Include="..\src\base\BitReader.h" />
-    <ClInclude Include="..\src\base\ByteOrderDecoder.h" />
-    <ClInclude Include="..\src\base\ByteReader.h" />
-    <ClInclude Include="..\src\base\ByteWriter.h" />
+    <ClInclude Include="..\src\base\ByteReaderWriter.h" />
     <ClInclude Include="..\src\base\CmdLineArgsIter.h" />
     <ClInclude Include="..\src\base\Color.h" />
     <ClInclude Include="..\src\base\Crypto.h" />
     <ClInclude Include="..\src\base\CssParser.h" />
     <ClInclude Include="..\src\base\DbgHelpDyn.h" />
     <ClInclude Include="..\src\base\Dict.h" />
-    <ClInclude Include="..\src\base\DirIter.h" />
     <ClInclude Include="..\src\base\DirScan.h" />
     <ClInclude Include="..\src\base\Dpi.h" />
     <ClInclude Include="..\src\base\Exif.h" />
     <ClInclude Include="..\src\base\File.h" />
     <ClInclude Include="..\src\base\FileWatcher.h" />
-    <ClInclude Include="..\src\base\GdiPlus.h" />
+    <ClInclude Include="..\src\base\GdiPlusUtil.h" />
     <ClInclude Include="..\src\base\Geom.h" />
     <ClInclude Include="..\src\base\GuessFileType.h" />
     <ClInclude Include="..\src\base\HtmlTags.h" />
@@ -953,6 +949,12 @@
     <ClInclude Include="..\src\base\Zip.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\ext\lzma\C\Bra86.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\ext\lzma\C\LzmaDec.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\src\BasePch.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
@@ -961,10 +963,7 @@
     <ClCompile Include="..\src\base\Arena_win.cpp" />
     <ClCompile Include="..\src\base\Base.cpp" />
     <ClCompile Include="..\src\base\Base_win.cpp" />
-    <ClCompile Include="..\src\base\BitReader.cpp" />
-    <ClCompile Include="..\src\base\ByteOrderDecoder.cpp" />
-    <ClCompile Include="..\src\base\ByteReader.cpp" />
-    <ClCompile Include="..\src\base\ByteWriter.cpp" />
+    <ClCompile Include="..\src\base\ByteReaderWriter.cpp" />
     <ClCompile Include="..\src\base\CmdLineArgsIter.cpp" />
     <ClCompile Include="..\src\base\CmdLineArgsIter_win.cpp" />
     <ClCompile Include="..\src\base\Color.cpp" />
@@ -972,8 +971,6 @@
     <ClCompile Include="..\src\base\CssParser.cpp" />
     <ClCompile Include="..\src\base\DbgHelpDyn_win.cpp" />
     <ClCompile Include="..\src\base\Dict.cpp" />
-    <ClCompile Include="..\src\base\DirIter.cpp" />
-    <ClCompile Include="..\src\base\DirIter_win.cpp" />
     <ClCompile Include="..\src\base\DirScan.cpp" />
     <ClCompile Include="..\src\base\DirScan_win.cpp" />
     <ClCompile Include="..\src\base\Dpi_win.cpp" />
@@ -981,7 +978,7 @@
     <ClCompile Include="..\src\base\File.cpp" />
     <ClCompile Include="..\src\base\FileWatcher.cpp" />
     <ClCompile Include="..\src\base\File_win.cpp" />
-    <ClCompile Include="..\src\base\GdiPlus.cpp" />
+    <ClCompile Include="..\src\base\GdiPlusUtil.cpp" />
     <ClCompile Include="..\src\base\Geom.cpp" />
     <ClCompile Include="..\src\base\GuessFileType.cpp" />
     <ClCompile Include="..\src\base\GuessFileTypeFromFile.cpp" />
@@ -990,14 +987,8 @@
     <ClCompile Include="..\src\base\Http_win.cpp" />
     <ClCompile Include="..\src\base\JsonParser.cpp" />
     <ClCompile Include="..\src\base\LzmaSimpleArchive.cpp" />
-    <!-- LzSA decoder (LzmaDecode + x86 BCJ). Bra.c (ARM/PPC/etc.) not needed. -->
-    <ClCompile Include="..\ext\lzma\C\Bra86.c">
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-    </ClCompile>
-    <ClCompile Include="..\ext\lzma\C\LzmaDec.c">
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-    </ClCompile>
     <ClCompile Include="..\src\base\Pixmap.cpp" />
+    <ClCompile Include="..\src\base\Pixmap_win.cpp" />
     <ClCompile Include="..\src\base\SettingsUtil.cpp" />
     <ClCompile Include="..\src\base\SquareTreeParser.cpp" />
     <ClCompile Include="..\src\base\Str.cpp" />

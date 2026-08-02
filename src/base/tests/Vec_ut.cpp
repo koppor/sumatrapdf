@@ -68,7 +68,7 @@ void VecTest() {
         str::Builder v(0, nullptr);
         for (int i = 0; i < 7; i++) {
             v.Append(Str(buf, 1));
-            buf[0] = buf[0] + 1;
+            buf[0] = (char)(buf[0] + 1);
         }
         Str s = ToStr(v);
         utassert(str::Eq("abcdefg", s));
@@ -117,17 +117,17 @@ void VecTest() {
         v.RemoveAt(0, 6 * 15);
         utassert(len(v) == 6);
         Str s = ToStr(v);
-        utassert(str::Eq(s, "lambda"));
+        utassert(str::Eq(s, StrL("lambda")));
         s = v.TakeStr();
-        utassert(str::Eq(s, "lambda"));
+        utassert(str::Eq(s, StrL("lambda")));
         str::Free(s);
         utassert(len(v) == 0);
 
         v.Append("lambda");
-        utassert(str::Eq(ToStr(v), "lambda"));
+        utassert(str::Eq(ToStr(v), StrL("lambda")));
         char c = v.RemoveLast();
         utassert(c == 'a');
-        utassert(str::Eq(ToStr(v), "lambd"));
+        utassert(str::Eq(ToStr(v), StrL("lambd")));
     }
 
     VecTestAppendFmt();

@@ -11,7 +11,7 @@
 // keeps the best time.
 
 #include "base/Base.h"
-#include "base/DirIter.h"
+#include "base/DirScan.h"
 #include "base/File.h"
 #include "base/ScopedWin.h"
 #include "base/Timer.h"
@@ -380,7 +380,7 @@ static bool DecodeGdiplus(Str data, int* outW, int* outH) {
     volatile BYTE sink = 0;
     if (bd.Scan0 && h > 0) {
         sink = *((BYTE*)bd.Scan0);
-        sink ^= *((BYTE*)bd.Scan0 + (size_t)(h - 1) * (size_t)bd.Stride);
+        sink ^= *((BYTE*)bd.Scan0 + ((size_t)(h - 1) * (size_t)bd.Stride));
         (void)sink;
     }
     bmp->UnlockBits(&bd);

@@ -69,23 +69,23 @@ static bool ExtractSignature(Str hexSignature, Str& data, ScopedMem<BYTE>& signa
     // * a string starting with "sha1:" followed by the signature (and optionally whitespace and further content)
     // * empty, then the signature must be found on the last line of non-binary data, starting at " Signature sha1:"
     Str hex = hexSignature;
-    if (str::StartsWith(hex, "sha1:")) {
-        hex = Str(hex.s + 5, hex.len - 5);
-    } else if (!hex) {
-        if (data.len < 20 || memchr(data.s, 0, data.len)) {
+    if (!str::TrimPrefix(hex, StrL("sha1:"))) {
+        if (!hex) {
+            if (data.len < 20 || memchr(data.s, 0, data.len)) {
+                return false;
+            }
+            const char* lastLine = data.s + data.len - 1;
+            while (lastLine > data.s && *(lastLine - 1) != '\n') {
+                lastLine--;
+            }
+            if (lastLine == data.s || !str::Contains(Str(lastLine), StrL(" Signature sha1:"))) {
+                return false;
+            }
+            data.len = (int)(lastLine - data.s);
+            str::Cut(Str(lastLine), StrL(" Signature sha1:"), nullptr, &hex);
+        } else {
             return false;
         }
-        const char* lastLine = data.s + data.len - 1;
-        while (lastLine > data.s && *(lastLine - 1) != '\n') {
-            lastLine--;
-        }
-        if (lastLine == data.s || !str::Contains(Str(lastLine), StrL(" Signature sha1:"))) {
-            return false;
-        }
-        data.len = (int)(lastLine - data.s);
-        str::Cut(Str(lastLine), StrL(" Signature sha1:"), nullptr, &hex);
-    } else {
-        return false;
     }
 
     Vec<BYTE> signatureBytes;
@@ -111,8 +111,11 @@ bool VerifySHA1Signature(Str data, Str hexSignature, Str pubkey) {
     const BYTE* dataPtr = (const BYTE*)data.s;
     size_t dataLen = (size_t)data.len;
 
-#define Check(val) \
-    if ((ok = (val)) == FALSE) goto CleanUp
+#define Check(val)                     \
+    do {                               \
+        ok = (val);                    \
+        if (ok == FALSE) goto CleanUp; \
+    } while (0)
     Check(ExtractSignature(hexSignature, data, signature, signatureLen));
     dataPtr = (const BYTE*)data.s;
     dataLen = (size_t)data.len;
@@ -164,7 +167,7 @@ Str ExtractP7m(Str d) {
         return {};
     }
 
-    u8* content = AllocArray<u8>(cbContent);
+    u8* content = AllocArray<u8>((int)cbContent);
     ok = CryptMsgGetParam(hMsg, CMSG_CONTENT_PARAM, 0, content, &cbContent);
     CryptMsgClose(hMsg);
     if (!ok) {

@@ -42,12 +42,12 @@ void UnpackColor(COLORREF c, u8& r, u8& g, u8& b) {
 Gdiplus::Color Unblend(COLORREF c, u8 alpha) {
     u8 r, g, b, a;
     UnpackColor(c, r, g, b, a);
-    u8 ralpha = (u8)(alpha * a / 255.f);
+    u8 ralpha = (u8)((float)alpha * (float)a / 255.f);
     float falpha = ((float)alpha * (float)a / 255.f);
     float tmp = 255.0f / (falpha + 0.5f);
-    u8 R = (u8)floorf(std::max(r - (255 - ralpha), 0) * tmp);
-    u8 G = (u8)floorf(std::max(g - (255 - ralpha), 0) * tmp);
-    u8 B = (u8)floorf(std::max(b - (255 - ralpha), 0) * tmp);
+    u8 R = (u8)floorf((float)std::max(r - (255 - ralpha), 0) * tmp);
+    u8 G = (u8)floorf((float)std::max(g - (255 - ralpha), 0) * tmp);
+    u8 B = (u8)floorf((float)std::max(b - (255 - ralpha), 0) * tmp);
     return Gdiplus::Color(alpha, R, G, B);
 }
 
@@ -93,24 +93,20 @@ void ParseColor(ParsedColor& parsed, Str txt) {
     }
     TempStr s = str::DupTemp(txt);
     str::TrimWSInPlace(s, str::TrimOpt::Both);
-    if (str::EqI(s, "checkered") || str::EqI(s, "unset")) {
+    if (str::EqI(s, StrL("checkered")) || str::EqI(s, StrL("unset"))) {
         parsed.col = kColorUnset;
         parsed.parsedOk = true;
         return;
     }
-    int off = 0;
-    if (str::StartsWith(s, "0x")) {
-        off = 2;
-    } else if (str::StartsWith(s, "#")) {
-        off = 1;
+    if (!str::TrimPrefix(s, StrL("0x"))) {
+        str::TrimPrefix(s, StrL("#"));
     }
-    Str p = Str(s.s + off, s.len - off);
-    int n = p.len;
+    int n = len(s);
     unsigned int r = 0;
     unsigned int g = 0;
     unsigned int b = 0;
     unsigned int a = 0;
-    bool ok = n == 8 && !str::IsNull(str::Parse(p, "%2x%2x%2x%2x%$", &a, &r, &g, &b));
+    bool ok = n == 8 && !str::IsNull(str::Parse(s, "%2x%2x%2x%2x%$", &a, &r, &g, &b));
     if (ok) {
         parsed.col = MkColor((u8)r, (u8)g, (u8)b, (u8)a);
         parsed.pdfCol = MkPdfColor((u8)r, (u8)g, (u8)b, (u8)a);
@@ -118,7 +114,7 @@ void ParseColor(ParsedColor& parsed, Str txt) {
         return;
     }
 
-    ok = n == 6 && !str::IsNull(str::Parse(p, "%2x%2x%2x%$", &r, &g, &b));
+    ok = n == 6 && !str::IsNull(str::Parse(s, "%2x%2x%2x%$", &r, &g, &b));
     if (!ok) {
         return;
     }
@@ -177,24 +173,41 @@ COLORREF AdjustLightness(COLORREF c, float factor) {
     u8 M = std::max(std::max(R, G), B), m = std::min(std::min(R, G), B);
     if (M == m) {
         // for grayscale values, lightness is proportional to the color value
-        u8 X = (u8)limitValue((int)floorf(M * factor + 0.5f), 0, 255);
+        u8 X = (u8)limitValue((int)floorf(((float)M * factor) + 0.5f), 0, 255);
         return MkColor(X, X, X);
     }
     u8 C = M - m;
-    u8 Ha = (u8)abs(M == R ? G - B : M == G ? B - R : R - G);
+    int hueDiff;
+    if (M == R) {
+        hueDiff = G - B;
+    } else if (M == G) {
+        hueDiff = B - R;
+    } else {
+        hueDiff = R - G;
+    }
+    u8 Ha = (u8)abs(hueDiff);
     // cf. http://en.wikipedia.org/wiki/HSV_color_space#Lightness
     float L2 = (float)(M + m);
     // cf. http://en.wikipedia.org/wiki/HSV_color_space#Saturation
-    float S = C / (L2 > 255.0f ? 510.0f - L2 : L2);
+    float S = (float)C / (L2 > 255.0f ? 510.0f - L2 : L2);
 
     L2 = limitValue(L2 * factor, 0.0f, 510.0f);
     // cf. http://en.wikipedia.org/wiki/HSV_color_space#From_HSL
     float C1 = (L2 > 255.0f ? 510.0f - L2 : L2) * S;
-    float X1 = C1 * Ha / C;
+    float X1 = C1 * (float)Ha / (float)C;
     float m1 = (L2 - C1) / 2;
-    R = (u8)floorf((M == R ? C1 : m != R ? X1 : 0) + m1 + 0.5f);
-    G = (u8)floorf((M == G ? C1 : m != G ? X1 : 0) + m1 + 0.5f);
-    B = (u8)floorf((M == B ? C1 : m != B ? X1 : 0) + m1 + 0.5f);
+    auto chromaOrX = [](bool isMax, bool isMin, float c1, float x1) -> float {
+        if (isMax) {
+            return c1;
+        }
+        if (!isMin) {
+            return x1;
+        }
+        return 0.f;
+    };
+    R = (u8)floorf(chromaOrX(M == R, m == R, C1, X1) + m1 + 0.5f);
+    G = (u8)floorf(chromaOrX(M == G, m == G, C1, X1) + m1 + 0.5f);
+    B = (u8)floorf(chromaOrX(M == B, m == B, C1, X1) + m1 + 0.5f);
     return MkColor(R, G, B);
 }
 
@@ -206,7 +219,7 @@ COLORREF AdjustLightness2(COLORREF c, float units) {
         u8 x = u8(units + 0.5f);
         return MkColor(x, x, x);
     }
-    return AdjustLightness(c, 1.0f + units / lightness);
+    return AdjustLightness(c, 1.0f + (units / lightness));
 }
 
 // http://en.wikipedia.org/wiki/HSV_color_space#Lightness
@@ -223,7 +236,7 @@ float GetLightness(COLORREF c) {
 bool IsLightColor(COLORREF c) {
     u8 r, g, b;
     UnpackColor(c, r, g, b);
-    float y = 0.2126f * float(r) + 0.7152f * float(g) + 0.0722f * float(b);
+    float y = (0.2126f * float(r)) + (0.7152f * float(g)) + (0.0722f * float(b));
     return y > 127.5f; // mid 256
 }
 

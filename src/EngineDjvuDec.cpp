@@ -28,7 +28,7 @@ Kind kindEngineDjVu = "engineDjVu";
 // of failing with an error code.
 bool gMemoryMapLargeFiles = true;
 
-constexpr i64 kMemoryMapMinFileSize = 128 * 1024 * 1024;
+constexpr i64 kMemoryMapMinFileSize = 128LL * 1024 * 1024;
 
 // parses "123", "#123", "# 123"; returns -1 for invalid page
 static int ParseDjvuDecLink(Str link) {
@@ -44,7 +44,8 @@ static bool DjvuDecCouldBeURL(Str link) {
     if (!link) {
         return false;
     }
-    if (str::StartsWithI(link, "http:") || str::StartsWithI(link, "https:") || str::StartsWithI(link, "mailto:")) {
+    if (str::StartsWithI(link, StrL("http:")) || str::StartsWithI(link, StrL("https:")) ||
+        str::StartsWithI(link, StrL("mailto:"))) {
         return true;
     }
     return str::Contains(link, ".");
@@ -80,11 +81,11 @@ struct PageDestinationDjvuDec : IPageDestination {
 };
 
 static IPageDestination* NewDjvuDecDestination(Str link, Str comment) {
-    if (!link || str::Eq(link, "#")) {
+    if (!link || str::Eq(link, StrL("#"))) {
         return nullptr;
     }
     auto res = new PageDestinationDjvuDec(link, comment);
-    res->rect = RectF(DEST_USE_DEFAULT, DEST_USE_DEFAULT, DEST_USE_DEFAULT, DEST_USE_DEFAULT);
+    res->rect = RectF(kDestUseDefault, kDestUseDefault, kDestUseDefault, kDestUseDefault);
     res->pageNo = ParseDjvuDecLink(link);
     return res;
 }
@@ -101,7 +102,8 @@ static IPageElement* NewDjvuDecLink(int pageNo, Rect rect, Str link, Str comment
 }
 
 static TocItem* NewDjvuDecTocItem(TocItem* parent, Str title, Str link) {
-    auto res = new TocItem(parent, title, 0);
+    auto res = AllocTocItem(nullptr, title, 0);
+    res->parent = parent;
     res->dest = NewDjvuDecDestination(link, {});
     if (res->dest) {
         res->pageNo = PageDestGetPageNo(res->dest);
@@ -221,7 +223,7 @@ class EngineDjvuDec : public EngineBase {
 
     PointF TransformPoint(PointF pt, int pageNo, float zoom, int rotation, bool inverse);
     bool FinishLoading();
-    TocItem* BuildTocTree(TocItem* parent, djvu_outline_item* items, int n, int& idCounter);
+    TocItem* BuildTocTree(TocItem* parent, djvu_outline_item* items, int n, int& idCounter, int depth);
     // After a successful render of page0: mark MRU and drop cold pages if the
     // decoder's page-local cache exceeds the byte/page budget.
     void NotePageCacheAfterRender(int page0);
@@ -232,7 +234,7 @@ class EngineDjvuDec : public EngineBase {
 
 // Cap decoder page-local cache (Sjbz/IW44/bg) so multi-GB books don't keep
 // every visited page. Tuned for interactive re-paint of a few recent pages.
-constexpr size_t kDjvuPageCacheMaxBytes = 64 * 1024 * 1024;
+constexpr size_t kDjvuPageCacheMaxBytes = 64ull * 1024 * 1024;
 constexpr int kDjvuPageCacheMaxPages = 32;
 
 EngineDjvuDec::EngineDjvuDec() {
@@ -367,8 +369,8 @@ bool EngineDjvuDec::FinishLoading() {
             }
             pi->uprightW = upW;
             pi->uprightH = upH;
-            float dx = upW * GetFileDPI() / dpi;
-            float dy = upH * GetFileDPI() / dpi;
+            float dx = (float)upW * GetFileDPI() / (float)dpi;
+            float dy = (float)upH * GetFileDPI() / (float)dpi;
             bool isValid = dx > 0 && dx < 1e6f && dy > 0 && dy < 1e6f;
             if (isValid) {
                 mbox = RectF(0, 0, dx, dy);
@@ -459,7 +461,7 @@ static u8* RotateGray8(const u8* src, int dx, int dy, int rotation, int& dxOut, 
     }
     for (int y = 0; y < dy; y++) {
         for (int x = 0; x < dx; x++) {
-            u8 v = src[(size_t)y * dx + x];
+            u8 v = src[((size_t)y * dx) + x];
             int nx = 0, ny = 0;
             if (rotation == 90) {
                 nx = dy - 1 - y;
@@ -471,7 +473,7 @@ static u8* RotateGray8(const u8* src, int dx, int dy, int rotation, int& dxOut, 
                 nx = y;
                 ny = dx - 1 - x;
             }
-            out[(size_t)ny * ndx + nx] = v;
+            out[((size_t)ny * ndx) + nx] = v;
         }
     }
     dxOut = ndx;
@@ -499,7 +501,7 @@ static u8* RotateBgr(const u8* src, int dx, int dy, int rotation, int& dxOut, in
     }
     for (int y = 0; y < dy; y++) {
         for (int x = 0; x < dx; x++) {
-            const u8* s = src + ((size_t)y * dx + x) * 3;
+            const u8* s = src + ((((size_t)y * dx) + x) * 3);
             int nx = 0, ny = 0;
             if (rotation == 90) {
                 nx = dy - 1 - y;
@@ -511,7 +513,7 @@ static u8* RotateBgr(const u8* src, int dx, int dy, int rotation, int& dxOut, in
                 nx = y;
                 ny = dx - 1 - x;
             }
-            u8* d = out + ((size_t)ny * ndx + nx) * 3;
+            u8* d = out + ((((size_t)ny * ndx) + nx) * 3);
             d[0] = s[0];
             d[1] = s[1];
             d[2] = s[2];
@@ -556,9 +558,9 @@ static inline int FloorInt(float v) {
 }
 
 static inline u8 BilinearByte(float v00, float v10, float v01, float v11, float tx, float ty) {
-    float v0 = v00 + (v10 - v00) * tx;
-    float v1 = v01 + (v11 - v01) * tx;
-    float v = v0 + (v1 - v0) * ty;
+    float v0 = v00 + ((v10 - v00) * tx);
+    float v1 = v01 + ((v11 - v01) * tx);
+    float v = v0 + ((v1 - v0) * ty);
     return (u8)ClampInt((int)(v + 0.5f), 0, 255);
 }
 
@@ -577,8 +579,8 @@ static Pixmap* ScaleDjvuPixelsToPixmap(const u8* src, int srcDx, int srcDy, int 
     if (srcDx == screen.dx && srcDy == screen.dy && screen.x == full.x && screen.y == full.y && srcDx == full.dx &&
         srcDy == full.dy) {
         for (int y = 0; y < screen.dy; y++) {
-            const u8* sp = src + (size_t)y * srcDx * comp;
-            u8* dst = res->data + (size_t)y * res->stride;
+            const u8* sp = src + ((size_t)y * srcDx * comp);
+            u8* dst = res->data + ((size_t)y * res->stride);
             if (comp == 1) {
                 for (int x = 0; x < screen.dx; x++) {
                     u8 g = sp[x];
@@ -597,30 +599,30 @@ static Pixmap* ScaleDjvuPixelsToPixmap(const u8* src, int srcDx, int srcDy, int 
     double sx = (double)srcDx / (double)full.dx;
     double sy = (double)srcDy / (double)full.dy;
     for (int y = 0; y < screen.dy; y++) {
-        float srcYf = (float)(((screen.y - full.y) + y + 0.5) * sy - 0.5);
+        float srcYf = (float)((((screen.y - full.y) + y + 0.5) * sy) - 0.5);
         int y0 = ClampInt(FloorInt(srcYf), 0, srcDy - 1);
         int y1 = ClampInt(y0 + 1, 0, srcDy - 1);
         float ty = srcYf - (float)y0;
-        u8* dst = res->data + (size_t)y * res->stride;
+        u8* dst = res->data + ((size_t)y * res->stride);
         for (int x = 0; x < screen.dx; x++) {
-            float srcXf = (float)(((screen.x - full.x) + x + 0.5) * sx - 0.5);
+            float srcXf = (float)((((screen.x - full.x) + x + 0.5) * sx) - 0.5);
             int x0 = ClampInt(FloorInt(srcXf), 0, srcDx - 1);
             int x1 = ClampInt(x0 + 1, 0, srcDx - 1);
             float tx = srcXf - (float)x0;
             if (comp == 1) {
-                float v00 = src[(size_t)y0 * srcDx + x0];
-                float v10 = src[(size_t)y0 * srcDx + x1];
-                float v01 = src[(size_t)y1 * srcDx + x0];
-                float v11 = src[(size_t)y1 * srcDx + x1];
+                float v00 = src[((size_t)y0 * srcDx) + x0];
+                float v10 = src[((size_t)y0 * srcDx) + x1];
+                float v01 = src[((size_t)y1 * srcDx) + x0];
+                float v11 = src[((size_t)y1 * srcDx) + x1];
                 u8 g = BilinearByte(v00, v10, v01, v11, tx, ty);
                 dst[0] = g;
                 dst[1] = g;
                 dst[2] = g;
             } else {
-                size_t off00 = ((size_t)y0 * srcDx + x0) * 3;
-                size_t off10 = ((size_t)y0 * srcDx + x1) * 3;
-                size_t off01 = ((size_t)y1 * srcDx + x0) * 3;
-                size_t off11 = ((size_t)y1 * srcDx + x1) * 3;
+                size_t off00 = (((size_t)y0 * srcDx) + x0) * 3;
+                size_t off10 = (((size_t)y0 * srcDx) + x1) * 3;
+                size_t off01 = (((size_t)y1 * srcDx) + x0) * 3;
+                size_t off11 = (((size_t)y1 * srcDx) + x1) * 3;
                 dst[0] = BilinearByte(src[off00 + 0], src[off10 + 0], src[off01 + 0], src[off11 + 0], tx, ty);
                 dst[1] = BilinearByte(src[off00 + 1], src[off10 + 1], src[off01 + 1], src[off11 + 1], tx, ty);
                 dst[2] = BilinearByte(src[off00 + 2], src[off10 + 2], src[off01 + 2], src[off11 + 2], tx, ty);
@@ -673,11 +675,16 @@ Pixmap* EngineDjvuDec::RenderPage(RenderPageArgs& args) {
     bool isBitonal = pi->pageType == DJVU_PAGE_BITONAL || ri.format == DJVU_FORMAT_GRAY8;
     int comp = (ri.format == DJVU_FORMAT_GRAY8) ? 1 : 3;
     int sdx = ri.width, sdy = ri.height;
-    u8* pixels = AllocArray<u8>(sdx * sdy * comp);
+    i64 stride = (i64)sdx * comp;
+    i64 pixelCount = stride * sdy;
+    if (sdx <= 0 || sdy <= 0 || stride > INT_MAX || pixelCount > INT_MAX) {
+        return nullptr;
+    }
+    u8* pixels = AllocArray<u8>((int)pixelCount);
     if (!pixels) {
         return nullptr;
     }
-    if (djvu_page_render_into_abortable(doc, pageNo - 1, subsample, pixels, sdx * comp, ab) != 0) {
+    if (djvu_page_render_into_abortable(doc, pageNo - 1, subsample, pixels, (int)stride, ab) != 0) {
         free(pixels);
         return nullptr;
     }
@@ -726,7 +733,8 @@ static void CollectZonesUtf8(djvu_text_zone* z, float dpiF, str::Builder& sb, Ve
             djvu_text_zone* c = &z->children[i];
             CollectZonesUtf8(c, dpiF, sb, coords);
             if (c->type == DJVU_ZONE_WORD) {
-                coords.Append(Rect((int)((c->x + c->w) * dpiF), (int)(c->y * dpiF), 2, (int)(c->h * dpiF)));
+                coords.Append(
+                    Rect((int)((float)(c->x + c->w) * dpiF), (int)((float)c->y * dpiF), 2, (int)((float)c->h * dpiF)));
                 sb.AppendChar(' ');
             } else if (c->type == DJVU_ZONE_LINE) {
                 coords.Append(Rect());
@@ -738,15 +746,15 @@ static void CollectZonesUtf8(djvu_text_zone* z, float dpiF, str::Builder& sb, Ve
     if (len(z->text) == 0) {
         return;
     }
-    Rect r((int)(z->x * dpiF), (int)(z->y * dpiF), (int)(z->w * dpiF), (int)(z->h * dpiF));
+    Rect r((int)((float)z->x * dpiF), (int)((float)z->y * dpiF), (int)((float)z->w * dpiF), (int)((float)z->h * dpiF));
     // zones are usually word-granularity, so approximate per-glyph rects by
     // evenly splitting the box horizontally (computed from endpoints so slices
     // tile exactly); this makes partial-word search hits and selections
     // highlight roughly just the matched characters
     int n = Utf8CodepointCount(z->text);
     for (int i = 0; i < n; i++) {
-        int xStart = r.x + (i * r.dx) / n;
-        int xEnd = r.x + ((i + 1) * r.dx) / n;
+        int xStart = r.x + ((i * r.dx) / n);
+        int xEnd = r.x + (((i + 1) * r.dx) / n);
         coords.Append(Rect(xStart, r.y, xEnd - xStart, r.dy));
     }
     sb.Append(z->text);
@@ -815,7 +823,8 @@ Vec<IPageElement*> EngineDjvuDec::GetElements(int pageNo) {
         if (!url) {
             continue;
         }
-        Rect rect((int)(l.x * dpiF), (int)(l.y * dpiF), (int)(l.w * dpiF), (int)(l.h * dpiF));
+        Rect rect((int)((float)l.x * dpiF), (int)((float)l.y * dpiF), (int)((float)l.w * dpiF),
+                  (int)((float)l.h * dpiF));
         TempStr link = ResolveNamedDestDjvuDecTemp(doc, url);
         if (!link) {
             link = url;
@@ -847,11 +856,11 @@ bool EngineDjvuDec::HandleLink(IPageDestination* dest, ILinkHandler* linkHandler
     }
     auto ddest = (PageDestinationDjvuDec*)dest;
     Str link = ddest->link;
-    if (str::Eq(link, "#+1")) {
+    if (str::Eq(link, StrL("#+1"))) {
         linkHandler->GoToNextPage();
         return true;
     }
-    if (str::Eq(link, "#-1")) {
+    if (str::Eq(link, StrL("#-1"))) {
         linkHandler->GoToPrevPage();
         return true;
     }
@@ -876,9 +885,7 @@ bool EngineDjvuDec::HandleLink(IPageDestination* dest, ILinkHandler* linkHandler
 
 IPageDestination* EngineDjvuDec::GetNamedDest(Str name) {
     Str n = name;
-    if (str::StartsWith(n, "#")) {
-        n = Str(n.s + 1, n.len - 1);
-    }
+    str::TrimPrefix(n, StrL("#"));
     TempStr link = ResolveNamedDestDjvuDecTemp(doc, n);
     if (link) {
         return NewDjvuDecDestination(link, {});
@@ -886,7 +893,10 @@ IPageDestination* EngineDjvuDec::GetNamedDest(Str name) {
     return nullptr;
 }
 
-TocItem* EngineDjvuDec::BuildTocTree(TocItem* parent, djvu_outline_item* items, int n, int& idCounter) {
+TocItem* EngineDjvuDec::BuildTocTree(TocItem* parent, djvu_outline_item* items, int n, int& idCounter, int depth) {
+    if (depth >= 64) {
+        return nullptr;
+    }
     TocItem* node = nullptr;
     for (int i = 0; i < n; i++) {
         djvu_outline_item& it = items[i];
@@ -901,7 +911,7 @@ TocItem* EngineDjvuDec::BuildTocTree(TocItem* parent, djvu_outline_item* items, 
         }
         TocItem* tocItem = NewDjvuDecTocItem(parent, title, link);
         tocItem->id = ++idCounter;
-        tocItem->child = BuildTocTree(tocItem, it.children, it.nchildren, idCounter);
+        tocItem->child = BuildTocTree(tocItem, it.children, it.nchildren, idCounter, depth + 1);
         if (!node) {
             node = tocItem;
         } else {
@@ -924,12 +934,12 @@ TocTree* EngineDjvuDec::GetToc() {
         return nullptr;
     }
     int idCounter = 0;
-    TocItem* rootItem = BuildTocTree(nullptr, root->children, root->nchildren, idCounter);
+    TocItem* rootItem = BuildTocTree(nullptr, root->children, root->nchildren, idCounter, 0);
     djvu_outline_destroy(ctx, root);
     if (!rootItem) {
         return nullptr;
     }
-    auto realRoot = new TocItem();
+    auto realRoot = AllocTocItem(nullptr, {}, 0);
     realRoot->child = rootItem;
     tocTree = new TocTree(realRoot);
     return tocTree;

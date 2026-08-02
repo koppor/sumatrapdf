@@ -82,7 +82,7 @@ static SeqStrings gCommandNames =
     "CmdFindToggleMatchCase\0"
     "CmdSaveAnnotations\0"
     "CmdSaveAnnotationsNewFile\0"
-    "CmdDiscardAnnotations\0"
+    "CmdDiscardChanges\0"
     "CmdEditAnnotations\0"
     "CmdDeleteAnnotation\0"
     "CmdZoomFitPage\0"
@@ -265,6 +265,9 @@ static SeqStrings gCommandNames =
     "CmdTocCollapseSameLevel\0"
     "CmdToggleFavoritesSort\0"
     "CmdZoomFitHeight\0"
+    "CmdDeleteFileAndOpenNext\0"
+    "CmdShowGeneratedHTML\0"
+    "CmdDeleteCachedFiles\0"
     "CmdRefHoverPushToJabRef\0"
     "CmdNone\0"
     "\0";
@@ -341,7 +344,7 @@ static i32 gCommandIds[] = {
     CmdFindToggleMatchCase,
     CmdSaveAnnotations,
     CmdSaveAnnotationsNewFile,
-    CmdDiscardAnnotations,
+    CmdDiscardChanges,
     CmdEditAnnotations,
     CmdDeleteAnnotation,
     CmdZoomFitPage,
@@ -524,6 +527,9 @@ static i32 gCommandIds[] = {
     CmdTocCollapseSameLevel,
     CmdToggleFavoritesSort,
     CmdZoomFitHeight,
+    CmdDeleteFileAndOpenNext,
+    CmdShowGeneratedHTML,
+    CmdDeleteCachedFiles,
     CmdRefHoverPushToJabRef,
     CmdNone,
 };
@@ -600,7 +606,7 @@ SeqStrings gCommandDescriptions =
     "Find: Toggle Match Case\0"
     "Save Annotations to existing PDF\0"
     "Save Annotations to a new PDF...\0"
-    "Discard Unsaved Changes\0"
+    "Discard Changes\0"
     "Edit Annotations...\0"
     "Delete Annotation\0"
     "Zoom: Fit Page\0"
@@ -637,7 +643,7 @@ SeqStrings gCommandDescriptions =
     "Open in Foxit Reader\0"
     "Open in Foxit PhantomPDF\0"
     "Open in PDF-XChange\0"
-    "Open in Microsoft Xps Viewer\0"
+    "Open in Microsoft XPS Viewer\0"
     "Open in Microsoft HTML Help\0"
     "Open With Pdf&Djvu Bookmarker\0"
     "don't use\0"
@@ -677,7 +683,7 @@ SeqStrings gCommandDescriptions =
     "Create Square Annotation\0"
     "Create Circle Annotation\0"
     "Create Polygon Annotation\0"
-    "Create Poly Line Annotation\0"
+    "Create Polyline Annotation\0"
     "Create Highlight Annotation\0"
     "Create Underline Annotation\0"
     "Create Squiggly Annotation\0"
@@ -704,7 +710,7 @@ SeqStrings gCommandDescriptions =
     "Next Tab\0"
     "Previous Tab\0"
     "Smart Next Tab\0"
-    "Smart Next Tab\0"
+    "Smart Previous Tab\0"
     "Move Tab Left\0"
     "Move Tab Right\0"
     "Invoke Inverse Search\0"
@@ -771,7 +777,7 @@ SeqStrings gCommandDescriptions =
     "Navigate Files in Folder...\0"
     "Debug: Toggle Cache Info\0"
     "Toggle Engineering Drawing Enhancement\0"
-    "Change Document Colors Follow Theme...\0"
+    "Make Document Colors Follow Theme...\0"
     "Toggle Preserve PDF Image Colors in Dark Mode\0"
     "Toggle Light/Dark Theme\0"
     "Change Theme...\0"
@@ -783,6 +789,9 @@ SeqStrings gCommandDescriptions =
     "Bookmarks: Collapse Same Level\0"
     "Sort Favorites By Name\0"
     "Zoom: Fit Height\0"
+    "Delete File And Open Next\0"
+    "Show Generated HTML\0"
+    "Delete Cached Files\0"
     "Push Reference to JabRef\0"
     "Do nothing\0"
     "\0";
@@ -860,7 +869,7 @@ int GetCommandIdByName(Str cmdName) {
         return cmdId;
     }
     // backwards compatibility for old names
-    if (str::EqI(cmdName, "CmdFindMatch")) {
+    if (str::EqI(cmdName, StrL("CmdFindMatch"))) {
         return CmdFindToggleMatchCase;
     }
     auto curr = gFirstCustomCommand;
@@ -1102,10 +1111,10 @@ CommandArg* TryParseDefaultArg(int defaultArgIdx, Str* argsInOut) {
 // -1 : not a known boolean string
 // returns 1 for a true value, 0 for a false value, -1 if not a recognized bool
 static int ParseBool(Str s) {
-    if (str::EqI(s, "1") || str::EqI(s, "true") || str::EqI(s, "yes") || str::EqI(s, "on")) {
+    if (str::EqI(s, StrL("1")) || str::EqI(s, StrL("true")) || str::EqI(s, StrL("yes")) || str::EqI(s, StrL("on"))) {
         return 1;
     }
-    if (str::EqI(s, "0") || str::EqI(s, "false") || str::EqI(s, "no") || str::EqI(s, "off")) {
+    if (str::EqI(s, StrL("0")) || str::EqI(s, StrL("false")) || str::EqI(s, StrL("no")) || str::EqI(s, StrL("off"))) {
         return 0;
     }
     return -1;

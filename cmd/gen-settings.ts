@@ -345,7 +345,7 @@ const codexBuild: Field[] = [
     "Models",
     Str,
     "",
-    "extra Codex model IDs for the dropdown, comma-separated; gpt-5.5, gpt-5.4, and o3 are always included",
+    "extra Codex model IDs for the dropdown, comma-separated; used in addition to models reported by Codex",
   ),
   field("Sandbox", Int, 1, "Codex sandbox mode: 0=read-only, 1=workspace-write, 2=danger-full-access"),
   field("SkipSandbox", Bool, false, "if true, pass --dangerously-bypass-approvals-and-sandbox to Codex"),
@@ -353,12 +353,12 @@ const codexBuild: Field[] = [
 ];
 
 const grokBuild: Field[] = [
-  field("Model", Str, "grok-composer-2.5-fast", "Grok model ID for --model (e.g. grok-composer-2.5-fast, grok-build)"),
+  field("Model", Str, "grok-4.5", "Grok model ID for --model (e.g. grok-4.5)"),
   field(
     "Models",
     Str,
     "",
-    "extra Grok model IDs for the dropdown, comma-separated; grok-composer-2.5-fast and grok-build are always included",
+    "extra Grok model IDs for the dropdown, comma-separated; used in addition to models reported by Grok",
   ),
   field("Effort", Int, 1, "Grok effort level: 0=Low, 1=Medium, 2=High, 3=XHigh, 4=Max"),
   field("AlwaysApprove", Bool, false, "if true, pass --always-approve to Grok Build (auto-approve tool executions)"),
@@ -376,7 +376,7 @@ const claudeCode: Field[] = [
     "Models",
     Str,
     "",
-    "extra Claude model aliases for the dropdown, comma-separated; sonnet, opus, and haiku are always included",
+    "extra Claude model aliases for the dropdown, comma-separated; documented Claude Code aliases are always included",
   ),
   field("Effort", Int, 1, "Claude effort level: 0=Low, 1=Medium, 2=High, 3=Max"),
   field("SkipPermissions", Bool, false, "if true, pass --dangerously-skip-permissions to Claude Code"),
@@ -465,6 +465,11 @@ const favorite: Field[] = [
     "label for this page (only present if logical and physical page numbers are not the same)",
   ),
   field("MenuId", Int, 0, "id of this favorite in the menu (assigned by AppendFavMenuItems)").notSaved(),
+  // search-start mark ("/") from Find; session-only. Field is in metadata so
+  // SerializeStruct can skip array elements with IsTemporary=true; the field
+  // itself is never written (SettingsUtil) (issue #5862)
+  field("IsTemporary", Bool, false, "session-only favorite; omitted when serializing array elements")
+    .internal(),
 ];
 
 const fileSettings: Field[] = [
@@ -1267,8 +1272,19 @@ function buildMetaData(struc: Field, built: Record<string, number>): string {
   const constStr = fullName !== "FileState" ? "const " : "";
   const namesStr = names.join("\\0");
   const commentsStr = comments.map(escapeCStr).join("\\0");
+  // true if metadata includes Bool IsTemporary (SerializeStruct skips those array elements)
+  let couldBeTemporary = false;
+  for (const field of fields) {
+    if (field.NotSaved || isComment(field)) {
+      continue;
+    }
+    if (field.Name === "IsTemporary" && field.Type.name === "Bool") {
+      couldBeTemporary = true;
+      break;
+    }
+  }
   lines.push(
-    `static ${constStr}StructInfo g${fullName}Info = { sizeof(${struc.StructName}), ${names.length}, g${fullName}Fields, "${namesStr}", "${commentsStr}" };`,
+    `static ${constStr}StructInfo g${fullName}Info = { sizeof(${struc.StructName}), ${names.length}, g${fullName}Fields, "${namesStr}", "${commentsStr}", ${couldBeTemporary} };`,
   );
   return lines.join("\n");
 }
@@ -1620,7 +1636,7 @@ The syntax for colors is: <code>#rrggbb</code> or <code>#rrggbbaa</code>.</p>
   <li><code>bb</code> : blue component</li>
   <li><code>aa</code> : alpha (transparency) component</li>
   </ul>
-For example #ff0000 means red color. You can use <a href="https://galactic.ink/sphere/">Sphere</a> to pick a color.
+For example #ff0000 means red color. You can use <a href="https://colorsphere.app/">Sphere</a> to pick a color.
 </p>
 </div>
 
@@ -1710,7 +1726,7 @@ The components are hex values (ranging from 00 to FF) and stand for:
 - \`gg\` : green component
 - \`bb\` : blue component
 
-For example #ff0000 means red color. #7fff0000 is half-transparent red.
+For example #ff0000 means red color. #7fff0000 is half-transparent red. You can use [Sphere](https://colorsphere.app/) to pick a color.
 
 `;
 

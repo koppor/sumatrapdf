@@ -199,6 +199,13 @@ class FrameSite : public IUnknown {
 static Vec<HtmlWindow*> gHtmlWindows;
 
 HtmlWindow* FindHtmlWindowById(int windowId) {
+    // windowId comes from the its:// URL host (a signed %d parsed from a CHM),
+    // so a crafted document can pass a negative or out-of-range value. Reject it
+    // instead of indexing out of bounds (Vec::operator[]'s ReportIf is
+    // diagnostic-only and still reads els[idx]). Callers null-check the result.
+    if (!gHtmlWindows.isValidIndex(windowId)) {
+        return nullptr;
+    }
     return gHtmlWindows[windowId];
 }
 
@@ -311,7 +318,7 @@ class HW_IInternetProtocol : public IInternetProtocol {
 
     // those are filled in Start() and represent data to be sent
     // for a given url
-    Str data{};
+    Str data;
     size_t dataCurrPos = 0;
 };
 
@@ -1160,7 +1167,8 @@ static LRESULT CALLBACK WndProcParent(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     return DefWindowProc(hwnd, msg, wp, lp);
 }
 
-static LRESULT CALLBACK WndProcParent2(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR subclassId, DWORD_PTR data) {
+static LRESULT CALLBACK WndProcParent2(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR /*subclassId*/,
+                                       DWORD_PTR data) {
     auto win = reinterpret_cast<HtmlWindow*>(data);
     return WndProcParent(hwnd, msg, wp, lp, win);
 }
@@ -1243,7 +1251,7 @@ bool HtmlWindow::CreateBrowser() {
     }
 
     ::SetActiveWindow(oleObjectHwnd);
-    RECT rc = ToRECT(ClientRect(hwndParent));
+    RECT rc = ToRECT(HwndClientRect(hwndParent));
 
     oleInPlaceObject->SetObjectRects(&rc, &rc);
     if (!invisibleAtRuntime) {
@@ -1391,7 +1399,7 @@ void HtmlWindow::OnLButtonDown() const {
 }
 
 void HtmlWindow::SetVisible(bool visible) {
-    HwndSetVisibility(hwndParent, visible);
+    HwndSetVisible(hwndParent, visible);
     if (webBrowser) {
         webBrowser->put_Visible(visible ? VARIANT_TRUE : VARIANT_FALSE);
     }
@@ -1680,7 +1688,7 @@ HBITMAP HtmlWindow::TakeScreenshot(Rect area, Size finalSize) {
     // capture the whole window (including scrollbars)
     // to image and create imageRes containing the area
     // user asked for
-    Rect winRc = WindowRect(hwndParent);
+    Rect winRc = HwndWindowRect(hwndParent);
     Gdiplus::Bitmap image(winRc.dx, winRc.dy, PixelFormat24bppRGB);
     Gdiplus::Graphics g(&image);
 
@@ -2127,7 +2135,7 @@ HRESULT HW_IOleInPlaceSiteWindowless::GetDC(__unused LPCRECT pRect, __unused DWO
 }
 
 HRESULT HW_IOleInPlaceSiteWindowless::InvalidateRect(__unused LPCRECT pRect, BOOL fErase) {
-    ::InvalidateRect(fs->hwndParent, nullptr, fErase);
+    HwndInvalidate(fs->hwndParent, tobool(fErase));
     return S_OK;
 }
 

@@ -15,15 +15,14 @@ function makelzsa_files()
     "Base.h",
     "Base.cpp",
     "Base_win.cpp",
-    "ByteOrderDecoder.*",
-    "ByteWriter.*",
+    "ByteReaderWriter.*",
     "CmdLineArgsIter.h",
     "CmdLineArgsIter.cpp",
     "CmdLineArgsIter_win.cpp",
     "Color.*",
-    "DirIter.h",
-    "DirIter.cpp",
-    "DirIter_win.cpp",
+    "DirScan.h",
+    "DirScan.cpp",
+    "DirScan_win.cpp",
     "Dpi.h",
     "Dpi_win.cpp",
     "File.h",
@@ -33,6 +32,7 @@ function makelzsa_files()
     "Log.h",
     "LogNoOp.cpp",
     "LzmaSimpleArchive.*",
+    "Pixmap.*",
     "Strconv.*",
     "StrFormatParse.*",
     "StrQueue.*",
@@ -79,6 +79,8 @@ function zlib_files()
     "zlib.c",
     "zlib.h",
     "version.txt",
+    "LICENSE",
+    "zlib.3.pdf",
   })
 end
 
@@ -359,68 +361,6 @@ function dav1d_files()
 
   files("ext/dav1d/include/common/*.h")
   files("ext/dav1d/include/dav1d/*.h")
-end
-
-function openjpeg_files()
-  files_in_dir("ext/openjpeg/src/lib/openjp2", {
-    "*.h",
-    "bio.c",
-    "cidx_manager.c",
-    "cio.c",
-    "dwt.c",
-    "event.c",
-    "function_list.c",
-    "ht_dec.c",
-    "image.c",
-    "invert.c",
-    "j2k.c",
-    "jp2.c",
-    "mct.c",
-    "mqc.c",
-    "openjpeg.c",
-    "opj_clock.c",
-    --"opj_malloc.c",
-    "phix_manager.c",
-    "pi.c",
-    "ppix_manager.c",
-    "sparse_array.c",
-    "t1.c",
-    "t2.c",
-    "tcd.c",
-    "tgt.c",
-    "thix_manager.c",
-    "thread.c",
-    "tpix_manager.c",
-  })
-end
-
-function extract_files()
-  files_in_dir("ext/extract/src", {
-    "alloc.*",
-    "astring.*",
-    "boxer.*",
-    "buffer.*",
-    "document.*",
-    "docx.*",
-    "docx_template.*",
-    "extract.*",
-    "html.*",
-    "join.*",
-    "json.*",
-    "mem.*",
-    "memento.*",
-    "odt.*",
-    "odt_template.*",
-    "outf.*",
-    "rect.*",
-    "sys.*",
-    "text.*",
-    "xml.*",
-    "zip.*",
-  })
-  files_in_dir("ext/extract/include", {
-    "*.h",
-  })
 end
 
 function libwebp_files()
@@ -859,10 +799,7 @@ function base_files()
     "Base.h",
     "Base.cpp",
     "Base_win.cpp",
-    "BitReader.*",
-    "ByteOrderDecoder.*",
-    "ByteReader.*",
-    "ByteWriter.*",
+    "ByteReaderWriter.*",
     "CmdLineArgsIter.h",
     "CmdLineArgsIter.cpp",
     "CmdLineArgsIter_win.cpp",
@@ -873,9 +810,6 @@ function base_files()
     "DbgHelpDyn.h",
     "DbgHelpDyn_win.cpp",
     "Dict.*",
-    "DirIter.h",
-    "DirIter.cpp",
-    "DirIter_win.cpp",
     "DirScan.h",
     "DirScan.cpp",
     "DirScan_win.cpp",
@@ -886,8 +820,8 @@ function base_files()
     "File.cpp",
     "File_win.cpp",
     "FileWatcher.*",
-    "GdiPlus.cpp",
-    "GdiPlus.h",
+    "GdiPlusUtil.cpp",
+    "GdiPlusUtil.h",
     "Geom.*",
     "GuessFileType.*",
     "GuessFileTypeFromFile.cpp",
@@ -899,6 +833,7 @@ function base_files()
     "Log.h",
     "LzmaSimpleArchive.*",
     "Pixmap.*",
+    "Pixmap_win.cpp",
     "RegistryPaths.*",
     "Scoped.h",
     "ScopedWin.h",
@@ -1309,8 +1244,8 @@ function efi_files()
     "src/base/Dict*",
     "src/base/Str.*",
     "src/base/StrUtf8.*",
-    "tools/efi/*.cpp",
-    "tools/efi/*.h",
+    "src/tools/efi/*.cpp",
+    "src/tools/efi/*.h",
   }
 end
 
@@ -1322,8 +1257,7 @@ function test_util_files()
     "Base.cpp",
     "Base_win.cpp",
     "BitManip.*",
-    "ByteOrderDecoder.*",
-    "ByteReader.*",
+    "ByteReaderWriter.*",
     "CmdLineArgsIter.h",
     "CmdLineArgsIter.cpp",
     "CmdLineArgsIter_win.cpp",
@@ -1349,6 +1283,7 @@ function test_util_files()
     "JsonParser.*",
     "Log.h",
     "Pixmap.*",
+    "Pixmap_win.cpp",
     "Scoped.*",
     "SettingsUtil.*",
     "SquareTreeParser.*",
@@ -1386,8 +1321,10 @@ function test_util_files()
     "PdfDarkModeOklab.cpp",
     "PdfDarkModeImageClassifier_ut.cpp",
     "PdfDarkModeOklab_ut.cpp",
-    "tools/test_util.cpp"
   })
+  files {
+    "src/tools/test_util.cpp",
+  }
 end
 
 function test_engines_files()
@@ -1426,6 +1363,24 @@ end
 function bench_image_files()
   files {
     "src/tools/bench_image.cpp",
+  }
+end
+
+function preview_test_files()
+  files {
+    "src/tools/preview_test.cpp",
+  }
+end
+
+function plugin_test_files()
+  files {
+    "src/tools/plugin-test.cpp",
+  }
+end
+
+function logview_files()
+  files {
+    "src/tools/logview/logview.cpp",
   }
 end
 
@@ -1601,7 +1556,7 @@ function a_gumbo_files()
 end
 
 function bin2coff_files()
-  files_in_dir("tools", {
+  files_in_dir("src/tools", {
     "bin2coff.c"
   })
 end

@@ -7,18 +7,21 @@
 #include "base/File.h"
 #include "base/WinDynCalls.h"
 #include "base/ScopedWin.h"
-#include "base/Pixmap.h"
 #include "base/Win.h"
 
 #include <aclapi.h>
 #include <bitset>
-#include <float.h>
-#include <intrin.h>
+#if COMPILER_MINGW
+#include <cpuid.h>
+#endif
+#include <float.h> // for _clearfp / _controlfp_s in MaskFpExceptions
 #include <mlang.h>
 #ifdef __GNUC__
 // mingw needs explicit UUID declaration for IMultiLanguage2
 __CRT_UUID_DECL(IMultiLanguage2, 0xDCCFC164, 0x2B38, 0x11D2, 0xB7, 0xEC, 0x00, 0xC0, 0x4F, 0x8F, 0x5D, 0x9A)
 #endif
+
+//--- subclass ids
 
 static LONG gSubclassId = 0;
 
@@ -27,9 +30,13 @@ UINT_PTR NextSubclassId() {
     return (UINT_PTR)res;
 }
 
+//--- bool / BOOL
+
 bool ToBool(BOOL b) {
     return b ? true : false;
 }
+
+//--- GDI: bitmaps / pixmaps (RenderedBitmap)
 
 Size RenderedBitmap::GetSize() {
     return size;
@@ -78,6 +85,8 @@ bool RenderedBitmap::Blit(HDC hdc, Rect target) {
 HBITMAP RenderedBitmap::GetBitmap() const {
     return hbmp;
 }
+
+//--- edit control
 
 void EditSelectAll(HWND hwnd) {
     Edit_SetSel(hwnd, 0, -1);
@@ -129,23 +138,96 @@ void EditImplementCtrlBack(HWND hwnd) {
     SendMessageW(hwnd, WM_CLEAR, 0, 0); // delete selected text
 }
 
+//--- list box
+
 void ListBox_AppendString_NoSort(HWND hwnd, WStr txt) {
-    // LB_INSERTSTRING reads a NUL-terminated string; txt may be a
-    // non-terminated view, so use a terminated copy
-    ListBox_InsertString(hwnd, -1, CWStrTemp(txt));
+    LbInsertString(hwnd, -1, txt);
 }
 
-// https://learn.microsoft.com/en-us/windows/win32/controls/lb-gettopindex
-int ListBoxGetTopIndex(HWND hwnd) {
-    auto res = ListBox_GetTopIndex(hwnd);
-    return res;
+void LbResetContent(HWND hwnd) {
+    SendMessageW(hwnd, LB_RESETCONTENT, 0, 0);
 }
 
-// https://learn.microsoft.com/en-us/windows/win32/controls/lb-settopindex
-bool ListBoxSetTopIndex(HWND hwnd, int idx) {
-    auto res = ListBox_SetTopIndex(hwnd, idx);
+int LbAddString(HWND hwnd, WStr text) {
+    return (int)SendMessageW(hwnd, LB_ADDSTRING, 0, (LPARAM)CWStrTemp(text));
+}
+
+int LbAddString(HWND hwnd, Str text) {
+    return LbAddString(hwnd, ToWStrTemp(text));
+}
+
+int LbInsertString(HWND hwnd, int idx, WStr text) {
+    return (int)SendMessageW(hwnd, LB_INSERTSTRING, (WPARAM)idx, (LPARAM)CWStrTemp(text));
+}
+
+int LbInsertString(HWND hwnd, int idx, Str text) {
+    return LbInsertString(hwnd, idx, ToWStrTemp(text));
+}
+
+int LbGetCount(HWND hwnd) {
+    return (int)SendMessageW(hwnd, LB_GETCOUNT, 0, 0);
+}
+
+int LbGetCurrentSelection(HWND hwnd) {
+    return (int)SendMessageW(hwnd, LB_GETCURSEL, 0, 0);
+}
+
+bool LbSetCurrentSelection(HWND hwnd, int idx) {
+    LRESULT res = SendMessageW(hwnd, LB_SETCURSEL, (WPARAM)idx, 0);
+    return idx < 0 || res != LB_ERR;
+}
+
+TempWStr LbGetTextTemp(HWND hwnd, int idx) {
+    int len = (int)SendMessageW(hwnd, LB_GETTEXTLEN, (WPARAM)idx, 0);
+    if (len == LB_ERR) {
+        return {};
+    }
+    TempWStr text = AllocArrayTemp<WCHAR>(len + 1);
+    LRESULT res = SendMessageW(hwnd, LB_GETTEXT, (WPARAM)idx, (LPARAM)text.s);
+    if (res == LB_ERR) {
+        return {};
+    }
+    text.len = (int)res;
+    return text;
+}
+
+int LbGetItemHeight(HWND hwnd, int idx) {
+    return (int)SendMessageW(hwnd, LB_GETITEMHEIGHT, (WPARAM)idx, 0);
+}
+
+void LbSetItemHeight(HWND hwnd, int idx, int height) {
+    SendMessageW(hwnd, LB_SETITEMHEIGHT, (WPARAM)idx, (LPARAM)height);
+}
+
+Rect LbGetItemRect(HWND hwnd, int idx) {
+    RECT rect{};
+    LRESULT res = SendMessageW(hwnd, LB_GETITEMRECT, (WPARAM)idx, (LPARAM)&rect);
+    if (res == LB_ERR) {
+        return {};
+    }
+    return Rect(rect);
+}
+
+int LbItemFromPoint(HWND hwnd, Point point, bool* outside) {
+    LRESULT res = SendMessageW(hwnd, LB_ITEMFROMPOINT, 0, MAKELPARAM(point.x, point.y));
+    *outside = HIWORD(res) != 0;
+    return (int)LOWORD(res);
+}
+
+int LbGetTopIndex(HWND hwnd) {
+    return (int)SendMessageW(hwnd, LB_GETTOPINDEX, 0, 0);
+}
+
+bool LbSetTopIndex(HWND hwnd, int idx) {
+    LRESULT res = SendMessageW(hwnd, LB_SETTOPINDEX, (WPARAM)idx, 0);
     return res != LB_ERR;
 }
+
+void LbInitStorage(HWND hwnd, int count) {
+    SendMessageW(hwnd, LB_INITSTORAGE, (WPARAM)count, 0);
+}
+
+//--- resources / instance / common controls
 
 void InitAllCommonControls() {
     INITCOMMONCONTROLSEX cex{};
@@ -164,89 +246,100 @@ void FillWndClassEx(WNDCLASSEX& wcex, WStr clsName, WNDPROC wndproc) {
     wcex.lpfnWndProc = wndproc;
 }
 
-RECT ClientRECT(HWND hwnd) {
-    RECT r;
-    ::GetClientRect(hwnd, &r);
-    return r;
-}
+//--- HWND: geometry
 
-Rect ClientRect(HWND hwnd) {
+Rect HwndClientRect(HWND hwnd) {
     RECT rc{};
     ::GetClientRect(hwnd, &rc);
     return Rect(rc);
 }
 
-Rect WindowRect(HWND hwnd) {
+Rect HwndWindowRect(HWND hwnd) {
     RECT rc{};
     GetWindowRect(hwnd, &rc);
     return Rect(rc);
 }
 
-Rect MapRectToWindow(Rect rect, HWND hwndFrom, HWND hwndTo) {
+void HwndInvalidateRect(HWND hwnd, Rect rect, bool erase) {
+    if (rect.IsEmpty()) {
+        return;
+    }
+    RECT r = ToRECT(rect);
+    InvalidateRect(hwnd, &r, toBOOL(erase));
+}
+
+void HwndInvalidate(HWND hwnd, bool erase) {
+    InvalidateRect(hwnd, nullptr, toBOOL(erase));
+}
+
+Rect HwndMapRectToWindow(Rect rect, HWND hwndFrom, HWND hwndTo) {
     RECT rc = ToRECT(rect);
-    MapWindowPoints(hwndFrom, hwndTo, (LPPOINT)&rc, 2);
+    ::MapWindowPoints(hwndFrom, hwndTo, (LPPOINT)&rc, 2);
     return ToRect(rc);
 }
 
 // map client coords where x=0 is the physical left edge (even on WS_EX_LAYOUTRTL windows)
-Rect MapLtrClientRectToScreen(HWND hwnd, Rect r) {
-    RECT rc = ToRECT(r);
+Rect HwndMapLtrClientRectToScreen(HWND hwnd, Rect r) {
     if (HwndIsRtl(hwnd)) {
-        RECT cr{};
-        GetClientRect(hwnd, &cr);
-        int w = cr.right;
-        int left = w - rc.right;
-        int right = w - rc.left;
-        rc.left = left;
-        rc.right = right;
+        int w = HwndClientRect(hwnd).dx;
+        r.x = w - r.x - r.dx;
     }
-    MapWindowPoints(hwnd, nullptr, (POINT*)&rc, 2);
-    return ToRect(rc);
+    return HwndMapRectToWindow(r, hwnd, nullptr);
 }
 
 // for SetWindowPos on a WS_EX_LAYOUTRTL parent: child x as offset from physical left
-int MapChildXForRtlParent(HWND parent, int ltrX, int childDx) {
+int HwndMapChildXForRtlParent(HWND parent, int ltrX, int childDx) {
     if (!HwndIsRtl(parent)) {
         return ltrX;
     }
-    return ClientRect(parent).dx - ltrX - childDx;
+    return HwndClientRect(parent).dx - ltrX - childDx;
 }
 
-int MapWindowPoints(HWND hwndFrom, HWND hwndTo, Point* points, int nPoints) {
-    ReportIf(nPoints > 64);
-    POINT pnts[64];
-    for (int i = 0; i < nPoints; i++) {
-        pnts[i].x = points[i].x;
-        pnts[i].y = points[i].y;
-    }
-    int res = MapWindowPoints(hwndFrom, hwndTo, &pnts[0], (uint)nPoints);
-    for (int i = 0; i < nPoints; i++) {
-        points[i].x = pnts[i].x;
-        points[i].y = pnts[i].y;
-    }
-    return res;
+//--- HWND: coordinates
+
+Point HwndMapWindowPoint(HWND hwndFrom, HWND hwndTo, Point p) {
+    POINT pt = ToPOINT(p);
+    ::MapWindowPoints(hwndFrom, hwndTo, &pt, 1);
+    return Point(pt.x, pt.y);
 }
 
-void HwndScreenToClient(HWND hwnd, Point& p) {
-    POINT pt = {p.x, p.y};
+Point HwndClientToScreen(HWND hwnd, Point p) {
+    POINT pt = ToPOINT(p);
+    ClientToScreen(hwnd, &pt);
+    return Point(pt.x, pt.y);
+}
+
+Point HwndScreenToClient(HWND hwnd, Point p) {
+    POINT pt = ToPOINT(p);
     ScreenToClient(hwnd, &pt);
-    p.x = pt.x;
-    p.y = pt.y;
+    return Point(pt.x, pt.y);
 }
+
+HWND HwndWindowFromPoint(Point p) {
+    return WindowFromPoint(ToPOINT(p));
+}
+
+Point GetCursorPosition() {
+    POINT pt{};
+    GetCursorPos(&pt);
+    return Point(pt.x, pt.y);
+}
+
+//--- HWND: focus / visibility / Z-order
 
 // move window to top of Z order (i.e. make it visible to the user)
 // but without activation (i.e. capturing focus)
-void HwndMakeVisible(HWND hwnd) {
+void HwndShowWithoutActivate(HWND hwnd) {
     SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
 }
 
-void MoveWindow(HWND hwnd, Rect rect) {
-    MoveWindow(hwnd, rect.x, rect.y, rect.dx, rect.dy, TRUE);
+//--- HWND: geometry (move)
+
+void HwndMoveWindow(HWND hwnd, Rect* r) {
+    MoveWindow(hwnd, r->x, r->y, r->dx, r->dy, TRUE);
 }
 
-void MoveWindow(HWND hwnd, RECT* r) {
-    MoveWindow(hwnd, r->left, r->top, RectDx(*r), RectDy(*r), TRUE);
-}
+//--- OS / process / CPU
 
 bool GetOsVersion(OSVERSIONINFOEX& ver) {
     ZeroMemory(&ver, sizeof(ver));
@@ -328,7 +421,7 @@ TempStr GetEnvVariableTemp(Str name) {
     if (res >= cchBufSize) {
         // buffer was too small
         cchBufSize = res + 4; // +4 jic
-        buf = AllocArrayTemp<WCHAR>(cchBufSize);
+        buf = AllocArrayTemp<WCHAR>((int)cchBufSize);
         res = GetEnvironmentVariableW(nameW, buf, cchBufSize);
         ReportIf(res == 0 || res > cchBufSize);
     }
@@ -406,7 +499,7 @@ bool IsRunningOnWine() {
     BOOL cont = Module32First(snap, &mod);
     while (cont) {
         auto nameA = ToUtf8Temp(mod.szModule);
-        if (str::EqI(nameA, "winex11.drv") || str::EqI(nameA, "winewayland.drv")) {
+        if (str::EqI(nameA, StrL("winex11.drv")) || str::EqI(nameA, StrL("winewayland.drv"))) {
             isWine = true;
             break;
         }
@@ -482,6 +575,8 @@ void DbgOutLastError(DWORD err) {
     OutputDebugStringA(msg.s);
 }
 
+//--- registry
+
 // return true if a given registry key (path) exists
 bool RegKeyExists(HKEY keySub, Str keyName) {
     HKEY hKey;
@@ -512,7 +607,7 @@ TryAgainWOW64:
         DWORD valLen;
         res = RegQueryValueEx(hKey, valNameW, nullptr, nullptr, nullptr, &valLen);
         if (ERROR_SUCCESS == res) {
-            val = WStr(AllocArray<WCHAR>(valLen / sizeof(WCHAR) + 1));
+            val = WStr(AllocArray<WCHAR>((int)(valLen / sizeof(WCHAR)) + 1));
             res = RegQueryValueEx(hKey, valNameW, nullptr, nullptr, (LPBYTE)val.s, &valLen);
             if (ERROR_SUCCESS != res) {
                 wstr::FreePtr(&val);
@@ -631,7 +726,7 @@ bool CreateRegKey(HKEY keySub, Str keyName) {
     return true;
 }
 
-const TempStr RegKeyNameTemp(HKEY key) {
+TempStr RegKeyNameTemp(HKEY key) {
     if (key == HKEY_LOCAL_MACHINE) {
         return "HKEY_LOCAL_MACHINE";
     }
@@ -644,7 +739,7 @@ const TempStr RegKeyNameTemp(HKEY key) {
     return "RegKeyName: unknown key";
 }
 
-const TempStr RegKeyNameWTemp(HKEY key) {
+TempStr RegKeyNameWTemp(HKEY key) {
     auto k = RegKeyNameTemp(key);
     return str::Dup(k);
 }
@@ -740,6 +835,8 @@ HRESULT CLSIDFromString(Str lpsz, LPCLSID pclsid) {
     return CLSIDFromString(ws, pclsid);
 }
 
+//--- environment / errors / paths
+
 TempStr GetSpecialFolderTemp(int csidl, bool createIfMissing) {
     if (createIfMissing) {
         csidl = csidl | CSIDL_FLAG_CREATE;
@@ -773,6 +870,8 @@ TempStr GetTempDirTemp() {
     ReportIf(cch >= dimof(dir));
     return ToUtf8Temp(WStr(dir, (int)cch));
 }
+
+//--- OS / process (misc)
 
 void DisableDataExecution() {
     // Win7+; 32-bit only (fails with ERROR_NOT_SUPPORTED on 64-bit processes)
@@ -909,6 +1008,8 @@ bool RedirectIOToExistingConsole() {
 
 // returns true if had to allocate new console (i.e. show console window)
 // false if redirected to existing console, which means it was launched from a shell
+//--- console
+
 bool RedirectIOToConsole() {
     return AttachOrAllocateConsole();
 }
@@ -1013,6 +1114,8 @@ void WaitForConsoleClose() {
         ReadConsoleA(hInput, &c, 1, &read, nullptr);
     }
 }
+
+//--- environment / paths (shell helpers)
 
 void ChangeCurrDirToDocuments() {
     TempStr dir = GetSpecialFolderTemp(CSIDL_MYDOCUMENTS);
@@ -1130,9 +1233,11 @@ IDataObject* GetDataObjectForFile(Str filePath, HWND hwnd) {
     return pDataObject;
 }
 
+//--- keyboard state
+
 bool IsKeyPressed(int key) {
     SHORT state = GetKeyState(key);
-    SHORT isDown = state & 0x8000;
+    SHORT isDown = (SHORT)(state & 0x8000);
     return isDown != 0;
 }
 
@@ -1200,9 +1305,7 @@ void OpenPathInDefaultFileManager(Str path) {
     }
 
     // strip \\?\ prefix — shell APIs (ILCreateFromPath, explorer.exe) don't understand it
-    if (str::StartsWith(path, StrL("\\\\?\\"))) {
-        path = Str(path.s + 4, path.len - 4);
-    }
+    str::TrimPrefix(path, StrL("\\\\?\\"));
 
     // Use SHOpenFolderAndSelectItems which respects the default file manager
     // (e.g. Directory Opus) instead of hardcoding explorer.exe
@@ -1466,6 +1569,8 @@ bool LaunchElevated(Str path, Str cmdline) {
 
 /* Ensure that the rectangle is at least partially in the work area on a
    monitor. The rectangle is shifted into the work area if necessary. */
+//--- HWND: screen / work area / placement
+
 Rect ShiftRectToWorkArea(Rect rect, HWND hwnd, bool bFully) {
     Rect monitor = GetWorkAreaRect(rect, hwnd);
 
@@ -1489,7 +1594,7 @@ Rect ShiftRectToWorkArea(Rect rect, HWND hwnd, bool bFully) {
 }
 
 // Limits size to max available work area (screen size - taskbar)
-void LimitWindowSizeToScreen(HWND hwnd, SIZE& size) {
+Size HwndLimitSizeToScreen(HWND hwnd, Size size) {
     HMONITOR hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi{};
     mi.cbSize = sizeof mi;
@@ -1498,22 +1603,23 @@ void LimitWindowSizeToScreen(HWND hwnd, SIZE& size) {
         SystemParametersInfo(SPI_GETWORKAREA, 0, &mi.rcWork, 0);
     }
     int dx = RectDx(mi.rcWork);
-    if (size.cx > dx) {
-        size.cx = dx;
+    if (size.dx > dx) {
+        size.dx = dx;
     }
     int dy = RectDy(mi.rcWork);
-    if (size.cy > dy) {
-        size.cy = dy;
+    if (size.dy > dy) {
+        size.dy = dy;
     }
+    return size;
 }
 
 // If the window is off-screen (e.g. a monitor was disconnected),
 // move it to the nearest visible monitor's work area.
-void HwndEnsureVisible(HWND hwnd) {
+void HwndEnsureOnScreen(HWND hwnd) {
     if (!hwnd) {
         return;
     }
-    Rect rect = WindowRect(hwnd);
+    Rect rect = HwndWindowRect(hwnd);
     if (rect.IsEmpty()) {
         return;
     }
@@ -1536,7 +1642,7 @@ void HwndEnsureVisible(HWND hwnd) {
     if (rect == shifted) {
         return;
     }
-    MoveWindow(hwnd, shifted);
+    HwndMoveWindow(hwnd, &shifted);
 }
 
 // returns available area of the screen i.e. screen minus taskbar area
@@ -1556,7 +1662,7 @@ Rect GetWorkAreaRect(Rect rect, HWND hwnd) {
 }
 
 // returns the dimensions the given window has to have in order to be a fullscreen window
-Rect GetFullscreenRect(HWND hwnd) {
+Rect HwndGetFullscreenRect(HWND hwnd) {
     MONITORINFO mi{};
     mi.cbSize = sizeof(mi);
     if (GetMonitorInfo(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
@@ -1579,7 +1685,9 @@ Rect GetVirtualScreenRect() {
     return result;
 }
 
-void DrawRect(HDC hdc, const Rect& rect) {
+//--- GDI: draw / measure (primitives)
+
+void HdcDrawRect(HDC hdc, const Rect& rect) {
     MoveToEx(hdc, rect.x, rect.y, nullptr);
     LineTo(hdc, rect.x + rect.dx - 1, rect.y);
     LineTo(hdc, rect.x + rect.dx - 1, rect.y + rect.dy - 1);
@@ -1587,23 +1695,25 @@ void DrawRect(HDC hdc, const Rect& rect) {
     LineTo(hdc, rect.x, rect.y);
 }
 
-void FillRect(HDC hdc, const Rect& rect, HBRUSH br) {
+void HdcFillRect(HDC hdc, const Rect& rect, HBRUSH br) {
     RECT r = ToRECT(rect);
-    FillRect(hdc, &r, br);
+    ::FillRect(hdc, &r, br);
 }
 
-void FillRect(HDC hdc, const Rect& rect, COLORREF col) {
+void HdcFillRect(HDC hdc, const Rect& rect, COLORREF col) {
     AutoDeleteBrush br(CreateSolidBrush(col));
     RECT r = ToRECT(rect);
-    FillRect(hdc, &r, br);
+    ::FillRect(hdc, &r, br);
 }
 
-void DrawLine(HDC hdc, const Rect& rect) {
+void HdcDrawLine(HDC hdc, const Rect& rect) {
     MoveToEx(hdc, rect.x, rect.y, nullptr);
     LineTo(hdc, rect.x + rect.dx, rect.y + rect.dy);
 }
 
 // returns previously focused window
+//--- HWND: focus / identity / cursor
+
 HWND HwndSetFocus(HWND hwnd) {
     return SetFocus(hwnd);
 }
@@ -1612,11 +1722,10 @@ bool HwndIsFocused(HWND hwnd) {
     return GetFocus() == hwnd;
 }
 
-bool IsCursorOverWindow(HWND hwnd) {
-    POINT pt;
-    GetCursorPos(&pt);
-    Rect rcWnd = WindowRect(hwnd);
-    return rcWnd.Contains({pt.x, pt.y});
+bool HwndIsCursorOverWindow(HWND hwnd) {
+    Point pt = GetCursorPosition();
+    Rect rcWnd = HwndWindowRect(hwnd);
+    return rcWnd.Contains(pt);
 }
 
 HWND HwndGetParent(HWND hwnd) {
@@ -1631,43 +1740,34 @@ TempStr HwndGetClassName(HWND hwnd) {
 }
 
 Point HwndGetCursorPos(HWND hwnd) {
-    POINT pt;
-    if (!GetCursorPos(&pt)) {
-        return {};
-    }
-    if (!ScreenToClient(hwnd, &pt)) {
-        return {};
-    }
-    return {pt.x, pt.y};
+    return HwndScreenToClient(hwnd, GetCursorPosition());
 }
 
 Point& UnmirrorRtl(HWND hwnd, Point& p) {
     if (!HwndIsRtl(hwnd)) return p;
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    p.x = rc.right - 1 - p.x;
+    p.x = HwndClientRect(hwnd).dx - 1 - p.x;
     return p;
 }
 
-bool IsMouseOverRect(HWND hwnd, const Rect& r) {
+bool HwndIsMouseOverRect(HWND hwnd, const Rect& r) {
     Point curPos = HwndGetCursorPos(hwnd);
     return r.Contains(curPos);
 }
 
-void CenterDialog(HWND hDlg, HWND hParent) {
+void HwndCenterDialog(HWND hDlg, HWND hParent) {
     if (!hParent) {
         hParent = GetParent(hDlg);
     }
 
-    Rect rcDialog = WindowRect(hDlg);
+    Rect rcDialog = HwndWindowRect(hDlg);
     rcDialog.Offset(-rcDialog.x, -rcDialog.y);
-    Rect rcOwner = WindowRect(hParent ? hParent : GetDesktopWindow());
+    Rect rcOwner = HwndWindowRect(hParent ? hParent : GetDesktopWindow());
     Rect rcRect = rcOwner;
     rcRect.Offset(-rcRect.x, -rcRect.y);
 
     // center dialog on its parent window
-    rcDialog.Offset(rcOwner.x + (rcRect.x - rcDialog.x + rcRect.dx - rcDialog.dx) / 2,
-                    rcOwner.y + (rcRect.y - rcDialog.y + rcRect.dy - rcDialog.dy) / 2);
+    rcDialog.Offset(rcOwner.x + ((rcRect.x - rcDialog.x + rcRect.dx - rcDialog.dx) / 2),
+                    rcOwner.y + ((rcRect.y - rcDialog.y + rcRect.dy - rcDialog.dy) / 2));
     // ensure that the dialog is fully visible on one monitor
     rcDialog = ShiftRectToWorkArea(rcDialog, hParent, true);
 
@@ -1710,6 +1810,8 @@ static HWND GetClipboardOwnerWnd() {
         CreateWindowExW(0, className, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, GetModuleHandle(nullptr), nullptr);
     return gClipboardOwnerWnd;
 }
+
+//--- clipboard
 
 bool OpenClipboardForUpdate() {
     HWND owner = GetClipboardOwnerWnd();
@@ -1818,7 +1920,9 @@ bool CopyImageToClipboard(HBITMAP hbmp, bool appendOnly) {
     return ok;
 }
 
-static void SetWindowStyle(HWND hwnd, DWORD flags, bool enable, int type) {
+//--- HWND: styles / RTL
+
+static void HwndSetWindowStyle(HWND hwnd, DWORD flags, bool enable, int type) {
     DWORD style = GetWindowLongW(hwnd, type);
     DWORD newStyle;
     if (enable) {
@@ -1827,16 +1931,16 @@ static void SetWindowStyle(HWND hwnd, DWORD flags, bool enable, int type) {
         newStyle = style & ~flags;
     }
     if (newStyle != style) {
-        SetWindowLongW(hwnd, type, newStyle);
+        SetWindowLongW(hwnd, type, (LONG)newStyle);
     }
 }
 
-bool IsWindowStyleSet(HWND hwnd, DWORD flags) {
+bool HwndIsWindowStyleSet(HWND hwnd, DWORD flags) {
     DWORD style = GetWindowLongW(hwnd, GWL_STYLE);
     return bit::IsMaskSet<DWORD>(style, flags);
 }
 
-bool IsWindowStyleExSet(HWND hwnd, DWORD flags) {
+bool HwndIsWindowStyleExSet(HWND hwnd, DWORD flags) {
     DWORD style = GetWindowLongW(hwnd, GWL_EXSTYLE);
     return (style != flags) != 0;
 }
@@ -1847,21 +1951,22 @@ bool HwndIsRtl(HWND hwnd) {
 }
 
 void HwndSetRtl(HWND hwnd, bool isRtl) {
-    SetWindowExStyle(hwnd, WS_EX_LAYOUTRTL | WS_EX_NOINHERITLAYOUT, isRtl);
+    HwndSetWindowExStyle(hwnd, WS_EX_LAYOUTRTL | WS_EX_NOINHERITLAYOUT, isRtl);
 }
 
-void SetWindowStyle(HWND hwnd, DWORD flags, bool enable) {
-    SetWindowStyle(hwnd, flags, enable, GWL_STYLE);
+void HwndSetWindowStyle(HWND hwnd, DWORD flags, bool enable) {
+    HwndSetWindowStyle(hwnd, flags, enable, GWL_STYLE);
 }
 
-void SetWindowExStyle(HWND hwnd, DWORD flags, bool enable) {
-    SetWindowStyle(hwnd, flags, enable, GWL_EXSTYLE);
+void HwndSetWindowExStyle(HWND hwnd, DWORD flags, bool enable) {
+    HwndSetWindowStyle(hwnd, flags, enable, GWL_EXSTYLE);
 }
+
+//--- HWND: geometry (relative)
 
 Rect ChildPosWithinParent(HWND hwnd) {
-    POINT pt = {0, 0};
-    ClientToScreen(GetParent(hwnd), &pt);
-    Rect rc = WindowRect(hwnd);
+    Point pt = HwndClientToScreen(GetParent(hwnd), Point());
+    Rect rc = HwndWindowRect(hwnd);
     rc.Offset(-pt.x, -pt.y);
     return rc;
 }
@@ -1924,6 +2029,8 @@ static HFONT RememberCreatedFont(HFONT font, Str name, int size, u16 flags, u16 
     return font;
 }
 
+//--- GDI: fonts
+
 HFONT GetMenuFont() {
     if (!gMenuFont) {
         NONCLIENTMETRICS ncm{};
@@ -1934,7 +2041,7 @@ HFONT GetMenuFont() {
     return gMenuFont;
 }
 
-HFONT CreateSimpleFont(HDC hdc, Str fontName, int fontSizePt) {
+HFONT HdcCreateSimpleFont(HDC hdc, Str fontName, int fontSizePt) {
     int realSize = MulDiv(fontSizePt, GetDeviceCaps(hdc, LOGPIXELSY), USER_DEFAULT_SCREEN_DPI);
 
     u16 flags = 0;
@@ -1984,7 +2091,7 @@ HFONT GetUserGuiFont(Str fontName, int size) {
 }
 
 HFONT GetUserGuiFontEx(Str fontName, int size, bool bold, bool italic) {
-    if (str::EqI(fontName, "automatic") || str::EqI(fontName, "auto")) {
+    if (str::EqI(fontName, StrL("automatic")) || str::EqI(fontName, StrL("auto"))) {
         fontName = Str();
     }
     u16 flags = 0;
@@ -2256,7 +2363,7 @@ Str ReadIStream(IStream* stream) {
     }
 
     int n = (int)stat.cbSize.QuadPart;
-    char* d = AllocArray<char>(n + sizeof(WCHAR));
+    char* d = AllocArray<char>(n + (int)sizeof(WCHAR));
     if (!d) {
         return {};
     }
@@ -2325,7 +2432,7 @@ bool RegisterOrUnregisterServerDLL(Str dllPath, bool install, Str args) {
     }
 
     // make sure that the DLL can find any DLLs it depends on and
-    // which reside in the same directory (in this case: libmupdf.dll)
+    // which reside in the same directory (in this case: libsumatrapdf.dll)
     TempStr dllDir = path::GetDirTemp(dllPath);
     SetDllDirectoryW(CWStrTemp(dllDir));
 
@@ -2376,6 +2483,8 @@ bool UnRegisterServerDLL(Str dllPath, Str args) {
     return RegisterOrUnregisterServerDLL(dllPath, false, args);
 }
 
+//--- HWND: text / visibility / chrome / Z-order
+
 void HwndToForeground(HWND hwnd) {
     if (IsIconic(hwnd)) {
         ShowWindow(hwnd, SW_RESTORE);
@@ -2418,13 +2527,26 @@ bool HwndHasCaption(HWND hwnd) {
     return bit::IsMaskSet(GetWindowLong(hwnd, GWL_STYLE), WS_CAPTION);
 }
 
-void HwndSetVisibility(HWND hwnd, bool visible) {
-    bool isVisible = IsWindowVisible(hwnd);
-    if (isVisible == visible) {
+bool HwndIsVisible(HWND hwnd) {
+    return ::IsWindowVisible(hwnd);
+}
+
+void HwndSetVisible(HWND hwnd, bool visible) {
+    if (HwndIsVisible(hwnd) == visible) {
         return;
     }
     ShowWindow(hwnd, visible ? SW_SHOW : SW_HIDE);
 }
+
+void HwndShow(HWND hwnd) {
+    HwndSetVisible(hwnd, true);
+}
+
+void HwndHide(HWND hwnd) {
+    HwndSetVisible(hwnd, false);
+}
+
+//--- GDI: bitmaps / pixmaps
 
 Size GetBitmapSize(HBITMAP hbmp) {
     BITMAP bmpInfo;
@@ -2434,7 +2556,7 @@ Size GetBitmapSize(HBITMAP hbmp) {
 
 // cf. fz_mul255 in fitz.h
 inline int mul255(int a, int b) {
-    int x = a * b + 128;
+    int x = (a * b) + 128;
     x += x >> 8;
     return x >> 8;
 }
@@ -2457,7 +2579,7 @@ COLORREF GetPixel(BitmapPixels* bitmap, int x, int y) {
     ReportIf(x < 0 || x >= bitmap->size.dx);
     ReportIf(y < 0 || y >= bitmap->size.dy);
     u8* pixels = bitmap->pixels;
-    u8* pixel = pixels + y * bitmap->nBytesPerRow + x * bitmap->nBytesPerPixel;
+    u8* pixel = pixels + ((size_t)y * bitmap->nBytesPerRow) + ((size_t)x * bitmap->nBytesPerPixel);
     // color order in DIB is blue-green-red-alpha
     COLORREF c = 0;
     if (3 == bitmap->nBytesPerPixel) {
@@ -2527,115 +2649,6 @@ BitmapPixels* GetBitmapPixels(HBITMAP hbmp) {
     }
     res->hdc = hdc;
     return res;
-}
-
-static bool SkipRecolorPixel(int x, int y, Vec<Rect>* skipRects) {
-    if (!skipRects) {
-        return false;
-    }
-    for (Rect& sr : *skipRects) {
-        if (sr.Contains(x, y)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void RecolorPixmap(Pixmap* px, COLORREF textColor, COLORREF bgColor, COLORREF linkColor, Vec<Rect>* skipRects) {
-    if (!px) {
-        return;
-    }
-    if (px->hbmp) {
-        UpdateBitmapColors(px->hbmp, textColor, bgColor, linkColor, skipRects);
-        return;
-    }
-    if (!px->data || px->width <= 0 || px->height <= 0) {
-        return;
-    }
-    if ((textColor & 0xFFFFFF) == WIN_COL_BLACK && (bgColor & 0xFFFFFF) == WIN_COL_WHITE && !linkColor && !skipRects) {
-        return;
-    }
-
-    byte linkR = 0, linkG = 0, linkB = 0;
-    bool recolorLinks = linkColor != 0;
-    if (recolorLinks) {
-        UnpackColor(linkColor, linkR, linkG, linkB);
-    }
-
-    auto isLikelyLinkPixel = [](u8 r, u8 g, u8 b) -> bool {
-        int maxRG = r > g ? r : g;
-        if (b < maxRG + 25) {
-            return false;
-        }
-        if (b < 72) {
-            return false;
-        }
-        int lum = (int(r) + g + b) / 3;
-        if (lum > 230) {
-            return false;
-        }
-        return true;
-    };
-
-    byte rt, gt, bt;
-    UnpackColor(textColor, rt, gt, bt);
-    const int base[4] = {bt, gt, rt, 0};
-    byte rb, gb, bb;
-    UnpackColor(bgColor, rb, gb, bb);
-    const int diff[4] = {(int)bb - base[0], (int)gb - base[1], (int)rb - base[2], 255};
-
-    auto setLinkPixel = [&](u8* pixel) {
-        pixel[0] = linkB;
-        pixel[1] = linkG;
-        pixel[2] = linkR;
-    };
-
-    if (px->format == PixmapFormat::BGRA8) {
-        for (int y = 0; y < px->height; y++) {
-            u8* row = px->data + (size_t)y * px->stride;
-            for (int x = 0; x < px->width; x++) {
-                if (SkipRecolorPixel(x, y, skipRects)) {
-                    continue;
-                }
-                u8* pixel = row + (size_t)x * 4;
-                u8 b = pixel[0];
-                u8 g = pixel[1];
-                u8 r = pixel[2];
-                if (recolorLinks && isLikelyLinkPixel(r, g, b)) {
-                    setLinkPixel(pixel);
-                    continue;
-                }
-                for (int k = 0; k < 4; k++) {
-                    pixel[k] = (u8)(base[k] + mul255(pixel[k], diff[k]));
-                }
-            }
-        }
-        return;
-    }
-
-    if (px->format == PixmapFormat::BGR8) {
-        for (int y = 0; y < px->height; y++) {
-            u8* row = px->data + (size_t)y * px->stride;
-            for (int x = 0; x < px->width; x++) {
-                if (SkipRecolorPixel(x, y, skipRects)) {
-                    continue;
-                }
-                u8* pixel = row + (size_t)x * 3;
-                u8 b = pixel[0];
-                u8 g = pixel[1];
-                u8 r = pixel[2];
-                if (recolorLinks && isLikelyLinkPixel(r, g, b)) {
-                    pixel[0] = linkB;
-                    pixel[1] = linkG;
-                    pixel[2] = linkR;
-                    continue;
-                }
-                for (int k = 0; k < 3; k++) {
-                    pixel[k] = (u8)(base[k] + mul255(pixel[k], diff[k]));
-                }
-            }
-        }
-    }
 }
 
 // Recolor a rendered page bitmap: map black->textColor and white->bgColor
@@ -2733,7 +2746,7 @@ void UpdateBitmapColors(HBITMAP hbmp, COLORREF textColor, COLORREF bgColor, COLO
         u8* bmpData = (u8*)info.dsBm.bmBits;
         for (int y = 0; y < size.dy; y++) {
             for (int x = 0; x < size.dx; x++) {
-                u8* px = bmpData + y * info.dsBm.bmWidthBytes + x * 3;
+                u8* px = bmpData + ((size_t)y * info.dsBm.bmWidthBytes) + ((size_t)x * 3);
                 u8 b = px[0];
                 u8 g = px[1];
                 u8 r = px[2];
@@ -2804,57 +2817,6 @@ void UpdateBitmapColors(HBITMAP hbmp, COLORREF textColor, COLORREF bgColor, COLO
     DeleteDC(hDC);
 }
 
-// create data for a .bmp file from this bitmap (if saved to disk, the HBITMAP
-// can be deserialized with LoadImage(nullptr, ..., LD_LOADFROMFILE) and its
-// dimensions determined again with GetBitmapSize(...))
-Str HBITMAPToBmpFormat(HBITMAP hbmp) {
-    Size size = GetBitmapSize(hbmp);
-    Pixmap* pixmap = AllocPixmap(size.dx, size.dy, PixmapFormat::BGR8);
-    if (!pixmap) {
-        return {};
-    }
-
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
-    bmi.bmiHeader.biWidth = size.dx;
-    bmi.bmiHeader.biHeight = -size.dy;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 24;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    HDC hDC = GetDC(nullptr);
-    if (!GetDIBits(hDC, hbmp, 0, size.dy, pixmap->data, &bmi, DIB_RGB_COLORS)) {
-        ReleaseDC(nullptr, hDC);
-        FreePixmap(pixmap);
-        return {};
-    }
-    ReleaseDC(nullptr, hDC);
-
-    Str res = PixmapToBmpFormat(pixmap);
-    FreePixmap(pixmap);
-    return res;
-}
-
-// returns the clipboard image (if any) serialized as BMP file bytes, or empty
-Str GetClipboardImageBmp() {
-    if (!IsClipboardFormatAvailable(CF_BITMAP)) {
-        return {};
-    }
-    if (!OpenClipboard(nullptr)) {
-        return {};
-    }
-    Str res;
-    // CF_BITMAP is synthesized by Windows from CF_DIB and vice versa, so it's
-    // available whenever any bitmap is on the clipboard. The returned HBITMAP is
-    // owned by the clipboard - don't delete it.
-    HBITMAP hbmp = (HBITMAP)GetClipboardData(CF_BITMAP);
-    if (hbmp) {
-        res = HBITMAPToBmpFormat(hbmp);
-    }
-    CloseClipboard();
-    return res;
-}
-
 HBITMAP CreateMemoryBitmap(Size size, HANDLE* hDataMapping) {
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -2896,232 +2858,10 @@ bool BlitHBITMAP(HBITMAP hbmp, HDC hdc, Rect target) {
     int y = target.y;
     int tdx = target.dx;
     int tdy = target.dy;
-    bool ok = StretchBlt(hdc, x, y, tdx, tdy, bmpDC, 0, 0, dx, dy, SRCCOPY);
+    bool ok = StretchBlt(hdc, x, y, tdx, tdy, bmpDC, 0, 0, dx, dy, SRCCOPY) ? true : false;
     SelectObject(bmpDC, oldBmp);
     DeleteDC(bmpDC);
     return ok;
-}
-
-// Allocate a Pixmap backed by a GDI DIB section: its pixels (`data`) double as a directly
-// blittable HBITMAP, so decoding/rendering into it needs no copy to reach the screen.
-// 32bpp BGRA, top-down. Returns nullptr on failure.
-Pixmap* AllocPixmapDIB(int w, int h) {
-    if (w <= 0 || h <= 0) {
-        return nullptr;
-    }
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = w;
-    bmi.bmiHeader.biHeight = -h; // negative => top-down (row 0 is the top row)
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-
-    void* bits = nullptr;
-    HBITMAP hbmp = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!hbmp || !bits) {
-        if (hbmp) {
-            DeleteObject(hbmp);
-        }
-        return nullptr;
-    }
-    Pixmap* p = new Pixmap();
-    p->width = w;
-    p->height = h;
-    p->stride = w * 4; // 32bpp DIB rows are DWORD-aligned, so w*4 is already the stride
-    p->format = PixmapFormat::BGRA8;
-    p->data = (u8*)bits;
-    p->hbmp = hbmp;
-    return p;
-}
-
-// Adopt an existing HBITMAP (and optional file mapping) into a Pixmap that owns them.
-// If it's a DIB section, the Pixmap's `data`/`stride`/`format` are filled in to point at
-// its pixels (so pixel access works); otherwise only the blittable handle is carried.
-// Used by engines that already render into a DIB section - they hand the handle to a
-// Pixmap with no copy.
-Pixmap* PixmapFromHBITMAP(HBITMAP hbmp, Size size, HANDLE hMap) {
-    if (!hbmp) {
-        return nullptr;
-    }
-    Pixmap* p = new Pixmap();
-    p->width = size.dx;
-    p->height = size.dy;
-    p->hbmp = hbmp;
-    p->hMap = hMap;
-    DIBSECTION ds{};
-    if (GetObject(hbmp, sizeof(ds), &ds) == sizeof(ds) && ds.dsBm.bmBits) {
-        p->stride = ds.dsBm.bmWidthBytes;
-        p->data = (u8*)ds.dsBm.bmBits;
-        p->format = (ds.dsBm.bmBitsPixel == 24) ? PixmapFormat::BGR8 : PixmapFormat::BGRA8;
-        // NOTE: orientation follows the DIB (biHeight < 0 => top-down). Pixel readers that
-        // care about orientation should prefer the HBITMAP-based helpers, which handle it.
-    }
-    return p;
-}
-
-// Transfer a RenderedBitmap's HBITMAP (+ mapping) into a Pixmap with no copy, then free the
-// now-empty RenderedBitmap shell. Bridges engine internals that still build RenderedBitmaps
-// while RenderPage's public result becomes a Pixmap.
-Pixmap* PixmapFromRenderedBitmap(RenderedBitmap* rb) {
-    if (!rb) {
-        return nullptr;
-    }
-    Pixmap* p = PixmapFromHBITMAP(rb->hbmp, rb->size, rb->hMap);
-    rb->hbmp = nullptr; // ownership moved to the Pixmap
-    rb->hMap = nullptr;
-    delete rb;
-    return p;
-}
-
-// Reverse of PixmapFromRenderedBitmap: move a DIB-section Pixmap's HBITMAP into a
-// RenderedBitmap (the long-lived present-layer handle, e.g. a saved thumbnail) and free
-// the Pixmap shell. A malloc-backed Pixmap (e.g. a djvu render) is first copied into a
-// DIB section so the result is always blittable; without this, thumbnails for such
-// engines silently produced nothing.
-RenderedBitmap* RenderedBitmapFromPixmap(Pixmap* px) {
-    if (!px) {
-        return nullptr;
-    }
-    if (!px->hbmp) {
-        if (!px->data) {
-            FreePixmap(px);
-            return nullptr;
-        }
-        Pixmap* dib = AllocPixmapDIB(px->width, px->height);
-        if (!dib) {
-            FreePixmap(px);
-            return nullptr;
-        }
-        int w = px->width;
-        int h = px->height;
-        for (int y = 0; y < h; y++) {
-            const u8* s = px->data + (size_t)y * px->stride;
-            u8* d = dib->data + (size_t)y * dib->stride;
-            switch (px->format) {
-                case PixmapFormat::BGR8:
-                    for (int x = 0; x < w; x++) {
-                        d[0] = s[0];
-                        d[1] = s[1];
-                        d[2] = s[2];
-                        d[3] = 0xff;
-                        d += 4;
-                        s += 3;
-                    }
-                    break;
-                case PixmapFormat::RGBA8:
-                    for (int x = 0; x < w; x++) {
-                        d[0] = s[2];
-                        d[1] = s[1];
-                        d[2] = s[0];
-                        d[3] = s[3];
-                        d += 4;
-                        s += 4;
-                    }
-                    break;
-                default: // BGRA8
-                    memcpy(d, s, (size_t)w * 4);
-                    break;
-            }
-        }
-        FreePixmap(px);
-        px = dib;
-    }
-    auto* rb = new RenderedBitmap(px->hbmp, Size(px->width, px->height), px->hMap);
-    px->hbmp = nullptr; // ownership moved to rb
-    px->hMap = nullptr;
-    px->data = nullptr; // pixels were owned by hbmp, now rb's
-    FreePixmap(px);
-    return rb;
-}
-
-// frees the native handles of a DIB-section-backed Pixmap (the pixels are owned by hbmp).
-void FreePixmapNativeBitmap(Pixmap* p) {
-    if (!p) {
-        return;
-    }
-    if (p->hbmp) {
-        DeleteObject(p->hbmp);
-        p->hbmp = nullptr;
-    }
-    if (p->hMap) {
-        CloseHandle(p->hMap);
-        p->hMap = nullptr;
-    }
-    p->data = nullptr; // was owned by the DIB section
-}
-
-// Blit a sub-rectangle of a Pixmap into the target rect (stretching if sizes differ).
-// Works for both DIB-section-backed and malloc-backed Pixmaps.
-bool BlitPixmapRegion(Pixmap* p, HDC hdc, Rect target, Rect source) {
-    if (!p || !p->data || target.IsEmpty() || source.IsEmpty()) {
-        return false;
-    }
-    SetStretchBltMode(hdc, HALFTONE);
-    if (p->hbmp) {
-        HDC bmpDC = CreateCompatibleDC(hdc);
-        if (!bmpDC) {
-            return false;
-        }
-        HGDIOBJ oldBmp = SelectObject(bmpDC, p->hbmp);
-        if (!oldBmp) {
-            DeleteDC(bmpDC);
-            return false;
-        }
-        bool ok;
-        if (target.dx == source.dx && target.dy == source.dy) {
-            ok = BitBlt(hdc, target.x, target.y, target.dx, target.dy, bmpDC, source.x, source.y, SRCCOPY) != 0;
-        } else {
-            ok = StretchBlt(hdc, target.x, target.y, target.dx, target.dy, bmpDC, source.x, source.y, source.dx,
-                            source.dy, SRCCOPY) != 0;
-        }
-        SelectObject(bmpDC, oldBmp);
-        DeleteDC(bmpDC);
-        return ok;
-    }
-    // StretchDIBits can't reliably address a vertical source sub-rect of a
-    // top-down DIB (YSrc is interpreted in bottom-up DIB coordinates), which
-    // silently painted nothing when a page was partially scrolled off-screen.
-    // Instead advance data to the first source row and pass a DIB that is
-    // exactly source.dy rows tall, with YSrc = 0.
-    source = Rect(0, 0, p->width, p->height).Intersect(source);
-    if (source.IsEmpty()) {
-        return false;
-    }
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = p->width;
-    bmi.bmiHeader.biHeight = -source.dy; // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = (p->format == PixmapFormat::BGR8) ? 24 : 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    const u8* rows = p->data + (size_t)source.y * p->stride;
-    int r = StretchDIBits(hdc, target.x, target.y, target.dx, target.dy, source.x, 0, source.dx, source.dy, rows, &bmi,
-                          DIB_RGB_COLORS, SRCCOPY);
-    return r != GDI_ERROR && r != 0;
-}
-
-// Blit a Pixmap into the target rect (stretching if sizes differ). DIB-section-backed
-// Pixmaps go through the GDI HBITMAP fast path; malloc-backed ones blit straight from
-// memory via StretchDIBits (no intermediate object).
-bool BlitPixmap(Pixmap* p, HDC hdc, Rect target) {
-    if (!p || !p->data) {
-        return false;
-    }
-    if (p->hbmp) {
-        return BlitHBITMAP(p->hbmp, hdc, target);
-    }
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = p->width;
-    bmi.bmiHeader.biHeight = -p->height; // top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = (p->format == PixmapFormat::BGR8) ? 24 : 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    SetStretchBltMode(hdc, HALFTONE);
-    int r = StretchDIBits(hdc, target.x, target.y, target.dx, target.dy, 0, 0, p->width, p->height, p->data, &bmi,
-                          DIB_RGB_COLORS, SRCCOPY);
-    return r != GDI_ERROR && r != 0;
 }
 
 // This is meant to measure program startup time from the user perspective.
@@ -3234,13 +2974,12 @@ void ResizeHwndToClientArea(HWND hwnd, int dx, int dy, bool hasMenu) {
 
 // -1 to use existing value
 void ResizeWindow(HWND hwnd, int dx, int dy) {
-    RECT rc;
-    GetWindowRect(hwnd, &rc);
+    Rect rc = HwndWindowRect(hwnd);
     if (dx == -1) {
-        dx = RectDx(rc);
+        dx = rc.dx;
     }
     if (dy == -1) {
-        dy = RectDy(rc);
+        dy = rc.dy;
     }
     SetWindowPos(hwnd, nullptr, 0, 0, dx, dy, SWP_NOMOVE | SWP_NOZORDER);
 }
@@ -3320,33 +3059,6 @@ Exit:
     DdeUninitialize(inst);
 
     return ok;
-}
-
-// given r,  sets r1, r2 and r3 so that:
-//  [         r       ]
-//  [ r1 ][  r2 ][ r3 ]
-//        ^     ^
-//        y     y+dy
-void DivideRectV(const RECT& r, int x, int dx, RECT& r1, RECT& r2, RECT& r3) {
-    r1 = r2 = r3 = r;
-    r1.right = x;
-    r2.left = x;
-    r2.right = x + dx;
-    r3.left = x + dx + 1;
-}
-
-// like DivideRectV
-void DivideRectH(const RECT& r, int y, int dy, RECT& r1, RECT& r2, RECT& r3) {
-    r1 = r2 = r3 = r;
-    r1.bottom = y;
-    r2.top = y;
-    r2.bottom = y + dy;
-    r3.top = y + dy + 1;
-}
-
-void RectInflateTB(RECT& r, int top, int bottom) {
-    r.top += top;
-    r.bottom += bottom;
 }
 
 static LPWSTR knownCursorIds[] = {IDC_ARROW,  IDC_IBEAM,    IDC_HAND,     IDC_SIZEALL, IDC_SIZEWE,
@@ -3508,6 +3220,8 @@ bool IsValidDelayType(int type) {
     return false;
 }
 
+//--- HWND: text / font / icon / paint / position / messages
+
 void HwndSetText(HWND hwnd, Str sv) {
     // can be called before a window is created
     if (!hwnd) {
@@ -3566,7 +3280,7 @@ void HwndScheduleRepaint(HWND hwnd) {
     if (!hwnd || !::IsWindow(hwnd)) {
         return;
     }
-    InvalidateRect(hwnd, nullptr, FALSE);
+    HwndInvalidate(hwnd);
 }
 
 // do WM_PAINT immediately
@@ -3574,7 +3288,7 @@ void HwndRepaintNow(HWND hwnd) {
     if (!hwnd || !::IsWindow(hwnd)) {
         return;
     }
-    InvalidateRect(hwnd, nullptr, FALSE);
+    HwndInvalidate(hwnd);
     // send WM_PAINT right away (normally would wait for empty msg queue)
     UpdateWindow(hwnd);
 }
@@ -3622,7 +3336,7 @@ HFONT HwndGetFont(HWND hwnd) {
 
 // change size of the window to have a given client size
 void HwndResizeClientSize(HWND hwnd, int dx, int dy) {
-    Rect rc = WindowRect(hwnd);
+    Rect rc = HwndWindowRect(hwnd);
     int x = rc.x;
     int y = rc.y;
     DWORD style = GetWindowStyle(hwnd);
@@ -3638,8 +3352,8 @@ void HwndResizeClientSize(HWND hwnd, int dx, int dy) {
 
 // position hwnd on the right of hwndRelative
 void HwndPositionToTheRightOf(HWND hwnd, HWND hwndRelative) {
-    Rect rHwnd = WindowRect(hwnd);
-    Rect rHwndRelative = WindowRect(hwndRelative);
+    Rect rHwnd = HwndWindowRect(hwnd);
+    Rect rHwndRelative = HwndWindowRect(hwndRelative);
     rHwnd.x = rHwndRelative.x + rHwndRelative.dx;
     rHwnd.y = rHwndRelative.y;
     // position hwnd vertically in the middle of hwndRelative
@@ -3652,8 +3366,8 @@ void HwndPositionToTheRightOf(HWND hwnd, HWND hwndRelative) {
 }
 
 void HwndPositionInCenterOf(HWND hwnd, HWND hwndRelative) {
-    Rect rRelative = WindowRect(hwndRelative);
-    Rect r = WindowRect(hwnd);
+    Rect rRelative = HwndWindowRect(hwndRelative);
+    Rect r = HwndWindowRect(hwnd);
     int x = rRelative.x + (rRelative.dx / 2) - (r.dx / 2);
     int y = rRelative.y + (rRelative.dy / 2) - (r.dy / 2);
 
@@ -3680,9 +3394,76 @@ void HwndDestroyWindowSafe(HWND* hwndPtr) {
     ::DestroyWindow(hwnd);
 }
 
-void TbSetButtonInfoById(HWND hwnd, int buttonId, TBBUTTONINFO* info) {
-    auto res = SendMessageW(hwnd, TB_SETBUTTONINFO, buttonId, (LPARAM)info);
+//--- toolbar / GDI handles / tree view / HGLOBAL / timing
+
+int TbGetButtonInfo(HWND hwnd, int buttonId, TBBUTTONINFO* info) {
+    int res = (int)SendMessageW(hwnd, TB_GETBUTTONINFOW, buttonId, (LPARAM)info);
+    ReportDebugIf(res < 0);
+    return res;
+}
+
+void TbSetButtonInfo(HWND hwnd, int buttonId, TBBUTTONINFO* info) {
+    auto res = SendMessageW(hwnd, TB_SETBUTTONINFOW, buttonId, (LPARAM)info);
     ReportDebugIf(0 == res);
+}
+
+void TbSetButtonChecked(HWND hwnd, int buttonId, bool checked) {
+    auto res = SendMessageW(hwnd, TB_CHECKBUTTON, buttonId, MAKELONG(checked ? 1 : 0, 0));
+    ReportDebugIf(0 == res);
+}
+
+void TbSetButtonStructSize(HWND hwnd, int size) {
+    SendMessageW(hwnd, TB_BUTTONSTRUCTSIZE, (WPARAM)size, 0);
+}
+
+void TbSetButtonSize(HWND hwnd, Size size) {
+    auto res = SendMessageW(hwnd, TB_SETBUTTONSIZE, 0, MAKELONG(size.dx, size.dy));
+    ReportDebugIf(0 == res);
+}
+
+void TbSetBitmapSize(HWND hwnd, Size size) {
+    auto res = SendMessageW(hwnd, TB_SETBITMAPSIZE, 0, MAKELONG(size.dx, size.dy));
+    ReportDebugIf(0 == res);
+}
+
+void TbAddButtons(HWND hwnd, int count, const TBBUTTON* buttons) {
+    auto res = SendMessageW(hwnd, TB_ADDBUTTONS, count, (LPARAM)buttons);
+    ReportDebugIf(0 == res);
+}
+
+void TbAutosIZE(HWND hwnd) {
+    SendMessageW(hwnd, TB_AUTOSIZE, 0, 0);
+}
+
+HIMAGELIST TbSetImageList(HWND hwnd, HIMAGELIST imageList) {
+    return (HIMAGELIST)SendMessageW(hwnd, TB_SETIMAGELIST, 0, (LPARAM)imageList);
+}
+
+HIMAGELIST TbGetImageList(HWND hwnd) {
+    return (HIMAGELIST)SendMessageW(hwnd, TB_GETIMAGELIST, 0, 0);
+}
+
+int TbGetButtonCount(HWND hwnd) {
+    return (int)SendMessageW(hwnd, TB_BUTTONCOUNT, 0, 0);
+}
+
+int TbHitTest(HWND hwnd, Point point) {
+    POINT pt = ToPOINT(point);
+    return (int)SendMessageW(hwnd, TB_HITTEST, 0, (LPARAM)&pt);
+}
+
+DWORD TbGetExtendedStyle(HWND hwnd) {
+    return (DWORD)SendMessageW(hwnd, TB_GETEXTENDEDSTYLE, 0, 0);
+}
+
+void TbSetExtendedStyle(HWND hwnd, DWORD style) {
+    SendMessageW(hwnd, TB_SETEXTENDEDSTYLE, 0, style);
+}
+
+Size TbGetMaxSize(HWND hwnd) {
+    SIZE size{};
+    SendMessageW(hwnd, TB_GETMAXSIZE, 0, (LPARAM)&size);
+    return Size((int)size.cx, (int)size.cy);
 }
 
 void TbGetPadding(HWND hwnd, int* padX, int* padY) {
@@ -3698,29 +3479,33 @@ void TbSetPadding(HWND hwnd, int padX, int padY) {
 }
 
 // https://docs.microsoft.com/en-us/windows/win32/controls/tb-getrect
-void TbGetRectById(HWND hwnd, int buttonId, RECT* r) {
+Rect TbGetRect(HWND hwnd, int buttonId) {
     if (!hwnd) {
-        return;
+        return {};
     }
-    auto res = SendMessageW(hwnd, TB_GETRECT, buttonId, (LPARAM)r);
+    RECT r{};
+    auto res = SendMessageW(hwnd, TB_GETRECT, buttonId, (LPARAM)&r);
     if (res == 0) {
-        logf("TbGetRect: hwnd=0x%p, buttonId: %d pos: (%d, %d) size: (%d, %d)\n", hwnd, buttonId, r->left, r->top,
-             RectDx(*r), RectDy(*r));
+        logf("TbGetRect: hwnd=0x%p, buttonId: %d pos: (%d, %d) size: (%d, %d)\n", hwnd, buttonId, r.left, r.top,
+             RectDx(r), RectDy(r));
         LogLastError();
         ReportIf(res == 0);
     }
+    return Rect(r);
 }
 
-void TbGetRectByIdx(HWND hwnd, int buttonIdx, RECT* rc) {
+Rect TbGetItemRect(HWND hwnd, int buttonIdx) {
     if (!hwnd) {
-        return;
+        return {};
     }
-    auto res = SendMessageW(hwnd, TB_GETITEMRECT, buttonIdx, (LPARAM)rc);
+    RECT rc{};
+    auto res = SendMessageW(hwnd, TB_GETITEMRECT, buttonIdx, (LPARAM)&rc);
     if (res == 0) {
-        logf("TbGetRectByIdx: hwnd=0x%p, buttonId: %d\n", hwnd, buttonIdx);
+        logf("TbGetItemRect: hwnd=0x%p, buttonIdx: %d\n", hwnd, buttonIdx);
         LogLastError();
         ReportIf(res == 0);
     }
+    return Rect(rc);
 }
 
 void TbGetMetrics(HWND hwnd, TBMETRICS* metrics) {
@@ -3755,52 +3540,70 @@ bool DestroyIconSafe(HICON* h) {
     return ToBool(res);
 }
 
-int HdcDrawText(HDC hdc, Str s, RECT* r, uint format, HFONT font) {
+//--- GDI: draw / measure (text)
+
+int HdcDrawText(HDC hdc, WStr s, const Rect& r, uint format, HFONT font) {
+    ReportIf(format & DT_CALCRECT);
     if (len(s) == 0) {
         return 0;
     }
-    TempWStr ws = ToWStrTemp(s);
-    if (len(ws) == 0) {
-        return 0;
-    }
-    int cch = ws.len;
     ScopedSelectFont f(hdc, font);
-    return DrawTextW(hdc, ws.s, cch, r, format);
+    RECT r2 = ToRECT(r);
+    return DrawTextW(hdc, s.s, s.len, &r2, format);
 }
 
 int HdcDrawText(HDC hdc, Str s, const Rect& r, uint format, HFONT font) {
-    RECT r2 = ToRECT(r);
-    return HdcDrawText(hdc, s, &r2, format, font);
+    return HdcDrawText(hdc, ToWStrTemp(s), r, format, font);
 }
 
 int HdcDrawText(HDC hdc, Str s, const Point& pos, uint format, HFONT font) {
     Rect r = {pos.x, pos.y, 0, 0};
+    return HdcDrawText(hdc, s, r, format, font);
+}
+
+int HdcDrawText(HDC hdc, WStr s, const Point& pos, uint format, HFONT font) {
+    Rect r = {pos.x, pos.y, 0, 0};
+    return HdcDrawText(hdc, s, r, format, font);
+}
+
+Rect HdcMeasureWithDrawText(HDC hdc, WStr s, Rect r, uint format, HFONT font) {
+    if (len(s) == 0) {
+        return r;
+    }
+    ScopedSelectFont f(hdc, font);
     RECT r2 = ToRECT(r);
-    return HdcDrawText(hdc, s, &r2, format, font);
+    DrawTextW(hdc, s.s, s.len, &r2, format | DT_CALCRECT);
+    return ToRect(r2);
+}
+
+Rect HdcMeasureWithDrawText(HDC hdc, Str s, Rect r, uint format, HFONT font) {
+    return HdcMeasureWithDrawText(hdc, ToWStrTemp(s), r, format, font);
+}
+
+bool HdcExTextOut(HDC hdc, Point pos, uint options, const Rect& rect, WStr text) {
+    RECT r = ToRECT(rect);
+    RECT* rectPtr = rect.IsEmpty() ? nullptr : &r;
+    return ExtTextOutW(hdc, pos.x, pos.y, options, rectPtr, text.s, (uint)text.len, nullptr) != 0;
+}
+
+bool HdcExTextOut(HDC hdc, Point pos, uint options, const Rect& rect, Str text) {
+    return HdcExTextOut(hdc, pos, options, rect, ToWStrTemp(text));
+}
+
+void HdcFillRectWithBkColor(HDC hdc, const Rect& rect) {
+    RECT r = ToRECT(rect);
+    ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &r, nullptr, 0, nullptr);
 }
 
 // uses the same logic as HdcDrawText
 // maxDx limits the width, used when measuring text wrapped with DT_WORDBREAK
 Size HdcMeasureText(HDC hdc, Str s, int maxDx, uint format, HFONT font) {
-    format |= DT_CALCRECT;
-    TempWStr ws = ToWStrTemp(s);
-    if (len(ws) == 0) {
+    if (len(s) == 0) {
         return {};
     }
-
-    ScopedSelectFont f(hdc, font);
-    int sLen = ws.len;
-    RECT rc{0, 0, maxDx, 4096};
-    int dy = DrawTextW(hdc, ws.s, sLen, &rc, format);
-    if (0 == dy) {
-        return {};
-    }
-    int dx = RectDx(rc);
-    int dy2 = RectDy(rc);
-    if (dy2 > dy) {
-        dy = dy2;
-    }
-    return Size(dx, dy);
+    Rect bounds = {0, 0, maxDx, 4096};
+    Rect measured = HdcMeasureWithDrawText(hdc, s, bounds, format, font);
+    return {measured.dx, measured.dy};
 }
 
 Size HdcMeasureText(HDC hdc, Str s, uint format, HFONT font) {
@@ -3816,15 +3619,13 @@ Size HdcMeasureText(HDC hdc, Str s, HFONT font) {
     return HdcMeasureText(hdc, s, fmt, font);
 }
 
-void DrawCenteredText(HDC hdc, const Rect r, Str txt, bool isRTL) {
-    WCHAR* ws = CWStrTemp(txt);
+void HdcDrawCenteredText(HDC hdc, Rect r, Str txt, bool isRTL) {
     int prevMode = SetBkMode(hdc, TRANSPARENT);
-    RECT tmpRect = ToRECT(r);
     uint format = DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
     if (isRTL) {
         format |= DT_RTLREADING;
     }
-    DrawTextW(hdc, ws, -1, &tmpRect, format);
+    HdcDrawText(hdc, txt, r, format);
     if (prevMode != 0) {
         SetBkMode(hdc, prevMode);
     }
@@ -3890,9 +3691,42 @@ void TreeViewExpandRecursively(HWND hTree, HTREEITEM hItem, uint flag, bool subt
     }
 }
 
+// SHAddToRecentDocs can block on network paths (shell resolves / writes Recent).
+// Run those off the UI thread with COM initialized and a heap-owned path.
+static void AddPathToRecentDocsOnThread(WCHAR* pathW) {
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool comInitedByUs = SUCCEEDED(hr);
+    if (!comInitedByUs && hr != RPC_E_CHANGED_MODE) {
+        logf("AddPathToRecentDocsOnThread: CoInitializeEx failed hr=0x%08x\n", (unsigned)hr);
+        free(pathW);
+        return;
+    }
+
+    if (pathW) {
+        SHAddToRecentDocs(SHARD_PATH, pathW);
+    }
+    free(pathW);
+
+    if (comInitedByUs) {
+        CoUninitialize();
+    }
+}
+
 void AddPathToRecentDocs(Str path) {
-    WCHAR* pathW = CWStrTemp(path);
-    SHAddToRecentDocs(SHARD_PATH, pathW);
+    if (!path) {
+        return;
+    }
+    if (!path::IsOnNetworkDrive(path)) {
+        WCHAR* pathW = CWStrTemp(path);
+        SHAddToRecentDocs(SHARD_PATH, pathW);
+        return;
+    }
+
+    WCHAR* owned = ToWStr(path).s; // heap; thread frees
+    if (!owned) {
+        return;
+    }
+    RunAsync(MkFunc0(AddPathToRecentDocsOnThread, owned), StrL("AddPathToRecentDocs"));
 }
 
 TempStr HGLOBALToStrTemp(HGLOBAL h, bool isUnicode) {
@@ -3956,6 +3790,8 @@ void MaskFpExceptions() {
     _controlfp_s(&unused, _MCW_EM, _MCW_EM);
 }
 
+//--- OS / process / CPU (SIMD)
+
 u32 CpuID() {
 #if IS_ARM_64
     // https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-isprocessorfeaturepresent
@@ -3982,15 +3818,27 @@ u32 CpuID() {
 
     u32 res = 0;
     int cpuInfo[4]{};
+#if COMPILER_MINGW
+    __cpuid(0, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
+#else
     __cpuid(cpuInfo, 0);
+#endif
     int nIds = cpuInfo[0];
     if (nIds >= 1) {
+#if COMPILER_MINGW
+        __cpuid(1, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
+#else
         __cpuid(cpuInfo, 1);
+#endif
         f_1_ECX_ = cpuInfo[2];
         f_1_EDX_ = cpuInfo[3];
     }
     if (nIds >= 7) {
+#if COMPILER_MINGW
+        __cpuid_count(7, 0, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
+#else
         __cpuid(cpuInfo, 7);
+#endif
         f_7_EBX_ = cpuInfo[1];
         f_7_ECX_ = cpuInfo[2];
     }
@@ -4060,6 +3908,8 @@ Str LatestSupportedSIMD() {
     return StrL("none");
 }
 
+//--- timing
+
 LARGE_INTEGER TimeNow() {
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -4082,7 +3932,9 @@ double TimeDiffMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
     return res * 1000;
 }
 
-void PaintCheckerboard(HDC hdc, int x, int y, int w, int h) {
+//--- GDI: draw (misc) / DC state
+
+void HdcPaintCheckerboard(HDC hdc, int x, int y, int w, int h) {
     constexpr int kCheckerSize = 8;
     COLORREF lightColor = RGB(255, 255, 255);
     COLORREF darkColor = RGB(204, 204, 204);
@@ -4095,7 +3947,7 @@ void PaintCheckerboard(HDC hdc, int x, int y, int w, int h) {
             int cellH = std::min(kCheckerSize, h - cy);
             RECT rc = {x + cx, y + cy, x + cx + cellW, y + cy + cellH};
             bool isDark = ((cx / kCheckerSize) + (cy / kCheckerSize)) % 2 != 0;
-            FillRect(hdc, &rc, isDark ? darkBrush : lightBrush);
+            HdcFillRect(hdc, ToRect(rc), isDark ? darkBrush : lightBrush);
         }
     }
 
@@ -4104,6 +3956,8 @@ void PaintCheckerboard(HDC hdc, int x, int y, int w, int h) {
 }
 
 // --- begin: merged from former src/common/win_util.cpp ---
+
+//--- DC state
 
 SavedDCState SaveDCState(HWND hwnd) {
     SavedDCState state = {};
@@ -4123,10 +3977,18 @@ void RestoreDCState(SavedDCState* state) {
     ReleaseDC(state->hwnd, state->hdc);
 }
 
-int MeasureStringWidth(HDC hdc, WStr str) {
-    SIZE size;
+Size HdcGetTextExtentPoint32(HDC hdc, WStr str) {
+    SIZE size{};
     GetTextExtentPoint32W(hdc, str.s, str.len, &size);
-    return size.cx;
+    return Size((int)size.cx, (int)size.cy);
+}
+
+Size HdcGetTextExtentPoint32(HDC hdc, Str str) {
+    return HdcGetTextExtentPoint32(hdc, ToWStrTemp(str));
+}
+
+int HdcMeasureStringWidth(HDC hdc, WStr str) {
+    return HdcGetTextExtentPoint32(hdc, str).dx;
 }
 
 Str GetLastErrorAsStr(Arena* arena) {

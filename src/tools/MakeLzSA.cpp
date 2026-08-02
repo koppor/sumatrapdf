@@ -10,10 +10,10 @@
 #include <LzmaEnc.h>
 #include <Bra.h>
 #include <zlib.h> // for crc32
-#include "base/ByteWriter.h"
+#include "base/ByteReaderWriter.h"
 #include "base/CmdLineArgsIter.h"
 #include "base/File.h"
-#include "base/DirIter.h"
+#include "base/DirScan.h"
 #include "base/Win.h"
 #include "base/LzmaSimpleArchive.h"
 
@@ -44,7 +44,7 @@ static bool Compress(const char* uncompressed, size_t uncompressedSize, char* co
         LzmaEncProps_Init(&props);
 
         // always apply the BCJ filter for speed (else two or three compression passes would be required)
-        ScopedMem<u8> bcj_enc(AllocArray<u8>(uncompressedSize));
+        ScopedMem<u8> bcj_enc(AllocArray<u8>((int)uncompressedSize));
         if (bcj_enc) {
             memcpy(bcj_enc, uncompressed, uncompressedSize);
             UInt32 x86State;
@@ -65,7 +65,7 @@ static bool Compress(const char* uncompressed, size_t uncompressedSize, char* co
     if (lzma_size <= uncompressedSize) {
         *compressedSize = lzma_size;
     } else {
-        compressed[0] = (u8)-1;
+        compressed[0] = (char)(u8)-1;
         memcpy(compressed + 1, uncompressed, uncompressedSize);
         *compressedSize = uncompressedSize + 1;
     }
@@ -127,7 +127,7 @@ static bool AppendEntry(str::Builder& data, str::Builder& content, Str filePath,
     data.Append(meta.AsByteSlice());
     data.Append(inArchiveName);
     data.AppendChar('\0');
-    return content.Append(Str(compressed.Get(), (int)compressedSize));
+    return content.Append(Str(compressed, (int)compressedSize));
 }
 
 // creates an archive from files (starting at index skipFiles);
@@ -147,11 +147,11 @@ bool CreateArchive(Str archivePath, StrVec& files, size_t skipFiles = 0) {
     constexpr int kBufSize = 8;
     ByteWriterLE lzsaHeader(kBufSize);
     lzsaHeader.Write32(LZMA_MAGIC_ID);
-    lzsaHeader.Write32((u32)(files.Size() - skipFiles));
+    lzsaHeader.Write32((u32)(len(files) - (int)skipFiles));
     ReportIf(lzsaHeader.Size() != kBufSize);
     data.Append(lzsaHeader.AsByteSlice());
 
-    for (int i = skipFiles; i < files.Size(); i++) {
+    for (int i = (int)skipFiles; i < len(files); i++) {
         TempStr filePath = str::DupTemp(files[i]);
         Str sep = str::SliceFromCharLast(filePath, ':');
         TempStr utf8Name;
@@ -221,7 +221,7 @@ static void MyParseCmdLine(WStr cmdLine, StrVec& args) {
         Str arg = ToUtf8Temp(argsArr[i]);
         args.Append(arg);
     }
-    LocalFree(argsArr);
+    LocalFree((void*)argsArr);
 }
 
 int mainVerify(Str archivePath) {
@@ -269,7 +269,7 @@ int main(__unused int argc, __unused char** argv) {
 
     auto exeName = path::GetBaseNameTemp(args[0]);
 
-    int nArgs = args.Size();
+    int nArgs = len(args);
     // first arg is exe path, the rest is
     if (nArgs < 2) {
         return printUsage(exeName);

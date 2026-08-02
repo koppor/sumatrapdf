@@ -9,7 +9,7 @@
 
 // returns -1 if didn't find
 int HtmlEntityNameToRune(Str name) {
-    return FindHtmlEntityRune(name);
+    return (int)FindHtmlEntityRune(name);
 }
 
 static int HtmlEntityHexDigit(char c) {
@@ -59,7 +59,7 @@ static Str ParseHtmlNumericEntity(Str str, int& rune) {
         if (codepoint > (0x10ffff - digit) / base) {
             overflow = true;
         } else if (!overflow) {
-            codepoint = codepoint * base + digit;
+            codepoint = (codepoint * base) + digit;
         }
         off++;
     }
@@ -416,8 +416,9 @@ static Str EndTagInner(Str raw) {
 }
 
 static Str CDataText(Str raw, const GumboNode* node) {
-    if (str::StartsWith(raw, StrL("<![CDATA[")) && str::EndsWith(raw, StrL("]]>"))) {
-        return Str(raw.s + 9, raw.len - 12);
+    if (str::TrimPrefix(raw, StrL("<![CDATA[")) && str::EndsWith(raw, StrL("]]>"))) {
+        raw.len -= 3;
+        return raw;
     }
     return Str(node->v.text.text);
 }

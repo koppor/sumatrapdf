@@ -4,7 +4,7 @@
 #include "base/Base.h"
 #include "base/Pixmap.h"
 #include "base/File.h"
-#include "base/GdiPlus.h"
+#include "base/GdiPlusUtil.h"
 #include "base/TgaReader.h"
 #include "base/Win.h"
 
@@ -163,11 +163,11 @@ static TempStr DestRectToStrTemp(EngineBase* engine, IPageDestination* dest) {
         PointF pt = engine->Transform(rect.TL(), pageNo, 1.0, 0);
         return fmt("Point=\"%.0f %.0f\"", pt.x, pt.y);
     }
-    if (rect.dx != DEST_USE_DEFAULT && rect.dy != DEST_USE_DEFAULT) {
+    if (rect.dx != kDestUseDefault && rect.dy != kDestUseDefault) {
         Rect rc = engine->Transform(rect, pageNo, 1.0, 0).Round();
         return fmt("Rect=\"%d %d %d %d\"", rc.x, rc.y, rc.dx, rc.dy);
     }
-    if (rect.y != DEST_USE_DEFAULT) {
+    if (rect.y != kDestUseDefault) {
         PointF pt = engine->Transform(rect.TL(), pageNo, 1.0, 0);
         return fmt("Point=\"x %.0f\"", pt.y);
     }
@@ -395,7 +395,7 @@ bool RenderDocument(EngineBase* engine, Str renderPath, float zoom = 1.f, bool s
         return false;
     }
 
-    if (str::EndsWithI(renderPath, ".txt")) {
+    if (str::EndsWithI(renderPath, StrL(".txt"))) {
         str::Builder text(1024);
         for (int pageNo = 1; pageNo <= engine->PageCount(); pageNo++) {
             PageText pageText = engine->ExtractPageText(pageNo);
@@ -426,12 +426,12 @@ bool RenderDocument(EngineBase* engine, Str renderPath, float zoom = 1.f, bool s
             continue;
         }
         TempStr pageBmpPath = fmt(renderPath.s, pageNo);
-        if (str::EndsWithI(pageBmpPath, ".png")) {
+        if (str::EndsWithI(pageBmpPath, StrL(".png"))) {
             Gdiplus::Bitmap gbmp(bmp->hbmp, nullptr);
             CLSID pngEncId = GetGdiPlusEncoderClsid(L"image/png");
             WCHAR* pageBmpPathW = CWStrTemp(pageBmpPath);
             gbmp.Save(pageBmpPathW, &pngEncId, nullptr);
-        } else if (str::EndsWithI(pageBmpPath, ".bmp")) {
+        } else if (str::EndsWithI(pageBmpPath, StrL(".bmp"))) {
             Str imgData = PixmapToBmpFormat(bmp);
             if (len(imgData) > 0) {
                 file::WriteFile(pageBmpPath, imgData);
@@ -482,11 +482,11 @@ void EngineDump(const Flags& flags) {
     bool loadOnly = false, silent = false;
 
     for (int i = 1; i < nArgs; i++) {
-        if (str::Eq(argList[i], "-pwd") && i + 1 < nArgs && !password) {
+        if (str::Eq(argList[i], StrL("-pwd")) && i + 1 < nArgs && !password) {
             password = argList[++i];
-        } else if (str::Eq(argList[i], "-quick")) {
+        } else if (str::Eq(argList[i], StrL("-quick"))) {
             fullDump = false;
-        } else if (str::Eq(argList[i], "-render") && i + 1 < nArgs && !renderPath) {
+        } else if (str::Eq(argList[i], StrL("-render")) && i + 1 < nArgs && !renderPath) {
             // optional zoom argument (e.g. -render 50% file.pdf)
             float zoom;
             if (i + 2 < nArgs && !str::IsNull(str::Parse(argList[i + 1], "%f%%%$", &zoom)) && zoom > 0.f) {
@@ -494,12 +494,12 @@ void EngineDump(const Flags& flags) {
                 i++;
             }
             renderPath = argList[++i];
-        } else if (str::Eq(argList[i], "-loadonly")) {
+        } else if (str::Eq(argList[i], StrL("-loadonly"))) {
             // -loadonly and -silent are only meant for profiling
             loadOnly = true;
-        } else if (str::Eq(argList[i], "-silent")) {
+        } else if (str::Eq(argList[i], StrL("-silent"))) {
             silent = true;
-        } else if (str::Eq(argList[i], "-full")) {
+        } else if (str::Eq(argList[i], StrL("-full"))) {
             // -full is for backward compatibility
             fullDump = true;
         } else if (!filePath) {

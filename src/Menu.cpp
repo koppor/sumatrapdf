@@ -43,7 +43,7 @@
 
 // value associated with menu item for owner-drawn purposes
 struct MenuOwnerDrawInfo {
-    Str text = {};
+    Str text;
     // copy of MENUITEMINFO fields
     uint fType = 0;
     uint fState = 0;
@@ -116,6 +116,10 @@ static MenuDef menuDefFile[] = {
     {
         _TRN("Delete"),
         CmdDeleteFile,
+    },
+    {
+        _TRN("Delete and Open Next File"),
+        CmdDeleteFileAndOpenNext,
     },
     {
         _TRN("&Print..."),
@@ -873,7 +877,7 @@ static MenuDef menuDefCreateAnnotUnderCursor[] = {
     //    CmdCreateAnnotPolygon,
     //},
     //{
-    //    _TRN("Poly Line"),
+    //    _TRN("Polyline"),
     //    CmdCreateAnnotPolyLine,
     //},
     //{ _TRN("Ink"), CmdCreateAnnotInk, },
@@ -1129,6 +1133,7 @@ static MenuDef menuDefContextStart[] = {
 static int disableIfDirectoryOrBrokenPDF[] = {
     CmdRenameFile,
     CmdDeleteFile,
+    CmdDeleteFileAndOpenNext,
     CmdSendByEmail,
     CmdOpenWithAcrobat,
     CmdOpenWithFoxIt,
@@ -1788,6 +1793,7 @@ static void MenuUpdateStateForWindow(MainWindow* win) {
     if (win->IsDocLoaded() && !fileExists) {
         MenuSetEnabled(win->menu, CmdRenameFile, false);
         MenuSetEnabled(win->menu, CmdDeleteFile, false);
+        MenuSetEnabled(win->menu, CmdDeleteFileAndOpenNext, false);
     }
 
     CheckMenuRadioItem(win->menu, gFirstSetThemeCmdId, gLastSetThemeCmdId, gCurrSetThemeCmdId, MF_BYCOMMAND);
@@ -1803,7 +1809,8 @@ void OnAboutContextMenu(MainWindow* win, int x, int y) {
     }
 
     TempStr path = GetStaticLinkAtTemp(win->staticLinks, x, y, nullptr);
-    if (!path || path.s[0] == '<' || str::StartsWith(path, "http://") || str::StartsWith(path, "https://")) {
+    if (!path || path.s[0] == '<' || str::StartsWith(path, StrL("http://")) ||
+        str::StartsWith(path, StrL("https://"))) {
         return;
     }
 
@@ -1817,8 +1824,7 @@ void OnAboutContextMenu(MainWindow* win, int x, int y) {
     ctx.filePath = path;
     HMENU popup = BuildMenuFromDef(menuDefContextStart, CreatePopupMenu(), &ctx);
     MenuSetChecked(popup, CmdPinSelectedDocument, fs->isPinned);
-    POINT pt = {x, y};
-    MapWindowPoints(win->hwndCanvas, HWND_DESKTOP, &pt, 1);
+    Point pt = HwndMapWindowPoint(win->hwndCanvas, HWND_DESKTOP, {x, y});
     MarkMenuOwnerDraw(popup);
     INT cmd = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, win->hwndFrame, nullptr);
     FreeMenuOwnerDrawInfoData(popup);
@@ -1876,8 +1882,8 @@ void ForgetFileFromFrequentlyRead(MainWindow* win, Str filePath) {
 // We only want the "path.pdf" / "foo@bar.com"
 static TempStr CleanupURLForClipbardCopyTemp(Str s) {
     Str slice = s;
-    str::Skip(slice, "file:");
-    str::Skip(slice, "mailto:");
+    str::TrimPrefix(slice, StrL("file:"));
+    str::TrimPrefix(slice, StrL("mailto:"));
     return str::DupTemp(slice);
 }
 
@@ -2038,8 +2044,7 @@ void OnWindowContextMenu(MainWindow* win, int x, int y) {
         HwndRepaintNow(win->hwndCanvas);
     }
 
-    POINT pt = {x, y};
-    MapWindowPoints(win->hwndCanvas, HWND_DESKTOP, &pt, 1);
+    Point pt = HwndMapWindowPoint(win->hwndCanvas, HWND_DESKTOP, {x, y});
     MarkMenuOwnerDraw(popup);
     UINT flags = TPM_RETURNCMD | TPM_RIGHTBUTTON;
     int cmdId = TrackPopupMenu(popup, flags, pt.x, pt.y, 0, win->hwndFrame, nullptr);
@@ -2432,7 +2437,7 @@ void MenuCustomDrawItem(HWND hwnd, DRAWITEMSTRUCT* dis) {
     };
 
     auto brBg = CreateSolidBrush(bgCol);
-    FillRect(hdc, &rc, brBg);
+    HdcFillRect(hdc, ToRect(rc), brBg);
     auto brTxt = CreateSolidBrush(txtCol);
 
     AutoDeleteObject deleteBgBrush(brBg);
@@ -2469,7 +2474,7 @@ void MenuCustomDrawItem(HWND hwnd, DRAWITEMSTRUCT* dis) {
         ws = CWStrTemp(shortcutText);
         rc = dis->rcItem;
         rc.top += padY;
-        rc.right -= (padX + cxCheckMark / 2);
+        rc.right -= (padX + (cxCheckMark / 2));
         DrawTextExW(hdc, ws, -1, &rc, DT_RIGHT, nullptr);
     }
 

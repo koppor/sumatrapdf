@@ -129,14 +129,14 @@ static TempStr UpdateCommandNameTemp(MainWindow* win, int cmdId, Str s) {
 
     if (cmdId == CmdToggleWindowsPreviewer) {
         if (IsPreviewInstalled()) {
-            return _TRA("Un-register Windows Previewer");
+            return _TRA("Unregister Windows Previewer");
         }
         return _TRA("Register Windows Previewer");
     }
 
     if (cmdId == CmdToggleWindowsSearchFilter) {
         if (IsSearchFilterInstalled()) {
-            return _TRA("Un-register Windows Search Filter");
+            return _TRA("Unregister Windows Search Filter");
         }
         return _TRA("Register Windows Search Filter");
     }
@@ -172,7 +172,7 @@ static void AppendTab(StrVecCP& tabs, WindowTab* tab, WindowTab* currTab, int& c
     }
 }
 
-void CommandPaletteWnd::CollectTabsRegular(MainWindow* mainWin, WindowTab* currTab) {
+void CommandPaletteWnd::CollectTabsRegular(MainWindow* /*mainWin*/, WindowTab* currTab) {
     currTabIdx = 0;
     tabs.Reset();
     for (MainWindow* w : gWindows) {

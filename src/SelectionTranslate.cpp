@@ -126,7 +126,7 @@ struct SelectionTranslateWnd : Wnd {
     void OnCloseClicked();
     void ScheduleDelete();
 
-    void OnSize(UINT msg, UINT type, SIZE size) override;
+    void OnSize(UINT msg, UINT type, Size size) override;
     void OnGetMinMaxInfo(MINMAXINFO* mmi) override;
 };
 
@@ -258,7 +258,7 @@ static Str PrimaryLangIdToEnglishName(WORD primary) {
     }
 }
 
-static const TempStr OsDefaultDestinationLanguageTemp() {
+static TempStr OsDefaultDestinationLanguageTemp() {
     LANGID langId = GetUserDefaultUILanguage();
     Str name = PrimaryLangIdToEnglishName(PRIMARYLANGID(langId));
     if (name) {
@@ -270,7 +270,7 @@ static const TempStr OsDefaultDestinationLanguageTemp() {
     return "English";
 }
 
-static const TempStr DefaultDestinationLanguageTemp() {
+static TempStr DefaultDestinationLanguageTemp() {
     if (gGlobalPrefs && !str::IsEmptyOrWhiteSpace(gGlobalPrefs->translateToLang)) {
         return gGlobalPrefs->translateToLang;
     }
@@ -286,7 +286,7 @@ static TempStr NormalizeLangNameTemp(Str lang) {
     return normalized;
 }
 
-static const TempStr DefaultSourceLanguageTemp() {
+static TempStr DefaultSourceLanguageTemp() {
     if (gGlobalPrefs && !str::IsEmptyOrWhiteSpace(gGlobalPrefs->translateFromLang)) {
         return gGlobalPrefs->translateFromLang;
     }
@@ -370,7 +370,7 @@ static bool TranslationLooksLikeError(Str text) {
     if (str::ContainsI(text, StrL("api error"))) {
         return true;
     }
-    if (str::StartsWithI(text, "error:")) {
+    if (str::StartsWithI(text, StrL("error:"))) {
         return true;
     }
     if (str::ContainsI(text, StrL("model is not supported"))) {
@@ -460,7 +460,7 @@ static void ReadPipeToStrBuilder(HANDLE hPipe, str::Builder& out) {
 
 static void AppendGrokTranslationText(Str line, str::Builder& out) {
     TempStr eventType = AIChatJsonStrTemp(line, "type");
-    if (eventType && str::Eq(eventType, "text")) {
+    if (eventType && str::Eq(eventType, StrL("text"))) {
         TempStr text = AIChatJsonStrTemp(line, "data");
         if (len(text) > 0) {
             out.Append(text);
@@ -473,7 +473,7 @@ static void AppendClaudeTranslationText(Str line, str::Builder& out) {
     if (!eventType) {
         return;
     }
-    if (str::Eq(eventType, "result")) {
+    if (str::Eq(eventType, StrL("result"))) {
         bool isError = str::Contains(line, StrL("\"is_error\":true"));
         TempStr text = AIChatJsonStrTemp(line, "result");
         if (len(text) > 0) {
@@ -489,12 +489,12 @@ static void AppendClaudeTranslationText(Str line, str::Builder& out) {
     if (str::Contains(line, StrL("authentication_failed")) || str::Contains(line, StrL("\"is_error\":true"))) {
         return;
     }
-    if (str::Eq(eventType, "assistant") && str::Contains(line, StrL("\"type\":\"text\""))) {
+    if (str::Eq(eventType, StrL("assistant")) && str::Contains(line, StrL("\"type\":\"text\""))) {
         TempStr text = AIChatJsonStrTemp(line, "text");
         if (len(text) > 0 && !TranslationLooksLikeError(text)) {
             out.Append(text);
         }
-    } else if (str::Eq(eventType, "content_block_delta")) {
+    } else if (str::Eq(eventType, StrL("content_block_delta"))) {
         TempStr text = AIChatJsonStrTemp(line, "text");
         if (len(text) > 0) {
             out.Append(text);
@@ -507,7 +507,7 @@ static void AppendCodexTranslationText(Str line, str::Builder& out) {
         return;
     }
     TempStr eventType = AIChatJsonStrTemp(line, "type");
-    if (!eventType || !str::Eq(eventType, "item.completed")) {
+    if (!eventType || !str::Eq(eventType, StrL("item.completed"))) {
         return;
     }
     TempStr text = AIChatJsonStrTemp(line, "text");
@@ -751,10 +751,10 @@ static TempStr BuildTranslateUrlTemp(TranslateEngine engine, Str srcLang, Str ds
     }
     if (engine == TranslateEngine::DeepL) {
         // DeepL uses plain "zh" for Chinese
-        if (str::StartsWithI(src, "zh")) {
+        if (str::StartsWithI(src, StrL("zh"))) {
             src = str::DupTemp("zh");
         }
-        if (str::StartsWithI(dst, "zh")) {
+        if (str::StartsWithI(dst, StrL("zh"))) {
             dst = str::DupTemp("zh");
         }
         return fmt("https://www.deepl.com/translator#%s/%s/%s", src, dst, enc);
@@ -881,17 +881,17 @@ void SelectionTranslateWnd::Relayout(bool initial) {
     }
     if (initial || !sizeInitialized) {
         LayoutAndSizeToContent(layout, 0, 0, hwnd);
-        CenterDialog(hwnd, hwndOwner);
+        HwndCenterDialog(hwnd, hwndOwner);
         sizeInitialized = true;
         return;
     }
     // keep current client size (or grow if new content needs more space, e.g. result)
-    Rect rc = ClientRect(hwnd);
+    Rect rc = HwndClientRect(hwnd);
     LayoutAndSizeToContent(layout, rc.dx, rc.dy, hwnd);
 }
 
 // reflow controls when the user resizes the window
-void SelectionTranslateWnd::OnSize(UINT msg, UINT, SIZE size) {
+void SelectionTranslateWnd::OnSize(UINT msg, UINT, Size size) {
     if (msg != WM_SIZE) {
         return;
     }
@@ -899,13 +899,13 @@ void SelectionTranslateWnd::OnSize(UINT msg, UINT, SIZE size) {
     if (!layout || !sizeInitialized) {
         return;
     }
-    int dx = (int)size.cx;
-    int dy = (int)size.cy;
+    int dx = size.dx;
+    int dy = size.dy;
     if (dx == 0 || dy == 0) {
         return;
     }
     LayoutToSize(layout, {dx, dy});
-    InvalidateRect(hwnd, nullptr, false);
+    HwndInvalidate(hwnd);
 }
 
 void SelectionTranslateWnd::OnGetMinMaxInfo(MINMAXINFO* mmi) {

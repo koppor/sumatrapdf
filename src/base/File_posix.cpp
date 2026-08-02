@@ -6,7 +6,6 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -29,7 +28,7 @@ static bool StatPath(Str path, struct stat& st) {
 }
 
 static FILETIME FileTimeFromTimespec(time_t sec, long nsec) {
-    u64 t = (u64)sec * 1000000000ULL + (u64)nsec;
+    u64 t = ((u64)sec * 1000000000ULL) + (u64)nsec;
     FILETIME ft;
     ft.dwLowDateTime = (DWORD)t;
     ft.dwHighDateTime = (DWORD)(t >> 32);
@@ -86,6 +85,15 @@ Type GetType(Str path) {
 bool IsDirectory(Str path) {
     struct stat st;
     return StatPath(path, st) && S_ISDIR(st.st_mode);
+}
+
+// No cache on non-Windows — same as an uncached attribute query.
+DWORD GetCachedAttributes(Str path) {
+    struct stat st;
+    if (!StatPath(path, st)) {
+        return (DWORD)-1; // INVALID_FILE_ATTRIBUTES
+    }
+    return (DWORD)st.st_mode;
 }
 
 TempStr NormalizeTemp(Str path) {
@@ -514,6 +522,23 @@ bool Create(Str dir) {
         return true;
     }
     return errno == EEXIST && Exists(dir);
+}
+
+// Create dir and all missing parents (like mkdir -p).
+bool CreateAll(Str dir) {
+    if (!dir) {
+        return false;
+    }
+    if (Exists(dir)) {
+        return true;
+    }
+    TempStr parent = path::GetDirTemp(dir);
+    if (!str::Eq(parent, dir) && parent && !str::Eq(parent, StrL("."))) {
+        if (!Exists(parent) && !CreateAll(parent)) {
+            return false;
+        }
+    }
+    return Create(dir);
 }
 
 static bool RemoveAllZ(const char* dir) {

@@ -30,10 +30,7 @@
     <ClInclude Include="..\src\base\BitManip.h">
       <Filter>base</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\base\ByteOrderDecoder.h">
-      <Filter>base</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\base\ByteReader.h">
+    <ClInclude Include="..\src\base\ByteReaderWriter.h">
       <Filter>base</Filter>
     </ClInclude>
     <ClInclude Include="..\src\base\CmdLineArgsIter.h">
@@ -156,10 +153,7 @@
     <ClCompile Include="..\src\base\Base_win.cpp">
       <Filter>base</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\ByteOrderDecoder.cpp">
-      <Filter>base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\ByteReader.cpp">
+    <ClCompile Include="..\src\base\ByteReaderWriter.cpp">
       <Filter>base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\CmdLineArgsIter.cpp">
@@ -216,6 +210,9 @@
     <ClCompile Include="..\src\base\Pixmap.cpp">
       <Filter>base</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\base\Pixmap_win.cpp">
+      <Filter>base</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\base\SettingsUtil.cpp">
       <Filter>base</Filter>
     </ClCompile>
@@ -255,7 +252,7 @@
     <ClCompile Include="..\src\base\tests\Base_ut.cpp">
       <Filter>base\tests</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\tests\ByteOrderDecoder_ut.cpp">
+    <ClCompile Include="..\src\base\tests\ByteReaderWriter_ut.cpp">
       <Filter>base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\Crypto_ut.cpp">

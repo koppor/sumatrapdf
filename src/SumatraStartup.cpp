@@ -7,11 +7,11 @@
 #include "base/ScopedWin.h"
 #include "base/WinDynCalls.h"
 #include "base/DbgHelpDyn.h"
-#include "base/DirIter.h"
+#include "base/DirScan.h"
 #include "base/Dpi.h"
 #include "base/File.h"
 #include "base/FileWatcher.h"
-#include "base/GdiPlus.h"
+#include "base/GdiPlusUtil.h"
 #include "mui/Mui.h"
 #include "base/UITask.h"
 #include "base/Win.h"
@@ -100,7 +100,8 @@ static NO_INLINE bool MaybeMakePluginWindow(MainWindow* win, HWND hwndParent) {
 
     // second SetParent after WS_CHILD is set
     SetParent(hwndFrame, hwndParent);
-    MoveWindow(hwndFrame, ClientRect(hwndParent));
+    Rect r = HwndClientRect(hwndParent);
+    HwndMoveWindow(hwndFrame, &r);
     ShowWindow(hwndFrame, SW_SHOW);
     UpdateWindow(hwndFrame);
 
@@ -198,6 +199,34 @@ static bool SendOpenFileToExistingInstance(HWND targetHwnd, Str fullPath, u32 ne
     payload->newWindow = newWindow;
     memcpy(payload + 1, fullPath.s, pathLen + 1);
     COPYDATASTRUCT cds = {kCopyDataOpen, (DWORD)cbData, payload};
+    LRESULT res = SendMessageW(targetHwnd, WM_COPYDATA, 0, (LPARAM)&cds);
+    free(payload);
+    return res != 0;
+}
+
+static bool SendOpenFilesToExistingInstance(HWND targetHwnd, StrVec& paths, u32 newWindow) {
+    size_t cbData = sizeof(SumatraOpenManyCopyData);
+    for (Str path : paths) {
+        cbData += path.len + 1;
+    }
+    if (cbData > MAXDWORD) {
+        return false;
+    }
+
+    u8* payload = (u8*)malloc(cbData);
+    if (!payload) {
+        return false;
+    }
+    auto* data = (SumatraOpenManyCopyData*)payload;
+    data->newWindow = newWindow;
+    data->pathCount = (u32)len(paths);
+    u8* dst = payload + sizeof(*data);
+    for (Str path : paths) {
+        memcpy(dst, path.s, path.len);
+        dst += path.len;
+        *dst++ = 0;
+    }
+    COPYDATASTRUCT cds = {kCopyDataOpenMany, (DWORD)cbData, payload};
     LRESULT res = SendMessageW(targetHwnd, WM_COPYDATA, 0, (LPARAM)&cds);
     free(payload);
     return res != 0;
@@ -396,15 +425,19 @@ static void RestoreMissingTabOnStartup(MainWindow* win, TabState* state) {
     AddTabToWindow(win, tab);
 }
 
-// TODO: when files are lazy loaded, they do not restore TabState. Need to remember
-// it in LoadArgs and call SetTabState() if present after loading
 static void RestoreTabOnStartup(MainWindow* win, TabState* state, bool lazyLoad = true) {
     logf("RestoreTabOnStartup: state->filePath: '%s'\n", state->filePath);
+    if (!DocumentPathExists(state->filePath)) {
+        RestoreMissingTabOnStartup(win, state);
+        return;
+    }
     LoadArgs args(state->filePath, win);
     args.noSavePrefs = true;
     args.showWin = false;
-    if (lazyLoad) {
-        args.tabState = state;
+    args.tabState = state;
+    if (!lazyLoad && SettingsUseTabs()) {
+        StartLoadDocument(&args);
+        return;
     }
     args.lazyLoad = lazyLoad;
     if (!LoadDocument(&args)) {
@@ -465,10 +498,10 @@ static bool SetupPluginMode(Flags& i) {
         for (int k = 0; k < len(parts); k++) {
             Str part = parts[k];
             int pageNo;
-            if (str::StartsWithI(part, "page=") &&
+            if (str::StartsWithI(part, StrL("page=")) &&
                 !str::IsNull(str::Parse(Str(part.s + 4, part.len - 4), "=%d%$", &pageNo))) {
                 i.pageNumber = pageNo;
-            } else if (str::StartsWithI(part, "nameddest=") && part.len > 10) {
+            } else if (str::StartsWithI(part, StrL("nameddest=")) && part.len > 10) {
                 i.namedDest = str::Dup(Str(part.s + 10, part.len - 10));
             } else if (!str::ContainsChar(part, '=') && part) {
                 i.namedDest = str::Dup(part);
@@ -775,12 +808,12 @@ static int RunMessageLoop() {
     return (int)msg.wParam;
 }
 
-static void FreeLibmupdfDll();
+static void FreeLibsumatrapdfDll();
 
 static void ShutdownCommon() {
     mui::Destroy();
     uitask::Destroy();
-    FreeLibmupdfDll();
+    FreeLibsumatrapdfDll();
     UninstallCrashHandler();
     dbghelp::FreeCallstackLogs();
 }
@@ -807,35 +840,35 @@ static void UpdateGlobalPrefs(const Flags& i) {
     Str param;
     for (int n = 0; n < len(i.globalPrefArgs); n++) {
         arg = i.globalPrefArgs[n];
-        if (str::EqI(arg, "-esc-to-exit")) {
+        if (str::EqI(arg, StrL("-esc-to-exit"))) {
             gGlobalPrefs->escToExit = true;
-        } else if (str::EqI(arg, "-bgcolor") || str::EqI(arg, "-bg-color")) {
+        } else if (str::EqI(arg, StrL("-bgcolor")) || str::EqI(arg, StrL("-bg-color"))) {
             // -bgcolor is for backwards compat (was used pre-1.3)
             // -bg-color is for consistency
             param = i.globalPrefArgs[++n];
             ReplaceColor(&gGlobalPrefs->mainWindowBackground, param);
-        } else if (str::EqI(arg, "-set-color-range")) {
+        } else if (str::EqI(arg, StrL("-set-color-range"))) {
             param = i.globalPrefArgs[++n];
             ReplaceColor(&gGlobalPrefs->fixedPageUI.textColor, param);
             param = i.globalPrefArgs[++n];
             ReplaceColor(&gGlobalPrefs->fixedPageUI.backgroundColor, param);
-        } else if (str::EqI(arg, "-fwdsearch-offset")) {
+        } else if (str::EqI(arg, StrL("-fwdsearch-offset"))) {
             param = i.globalPrefArgs[++n];
             gGlobalPrefs->forwardSearch.highlightOffset = ParseInt(param);
             gGlobalPrefs->enableTeXEnhancements = true;
-        } else if (str::EqI(arg, "-fwdsearch-width")) {
+        } else if (str::EqI(arg, StrL("-fwdsearch-width"))) {
             param = i.globalPrefArgs[++n];
             gGlobalPrefs->forwardSearch.highlightWidth = ParseInt(param);
             gGlobalPrefs->enableTeXEnhancements = true;
-        } else if (str::EqI(arg, "-fwdsearch-color")) {
+        } else if (str::EqI(arg, StrL("-fwdsearch-color"))) {
             param = i.globalPrefArgs[++n];
             ReplaceColor(&gGlobalPrefs->forwardSearch.highlightColor, param);
             gGlobalPrefs->enableTeXEnhancements = true;
-        } else if (str::EqI(arg, "-fwdsearch-permanent")) {
+        } else if (str::EqI(arg, StrL("-fwdsearch-permanent"))) {
             param = i.globalPrefArgs[++n];
             gGlobalPrefs->forwardSearch.highlightPermanent = ParseInt(param);
             gGlobalPrefs->enableTeXEnhancements = true;
-        } else if (str::EqI(arg, "-manga-mode")) {
+        } else if (str::EqI(arg, StrL("-manga-mode"))) {
             param = i.globalPrefArgs[++n];
             gGlobalPrefs->comicBookUI.cbxMangaMode = str::EqI("true", param) || str::Eq("1", param);
         }
@@ -859,9 +892,9 @@ static bool ExeHasNameOfStoreInstaller() {
     return str::ContainsI(exeName, StrL("install-store"));
 }
 
-// Uncompressed size of libmupdf.dll in the IDR_DLL_PAK LzSA resource, or -1 if
+// Uncompressed size of libsumatrapdf.dll in the IDR_DLL_PAK LzSA resource, or -1 if
 // the resource / entry is missing. Cached after the first call (-2 = uncached).
-static i64 GetEmbeddedLibmupdfSize() {
+static i64 GetEmbeddedLibsumatrapdfSize() {
     static i64 size = -2;
     if (size != -2) {
         return size;
@@ -878,7 +911,7 @@ static i64 GetEmbeddedLibmupdfSize() {
     }
     for (int i = 0; i < archive.filesCount; i++) {
         lzma::FileInfo* fi = &archive.files[i];
-        if (str::EqI(fi->name, "libmupdf.dll")) {
+        if (str::EqI(fi->name, StrL("libsumatrapdf.dll"))) {
             size = (i64)fi->uncompressedSize;
             break;
         }
@@ -886,35 +919,35 @@ static i64 GetEmbeddedLibmupdfSize() {
     return size;
 }
 
-static bool HasEmbeddedLibmupdf() {
-    return GetEmbeddedLibmupdfSize() >= 0;
+static bool HasEmbeddedLibsumatrapdf() {
+    return GetEmbeddedLibsumatrapdfSize() >= 0;
 }
 
 static bool IsInstallerAndNamedAsSuch() {
-    if (!HasEmbeddedLibmupdf()) {
+    if (!HasEmbeddedLibsumatrapdf()) {
         return false;
     }
     return ExeHasNameOfInstaller();
 }
 
 static bool IsInstallerButNotInstalled() {
-    if (!HasEmbeddedLibmupdf()) {
+    if (!HasEmbeddedLibsumatrapdf()) {
         return false;
     }
     return !IsOurExeInstalled();
 }
 
-// we delay load libmupdf.dll but it seems in some cases it fails to load
+// we delay load libsumatrapdf.dll but it seems in some cases it fails to load
 // as seen in crash reports
 // here I'm trying to explicitly LoadLibrary() to hopefully fix that
 // if not, at least I can add logging to figure out why it fails
 constexpr int kBtnIdLearnMore = 100;
 static Str kFailedToLoadURL() {
-    return StrL("https://www.sumatrapdfreader.org/docs/Failed-to-load-libmpdf");
+    return StrL("https://www.sumatrapdfreader.org/docs/Failed-to-load-libmupdf");
 }
 
-static HRESULT CALLBACK LoadLibmupdfDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
-                                                   LONG_PTR lpRefData) {
+static HRESULT CALLBACK LoadLibsumatrapdfDialogCallback(HWND /*hwnd*/, UINT msg, WPARAM wParam, LPARAM lParam,
+                                                        LONG_PTR /*lpRefData*/) {
     switch (msg) {
         case TDN_HYPERLINK_CLICKED: {
             LaunchBrowser(ToUtf8Temp(WStr((wchar_t*)lParam)));
@@ -930,127 +963,239 @@ static HRESULT CALLBACK LoadLibmupdfDialogCallback(HWND hwnd, UINT msg, WPARAM w
     return S_OK;
 }
 
-// if true, and libmupdf.dll is not next to the exe, extract it to the build data
+// if true, and libsumatrapdf.dll is not next to the exe, extract it to the build data
 // dir and load from there (portable / single-exe). if false, only try next to
 // the exe; missing dll is handled by ForceRunningAsInstaller.
 bool gSingleExe = true;
 
-static HMODULE gLibmupdfDll = nullptr;
-// Last LoadLibrary(Ex) failure for libmupdf.dll (0 if none / size mismatch skip).
-static DWORD gLibmupdfLastLoadError = 0;
+static HMODULE gLibsumatrapdfDll = nullptr;
+// Last LoadLibrary(Ex) failure for libsumatrapdf.dll (0 if none / size mismatch skip).
+static DWORD gLibsumatrapdfLastLoadError = 0;
 
-static void FreeLibmupdfDll() {
-    if (gLibmupdfDll) {
-        FreeLibrary(gLibmupdfDll);
-        gLibmupdfDll = nullptr;
+static void FreeLibsumatrapdfDll() {
+    if (gLibsumatrapdfDll) {
+        FreeLibrary(gLibsumatrapdfDll);
+        gLibsumatrapdfDll = nullptr;
     }
 }
 
-// Load libmupdf.dll from path only if the file size matches expectedSize (the
+// Errors commonly seen when antivirus is scanning / locking a just-written DLL
+// (debug reports e.g. 8bfd12791000001 with err=87 after successful extract).
+static bool IsLibsumatrapdfAvRaceError(DWORD err) {
+    return err == ERROR_INVALID_PARAMETER     // 87 — sometimes returned by AV hooks
+           || err == ERROR_ACCESS_DENIED      // 5
+           || err == ERROR_SHARING_VIOLATION; // 32
+}
+
+// Windows Application Control (WDAC / AppLocker / Smart App Control) refused
+// LoadLibrary — file is on disk but policy blocks execution. e.g. debug report
+// 8c09d3b87000001 with err=4551 ("An Application Control policy has blocked this file.").
+// Older SDKs / MinGW lack these Smart App Control / System Integrity error codes.
+#ifndef ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION
+#define ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION 4551L
+#endif
+#ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_MALICIOUS
+#define ERROR_SYSTEM_INTEGRITY_REPUTATION_MALICIOUS 4556L
+#endif
+#ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_PUA
+#define ERROR_SYSTEM_INTEGRITY_REPUTATION_PUA 4557L
+#endif
+#ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_DANGEROUS_EXT
+#define ERROR_SYSTEM_INTEGRITY_REPUTATION_DANGEROUS_EXT 4558L
+#endif
+#ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_OFFLINE
+#define ERROR_SYSTEM_INTEGRITY_REPUTATION_OFFLINE 4559L
+#endif
+#ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_UNFRIENDLY_FILE
+#define ERROR_SYSTEM_INTEGRITY_REPUTATION_UNFRIENDLY_FILE 4580L
+#endif
+#ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_UNATTAINABLE
+#define ERROR_SYSTEM_INTEGRITY_REPUTATION_UNATTAINABLE 4581L
+#endif
+#ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_EXPLICIT_DENY_FILE
+#define ERROR_SYSTEM_INTEGRITY_REPUTATION_EXPLICIT_DENY_FILE 4582L
+#endif
+#ifndef ERROR_SYSTEM_INTEGRITY_WHQL_NOT_SATISFIED
+#define ERROR_SYSTEM_INTEGRITY_WHQL_NOT_SATISFIED 4583L
+#endif
+static bool IsLibsumatrapdfAppControlError(DWORD err) {
+    switch (err) {
+        case ERROR_ACCESS_DISABLED_BY_POLICY:                      // 1260 — AppLocker / SRP
+        case ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION:              // 4551
+        case ERROR_SYSTEM_INTEGRITY_REPUTATION_MALICIOUS:          // 4556
+        case ERROR_SYSTEM_INTEGRITY_REPUTATION_PUA:                // 4557
+        case ERROR_SYSTEM_INTEGRITY_REPUTATION_DANGEROUS_EXT:      // 4558
+        case ERROR_SYSTEM_INTEGRITY_REPUTATION_OFFLINE:            // 4559
+        case ERROR_SYSTEM_INTEGRITY_REPUTATION_UNFRIENDLY_FILE:    // 4580
+        case ERROR_SYSTEM_INTEGRITY_REPUTATION_UNATTAINABLE:       // 4581
+        case ERROR_SYSTEM_INTEGRITY_REPUTATION_EXPLICIT_DENY_FILE: // 4582
+        case ERROR_SYSTEM_INTEGRITY_WHQL_NOT_SATISFIED:            // 4583
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void LogLibsumatrapdfFileStateAfterLoadFail(Str path, DWORD err) {
+    i64 sizeAfter = file::GetSize(path);
+    bool existsAfter = file::Exists(path);
+    logf("LoadLibsumatrapdfFromFile: after fail path='%s' stillExists=%d size=%lld err=%u\n", path, (int)existsAfter,
+         (long long)sizeAfter, err);
+    if (existsAfter) {
+        DWORD attrs = path::GetCachedAttributes(path);
+        logf("LoadLibsumatrapdfFromFile: after fail attrs=0x%x\n", attrs);
+    } else {
+        // Typical when AV quarantines the DLL right after extract
+        logf("LoadLibsumatrapdfFromFile: file missing after LoadLibrary fail (possible AV quarantine)\n");
+    }
+}
+
+// Load libsumatrapdf.dll from path only if the file size matches expectedSize (the
 // embedded/installer copy). Skips mismatched leftover DLLs from other builds.
 // useLoadLibraryEx: LoadLibraryExW with LOAD_WITH_ALTERED_SEARCH_PATH (helps
 // when AV hooks plain LoadLibrary, and for dependency search next to the DLL).
-static bool LoadLibmupdfFromFile(Str path, i64 expectedSize, bool useLoadLibraryEx = false) {
+static bool LoadLibsumatrapdfFromFile(Str path, i64 expectedSize, bool useLoadLibraryEx = false) {
     i64 realSize = file::GetSize(path);
     if (realSize != expectedSize) {
         if (realSize >= 0) {
-            logf("LoadLibmupdfFromFile: skip '%s' (size %lld, expected %lld)\n", path, (long long)realSize,
+            logf("LoadLibsumatrapdfFromFile: skip '%s' (size %lld, expected %lld)\n", path, (long long)realSize,
                  (long long)expectedSize);
         }
         return false;
     }
     const WCHAR* wpath = CWStrTemp(path);
     if (useLoadLibraryEx) {
-        gLibmupdfDll = LoadLibraryExW(wpath, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        gLibsumatrapdfDll = LoadLibraryExW(wpath, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     } else {
-        gLibmupdfDll = LoadLibraryW(wpath);
+        gLibsumatrapdfDll = LoadLibraryW(wpath);
     }
-    if (!gLibmupdfDll) {
+    if (!gLibsumatrapdfDll) {
         // capture before logf, which can overwrite GetLastError
         DWORD err = GetLastError();
-        gLibmupdfLastLoadError = err;
+        gLibsumatrapdfLastLoadError = err;
         if (useLoadLibraryEx) {
-            logf("LoadLibmupdfFromFile: failed to load '%s' (LoadLibraryExW) err=%u\n", path, err);
+            logf("LoadLibsumatrapdfFromFile: failed to load '%s' (LoadLibraryExW) err=%u\n", path, err);
         } else {
-            logf("LoadLibmupdfFromFile: failed to load '%s' err=%u\n", path, err);
+            logf("LoadLibsumatrapdfFromFile: failed to load '%s' err=%u\n", path, err);
         }
         LogLastError(err);
+        // Log whether the file still exists — AV often deletes/quarantines it
+        // between a successful write and LoadLibrary (see debug reports).
+        LogLibsumatrapdfFileStateAfterLoadFail(path, err);
         SetLastError(err); // so callers' GetLastError() still see LoadLibrary's error
         return false;
     }
-    gLibmupdfLastLoadError = 0;
+    gLibsumatrapdfLastLoadError = 0;
     if (useLoadLibraryEx) {
-        logf("LoadLibmupdf: loaded '%s' (LoadLibraryExW)\n", path);
+        logf("LoadLibsumatrapdf: loaded '%s' (LoadLibraryExW)\n", path);
     } else {
-        logf("LoadLibmupdf: loaded '%s'\n", path);
+        logf("LoadLibsumatrapdf: loaded '%s'\n", path);
     }
     return true;
 }
 
-// LoadLibraryW, wait 1s and retry, then LoadLibraryExW. For AV races that
-// briefly block a just-written DLL under LocalAppData (see crash reports).
-static bool LoadLibmupdfFromFileRobust(Str path, i64 expectedSize) {
-    if (LoadLibmupdfFromFile(path, expectedSize)) {
+// LoadLibraryW with short retry, optional longer AV-race backoff, then
+// LoadLibraryExW. justWritten: we extracted the DLL moments ago (AV most active).
+// Missing / wrong-size files fail immediately — no Sleep. Sleeps are only for real
+// LoadLibrary failures (AV race). Otherwise portable startup pays ~1s every launch
+// when the DLL is not next to the exe (issue #5849).
+static bool LoadLibsumatrapdfFromFileRobust(Str path, i64 expectedSize, bool justWritten = false) {
+    i64 realSize = file::GetSize(path);
+    if (realSize != expectedSize) {
+        return false;
+    }
+
+    if (LoadLibsumatrapdfFromFile(path, expectedSize)) {
         return true;
     }
-    logf("LoadLibmupdfFromFileRobust: retry after 1s '%s'\n", path);
+
+    logf("LoadLibsumatrapdfFromFileRobust: retry after 1s '%s'\n", path);
     Sleep(1000);
-    if (LoadLibmupdfFromFile(path, expectedSize)) {
+    if (LoadLibsumatrapdfFromFile(path, expectedSize)) {
         return true;
     }
-    logf("LoadLibmupdfFromFileRobust: trying LoadLibraryExW '%s'\n", path);
-    return LoadLibmupdfFromFile(path, expectedSize, true);
+
+    // Longer backoff when AV may still be scanning a just-written DLL
+    // (errors 5 / 32 / 87 are common in those reports).
+    DWORD err = gLibsumatrapdfLastLoadError;
+    if (justWritten || IsLibsumatrapdfAvRaceError(err)) {
+        static const int kAvBackoffMs[] = {2000, 3000, 5000};
+        for (int waitMs : kAvBackoffMs) {
+            logf("LoadLibsumatrapdfFromFileRobust: AV-race retry after %dms (err=%u) '%s'\n", waitMs, err, path);
+            Sleep(waitMs);
+            if (LoadLibsumatrapdfFromFile(path, expectedSize)) {
+                return true;
+            }
+            err = gLibsumatrapdfLastLoadError;
+        }
+    }
+
+    logf("LoadLibsumatrapdfFromFileRobust: trying LoadLibraryExW '%s'\n", path);
+    if (LoadLibsumatrapdfFromFile(path, expectedSize, true)) {
+        return true;
+    }
+
+    if (justWritten || IsLibsumatrapdfAvRaceError(gLibsumatrapdfLastLoadError)) {
+        logf("LoadLibsumatrapdfFromFileRobust: final AV-race LoadLibraryExW after 3s '%s'\n", path);
+        Sleep(3000);
+        return LoadLibsumatrapdfFromFile(path, expectedSize, true);
+    }
+    return false;
 }
 
-// Extract embedded libmupdf.dll into dir (if size mismatches), then load with
+// Extract embedded libsumatrapdf.dll into dir (if size mismatches), then load with
 // retry / LoadLibraryExW. Used for single-exe portable layout.
-static bool ExtractAndLoadLibmupdfRobust(Str dir, bool extract) {
+static bool ExtractAndLoadLibsumatrapdfRobust(Str dir, bool extract) {
     if (!dir) {
         return false;
     }
-    i64 expectedSize = GetEmbeddedLibmupdfSize();
+    i64 expectedSize = GetEmbeddedLibsumatrapdfSize();
     if (expectedSize < 0) {
         return false;
     }
-    TempStr path = path::JoinTemp(dir, StrL("libmupdf.dll"));
+    TempStr path = path::JoinTemp(dir, StrL("libsumatrapdf.dll"));
     i64 realSize = file::GetSize(path);
+    bool justWritten = false;
     if (realSize != expectedSize) {
         if (realSize >= 0) {
-            logf("ExtractAndLoadLibmupdfRobust: overwriting '%s' (size %lld, expected %lld)\n", path,
+            logf("ExtractAndLoadLibsumatrapdfRobust: overwriting '%s' (size %lld, expected %lld)\n", path,
                  (long long)realSize, (long long)expectedSize);
         }
-        if (extract) {
-            if (!ExtractLibmupdfToDir(dir)) {
-                logf("ExtractAndLoadLibmupdfRobust: ExtractLibmupdfToDir failed for '%s'\n", dir);
-                return false;
-            }
+        if (!extract) {
+            // No DLL (or wrong build) here and we must not write — try next candidate.
+            return false;
         }
+        if (!ExtractLibsumatrapdfToDir(dir)) {
+            logf("ExtractAndLoadLibsumatrapdfRobust: ExtractLibsumatrapdfToDir failed for '%s'\n", dir);
+            return false;
+        }
+        justWritten = true;
     }
-    return LoadLibmupdfFromFileRobust(path, expectedSize);
+    return LoadLibsumatrapdfFromFileRobust(path, expectedSize, justWritten);
 }
 
 // Log as much as we can about a failed load; ends up in the debug report via gLogBuf.
-static void LogLibmupdfLoadFailureDiagnostics(Str selfDir, Str buildDir, i64 expectedSize, DWORD lastErr) {
+static void LogLibsumatrapdfLoadFailureDiagnostics(Str selfDir, Str buildDir, i64 expectedSize, DWORD lastErr) {
     TempStr exePath = GetSelfExePathTemp();
-    logf("LoadLibmupdf FAILED: lastError=%u (0x%x) gSingleExe=%d expectedSize=%lld\n", lastErr, lastErr,
+    logf("LoadLibsumatrapdf FAILED: lastError=%u (0x%x) gSingleExe=%d expectedSize=%lld\n", lastErr, lastErr,
          (int)gSingleExe, (long long)expectedSize);
-    logf("LoadLibmupdf FAILED: exe='%s'\n", exePath);
-    logf("LoadLibmupdf FAILED: selfDir='%s'\n", selfDir);
-    logf("LoadLibmupdf FAILED: buildDir='%s'\n", buildDir);
-    logf("LoadLibmupdf FAILED: gLibmupdfDll=%p\n", (void*)gLibmupdfDll);
+    logf("LoadLibsumatrapdf FAILED: exe='%s'\n", exePath);
+    logf("LoadLibsumatrapdf FAILED: selfDir='%s'\n", selfDir);
+    logf("LoadLibsumatrapdf FAILED: buildDir='%s'\n", buildDir);
+    logf("LoadLibsumatrapdf FAILED: gLibsumatrapdfDll=%p\n", (void*)gLibsumatrapdfDll);
 
     auto logDllCandidate = [](Str dir, Str label) {
         if (!dir) {
-            logf("LoadLibmupdf FAILED: %s dir is null\n", label);
+            logf("LoadLibsumatrapdf FAILED: %s dir is null\n", label);
             return;
         }
-        TempStr path = path::JoinTemp(dir, StrL("libmupdf.dll"));
+        TempStr path = path::JoinTemp(dir, StrL("libsumatrapdf.dll"));
         i64 size = file::GetSize(path);
         bool exists = file::Exists(path);
-        logf("LoadLibmupdf FAILED: %s path='%s' exists=%d size=%lld\n", label, path, (int)exists, (long long)size);
+        logf("LoadLibsumatrapdf FAILED: %s path='%s' exists=%d size=%lld\n", label, path, (int)exists, (long long)size);
         if (exists) {
-            DWORD attrs = GetFileAttributesW(CWStrTemp(path));
-            logf("LoadLibmupdf FAILED: %s attrs=0x%x\n", label, attrs);
+            DWORD attrs = path::GetCachedAttributes(path);
+            logf("LoadLibsumatrapdf FAILED: %s attrs=0x%x\n", label, attrs);
         }
     };
     logDllCandidate(selfDir, StrL("selfDir"));
@@ -1063,55 +1208,55 @@ static void LogLibmupdfLoadFailureDiagnostics(Str selfDir, Str buildDir, i64 exp
             FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
                            nullptr, lastErr, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&msgBuf, 0, nullptr);
         if (n > 0 && msgBuf) {
-            logf("LoadLibmupdf FAILED: FormatMessage: %s\n", ToUtf8Temp(WStr(msgBuf)));
+            logf("LoadLibsumatrapdf FAILED: FormatMessage: %s\n", ToUtf8Temp(WStr(msgBuf)));
             LocalFree(msgBuf);
         }
     }
 }
 
-static bool LoadLibmupdf(bool showErrorDialog) {
+static bool LoadLibsumatrapdf(bool showErrorDialog) {
     // Static-linked builds (mingw wine cross-build, MSVC SumatraPDF-static) do
-    // not embed/delay-load libmupdf.dll — MuPDF is already in the exe image.
-    // HasEmbeddedLibmupdf() is false when IDR_DLL_PAK has no libmupdf.dll entry.
-    if (!HasEmbeddedLibmupdf()) {
-        logf("LoadLibmupdf: no embedded libmupdf.dll (static build); nothing to load\n");
+    // not embed/delay-load libsumatrapdf.dll — MuPDF is already in the exe image.
+    // HasEmbeddedLibsumatrapdf() is false when IDR_DLL_PAK has no libsumatrapdf.dll entry.
+    if (!HasEmbeddedLibsumatrapdf()) {
+        logf("LoadLibsumatrapdf: no embedded libsumatrapdf.dll (static build); nothing to load\n");
         return true;
     }
 
-    i64 expectedSize = GetEmbeddedLibmupdfSize();
+    i64 expectedSize = GetEmbeddedLibsumatrapdfSize();
     Str selfDir = GetSelfExeDirTemp();
     Str buildDir = GetSumatraBuildSpecificDirTemp();
-    logf("LoadLibmupdf: start expectedSize=%lld gSingleExe=%d selfDir='%s' buildDir='%s'\n", (long long)expectedSize,
-         (int)gSingleExe, selfDir, buildDir);
+    logf("LoadLibsumatrapdf: start expectedSize=%lld gSingleExe=%d selfDir='%s' buildDir='%s'\n",
+         (long long)expectedSize, (int)gSingleExe, selfDir, buildDir);
 
-    // prefer existing libmupdf.dll next to the exe (installer layout)
-    if (ExtractAndLoadLibmupdfRobust(selfDir, false)) {
+    // prefer existing libsumatrapdf.dll next to the exe (installer layout)
+    if (ExtractAndLoadLibsumatrapdfRobust(selfDir, false)) {
         return true;
     }
 
     // Portable / single-exe: extract + robust load from build data dir, then
     // from the exe directory (in case AppData is blocked by AV).
     if (gSingleExe) {
-        if (ExtractAndLoadLibmupdfRobust(buildDir, true)) {
+        if (ExtractAndLoadLibsumatrapdfRobust(buildDir, true)) {
             return true;
         }
-        if (ExtractAndLoadLibmupdfRobust(selfDir, true)) {
+        if (ExtractAndLoadLibsumatrapdfRobust(selfDir, true)) {
             return true;
         }
     }
 
     // A later attempt can fail while an earlier LoadLibrary still holds a handle.
-    if (gLibmupdfDll) {
-        logf("LoadLibmupdf: gLibmupdfDll already set after attempts; treating as success\n");
+    if (gLibsumatrapdfDll) {
+        logf("LoadLibsumatrapdf: gLibsumatrapdfDll already set after attempts; treating as success\n");
         return true;
     }
 
-    DWORD err = gLibmupdfLastLoadError ? gLibmupdfLastLoadError : GetLastError();
-    LogLibmupdfLoadFailureDiagnostics(selfDir, buildDir, expectedSize, err);
+    DWORD err = gLibsumatrapdfLastLoadError ? gLibsumatrapdfLastLoadError : GetLastError();
+    LogLibsumatrapdfLoadFailureDiagnostics(selfDir, buildDir, expectedSize, err);
 
     // Upload a debug report (pre-release) without requiring symbols. captureCallstack
     // is false so we skip symbol download; the log (paths/sizes/errors) is the payload.
-    _uploadDebugReport(StrL("LoadLibmupdf failed"), FILE_LINE, false, false);
+    _uploadDebugReport(StrL("LoadLibsumatrapdf failed"), FILE_LINE, false, false);
 
     if (!showErrorDialog) {
         // e.g. -print-to ... -silent invoked by another program:
@@ -1119,11 +1264,36 @@ static bool LoadLibmupdf(bool showErrorDialog) {
         return false;
     }
 
-    TempStr msg = fmt(R"(SumatraPDF.exe failed to load libmupdf.dll.
-Error code: %d
-We can't proceed.
-For more information see <a href="%s">SumatraPDF docs</a>.)",
-                      (int)err, kFailedToLoadURL());
+    // Keep this English-only: we may fail before translations / UI language load.
+    TempStr msg;
+    if (IsLibsumatrapdfAppControlError(err)) {
+        msg = fmt(
+            R"(SumatraPDF failed to load libsumatrapdf.dll (error code %d).
+
+Windows Application Control blocked the file (WDAC, AppLocker, or Smart App Control). The DLL is present on disk but the OS policy will not allow it to load.
+
+Try:
+• Settings → Privacy & security → Windows Security → App & browser control: check Smart App Control and reputation-based protection
+• If this is a work or school PC, ask IT to allowlist SumatraPDF.exe and libsumatrapdf.dll
+• Unblock the files (right-click → Properties → Unblock) if they show "downloaded from the Internet"
+• Move the portable folder out of Downloads and try again, or install from the official website
+
+For more information see <a href="%s">Failed to load libsumatrapdf.dll</a>.)",
+            (int)err, kFailedToLoadURL());
+    } else {
+        msg = fmt(
+            R"(SumatraPDF failed to load libsumatrapdf.dll (error code %d).
+
+This is often caused by antivirus software blocking or quarantining libsumatrapdf.dll when SumatraPDF extracts it.
+
+Try:
+• Add an exclusion for the SumatraPDF folder and %%LocalAppData%%\SumatraPDF-data
+• Temporarily disable real-time antivirus protection, then start SumatraPDF again
+• Re-download SumatraPDF from the official website
+
+For more information see <a href="%s">Failed to load libsumatrapdf.dll</a>.)",
+            (int)err, kFailedToLoadURL());
+    }
 
     TASKDIALOG_BUTTON buttons[2];
     buttons[0].nButtonID = IDOK;
@@ -1138,11 +1308,11 @@ For more information see <a href="%s">SumatraPDF docs</a>.)",
     }
     dialogConfig.cbSize = sizeof(TASKDIALOGCONFIG);
     dialogConfig.pszWindowTitle = L"SumatraPDF";
-    dialogConfig.pszMainInstruction = L"Failed to load libmupdf.dll";
+    dialogConfig.pszMainInstruction = L"Failed to load libsumatrapdf.dll";
     dialogConfig.pszContent = CWStrTemp(msg);
     dialogConfig.nDefaultButton = IDOK;
     dialogConfig.dwFlags = flags;
-    dialogConfig.pfCallback = LoadLibmupdfDialogCallback;
+    dialogConfig.pfCallback = LoadLibsumatrapdfDialogCallback;
     dialogConfig.pButtons = buttons;
     dialogConfig.cButtons = 2;
     dialogConfig.pszMainIcon = TD_ERROR_ICON;
@@ -1152,8 +1322,8 @@ For more information see <a href="%s">SumatraPDF docs</a>.)",
 }
 
 // TODO: maybe could set font on TDN_CREATED to Consolas, to better show the message
-static HRESULT CALLBACK TaskdialogHandleLinkscallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
-                                                      LONG_PTR lpRefData) {
+static HRESULT CALLBACK TaskdialogHandleLinkscallback(HWND /*hwnd*/, UINT msg, WPARAM /*wParam*/, LPARAM lParam,
+                                                      LONG_PTR /*lpRefData*/) {
     switch (msg) {
         case TDN_HYPERLINK_CLICKED:
             LaunchBrowser(ToUtf8Temp(WStr((wchar_t*)lParam)));
@@ -1163,16 +1333,16 @@ static HRESULT CALLBACK TaskdialogHandleLinkscallback(HWND hwnd, UINT msg, WPARA
 }
 
 // !gSingleExe (installer build): a single exe is both an installer and the app
-// (once libmupdf.dll has been extracted next to it). If we don't find
-// libmupdf.dll alongside us, assume this is the installer. If it's present but a
+// (once libsumatrapdf.dll has been extracted next to it). If we don't find
+// libsumatrapdf.dll alongside us, assume this is the installer. If it's present but a
 // different size than ours, it's a damaged installation.
 static bool ForceRunningAsInstaller() {
-    if (!HasEmbeddedLibmupdf()) {
-        // this is not a version that needs libmupdf.dll
+    if (!HasEmbeddedLibsumatrapdf()) {
+        // this is not a version that needs libsumatrapdf.dll
         return false;
     }
 
-    i64 expectedSize = GetEmbeddedLibmupdfSize();
+    i64 expectedSize = GetEmbeddedLibsumatrapdfSize();
     ReportIf(expectedSize < 0);
     if (expectedSize < 0) {
         // shouldn't happen
@@ -1180,7 +1350,7 @@ static bool ForceRunningAsInstaller() {
     }
 
     TempStr dir = GetSelfExeDirTemp();
-    TempStr path = path::JoinTemp(dir, StrL("libmupdf.dll"));
+    TempStr path = path::JoinTemp(dir, StrL("libsumatrapdf.dll"));
     auto realSize = file::GetSize(path);
     if (realSize < 0) {
         return true;
@@ -1216,7 +1386,7 @@ Learn more at https://www.sumatrapdfreader.org/docs/Corrupted-installation
     dialogConfig.pszContent =
         LR"(Learn more at <a href="https://www.sumatrapdfreader.org/docs/Corrupted-installation">www.sumatrapdfreader.org/docs/Corrupted-installation</a>.)";
     dialogConfig.nDefaultButton = IDOK;
-    dialogConfig.dwFlags = flags;
+    dialogConfig.dwFlags = (TASKDIALOG_FLAGS)flags;
     dialogConfig.cxWidth = 0;
     dialogConfig.pfCallback = TaskdialogHandleLinkscallback;
     dialogConfig.dwCommonButtons = TDCBF_CLOSE_BUTTON;
@@ -1270,7 +1440,7 @@ static void ShowInstallerHelp() {
     dialogConfig.pszContent =
         LR"(<a href="https://www.sumatrapdfreader.org/docs/Installer-cmd-line-arguments">Read more on website</a>)";
     dialogConfig.nDefaultButton = IDOK;
-    dialogConfig.dwFlags = flags;
+    dialogConfig.dwFlags = (TASKDIALOG_FLAGS)flags;
     dialogConfig.pfCallback = TaskdialogHandleLinkscallback;
     dialogConfig.dwCommonButtons = TDCBF_OK_BUTTON;
     dialogConfig.pszMainIcon = TD_INFORMATION_ICON;
@@ -1333,8 +1503,8 @@ static void DeleteStaleCbxCacheFiles() {
     di.includeDirs = false;
     for (DirIterEntry* de : di) {
         TempStr ext = path::GetExtTemp(de->name);
-        bool isCbx = str::EqI(ext, ".cbx") || str::EqI(ext, ".cbz") || str::EqI(ext, ".cbr") || str::EqI(ext, ".cb7") ||
-                     str::EqI(ext, ".cbt");
+        bool isCbx = str::EqI(ext, StrL(".cbx")) || str::EqI(ext, StrL(".cbz")) || str::EqI(ext, StrL(".cbr")) ||
+                     str::EqI(ext, StrL(".cb7")) || str::EqI(ext, StrL(".cbt"));
         if (!isCbx) {
             continue;
         }
@@ -1349,7 +1519,7 @@ static void DeleteStaleCbxCacheFiles() {
         }
         bool ok = file::Delete(de->filePath);
         logf("DeleteStaleCbxCacheFiles: delete '%s' (age %lld days) -> %d\n", de->filePath,
-             (long long)(ageSec / (24 * 60 * 60)), (int)ok);
+             (long long)(ageSec / (24LL * 60 * 60)), (int)ok);
     }
 }
 
@@ -1472,11 +1642,11 @@ static void DeleteStaleFilesAsync() {
     di.includeDirs = true;
     for (DirIterEntry* de : di) {
         Str name = de->name;
-        if (str::Eq(name, "cbx-cache")) {
+        if (str::Eq(name, StrL("cbx-cache"))) {
             continue;
         }
 
-        bool isLegacy = str::StartsWith(name, "manual-") || str::StartsWith(name, "crashinfo-");
+        bool isLegacy = str::StartsWith(name, StrL("manual-")) || str::StartsWith(name, StrL("crashinfo-"));
         bool isBuildDir = IsBuildDirName(name);
         if (!isLegacy && !isBuildDir) {
             logf("DeleteStaleFilesAsync: skipping '%s'\n", name);
@@ -1491,11 +1661,11 @@ static void DeleteStaleFilesAsync() {
             }
             if (ageSec < kMaxAgeSec) {
                 logf("DeleteStaleFilesAsync: skipping '%s' (age %lld days)\n", de->filePath,
-                     (long long)(ageSec / (24 * 60 * 60)));
+                     (long long)(ageSec / (24LL * 60 * 60)));
                 continue;
             }
             logf("DeleteStaleFilesAsync: deleting stale build dir '%s' (age %lld days)\n", de->filePath,
-                 (long long)(ageSec / (24 * 60 * 60)));
+                 (long long)(ageSec / (24LL * 60 * 60)));
         } else {
             logf("DeleteStaleFilesAsync: deleting legacy dir '%s'\n", de->filePath);
         }
@@ -1525,7 +1695,7 @@ static int WineDpiFromEnv() {
         if (scale < 1.f) {
             continue;
         }
-        int dpi = (int)(96.f * scale + 0.5f);
+        int dpi = (int)((96.f * scale) + 0.5f);
         if (dpi > bestDpi) {
             bestDpi = dpi;
         }
@@ -1727,7 +1897,7 @@ static int ToolIdxFromCmdLine() {
         TempStr toolName = ToUtf8Temp(wargv[1]);
         idx = SeqStrIndexIS(gToolNames, toolName);
     }
-    LocalFree(wargv);
+    LocalFree((void*)wargv);
     return idx;
 }
 
@@ -1745,12 +1915,12 @@ static bool IsRunningTool() {
     }
     bool isTool = false;
     for (int i = 1; i < argc; i++) {
-        if (wstr::EqI(wargv[i], L"-dump-chm") || wstr::EqI(wargv[i], L"-dump-exif")) {
+        if (wstr::EqI(wargv[i], WStrL(L"-dump-chm")) || wstr::EqI(wargv[i], WStrL(L"-dump-exif"))) {
             isTool = true;
             break;
         }
     }
-    LocalFree(wargv);
+    LocalFree((void*)wargv);
     return isTool;
 }
 
@@ -1784,7 +1954,7 @@ static WStr SkipFirstArg(WStr cmdLine) {
 }
 
 // When this is SumatraPDF-dll.exe (carries embedded installer resources) and is
-// properly installed - libmupdf.dll and sumatrapdf-tool.exe sit next to it - run
+// properly installed - libsumatrapdf.dll and sumatrapdf-tool.exe sit next to it - run
 // the requested tool by launching the console sumatrapdf-tool.exe instead of
 // running it in-process. This is a GUI (Windows subsystem) exe and interacts
 // poorly with cmd.exe / PowerShell; the console exe doesn't. The child inherits
@@ -1793,12 +1963,12 @@ static WStr SkipFirstArg(WStr cmdLine) {
 // doesn't apply (the caller then runs the tool in-process). The static
 // SumatraPDF.exe (no embedded resources) always runs the tool in-process.
 static int MaybeDelegateToToolExe() {
-    if (!HasEmbeddedLibmupdf()) {
+    if (!HasEmbeddedLibsumatrapdf()) {
         return kNoMutool;
     }
     TempStr toolExe = GetPathInExeDirTemp("sumatrapdf-tool.exe");
-    TempStr libmupdf = GetPathInExeDirTemp("libmupdf.dll");
-    if (!file::Exists(toolExe) || !file::Exists(libmupdf)) {
+    TempStr libsumatrapdf = GetPathInExeDirTemp("libsumatrapdf.dll");
+    if (!file::Exists(toolExe) || !file::Exists(libsumatrapdf)) {
         return kNoMutool;
     }
 
@@ -1909,7 +2079,9 @@ Run the command from cmd.exe instead, e.g.:
     }
 
 Exit:
-    if (wargvOrig) LocalFree(wargvOrig);
+    if (wargvOrig) {
+        LocalFree((void*)wargvOrig);
+    }
     if (argv) fz_free_argv(argc, argv);
     return res;
 }
@@ -1917,6 +2089,7 @@ Exit:
 static void LogCommandLine() {
     TempStr s = ToUtf8Temp(GetCommandLineW());
     logf("'%s'\n  ver %s\n", Str(s), StrL(UPDATE_CHECK_VERA));
+    LogParentProcessChain();
 }
 
 static void InstallSumatraCrashHandler(bool localOnly) {
@@ -2132,24 +2305,24 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
     }
 
     if (isInstaller) {
-        if (!HasEmbeddedLibmupdf()) {
+        if (!HasEmbeddedLibsumatrapdf()) {
             ShowNotValidInstallerError();
             return 1;
         }
         exitCode = RunInstaller();
         // exit immediately. for some reason exit handlers try to
-        // pull in libmupdf.dll which we don't have access to in the installer
+        // pull in libsumatrapdf.dll which we don't have access to in the installer
         ::ExitProcess(exitCode);
     }
 
-    // when not a single self-contained exe, a missing sibling libmupdf.dll means
+    // when not a single self-contained exe, a missing sibling libsumatrapdf.dll means
     // we're really the installer; run it (matches pre-single-exe behavior)
     if (!gSingleExe && ForceRunningAsInstaller() && !flags.dumpExif && !flags.dumpChm && !flags.engineDump &&
         !flags.unitTests) {
         logf("forcing running as an installer\n");
         exitCode = RunInstaller();
         // exit immediately. for some reason exit handlers try to
-        // pull in libmupdf.dll which we don't have access to in the installer
+        // pull in libsumatrapdf.dll which we don't have access to in the installer
         ::ExitProcess(exitCode);
     }
 
@@ -2168,11 +2341,35 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
     }
 #endif
 
-    // load libmupdf.dll eagerly before any code path that might call into it.
+    // -x extract only needs the embedded LzSA archive in the EXE — not a loaded
+    // libsumatrapdf.dll. Do this before LoadLibsumatrapdf so Desktop/sandbox
+    // Access Denied or AV blocking LoadLibrary cannot abort a pure extract
+    // (see crash report 8c10917a4, WDAG/Sandbox + -x).
+    // ParseFlags skips flag parsing when argv[1] is a mutool name (poster, …),
+    // so poster’s own -x never sets justExtractFiles; MaybeRunMutool still runs
+    // for tools after we load the DLL below.
+    if (flags.justExtractFiles) {
+        RedirectIOToExistingConsole();
+        if (!HasEmbeddedLibsumatrapdf()) {
+            log("this is not a SumatraPDF installer, -x option not available\n");
+            HandleRedirectedConsoleOnShutdown();
+            return 1;
+        }
+        exitCode = 0;
+        if (!ExtractInstallerFiles(gCli->installDir)) {
+            log("failed to extract files");
+            LogLastError();
+            exitCode = 1;
+        }
+        HandleRedirectedConsoleOnShutdown();
+        return exitCode;
+    }
+
+    // load libsumatrapdf.dll eagerly before any code path that might call into it.
     // if we let the delay-load helper do it and it fails, it raises a fatal
-    // exception. this must remain after the installer checks above because
-    // during installation libmupdf.dll isn't extracted yet
-    if (!LoadLibmupdf(!flags.silent)) {
+    // exception. this must remain after the installer / -x checks above because
+    // during installation or extract libsumatrapdf.dll need not be loaded yet
+    if (!LoadLibsumatrapdf(!flags.silent)) {
         ::ExitProcess(1);
     }
 
@@ -2227,24 +2424,6 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
             exitCode = mutoolRes; // propagate the tool's exit code to the process
             goto Exit;
         }
-    }
-
-    // -x is one of options for poster tool, so we must run MaybeRunMutool() before this
-    if (flags.justExtractFiles) {
-        RedirectIOToExistingConsole();
-        if (!HasEmbeddedLibmupdf()) {
-            log("this is not a SumatraPDF installer, -x option not available\n");
-            HandleRedirectedConsoleOnShutdown();
-            return 1;
-        }
-        exitCode = 0;
-        if (!ExtractInstallerFiles(gCli->installDir)) {
-            log("failed to extract files");
-            LogLastError();
-            exitCode = 1;
-        }
-        HandleRedirectedConsoleOnShutdown();
-        return exitCode;
     }
 
     DetectExternalViewers();
@@ -2373,6 +2552,17 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
         // the rest open as tabs in that window (issue #5044). Previously every
         // file got its own window.
         bool userNewWindow = flags.inNewWindow;
+        bool canBatchOpen = nFiles > 1 && existingHwnd && !flags.reuseDdeInstance && IsSimpleOpenCase(flags, true);
+        if (canBatchOpen) {
+            StrVec paths;
+            for (Str path : flags.fileNames) {
+                paths.Append(path::NormalizeTemp(path));
+            }
+            u32 newWindow = (reuseInNewWindow || userNewWindow) ? 2 : 0;
+            if (SendOpenFilesToExistingInstance(existingHwnd, paths, newWindow)) {
+                goto Exit;
+            }
+        }
         for (int n = 0; n < nFiles; n++) {
             Str path = flags.fileNames[n];
             bool isFirstWindow = (0 == n);
@@ -2718,7 +2908,7 @@ Exit:
     DestroyLogging();
     DestroyTempArena();
     DestroyPermArena();
-    FreeLibmupdfDll();
+    FreeLibsumatrapdfDll();
 
     return exitCode;
 }

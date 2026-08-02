@@ -216,6 +216,7 @@ void ClearMouseState(MainWindow* win) {
     win->textDragPending = false;
     win->imageDragPending = false;
     win->imageDragElement = nullptr;
+    win->imageDragPageNo = -1;
     win->linkOnLastButtonDown = nullptr;
     win->annotationUnderCursor = nullptr;
 }
@@ -323,7 +324,7 @@ MarkdownModel* MainWindow::AsMarkdown() const {
 // Notify both display model and double-buffer (if they exist)
 // about a potential change of available canvas size
 void MainWindow::UpdateCanvasSize() {
-    Rect rc = ClientRect(hwndCanvas);
+    Rect rc = HwndClientRect(hwndCanvas);
     if (buffer && canvasRc == rc) {
         return;
     }
@@ -363,7 +364,7 @@ Size MainWindow::GetViewPortSize() const {
 
 static BOOL CALLBACK RedrawHwndCallback(HWND hwnd, LPARAM lp) {
     bool update = (bool)lp;
-    InvalidateRect(hwnd, nullptr, true);
+    HwndInvalidate(hwnd, true);
     if (update) {
         UpdateWindow(hwnd);
     }
@@ -599,14 +600,13 @@ void LinkHandler::ScrollTo(int pageNo, RectF rect, float zoom) {
 // Convert file:// / file:/// / file: URIs to a local path (+ optional #fragment).
 // Returns false if uri is not a file: scheme.
 static bool PathFromFileUriTemp(Str uri, TempStr* pathOut, Str* fragmentOut) {
-    if (!str::StartsWithI(uri, "file:")) {
+    if (!str::StartsWithI(uri, StrL("file:"))) {
         return false;
     }
-    // Skip "file:" case-insensitively (str::Skip is case-sensitive).
+    // Skip "file:" case-insensitively (str::TrimPrefix is case-sensitive).
     Str rest = Str(uri.s + 5, uri.len - 5);
     // file://host/path or file:///path → drop authority (// or ///)
-    if (str::StartsWith(rest, "//")) {
-        rest = Str(rest.s + 2, rest.len - 2);
+    if (str::TrimPrefix(rest, StrL("//"))) {
         // empty host: next char is / of absolute path
         if (rest && rest.s[0] == '/') {
             // Windows drive path: /C:/foo → C:/foo
@@ -697,12 +697,10 @@ void LinkHandler::LaunchFile(Str pathOrig, IPageDestination* remoteLink) {
     }
 
     TempStr path = str::ReplaceTemp(pathOrig, StrL("/"), StrL("\\"));
-    if (str::StartsWith(path, ".\\")) {
-        path = Str(path.s + 2);
-    }
+    str::TrimPrefix(path, StrL(".\\"));
 
     TempStr fullPath = path;
-    bool isAbsPath = str::StartsWith(path, "\\");
+    bool isAbsPath = str::StartsWith(path, StrL("\\"));
     if (len(path) >= 2 && path.s[1] == ':') {
         /* technically c: is not abs, only c:\\ */
         isAbsPath = true;
@@ -976,6 +974,7 @@ MainWindow* FindMainWindowByHwnd(HWND hwnd) {
 // Find MainWindow using WindowTab. Diffrent than WindowTab->win in that
 // it validates that WindowTab is still valid
 MainWindow* FindMainWindowByTab(WindowTab* tabToFind) {
+    if (!tabToFind) return nullptr;
     for (MainWindow* win : gWindows) {
         for (WindowTab* tab : win->Tabs()) {
             if (tab == tabToFind) {

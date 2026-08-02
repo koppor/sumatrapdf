@@ -1,5 +1,5 @@
 // this file is compiled as part of mupdf library and ends up
-// in libmupdf.dll, to avoid issues related to crossing .dll boundaries
+// in libsumatrapdf.dll, to avoid issues related to crossing .dll boundaries
 // It implements loading of Fonts included in windows
 #include "mupdf/fitz.h"
 #include "mupdf/ucdn.h"
@@ -618,7 +618,7 @@ static void extend_system_font_list(fz_context* ctx, const WCHAR* path) {
                 }
             }
             fz_catch(ctx) {
-                fz_report_error(ctx);
+                fz_ignore_error(ctx);
                 // ignore errors occurring while parsing a given font file
             }
         }

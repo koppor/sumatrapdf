@@ -2,7 +2,8 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#include "base/GdiPlus.h"
+#include "base/GdiPlusUtil.h"
+#include "base/Win.h"
 #include "Mui.h"
 
 /*
@@ -119,9 +120,8 @@ float TextRenderGdi::GetCurrFontLineSpacing() {
 }
 
 RectF TextRenderGdi::Measure(WStr s) {
-    SIZE txtSize;
-    GetTextExtentPoint32W(hdcForTextMeasure, s.s, s.len, &txtSize);
-    RectF res(0.0f, 0.0f, (float)txtSize.cx, (float)txtSize.cy);
+    Size size = HdcGetTextExtentPoint32(hdcForTextMeasure, s);
+    RectF res(0.0f, 0.0f, (float)size.dx, (float)size.dy);
     return res;
 }
 
@@ -192,7 +192,7 @@ void TextRenderGdi::Draw(Str s, const RectF bb, bool isRtl) {
     DrawTransparent(s, bb, isRtl);
 #else
     TempWStr buf = ToWStrTemp(s);
-    return Draw(buf, bb, isRtl);
+    Draw(buf, bb, isRtl);
 #endif
 }
 
@@ -285,7 +285,7 @@ void TextRenderGdi::DrawTransparent(WStr s, const RectF bb, bool isRtl) {
 
 void TextRenderGdi::DrawTransparent(Str s, const RectF bb, bool isRtl) {
     TempWStr buf = ToWStrTemp(s);
-    return DrawTransparent(buf, bb, isRtl);
+    DrawTransparent(buf, bb, isRtl);
 }
 
 TextRenderGdiplus* TextRenderGdiplus::Create(Graphics* gfx, TextMeasureAlgorithm measureAlgo) {
@@ -335,6 +335,10 @@ void TextRenderGdiplus::SetTextColor(Gdiplus::Color col) {
     textColorBrush = new SolidBrush(col);
 }
 
+Gdiplus::PointF ToGdipPointF(const PointF p) {
+    return Gdiplus::PointF(p.x, p.y);
+}
+
 void TextRenderGdiplus::Draw(WStr s, const RectF bb, bool isRtl) {
     Gdiplus::PointF pos = ToGdipPointF(bb.TL());
     if (!isRtl) {
@@ -355,7 +359,7 @@ void TextRenderGdiplus::Draw(Str s, const RectF bb, bool isRtl) {
 void TextRenderHdc::Lock() {
     int dx = bmi.bmiHeader.biWidth;
     int dy = bmi.bmiHeader.biHeight;
-    ZeroMemory(bmpData, dx * dy * 4);
+    ZeroMemory(bmpData, (size_t)dx * dy * 4);
 }
 
 void TextRenderHdc::Unlock() {
@@ -437,16 +441,15 @@ RectF TextRenderHdc::Measure(Str s) {
 }
 
 RectF TextRenderHdc::Measure(WStr s) {
-    SIZE txtSize;
     ReportIf(!hdc);
-    GetTextExtentPoint32W(hdc, s.s, s.len, &txtSize);
-    RectF res(0.0f, 0.0f, (float)txtSize.cx, (float)txtSize.cy);
+    Size size = HdcGetTextExtentPoint32(hdc, s);
+    RectF res(0.0f, 0.0f, (float)size.dx, (float)size.dy);
     return res;
 }
 
 void TextRenderHdc::Draw(Str s, const RectF bb, bool isRtl) {
     TempWStr buf = ToWStrTemp(s);
-    return Draw(buf, bb, isRtl);
+    Draw(buf, bb, isRtl);
 }
 
 void TextRenderHdc::Draw(WStr s, const RectF bb, bool /* isRtl */) {
@@ -459,7 +462,7 @@ void TextRenderHdc::Draw(WStr s, const RectF bb, bool /* isRtl */) {
         opts = opts | ETO_RTLREADING;
     }
 #endif
-    ExtTextOutW(hdc, x, y, opts, nullptr, s.s, (uint)s.len, nullptr);
+    HdcExTextOut(hdc, Point(x, y), opts, Rect(), s);
 }
 
 TextRenderHdc::~TextRenderHdc() {

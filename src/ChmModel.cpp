@@ -36,12 +36,13 @@ static IPageDestination* NewChmNamedDest(Str url, int pageNo) {
     }
     dest->pageNo = pageNo;
     ReportIf(!dest->kind);
-    dest->rect = RectF(DEST_USE_DEFAULT, DEST_USE_DEFAULT, DEST_USE_DEFAULT, DEST_USE_DEFAULT);
+    dest->rect = RectF(kDestUseDefault, kDestUseDefault, kDestUseDefault, kDestUseDefault);
     return dest;
 }
 
 static TocItem* NewChmTocItem(TocItem* parent, Str title, int pageNo, Str url) {
-    auto res = new TocItem(parent, title, pageNo);
+    auto res = AllocTocItem(nullptr, title, pageNo);
+    res->parent = parent;
     res->dest = NewChmNamedDest(url, pageNo);
     return res;
 }
@@ -260,7 +261,7 @@ bool ChmModel::DisplayPage(Str pageUrl) {
             // TODO: optimize, create just destination
             auto item = NewChmTocItem(nullptr, nullptr, 0, pageUrl);
             cb->GotoLink(item->dest);
-            delete item;
+            FreeTocItemRec(nullptr, item);
         }
         return true;
     }
@@ -294,13 +295,8 @@ bool ChmModel::DisplayPage(Str pageUrl) {
     // chm files (I don't know such cases, though).
     // A more robust solution would try to match with the actual
     // names of files inside chm package.
-    if (str::StartsWith(pageUrl, "..\\")) {
-        pageUrl = Str(pageUrl.s + 3, pageUrl.len - 3);
-    }
-
-    if (str::StartsWith(pageUrl, "/")) {
-        pageUrl = Str(pageUrl.s + 1, pageUrl.len - 1);
-    }
+    str::TrimPrefix(pageUrl, StrL("..\\"));
+    str::TrimPrefix(pageUrl, StrL("/"));
 
     if (!docView) {
         return false;
@@ -661,7 +657,7 @@ bool ChmModel::OnBeforeNavigate(Str url, bool newWindow) {
         // TODO: optimize, create just destination
         auto item = NewChmTocItem(nullptr, nullptr, 1, url);
         cb->GotoLink(item->dest);
-        delete item;
+        FreeTocItemRec(nullptr, item);
     }
     return false;
 }
@@ -852,7 +848,7 @@ TocTree* ChmModel::GetToc() {
     if (!foundRoot) {
         return nullptr;
     }
-    auto realRoot = new TocItem();
+    auto realRoot = AllocTocItem(nullptr, {}, 0);
     realRoot->child = root;
     tocTree = new TocTree(realRoot);
     return tocTree;
@@ -881,7 +877,7 @@ float ChmModel::GetNextZoomStep(float towardsLevel) const {
     int iCurrZoom = (int)currZoom;
     int iTowardsLevel = (int)towardsLevel;
     int iNewZoom = iTowardsLevel;
-    if (iCurrZoom < towardsLevel) {
+    if ((float)iCurrZoom < towardsLevel) {
         for (int i = 0; i < nZoomLevels; i++) {
             int iZoom = (int)zoomLevels[i];
             if (iZoom > iCurrZoom) {
@@ -889,7 +885,7 @@ float ChmModel::GetNextZoomStep(float towardsLevel) const {
                 break;
             }
         }
-    } else if (iCurrZoom > towardsLevel) {
+    } else if ((float)iCurrZoom > towardsLevel) {
         for (int i = nZoomLevels - 1; i >= 0; i--) {
             int iZoom = (int)zoomLevels[i];
             if (iZoom < iCurrZoom) {
@@ -972,8 +968,9 @@ bool ChmThumbnailTask::OnBeforeNavigate(Str, bool newWindow) {
 void ChmThumbnailTask::StartCreateThumbnail(HtmlWindow* hw) {
     this->hw = hw;
     homeUrl = strconv::AnsiToUtf8(doc->GetHomePath());
-    if (str::StartsWith(homeUrl, "/")) {
-        str::ReplaceWithCopy(&homeUrl, Str(homeUrl.s + 1));
+    Str trimmedHomeUrl = homeUrl;
+    if (str::TrimPrefix(trimmedHomeUrl, StrL("/"))) {
+        str::ReplaceWithCopy(&homeUrl, trimmedHomeUrl);
     }
     hw->NavigateToDataUrl(homeUrl);
 }
@@ -1026,8 +1023,8 @@ static void CreateChmThumbnail(Str path, const Size& size, const OnBitmapRendere
     }
 
     // We render twice the size of thumbnail and scale it down
-    int dx = size.dx * 2 + GetSystemMetrics(SM_CXVSCROLL);
-    int dy = size.dy * 2 + GetSystemMetrics(SM_CYHSCROLL);
+    int dx = (size.dx * 2) + GetSystemMetrics(SM_CXVSCROLL);
+    int dy = (size.dy * 2) + GetSystemMetrics(SM_CYHSCROLL);
     // reusing WC_STATIC. I don't think exact class matters (WndProc
     // will be taken over by HtmlWindow anyway) but it can't be nullptr.
     HWND hwnd =

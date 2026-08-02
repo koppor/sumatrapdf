@@ -386,8 +386,8 @@ ClaudeCode [
     ; not in the model list
     Model = sonnet
 
-    ; extra Claude model aliases for the dropdown, comma-separated; sonnet,
-    ; opus, and haiku are always included
+    ; extra Claude model aliases for the dropdown, comma-separated; documented
+    ; Claude Code aliases are always included
     Models = 
 
     ; Claude effort level: 0=Low, 1=Medium, 2=High, 3=Max
@@ -402,11 +402,11 @@ ClaudeCode [
 
 ; settings for the Grok Build chat sidebar (introduced in version 3.7)
 GrokBuild [
-    ; Grok model ID for --model (e.g. grok-composer-2.5-fast, grok-build)
-    Model = grok-composer-2.5-fast
+    ; Grok model ID for --model (e.g. grok-4.5)
+    Model = grok-4.5
 
-    ; extra Grok model IDs for the dropdown, comma-separated;
-    ; grok-composer-2.5-fast and grok-build are always included
+    ; extra Grok model IDs for the dropdown, comma-separated; used in addition
+    ; to models reported by Grok
     Models = 
 
     ; Grok effort level: 0=Low, 1=Medium, 2=High, 3=XHigh, 4=Max
@@ -425,8 +425,8 @@ CodexBuild [
     ; Codex model ID for -m (e.g. gpt-5.5, gpt-5.4, o3)
     Model = gpt-5.5
 
-    ; extra Codex model IDs for the dropdown, comma-separated; gpt-5.5, gpt-5.4,
-    ; and o3 are always included
+    ; extra Codex model IDs for the dropdown, comma-separated; used in addition
+    ; to models reported by Codex
     Models = 
 
     ; Codex sandbox mode: 0=read-only, 1=workspace-write, 2=danger-full-access
@@ -715,6 +715,9 @@ FileStates [
         ; label for this page (only present if logical and physical page numbers
         ; are not the same)
         PageLabel =
+
+        ; session-only favorite; omitted when serializing array elements
+        IsTemporary = false
       ]
     ]
 
@@ -862,5 +865,5 @@ The components are hex values (ranging from 00 to FF) and stand for:
 - `gg` : green component
 - `bb` : blue component
 
-For example #ff0000 means red color. #7fff0000 is half-transparent red.
+For example #ff0000 means red color. #7fff0000 is half-transparent red. You can use [Sphere](https://colorsphere.app/) to pick a color.
 

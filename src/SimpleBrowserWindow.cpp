@@ -12,6 +12,7 @@
 
 #include "Settings.h"
 #include "AppTools.h"
+#include "Commands.h"
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
 #include "Translations.h"
@@ -52,7 +53,7 @@ static void LayoutControls(SimpleBrowserWindow* w) {
         return;
     }
 
-    Rect rc = ClientRect(w->hwnd);
+    Rect rc = HwndClientRect(w->hwnd);
     int pad = DpiScale(w->hwnd, kNavRowPadding);
     int gap = DpiScale(w->hwnd, kNavBtnGap);
     int y = pad;
@@ -79,15 +80,15 @@ static void LayoutControls(SimpleBrowserWindow* w) {
     if (urlDy <= 0) {
         urlDy = rowH;
     }
-    int urlY = y + (rowH - urlDy) / 2;
+    int urlY = y + ((rowH - urlDy) / 2);
     MoveWindow(w->hwndUrl, urlX, urlY, urlDx, urlDy, TRUE);
 
-    int navRowDy = rowH + 2 * pad;
+    int navRowDy = rowH + (2 * pad);
     int webDy = rc.dy - navRowDy - pad;
     if (webDy < 0) {
         webDy = 0;
     }
-    int webDx = rc.dx - 2 * pad;
+    int webDx = rc.dx - (2 * pad);
     if (webDx < 0) {
         webDx = 0;
     }
@@ -113,7 +114,8 @@ static void OnForward(SimpleBrowserWindow* w) {
 // content we serve from our virtual host (UrlForWebViewEvent strips the host
 // prefix off internal pages, so those arrive as a bare path without a scheme)
 static bool IsExternalUrl(Str url) {
-    return str::StartsWithI(url, "http://") || str::StartsWithI(url, "https://") || str::StartsWithI(url, "mailto:");
+    return str::StartsWithI(url, StrL("http://")) || str::StartsWithI(url, StrL("https://")) ||
+           str::StartsWithI(url, StrL("mailto:"));
 }
 
 static bool NavigationStarting(void* ctx, Str url, bool newWindow) {
@@ -161,10 +163,30 @@ static void HistoryChanged(void* ctx, bool canGoBack, bool canGoForward) {
     }
 }
 
+static int ResolveAccelCmd(void*, u16 vk, bool ctrl, bool shift, bool alt) {
+    if (vk == 'W' && ctrl && !shift && !alt) {
+        return CmdClose;
+    }
+    // Esc closes documentation (WebView has focus; PreTranslate alone is not enough)
+    if (vk == VK_ESCAPE && !ctrl && !shift && !alt) {
+        return CmdClose;
+    }
+    return 0;
+}
+
 SimpleBrowserWindow::~SimpleBrowserWindow() {
     delete btnBack;
     delete btnForward;
     delete webView;
+}
+
+bool SimpleBrowserWindow::PreTranslateMessage(MSG& msg) {
+    // When focus is on chrome (Back/Forward/URL), Esc is not handled by WebView.
+    if ((msg.message == WM_KEYDOWN || msg.message == WM_CHAR) && msg.wParam == VK_ESCAPE) {
+        Close();
+        return true;
+    }
+    return false;
 }
 
 LRESULT SimpleBrowserWindow::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -176,6 +198,10 @@ LRESULT SimpleBrowserWindow::WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
     }
     if (msg == WM_SIZE) {
         LayoutControls(this);
+        return 0;
+    }
+    if (msg == WM_COMMAND && LOWORD(wparam) == CmdClose) {
+        SendMessageW(hwnd, WM_CLOSE, 0, 0);
         return 0;
     }
     if (msg == WM_CTLCOLORSTATIC && (HWND)lparam == hwndUrl) {
@@ -256,11 +282,12 @@ HWND SimpleBrowserWindow::Create(const SimpleBrowserCreateArgs& args) {
         webView->events.navigationStarting = NavigationStarting;
         webView->events.navigationCompleted = NavigationCompleted;
         webView->events.historyChanged = HistoryChanged;
-        webView->forwardAppAccelerators = false;
+        webView->events.resolveAccelCmd = ResolveAccelCmd;
+        webView->forwardAppAccelerators = true;
 
         CreateWebViewArgs cargs;
         cargs.parent = frameHwnd;
-        cargs.pos = ClientRect(frameHwnd);
+        cargs.pos = HwndClientRect(frameHwnd);
         if (!webView->Create(cargs)) {
             return nullptr;
         }

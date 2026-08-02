@@ -5,8 +5,6 @@
 
 #include "PdfDarkMode.h"
 
-#include <math.h>
-
 #include "base/UtAssert.h"
 
 static float SrgbToLinear(float c) {
@@ -20,7 +18,7 @@ static float RelLuminance(float r, float g, float b) {
     float lr = SrgbToLinear(r);
     float lg = SrgbToLinear(g);
     float lb = SrgbToLinear(b);
-    return 0.2126f * lr + 0.7152f * lg + 0.0722f * lb;
+    return (0.2126f * lr) + (0.7152f * lg) + (0.0722f * lb);
 }
 
 static float ContrastRatio(float r1, float g1, float b1, float r2, float g2, float b2) {
@@ -65,7 +63,7 @@ void PdfDarkModeOklab_UnitTests() {
     // Monotone gray ramp: lighter inputs map to darker outputs.
     float prevOutL = 2.f;
     for (int i = 10; i <= 90; i += 20) {
-        float g = i / 100.f;
+        float g = (float)i / 100.f;
         MapRgbToDarkThemeOklab(g, g, g, palette, out);
         float outL = RelLuminance(out[0], out[1], out[2]);
         utassert(outL <= prevOutL + 0.001f);

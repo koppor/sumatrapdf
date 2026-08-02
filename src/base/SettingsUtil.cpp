@@ -294,10 +294,10 @@ static bool parseBool(Str value) {
     if (str::IsNull(value)) {
         return false;
     }
-    if (str::StartsWithI(value, "true") && (value.len <= 4 || str::IsWs(value.s[4]))) {
+    if (str::StartsWithI(value, StrL("true")) && (value.len <= 4 || str::IsWs(value.s[4]))) {
         return true;
     }
-    if (str::StartsWithI(value, "yes") && (value.len <= 3 || str::IsWs(value.s[3]))) {
+    if (str::StartsWithI(value, StrL("yes")) && (value.len <= 3 || str::IsWs(value.s[3]))) {
         return true;
     }
 
@@ -473,6 +473,26 @@ static void SerializeUnknownFields(str::Builder& out, SquareTreeNode* node, int 
     }
 }
 
+// If the struct defines a Bool field named IsTemporary and it is true, the
+// element is session-only and must not be written (e.g. search-start favorites).
+static bool StructIsTemporary(const StructInfo* info, const void* data) {
+    if (!info || !data || !info->couldBeTemporary) {
+        return false;
+    }
+    const char* fieldName = info->fieldNames;
+    for (size_t i = 0; i < info->fieldCount; i++, fieldName += len(fieldName) + 1) {
+        const FieldInfo& field = info->fields[i];
+        if (field.type != SettingType::Bool) {
+            continue;
+        }
+        if (!str::Eq(fieldName, StrL("IsTemporary"))) {
+            continue;
+        }
+        return *(const bool*)((const u8*)data + field.offset);
+    }
+    return false;
+}
+
 static void SerializeStructRec(str::Builder& out, const StructInfo* info, const void* data, SquareTreeNode* prevNode,
                                int indent = 0) {
     const u8* base = (const u8*)data;
@@ -483,6 +503,11 @@ static void SerializeStructRec(str::Builder& out, const StructInfo* info, const 
         ReportIf(str::ContainsChar(fieldNameStr, '=') || str::ContainsChar(fieldNameStr, ':') ||
                  str::ContainsChar(fieldNameStr, '[') || str::ContainsChar(fieldNameStr, ']') ||
                  NeedsEscaping(fieldNameStr));
+        // Never write IsTemporary itself; it only gates array-element omission.
+        if (SettingType::Bool == field.type && str::Eq(fieldNameStr, StrL("IsTemporary"))) {
+            MarkFieldKnown(prevNode, fieldNameStr, field.type);
+            continue;
+        }
         if (SettingType::Struct == field.type) {
             Indent(out, indent);
             out.Append(fieldNameStr);
@@ -497,10 +522,15 @@ static void SerializeStructRec(str::Builder& out, const StructInfo* info, const 
             out.Append(" [\r\n");
             Vec<void*>* array = *(Vec<void*>**)(base + field.offset);
             if (array && len(*array) > 0) {
+                const StructInfo* elemInfo = GetSubstruct(field);
                 for (int j = 0; j < len(*array); j++) {
+                    void* elem = (*array)[j];
+                    if (StructIsTemporary(elemInfo, elem)) {
+                        continue;
+                    }
                     Indent(out, indent + 1);
                     out.Append("[\r\n");
-                    SerializeStructRec(out, GetSubstruct(field), (*array)[j], nullptr, indent + 2);
+                    SerializeStructRec(out, elemInfo, elem, nullptr, indent + 2);
                     Indent(out, indent + 1);
                     out.Append("]\r\n");
                 }
@@ -546,8 +576,10 @@ static void* DeserializeStructRec(const StructInfo* info, SquareTreeNode* node, 
             DeserializeStructRec(GetSubstruct(field), child, fieldPtr, useDefaults);
         } else if (SettingType::Array == field.type) {
             SquareTreeNode *parent = node, *child = nullptr;
-            if (parent && (child = parent->GetChild(fieldNameStr)) != nullptr &&
-                (0 == len(child->data) || child->GetChild(StrL("")))) {
+            if (parent) {
+                child = parent->GetChild(fieldNameStr);
+            }
+            if (parent && child != nullptr && (0 == len(child->data) || child->GetChild(StrL("")))) {
                 parent = child;
                 fieldName += len(fieldName);
                 fieldNameStr = Str(fieldName);
@@ -555,7 +587,11 @@ static void* DeserializeStructRec(const StructInfo* info, SquareTreeNode* node, 
             if (child || useDefaults || !*(Vec<void*>**)fieldPtr) {
                 Vec<void*>* array = new Vec<void*>();
                 size_t idx = 0;
-                while (parent && (child = parent->GetChild(fieldNameStr, &idx)) != nullptr) {
+                while (parent) {
+                    child = parent->GetChild(fieldNameStr, &idx);
+                    if (child == nullptr) {
+                        break;
+                    }
                     void* v = DeserializeStructRec(GetSubstruct(field), child, nullptr, true);
                     array->Append(v);
                 }

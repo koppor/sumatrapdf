@@ -40,9 +40,9 @@ libjpeg-turbo   3.1.4.1    2026-03-27
   vendored src/ + simd/ (x86/x86-64 NASM); jconfig.h, jconfigint.h, jversion.h
   hand-generated (v8 API). See ext/libjpeg-turbo/src/jconfig.h
 
-djvudec         main       2026-07-28
+djvudec         main       2026-08-01
   https://github.com/kjk/djvudec
-  commit b77aaebfc62b8e010eb899737243b2e7b12c05c0
+  commit c8bf1b3e6704fd99d6feaba8d8ebc417e013bdb8
   amalgamated dist/djvu.c + dist/djvu.h only
 
 libwebp         1.6.0      2025-06-30
@@ -114,4 +114,4 @@ jxldec          dist       2026-07-28
 zopfli         1.0.3+     2024-04-11
   https://github.com/google/zopfli
   https://github.com/google/zopfli/commit/ccf9f0588d4a4509cb1040310ec122243e670ee6
-  vendored: src/zopfli (minus zopfli_bin.c), src/zopflipng (minus zopflipng_bin.cc), COPYING
+  amalgamated as ext/a-zopfli (zopfli.cpp + public headers + COPYING)

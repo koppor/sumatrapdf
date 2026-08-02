@@ -30,7 +30,7 @@ static bool HasBeenInstalled() {
     }
 
     TempStr exePath = GetSelfExePathTemp();
-    if (!str::EndsWithI(installedPath, ".exe")) {
+    if (!str::EndsWithI(installedPath, StrL(".exe"))) {
         installedPath = path::JoinTemp(installedPath.s, path::GetBaseNameTemp(exePath).s);
     }
     return path::IsSame(installedPath, exePath);
@@ -500,7 +500,7 @@ void EnsureAreaVisibility(Rect& r) {
     // check whether the lower half of the window's title bar is
     // inside a visible working area
     int captionDy = GetSystemMetrics(SM_CYCAPTION);
-    Rect halfCaption(r.x, r.y + captionDy / 2, r.dx, captionDy / 2);
+    Rect halfCaption(r.x, r.y + (captionDy / 2), r.dx, captionDy / 2);
     if (halfCaption.Intersect(work).IsEmpty()) {
         r = Rect(work.TL(), r.Size());
     }
@@ -645,7 +645,7 @@ bool AdjustVariableDriveLetter(Str& path) {
 bool IsUntrustedFile(Str filePath, Str fileURL) {
     TempStr protocol;
     if (fileURL && !str::IsNull(str::Parse(fileURL, "%S:", &protocol))) {
-        if (len(protocol) > 1 && !str::EqI(protocol, "file")) {
+        if (len(protocol) > 1 && !str::EqI(protocol, StrL("file"))) {
             return true;
         }
     }

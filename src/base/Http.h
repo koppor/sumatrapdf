@@ -20,4 +20,4 @@ bool IsHttpRspOk(const HttpRsp*);
 bool HttpPost(Str server, int port, Str url, str::Builder* headers, str::Builder* data, str::Builder* outResp = nullptr,
               DWORD* outStatusCode = nullptr);
 bool HttpGet(Str url, HttpRsp* rspOut);
-bool HttpGetToFile(Str url, Str destFilePath, const Func1<HttpProgress*>& cbProgress);
+bool HttpGetToFile(Str url, Str destFilePath, const Func1<HttpProgress*>& cbProgress, i64 maxSize = -1);

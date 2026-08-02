@@ -6,7 +6,7 @@
 // that can't write to a console or be piped reliably - this is a console
 // subsystem app, so it behaves well under cmd.exe / PowerShell.
 //
-// It links libmupdf.dll for everything (the tool implementations live there),
+// It links libsumatrapdf.dll for everything (the tool implementations live there),
 // so the executable itself stays tiny.
 //
 // Usage: sumatrapdf-tool.exe <tool> [args...]   e.g. sumatrapdf-tool.exe info file.pdf
@@ -20,7 +20,7 @@
 #define _stricmp strcasecmp
 #endif
 
-// implemented in (and exported from) libmupdf.dll - see src/libmupdf.def
+// implemented in (and exported from) libsumatrapdf.dll - see src/libsumatrapdf.def
 extern "C" {
 int muconvert_main(int argc, char* argv[]);
 int mudraw_main(int argc, char* argv[]);
@@ -117,7 +117,7 @@ int main() {
     }
     if (argc < 2) {
         PrintUsage();
-        LocalFree(wargv);
+        LocalFree((void*)wargv);
         return 1;
     }
 
@@ -125,7 +125,7 @@ int main() {
     // tool sees its own name as argv[0], matching what the mupdf tools expect.
     int toolArgc = argc - 1;
     char** toolArgv = fz_argv_from_wargv(toolArgc, wargv + 1);
-    LocalFree(wargv); // fz_argv_from_wargv copied the strings, so this is safe
+    LocalFree((void*)wargv); // fz_argv_from_wargv copied the strings, so this is safe
 
     const Tool* tool = FindTool(toolArgv[0]);
     int res;

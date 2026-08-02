@@ -4,7 +4,7 @@
 #include "base/Base.h"
 #include "base/Pixmap.h"
 #include "base/ScopedWin.h"
-#include "base/GdiPlus.h"
+#include "base/GdiPlusUtil.h"
 #include "base/Win.h"
 #include "mui/Mui.h"
 
@@ -38,7 +38,7 @@ IFACEMETHODIMP PdfPreview::GetThumbnail(uint cx, HBITMAP* phbmp, WTS_ALPHATYPE* 
     logf("PdfPreview::GetThumbnail(cx=%d, engine: %s\n", (int)cx, Str(engine->kind));
 
     RectF page = engine->Transform(engine->PageMediabox(1), 1, 1.0, 0);
-    float zoom = std::min(cx / (float)page.dx, cx / (float)page.dy) - 0.001f;
+    float zoom = std::min((float)cx / (float)page.dx, (float)cx / (float)page.dy) - 0.001f;
     Rect thumb = RectF(0, 0, page.dx * zoom, page.dy * zoom).Round();
 
     BITMAPINFO bmi{};
@@ -64,7 +64,7 @@ IFACEMETHODIMP PdfPreview::GetThumbnail(uint cx, HBITMAP* phbmp, WTS_ALPHATYPE* 
     if (bmp && GetDIBits(hdc, bmp->hbmp, 0, thumb.dy, bmpData, &bmi, DIB_RGB_COLORS)) {
         // cf. http://msdn.microsoft.com/en-us/library/bb774612(v=VS.85).aspx
         for (int i = 0; i < thumb.dx * thumb.dy; i++) {
-            bmpData[4 * i + 3] = 0xFF;
+            bmpData[(4 * i) + 3] = 0xFF;
         }
 
         *phbmp = hthumb;
@@ -94,7 +94,7 @@ class PageRenderer {
     Size currSize;
     int reqPage = 0;
     float reqZoom = 0.f;
-    Size reqSize = {};
+    Size reqSize;
     bool reqAbort = false;
     AbortCookie* abortCookie = nullptr;
 
@@ -189,13 +189,13 @@ class PageRenderer {
 };
 
 static LRESULT OnPaint(HWND hwnd) {
-    Rect rect = ClientRect(hwnd);
+    Rect rect = HwndClientRect(hwnd);
     DoubleBuffer buffer(hwnd, rect);
     HDC hdc = buffer.GetDC();
     HBRUSH brushBg = CreateSolidBrush(kColWindowBg);
     HBRUSH brushWhite = GetStockBrush(WHITE_BRUSH);
     RECT rcClient = ToRECT(rect);
-    FillRect(hdc, &rcClient, brushBg);
+    HdcFillRect(hdc, ToRect(rcClient), brushBg);
 
     PdfPreview* preview = (PdfPreview*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
     if (preview && preview->renderer) {
@@ -203,12 +203,12 @@ static LRESULT OnPaint(HWND hwnd) {
         RectF page = preview->renderer->GetPageRect(pageNo);
         if (!page.IsEmpty()) {
             rect.Inflate(-kPreviewMargin, -kPreviewMargin);
-            float zoom = (float)std::min(rect.dx / page.dx, rect.dy / page.dy) - 0.001f;
+            float zoom = (float)std::min((float)rect.dx / page.dx, (float)rect.dy / page.dy) - 0.001f;
             Rect onScreen = RectF((float)rect.x, (float)rect.y, (float)page.dx * zoom, (float)page.dy * zoom).Round();
             onScreen.Offset((rect.dx - onScreen.dx) / 2, (rect.dy - onScreen.dy) / 2);
 
             RECT rcPage = ToRECT(onScreen);
-            FillRect(hdc, &rcPage, brushWhite);
+            HdcFillRect(hdc, ToRect(rcPage), brushWhite);
             preview->renderer->Render(hdc, onScreen, pageNo, zoom);
         }
     }
@@ -254,7 +254,7 @@ static LRESULT OnVScroll(HWND hwnd, WPARAM wp) {
     si.fMask = SIF_POS;
     SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
 
-    InvalidateRect(hwnd, nullptr, TRUE);
+    HwndInvalidate(hwnd, true);
     UpdateWindow(hwnd);
     return 0;
 }
@@ -306,7 +306,7 @@ static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         case WM_DESTROY:
             return OnDestroy(hwnd);
         case kUwmPaintAgain:
-            InvalidateRect(hwnd, nullptr, TRUE);
+            HwndInvalidate(hwnd, true);
             UpdateWindow(hwnd);
             return 0;
         default:

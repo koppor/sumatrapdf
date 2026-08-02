@@ -7,6 +7,11 @@
 #define UTF16_BOM "\xFF\xFE"
 #define UTF16BE_BOM "\xFE\xFF"
 
+using StrArena = u32;
+StrArena StrArenaAlloc(Arena* a, int size);
+StrArena StrArenaDupStr(Arena* a, Str s);
+Str StrArenaToStr(Arena* a, StrArena sa);
+
 namespace str {
 
 enum class TrimOpt {
@@ -52,6 +57,7 @@ bool EqN(Str s1, Str s2, int n);
 bool EqNI(Str s1, Str s2, int n);
 bool IsNull(const Str& s);
 bool StartsWith(Str str, Str prefix);
+bool TrimPrefix(Str& s, Str prefix);
 
 bool StartsWithI(Str str, Str prefix);
 bool EndsWith(Str txt, Str end);
@@ -79,8 +85,8 @@ bool CutChar(Str s, char c, Str* before, Str* after);
 bool CutCharLast(Str s, char c, Str* before, Str* after);
 bool NextLine(Str s, Str& line, Str& rest);
 
-bool Contains(Str s, Str txt);
-bool ContainsI(Str s, Str txt);
+bool Contains(Str s, Str sub);
+bool ContainsI(Str s, Str sub);
 bool ContainsChar(Str s, char c);
 
 Str TrimSuffix(Str s, Str suffix);
@@ -111,7 +117,6 @@ int Cmp(Str a, Str b);
 int CmpI(Str a, Str b);
 
 bool IsEmptyOrWhiteSpace(Str s);
-bool Skip(Str& s, Str toSkip);
 bool SkipChar(Str& s, char toSkip);
 
 int BufSet(WCHAR* dst, int dstCchSize, Str src);
@@ -241,7 +246,7 @@ struct Builder {
     iterator end() const { return &(els[len]); }
 };
 
-bool Contains(const Builder& b, Str s);
+bool Contains(const Builder& b, Str sub);
 } // namespace str
 
 void SeqStrNumAppend(str::Builder* b, Str s, i64 num);

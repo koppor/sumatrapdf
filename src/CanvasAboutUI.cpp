@@ -55,13 +55,13 @@ static void OnMouseLeftButtonDownAbout(MainWindow* win, int x, int y, WPARAM) {
 }
 
 static bool IsLink(Str url) {
-    if (str::StartsWithI(url, "http:")) {
+    if (str::StartsWithI(url, StrL("http:"))) {
         return true;
     }
-    if (str::StartsWithI(url, "https:")) {
+    if (str::StartsWithI(url, StrL("https:"))) {
         return true;
     }
-    if (str::StartsWithI(url, "mailto:")) {
+    if (str::StartsWithI(url, StrL("mailto:"))) {
         return true;
     }
     return false;
@@ -109,19 +109,17 @@ static void OnMouseLeftButtonUpAbout(MainWindow* win, int x, int y, WPARAM) {
         win->homePageScrollY = 0;
         SaveSettings();
         win->RedrawAll(true);
-    } else if (str::StartsWith(url, kLinkHomeRemoveFilePrefix)) {
-        int prefixLen = len(kLinkHomeRemoveFilePrefix);
-        ForgetFileFromFrequentlyRead(win, Str(url.s + prefixLen, url.len - prefixLen));
-    } else if (str::StartsWith(url, kLinkHomePinFilePrefix)) {
-        int prefixLen = len(kLinkHomePinFilePrefix);
-        FileState* fs = gFileHistory.FindByPath(Str(url.s + prefixLen, url.len - prefixLen));
+    } else if (str::TrimPrefix(url, kLinkHomeRemoveFilePrefix)) {
+        ForgetFileFromFrequentlyRead(win, url);
+    } else if (str::TrimPrefix(url, kLinkHomePinFilePrefix)) {
+        FileState* fs = gFileHistory.FindByPath(url);
         if (fs) {
             fs->isPinned = !fs->isPinned;
             SaveSettings();
             win->DeleteToolTip();
             win->RedrawAll(true);
         }
-    } else if (str::StartsWith(url, "Cmd")) {
+    } else if (str::StartsWith(url, StrL("Cmd"))) {
         int cmdId = GetCommandIdByName(url);
         if (cmdId > 0) {
             HwndSendCommand(win->hwndFrame, cmdId);
@@ -195,7 +193,7 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
         case WM_COMMAND:
             if (HIWORD(wp) == EN_CHANGE && (HWND)lp == win->hwndHomeSearch) {
                 win->homePageScrollY = 0;
-                InvalidateRect(win->hwndCanvas, nullptr, FALSE);
+                HwndInvalidate(win->hwndCanvas);
                 return 0;
             }
             break;

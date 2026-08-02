@@ -40,6 +40,13 @@ bool IsFormFieldEditActive() {
     return gEdit.hwnd != nullptr;
 }
 
+void CancelFormFieldEditIfWidget(Annotation* widget) {
+    if (!widget || !gEdit.hwnd || gEdit.widget != widget) {
+        return;
+    }
+    CommitFormFieldEdit(false);
+}
+
 void CommitFormFieldEdit(bool save) {
     if (!gEdit.hwnd || gCommitting) {
         return;
@@ -54,13 +61,11 @@ void CommitFormFieldEdit(bool save) {
     Str text;
     if (save) {
         if (isChoice) {
-            int sel = (int)SendMessageW(h, LB_GETCURSEL, 0, 0);
+            int sel = LbGetCurrentSelection(h);
             if (sel < 0) {
                 save = false; // nothing selected
             } else {
-                int n = (int)SendMessageW(h, LB_GETTEXTLEN, sel, 0);
-                TempWStr buf = AllocArrayTemp<WCHAR>(n + 1);
-                SendMessageW(h, LB_GETTEXT, sel, (LPARAM)buf.s);
+                TempWStr buf = LbGetTextTemp(h, sel);
                 text = ToUtf8Temp(buf);
             }
         } else {
@@ -110,7 +115,9 @@ static LRESULT CALLBACK WndProcFormCtrl(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
                 MainWindow* win = gEdit.win;
                 CommitFormFieldEdit(true);
                 DisplayModel* dm = win ? win->AsFixed() : nullptr;
-                if (dm && cur) {
+                // cur may be dead if commit triggered a document reload; only
+                // walk to the next field when the widget is still live.
+                if (dm && AnnotationIsLive(cur)) {
                     Annotation* next = EngineMupdfGetAdjacentWidget(dm->GetEngine(), cur, !back);
                     if (next) {
                         StartFormFieldEdit(win, next);
@@ -210,10 +217,10 @@ static bool StartChoiceEdit(MainWindow* win, Annotation* widget, Rect rc) {
     int fontPx = FieldFontPx(widget, rc);
     int itemDy = fontPx + DpiScale(win->hwndCanvas, 6);
     int visN = std::min(n, 8);
-    int listDy = visN * itemDy + DpiScale(win->hwndCanvas, 4);
+    int listDy = (visN * itemDy) + DpiScale(win->hwndCanvas, 4);
     int listDx = std::max(rc.dx, DpiScale(win->hwndCanvas, 120));
     // drop down just below the field, or above if it would fall off the canvas
-    Rect canvasRc = ClientRect(win->hwndCanvas);
+    Rect canvasRc = HwndClientRect(win->hwndCanvas);
     int x = rc.x;
     int y = rc.y + rc.dy;
     if (y + listDy > canvasRc.dy && rc.y - listDy >= 0) {
@@ -228,18 +235,18 @@ static bool StartChoiceEdit(MainWindow* win, Annotation* widget, Rect rc) {
     }
     HFONT font = MakeFieldFont(fontPx);
     SetWindowFont(hLb, font, TRUE);
-    SendMessageW(hLb, LB_SETITEMHEIGHT, 0, (LPARAM)itemDy);
+    LbSetItemHeight(hLb, 0, itemDy);
 
     Str cur = GetWidgetValue(widget);
     int curIdx = -1;
     for (int i = 0; i < n; i++) {
         Str o = opts[i];
-        SendMessageW(hLb, LB_ADDSTRING, 0, (LPARAM)CWStrTemp(o));
+        LbAddString(hLb, o);
         if (curIdx < 0 && str::Eq(o, cur)) {
             curIdx = i;
         }
     }
-    SendMessageW(hLb, LB_SETCURSEL, (WPARAM)curIdx, 0);
+    LbSetCurrentSelection(hLb, curIdx);
 
     gDefCtrlProc = (WNDPROC)GetWindowLongPtrW(hLb, GWLP_WNDPROC);
     SetWindowLongPtrW(hLb, GWLP_WNDPROC, (LONG_PTR)WndProcFormCtrl);
@@ -256,7 +263,7 @@ static bool StartChoiceEdit(MainWindow* win, Annotation* widget, Rect rc) {
 }
 
 bool StartFormFieldEdit(MainWindow* win, Annotation* widget) {
-    if (!win || !widget) {
+    if (!win || !AnnotationIsLive(widget)) {
         return false;
     }
     int wt = GetWidgetType(widget);

@@ -16,8 +16,8 @@
 #include "CommandPaletteInternal.h"
 
 void PositionCommandPalette(HWND hwnd, HWND hwndRelative) {
-    Rect rRelative = WindowRect(hwndRelative);
-    Rect r = WindowRect(hwnd);
+    Rect rRelative = HwndWindowRect(hwndRelative);
+    Rect r = HwndWindowRect(hwnd);
     int x = rRelative.x + (rRelative.dx / 2) - (r.dx / 2);
     int y = rRelative.y + (rRelative.dy / 2) - (r.dy / 2);
     r = {x, y, r.dx, r.dy};
@@ -34,7 +34,7 @@ void CommandPaletteWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
     }
 
     HDC hdc = ev->hdc;
-    RECT rc = ev->itemRect;
+    Rect rc = ev->itemRect;
 
     COLORREF colBg = IsSpecialColor(lb->bgColor) ? GetSysColor(COLOR_WINDOW) : lb->bgColor;
     COLORREF colText = IsSpecialColor(lb->textColor) ? GetSysColor(COLOR_WINDOWTEXT) : lb->textColor;
@@ -43,7 +43,7 @@ void CommandPaletteWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
     }
 
     SetBkColor(hdc, colBg);
-    ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
+    HdcFillRectWithBkColor(hdc, rc);
 
     bool isRtl = HwndIsRtl(lb->hwnd);
     if (isRtl) {
@@ -75,34 +75,34 @@ void CommandPaletteWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
     }
 
     int padX = DpiScale(lb->hwnd, 4);
-    rc.left += padX;
-    rc.right -= padX;
+    rc.x += padX;
+    rc.dx -= 2 * padX;
 
     if (data->indent > 0) {
         int indentW = data->indent * DpiScale(lb->hwnd, 16);
         if (isRtl) {
-            rc.right -= indentW;
+            rc.dx -= indentW;
         } else {
-            rc.left += indentW;
+            rc.x += indentW;
+            rc.dx -= indentW;
         }
     }
 
     // reserve space on the right for rightStr (accel key, dir, or "p34") so it
     // is always visible; the item text gets the remaining space and is
     // ellipsized when too long.
-    RECT rcText = rc;
+    Rect rcText = rc;
     TempWStr rightStrW = nullptr;
     int rightW = 0;
     if (rightStr && rightStr.s[0]) {
         rightStrW = ToWStrTemp(rightStr);
         int gap = DpiScale(lb->hwnd, 8);
-        SIZE szRight{};
-        GetTextExtentPoint32W(hdc, rightStrW.s, len(rightStrW), &szRight);
-        rightW = szRight.cx;
+        rightW = HdcGetTextExtentPoint32(hdc, rightStr).dx;
         if (isRtl) {
-            rcText.left += rightW + gap;
+            rcText.x += rightW + gap;
+            rcText.dx -= rightW + gap;
         } else {
-            rcText.right -= rightW + gap;
+            rcText.dx -= rightW + gap;
         }
     }
 
@@ -113,18 +113,19 @@ void CommandPaletteWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
     }
 
     if (rightStrW) {
-        RECT rcRight = rc;
+        Rect rcRight = rc;
         uint fmt = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
         if (isRtl) {
-            rcRight.right = rc.left + rightW;
+            rcRight.dx = rightW;
             fmt |= DT_LEFT | DT_RTLREADING;
         } else {
-            rcRight.left = rc.right - rightW;
+            rcRight.x += rcRight.dx - rightW;
+            rcRight.dx = rightW;
             fmt |= DT_RIGHT;
         }
         COLORREF rightCol = AccentColor(colText, 80);
         SetTextColor(hdc, rightCol);
-        DrawTextW(hdc, rightStrW.s, -1, &rcRight, fmt);
+        HdcDrawText(hdc, rightStrW, rcRight, fmt);
         SetTextColor(hdc, colText);
     }
 

@@ -36,7 +36,8 @@ static Kind destKinds[] = {
 // clang-format on
 
 bool IsExternalUrl(Str url) {
-    return str::StartsWithI(url, "http://") || str::StartsWithI(url, "https://") || str::StartsWithI(url, "mailto:");
+    return str::StartsWithI(url, StrL("http://")) || str::StartsWithI(url, StrL("https://")) ||
+           str::StartsWithI(url, StrL("mailto:"));
 }
 
 static void EnsurePageText(PageText* pageText) {
@@ -129,24 +130,25 @@ TempStr CleanupTreeViewControlStringTemp(Str s) {
     return ToUtf8Temp(ws);
 }
 
-TocItem::TocItem(TocItem* parent, Str title, int pageNo) {
-    this->title = str::Dup(CleanupTreeViewControlStringTemp(title));
-    this->pageNo = pageNo;
-    this->parent = parent;
+TocItem* AllocTocItem(Arena* arena, Str title, int pageNo) {
+    auto item = (TocItem*)AllocZero(arena, sizeof(TocItem));
+    item->title = str::Dup(arena, CleanupTreeViewControlStringTemp(title));
+    item->pageNo = pageNo;
+    item->color = kColorUnset;
+    return item;
 }
 
-TocItem::~TocItem() {
-    delete child;
-    if (!destNotOwned) {
-        delete dest;
+void FreeTocItemRec(Arena* arena, TocItem* item) {
+    if (!item) {
+        return;
     }
-    while (next) {
-        TocItem* tmp = next->next;
-        next->next = nullptr;
-        delete next;
-        next = tmp;
+    FreeTocItemRec(arena, item->child);
+    if (!item->destNotOwned) {
+        delete item->dest;
     }
-    str::Free(title);
+    FreeTocItemRec(arena, item->next);
+    Free(arena, item->title.s);
+    Free(arena, item);
 }
 
 void TocItem::AddSibling(TocItem* sibling) {
@@ -170,14 +172,6 @@ void TocItem::AddChild(TocItem* newChild) {
     child = newChild;
     newChild->parent = this;
     newChild->next = curr;
-}
-
-// regular delete is recursive, this deletes only this item
-void TocItem::DeleteJustSelf() {
-    child = nullptr;
-    next = nullptr;
-    parent = nullptr;
-    delete this;
 }
 
 // returns the destination this ToC item points to or nullptr
@@ -246,7 +240,7 @@ TocTree::TocTree(TocItem* root) {
 }
 
 TocTree::~TocTree() {
-    delete root;
+    FreeTocItemRec(nullptr, root);
 }
 
 TreeItem TocTree::Root() {

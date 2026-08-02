@@ -32,8 +32,8 @@ static bool PopupClientToPagePt(RefHoverState* s, HWND hwnd, int clientX, int cl
     if ((float)(clientY - border) > regionPixH) {
         return false;
     }
-    ptOut.x = s->displayed.region.x + (float)(clientX - border) / zoom;
-    ptOut.y = s->displayed.region.y + (float)(clientY - border) / zoom;
+    ptOut.x = s->displayed.region.x + ((float)(clientX - border) / zoom);
+    ptOut.y = s->displayed.region.y + ((float)(clientY - border) / zoom);
     return true;
 }
 
@@ -76,11 +76,8 @@ static LRESULT CALLBACK RefHoverWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
 
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-
         HBRUSH hbg = CreateSolidBrush(RGB(255, 252, 200));
-        FillRect(hdc, &rc, hbg);
+        HdcFillRect(hdc, HwndClientRect(hwnd), hbg);
         DeleteObject(hbg);
 
         RefHoverState* s = (RefHoverState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
@@ -109,8 +106,9 @@ static LRESULT CALLBACK RefHoverWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             // or hard failure, full canvas).
             constexpr int kBadgeCanvas = 14;
             constexpr int kBadgeMargin = 6;
-            int bx = rc.right - kBadgeCanvas - kBadgeMargin;
-            int by = rc.top + kBadgeMargin;
+            Rect rcClient = HwndClientRect(hwnd);
+            int bx = rcClient.x + rcClient.dx - kBadgeCanvas - kBadgeMargin;
+            int by = rcClient.y + kBadgeMargin;
 
             COLORREF gray = RGB(0xBB, 0xBB, 0xBB);
             COLORREF mint = RGB(0x44, 0xBB, 0x99);
@@ -234,8 +232,8 @@ void RefHoverShowPopup(RefHoverState* s, Point screenPt) {
     }
     Size bmpSize = Size(s->bmp->width, s->bmp->height);
     int border = DpiScale(s->hwndPopup, kRefHoverBorder);
-    int popupW = bmpSize.dx + 2 * border;
-    int popupH = bmpSize.dy + 2 * border;
+    int popupW = bmpSize.dx + (2 * border);
+    int popupH = bmpSize.dy + (2 * border);
 
     HMONITOR hmon = MonitorFromPoint({screenPt.x, screenPt.y}, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi{};
@@ -264,15 +262,15 @@ void RefHoverShowPopup(RefHoverState* s, Point screenPt) {
         popupH = boundH;
     }
 
-    int pageCenterX = (pr.dx > 0) ? (pr.x + pr.dx / 2) : screenPt.x;
+    int pageCenterX = (pr.dx > 0) ? (pr.x + (pr.dx / 2)) : screenPt.x;
     int anchorX = pageCenterX;
     if (pr.dx > 0) {
         int colWidth = pr.dx / 2;
         if (popupW <= colWidth) {
-            anchorX = (screenPt.x >= pageCenterX) ? (pr.x + pr.dx * 3 / 4) : (pr.x + pr.dx / 4);
+            anchorX = (screenPt.x >= pageCenterX) ? (pr.x + (pr.dx * 3 / 4)) : (pr.x + (pr.dx / 4));
         }
     }
-    int x = anchorX - popupW / 2;
+    int x = anchorX - (popupW / 2);
     int cursorPad = DpiScale(s->hwndPopup, kRefHoverCursorPad);
     int spaceBelow = bottomBound - (screenPt.y + cursorPad);
     int spaceAbove = (screenPt.y - cursorPad) - topBound;
@@ -311,7 +309,7 @@ void RefHoverShowPopup(RefHoverState* s, Point screenPt) {
     }
 
     SetWindowPos(s->hwndPopup, HWND_TOPMOST, x, y, popupW, popupH, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    InvalidateRect(s->hwndPopup, nullptr, TRUE);
+    HwndInvalidate(s->hwndPopup, true);
 }
 
 bool RefHoverRerenderDisplayedRegion(RefHoverState* s, EngineBase* engine, int page, RectF region) {
@@ -348,11 +346,10 @@ bool RefHoverWheelZoom(RefHoverState* s, EngineBase* engine, int wheelDelta) {
     }
     s->displayed.userZoom = newZoom;
 
-    RECT rc;
-    GetClientRect(s->hwndPopup, &rc);
+    Rect rc = HwndClientRect(s->hwndPopup);
     int border = DpiScale(s->hwndPopup, kRefHoverBorder);
-    float clientW = (float)((rc.right - rc.left) - 2 * border);
-    float clientH = (float)((rc.bottom - rc.top) - 2 * border);
+    float clientW = (float)(rc.dx - (2 * border));
+    float clientH = (float)(rc.dy - (2 * border));
     float zoom = s->displayed.baseZoom * s->displayed.userZoom;
     if (zoom <= 0.f || clientW <= 0.f || clientH <= 0.f) {
         return false;

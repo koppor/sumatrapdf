@@ -25,13 +25,13 @@ static void SamplePixmapRgb(fz_context* ctx, fz_pixmap* pix, int x, int y, float
     fz_colorspace* cs = pix->colorspace ? pix->colorspace : fz_device_rgb(ctx);
     fz_colorspace* rgb = fz_device_rgb(ctx);
     int n = pix->n;
-    int stride = pix->stride;
-    unsigned char* px = pix->samples + y * stride + x * n;
+    int stride = (int)pix->stride;
+    unsigned char* px = pix->samples + ((size_t)y * stride) + ((size_t)x * n);
     float conv[FZ_MAX_COLORS] = {};
     float srcRgb[FZ_MAX_COLORS] = {};
     int components = fz_colorspace_n(ctx, cs);
     for (int c = 0; c < components && c < FZ_MAX_COLORS; c++) {
-        conv[c] = px[c] / 255.f;
+        conv[c] = (float)px[c] / 255.f;
     }
     fz_convert_color(ctx, cs, conv, rgb, srcRgb, cs, fz_default_color_params);
     *outR = srcRgb[0];
@@ -75,15 +75,15 @@ static PdfDarkModeImageSampleStats PdfDarkModeSampleImageStats(fz_context* ctx, 
             for (int x = 0; x < pix->w; x += stepX) {
                 float r, g, b;
                 SamplePixmapRgb(ctx, pix, x, y, &r, &g, &b);
-                int ri = (int)(r * 255.f + 0.5f);
-                int gi = (int)(g * 255.f + 0.5f);
-                int bi = (int)(b * 255.f + 0.5f);
+                int ri = (int)((r * 255.f) + 0.5f);
+                int gi = (int)((g * 255.f) + 0.5f);
+                int bi = (int)((b * 255.f) + 0.5f);
                 int bucket = ((ri >> 4) << 8) | ((gi >> 4) << 4) | (bi >> 4);
                 buckets[bucket]++;
 
                 float maxC = r > g ? (r > b ? r : b) : (g > b ? g : b);
                 float minC = r < g ? (r < b ? r : b) : (g < b ? g : b);
-                float lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                float lum = (0.2126f * r) + (0.7152f * g) + (0.0722f * b);
                 lumSum += lum;
                 lumSqSum += lum * lum;
                 if (maxC - minC > 0.12f) {
@@ -106,9 +106,9 @@ static PdfDarkModeImageSampleStats PdfDarkModeSampleImageStats(fz_context* ctx, 
             }
         }
 
-        float lumMean = lumSum / n;
+        float lumMean = lumSum / (float)n;
         stats.significantBuckets = significantBuckets;
-        stats.lumVar = lumSqSum / n - lumMean * lumMean;
+        stats.lumVar = (lumSqSum / (float)n) - (lumMean * lumMean);
         stats.satRatio = (float)saturated / (float)n;
         stats.highLumRatio = (float)highLum / (float)n;
         stats.valid = true;
@@ -238,7 +238,8 @@ bool PdfDarkModeImageLooksLikeDarkArtwork(fz_context* ctx, fz_image* image, floa
     return PdfDarkModeStatsLookLikeDarkArtwork(PdfDarkModeSampleImageStats(ctx, image), pageCoverage);
 }
 
-bool PdfDarkModeImageShouldPreserveInLegacy(fz_context* ctx, fz_image* image, float pageCoverage, int devW, int devH) {
+bool PdfDarkModeImageShouldPreserveInLegacy(fz_context* ctx, fz_image* image, float pageCoverage, int /*devW*/,
+                                            int /*devH*/) {
     if (!ctx || !image) {
         return false;
     }
@@ -261,7 +262,8 @@ bool PdfDarkModeImageShouldPreserveInLegacy(fz_context* ctx, fz_image* image, fl
     return false;
 }
 
-bool PdfDarkModeImageIsConfirmedArtwork(fz_context* ctx, fz_image* image, float pageCoverage, int devW, int devH) {
+bool PdfDarkModeImageIsConfirmedArtwork(fz_context* ctx, fz_image* image, float pageCoverage, int /*devW*/,
+                                        int /*devH*/) {
     if (!ctx || !image) {
         return false;
     }

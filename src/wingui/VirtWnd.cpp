@@ -52,12 +52,12 @@ Size VirtWndText::Layout(const Constraints bc) {
     return bc.Constrain({sz.dx, sz.dy});
 }
 
-int VirtWndText::MinIntrinsicHeight(int width) {
+int VirtWndText::MinIntrinsicHeight(int /*width*/) {
     GetIdealSize(true);
     return sz.dy;
 }
 
-int VirtWndText::MinIntrinsicWidth(int height) {
+int VirtWndText::MinIntrinsicWidth(int /*height*/) {
     GetIdealSize(true);
     return sz.dx;
 }
@@ -88,14 +88,13 @@ void VirtWndText::Paint(HDC hdc) {
     if (isRtl) {
         fmt |= DT_RTLREADING;
     }
-    RECT dr = ToRECT(lastBounds);
-    HdcDrawText(hdc, s, &dr, fmt, font);
+    HdcDrawText(hdc, s, lastBounds, fmt, font);
     if (withUnderline) {
         auto& r = lastBounds;
         Rect lineRect = {r.x, r.y + sz.dy, sz.dx, 0};
         auto col = GetTextColor(hdc);
         ScopedSelectObject pen(hdc, CreatePen(PS_SOLID, 1, col), true);
-        DrawLine(hdc, lineRect);
+        HdcDrawLine(hdc, lineRect);
     }
     if (textColor != kColorUnset) {
         SetTextColor(hdc, prevCol);

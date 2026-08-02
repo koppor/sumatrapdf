@@ -137,7 +137,7 @@ bool UninstallPreviewDll() {
 // TODO: is anyone using this functionality?
 void DisablePreviewInstallExts(Str cmdLine) {
     // allows installing only a subset of available preview handlers
-    if (str::StartsWithI(cmdLine, "exts:")) {
+    if (str::StartsWithI(cmdLine, StrL("exts:"))) {
         TempStr extsList = str::DupTemp(Str(cmdLine.s + 5, cmdLine.len - 5));
         str::ToLowerInPlace(extsList);
         str::TransCharsInPlace(extsList, StrL(";. :"), StrL(",,,\0"));
@@ -195,7 +195,7 @@ TempStr GetPdfPreviewLogDirTemp() {
     str::Free(d);
     char id[7];
     for (int i = 0; i < 3; i++) { // first 6 hex chars (3 bytes), matches GetSumatraBuildSpecificDirTemp
-        sprintf_s(&id[2 * i], 3, "%02x", sha1[i]);
+        sprintf_s(&id[(size_t)2 * i], 3, "%02x", sha1[i]);
     }
     TempStr local = GetSpecialFolderTemp(CSIDL_LOCAL_APPDATA, false);
     if (!local) {

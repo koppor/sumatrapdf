@@ -20,7 +20,7 @@ static void QuoteCmdLineArgTest() {
         StrVec args;
         ParseCmdLine(cmdLine, args);
         utassert(len(args) >= 1);
-        utassert(str::Eq(args[0], "exe"));
+        utassert(str::Eq(args[0], StrL("exe")));
         if (len(input) == 0) {
             // `exe ""` → only "exe" after empty-token skip in ParseCmdLine
             utassert(len(args) == 1);
@@ -60,14 +60,13 @@ void WinUtilTest() {
     QuoteCmdLineArgTest();
 
     {
-        Str string = "abcde";
-        size_t stringSize = string.len;
-        auto strm = CreateStreamFromData(Str((char*)string.s, (int)stringSize));
+        Str string = StrL("abcde");
+        auto strm = CreateStreamFromData(string);
         ScopedComPtr<IStream> stream(strm);
         utassert(stream);
         Str data = ReadIStream(stream);
         utassert((u8*)data.s);
-        utassert(stringSize == (size_t)data.len);
+        utassert(string.len == data.len);
         utassert(data.s[data.len] == 0);
         utassert(data.s[data.len + 1] == 0);
         Str s = data;
@@ -90,7 +89,7 @@ void WinUtilTest() {
     }
 
     {
-        Rect oneScreen = GetFullscreenRect(nullptr);
+        Rect oneScreen = HwndGetFullscreenRect(nullptr);
         Rect allScreens = GetVirtualScreenRect();
         utassert(allScreens.Intersect(oneScreen) == oneScreen);
     }

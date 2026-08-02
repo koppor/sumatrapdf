@@ -11,6 +11,102 @@
 #define sscanf_s sscanf
 #endif
 
+// StrArena: u32 handle from ArenaPtrCompress. Arena layout is unsigned LEB128
+// length, length bytes of payload, trailing 0 for C APIs. 0 is the null handle.
+
+static int StrArenaUlebSize(u32 n) {
+    int i = 1;
+    while (n >= 0x80) {
+        n >>= 7;
+        i++;
+    }
+    return i;
+}
+
+static int StrArenaUlebEncode(u8* dst, u32 n) {
+    int i = 0;
+    for (;;) {
+        u8 b = (u8)(n & 0x7f);
+        n >>= 7;
+        if (n) {
+            b |= 0x80;
+        }
+        dst[i++] = b;
+        if (!n) {
+            return i;
+        }
+    }
+}
+
+static bool StrArenaUlebDecode(const u8*& p, u32* out) {
+    u32 n = 0;
+    int shift = 0;
+    for (;;) {
+        u8 b = *p++;
+        n |= (u32)(b & 0x7f) << shift;
+        if (!(b & 0x80)) {
+            *out = n;
+            return true;
+        }
+        shift += 7;
+        if (shift >= 35) {
+            return false;
+        }
+    }
+}
+
+// Allocate [uleb(size)][size bytes][0]. Body is uninitialized; terminator is set.
+// Caller fills via StrArenaToStr(a, handle).s.
+StrArena StrArenaAlloc(Arena* a, int size) {
+    if (!a || size < 0) {
+        return 0;
+    }
+    int vlen = StrArenaUlebSize((u32)size);
+    int total = vlen + size + 1;
+    u8* mem = (u8*)a->Push((u64)total, 1, false);
+    if (!mem) {
+        return 0;
+    }
+    StrArenaUlebEncode(mem, (u32)size);
+    mem[vlen + size] = 0;
+    return ArenaPtrCompress(a, mem);
+}
+
+StrArena StrArenaDupStr(Arena* a, Str s) {
+    if (!a) {
+        return 0;
+    }
+    int size = s.len;
+    if (size < 0) {
+        size = 0;
+    }
+    StrArena sa = StrArenaAlloc(a, size);
+    if (!sa) {
+        return 0;
+    }
+    if (size > 0 && s.s) {
+        Str out = StrArenaToStr(a, sa);
+        memcpy(out.s, s.s, (size_t)size);
+    }
+    return sa;
+}
+
+Str StrArenaToStr(Arena* a, StrArena sa) {
+    if (!a || !sa) {
+        return {};
+    }
+    u8* mem = (u8*)ArenaPtrUncompress(a, sa);
+    if (!mem) {
+        return {};
+    }
+    const u8* p = mem;
+    u32 size = 0;
+    if (!StrArenaUlebDecode(p, &size)) {
+        return {};
+    }
+    return Str((char*)p, (int)size);
+}
+
 // Locale-independent Unicode lowercase fold for one WCHAR.
 // On Windows, CharLowerBuffW matches FoldCaseWInPlace; on POSIX a small table
 // covers Latin/Cyrillic/Greek used by tests and falls back to towlower().
@@ -325,23 +421,27 @@ bool StartsWith(Str s, Str prefix) {
     return EqN(s, prefix, len(prefix));
 }
 
-/* return true if 'str' starts with 'txt', NOT case-sensitive */
-bool StartsWithI(Str s, Str prefix) {
-    if (s.s == prefix.s) {
-        return true;
-    }
-    if (!s || !prefix) {
+// Removes prefix from the string view, without modifying the underlying data.
+bool TrimPrefix(Str& s, Str prefix) {
+    if (!StartsWith(s, prefix)) {
         return false;
     }
-    return 0 == _strnicmp(s.s, prefix.s, len(prefix));
+    s.s += prefix.len;
+    s.len -= prefix.len;
+    return true;
 }
 
-bool Contains(Str s, Str txt) {
-    return str::IndexOf(s, txt) >= 0;
+/* return true if 'str' starts with 'txt', NOT case-sensitive */
+bool StartsWithI(Str s, Str prefix) {
+    return EqNI(s, prefix, len(prefix));
 }
 
-bool ContainsI(Str s, Str txt) {
-    return str::IndexOfI(s, txt) >= 0;
+bool Contains(Str s, Str sub) {
+    return str::IndexOf(s, sub) >= 0;
+}
+
+bool ContainsI(Str s, Str sub) {
+    return str::IndexOfI(s, sub) >= 0;
 }
 
 bool EndsWith(Str txt, Str end) {
@@ -885,7 +985,7 @@ namespace str {
 TempStr MemToHexTemp(Str buf) {
     int n = buf.len;
     /* 2 hex chars per byte, +1 for terminating 0 */
-    char* ret = AllocArrayTemp<char>(2 * n + 1);
+    char* ret = AllocArrayTemp<char>((2 * n) + 1);
     if (!ret) {
         return {};
     }
@@ -1052,15 +1152,6 @@ bool IsEmptyOrWhiteSpace(Str s) {
         }
     }
     return true;
-}
-
-bool Skip(Str& s, Str toSkip) {
-    if (str::StartsWith(s, toSkip)) {
-        s.s += toSkip.len;
-        s.len -= toSkip.len;
-        return true;
-    }
-    return false;
 }
 
 // advances s past any leading toSkip chars (in place); returns whether it skipped any
@@ -1393,14 +1484,18 @@ TempStr SeqStrNumStrByNumber(SeqStrNum strs, i64 num) {
 static constexpr size_t kPadding = 1;
 
 static char* EnsureCap(str::Builder* s, size_t needed) {
-    if (needed + kPadding <= str::Builder::kBufChars) {
-        s->els = s->buf; // TODO: not needed?
+    bool isInlineBuf = !s->els || (s->els == s->buf);
+    // only use the inline buffer if we haven't moved to the heap yet.
+    // RemoveAt() can shrink len enough for needed to fit in buf again and
+    // switching back would lose the data and leak the heap allocation
+    if (isInlineBuf && (needed + kPadding <= str::Builder::kBufChars)) {
+        s->els = s->buf;
         return s->buf;
     }
 
     size_t capacityHint = s->cap;
     // tricky: to save sapce we reuse cap for capacityHint
-    if (!s->els || (s->els == s->buf)) {
+    if (isInlineBuf) {
         // on first expand cap might be capacityHint
         s->cap = 0;
     }
@@ -1409,7 +1504,7 @@ static char* EnsureCap(str::Builder* s, size_t needed) {
         return s->els;
     }
 
-    size_t newCap = s->cap * 2;
+    size_t newCap = (size_t)s->cap * 2;
     if (needed > newCap) {
         newCap = needed;
     }
@@ -1460,29 +1555,29 @@ static char* MakeSpaceAt(str::Builder* s, size_t idx, size_t count) {
     return res;
 }
 
-static void StrBuilderFree(str::Builder* s) {
-    if (!s->els || (s->els == s->buf)) {
-        return;
+static void StrBuilderReset(str::Builder* s) {
+    s->len = 0;
+    // keep an existing heap buffer for re-use; only default to the
+    // inline buf when we have not allocated yet (e.g. constructor)
+    if (!s->els) {
+        s->els = s->buf;
     }
-    Free(s->a, s->els);
-    s->els = nullptr;
+    s->els[0] = 0;
+}
+
+static void StrBuilderFree(str::Builder* s) {
+    bool isInlineBuf = !s->els || (s->els == s->buf);
+    if (!isInlineBuf) {
+        Free(s->a, s->els);
+    }
+    s->len = 0;
+    s->cap = 0;
+    s->els = s->buf;
+    s->buf[0] = 0;
 }
 
 void str::Builder::Reset(Str s) {
-    StrBuilderFree(this);
-    len = 0;
-    cap = 0;
-    els = buf;
-
-#if defined(DEBUG)
-#define kFillerStr "01234567890123456789012345678901"
-    // to catch mistakes earlier, fill the buffer with a known string
-    constexpr size_t nFiller = sizeof(kFillerStr) - 1;
-    static_assert(nFiller == str::Builder::kBufChars);
-    memcpy(buf, kFillerStr, kBufChars);
-#endif
-
-    buf[0] = 0;
+    StrBuilderReset(this);
     Append(s); // no-op if s is empty
 }
 
@@ -1580,8 +1675,8 @@ Str str::Builder::TakeStr() {
     return Str(res, n);
 }
 
-bool str::Contains(const str::Builder& b, Str s) {
-    return str::Contains(ToStr(b), s);
+bool str::Contains(const str::Builder& b, Str sub) {
+    return str::Contains(ToStr(b), sub);
 }
 
 bool str::Builder::IsEmpty() const {
@@ -1597,14 +1692,16 @@ char str::Builder::LastChar() const {
 }
 
 static WCHAR* EnsureCap(wstr::Builder* s, size_t needed) {
-    if (needed + kPadding <= str::Builder::kBufChars) {
-        s->els = s->buf; // TODO: not needed?
+    bool isInlineBuf = !s->els || (s->els == s->buf);
+    // see the comment in str::Builder's EnsureCap()
+    if (isInlineBuf && (needed + kPadding <= wstr::Builder::kBufChars)) {
+        s->els = s->buf;
         return s->buf;
     }
 
     size_t capacityHint = s->cap;
     // tricky: to save sapce we reuse cap for capacityHint
-    if (!s->els || (s->els == s->buf)) {
+    if (isInlineBuf) {
         // on first expand cap might be capacityHint
         s->cap = 0;
     }
@@ -1613,7 +1710,7 @@ static WCHAR* EnsureCap(wstr::Builder* s, size_t needed) {
         return s->els;
     }
 
-    size_t newCap = s->cap * 2;
+    size_t newCap = (size_t)s->cap * 2;
     if (needed > newCap) {
         newCap = needed;
     }
@@ -1661,29 +1758,29 @@ static WCHAR* MakeSpaceAt(wstr::Builder* s, size_t idx, size_t count) {
     return res;
 }
 
-static void WStrBuilderFree(wstr::Builder* s) {
-    if (!s->els || (s->els == s->buf)) {
-        return;
+static void WStrBuilderReset(wstr::Builder* s) {
+    s->len = 0;
+    // keep an existing heap buffer for re-use; only default to the
+    // inline buf when we have not allocated yet (e.g. constructor)
+    if (!s->els) {
+        s->els = s->buf;
     }
-    Free(s->a, s->els);
-    s->els = nullptr;
+    s->els[0] = 0;
+}
+
+static void WStrBuilderFree(wstr::Builder* s) {
+    bool isInlineBuf = !s->els || (s->els == s->buf);
+    if (!isInlineBuf) {
+        Free(s->a, s->els);
+    }
+    s->len = 0;
+    s->cap = 0;
+    s->els = s->buf;
+    s->buf[0] = 0;
 }
 
 void wstr::Builder::Reset(WStr s) {
-    WStrBuilderFree(this);
-    len = 0;
-    cap = 0;
-    els = buf;
-
-#if defined(DEBUG)
-#define kFillerWStr L"01234567890123456789012345678901"
-    // to catch mistakes earlier, fill the buffer with a known string
-    constexpr size_t nFiller = sizeof(kFillerStr) - 1;
-    static_assert(nFiller == str::Builder::kBufChars);
-    memcpy(buf, kFillerWStr, nFiller * kElSize);
-#endif
-
-    buf[0] = 0;
+    WStrBuilderReset(this);
     Append(s); // no-op if s is empty
 }
 
@@ -1851,7 +1948,7 @@ WStr CastToWCHAR(Str s) {
     }
     WCHAR* w = nullptr;
     static_assert(sizeof(char*) == sizeof(WCHAR*), "pointer sizes must match");
-    memcpy(&w, &s.s, sizeof(w));
+    memcpy((void*)&w, (const void*)&s.s, sizeof(w));
     return WStr(w, s.len / (int)sizeof(WCHAR));
 }
 
@@ -1978,7 +2075,7 @@ bool StartsWith(WStr str, WStr prefix) {
     if (!str || prefix.len > str.len) {
         return false;
     }
-    return EqN(str, prefix, (size_t)prefix.len);
+    return EqN(str, prefix, (int)(size_t)prefix.len);
 }
 
 /* return true if 'str' starts with 'txt', NOT case-sensitive */
@@ -2095,7 +2192,7 @@ WStr Replace(WStr s, WStr toReplace, WStr replaceWith) {
         return {};
     }
 
-    wstr::Builder result((size_t)s.len);
+    wstr::Builder result((int)(size_t)s.len);
     int findLen = toReplace.len;
     int start = 0;
     while (start < s.len) {
@@ -2266,7 +2363,7 @@ int ParseInt(Str s) {
     int value = 0;
     int overflowCheck = negative ? 1 : 0;
     for (; off < s.len && str::IsDigit(s.s[off]); off++) {
-        value = value * 10 + (s.s[off] - '0');
+        value = (value * 10) + (s.s[off] - '0');
         // return 0 on overflow
         if (value - overflowCheck < 0) {
             return 0;
@@ -2286,7 +2383,7 @@ i64 ParseInt64(Str s) {
     }
     i64 value = 0;
     for (; off < s.len && str::IsDigit(s.s[off]); off++) {
-        value = value * 10 + (s.s[off] - '0');
+        value = (value * 10) + (s.s[off] - '0');
     }
     return negative ? -value : value;
 }
@@ -2438,7 +2535,7 @@ TempStr ReplaceTemp(Str s, Str toReplace, Str replaceWith) {
         lenDiff = replLen - findLen;
     }
     // heuristic: allow 6 replacements without reallocating
-    int capHint = s.len + 1 + lenDiff * 6;
+    int capHint = s.len + 1 + (lenDiff * 6);
     str::Builder result(capHint);
     bool ok;
     while (idx >= 0) {
@@ -2571,7 +2668,7 @@ Str FormatFileSize(Arena* arena, u64 size) {
     char temp[32];
     int i = 0;
     while (size > 0 && i < 31) {
-        temp[i++] = '0' + (size % 10);
+        temp[i++] = (char)('0' + (size % 10));
         size /= 10;
     }
     int numDigits = i;
@@ -2640,6 +2737,7 @@ void FormatFileSizeToWstrBuf(u64 size, WStr buf) {
 int FormatSizeHumanIntoBuf(u64 size, Str buf) {
     if (buf.len < 2) return 0;
 
+    const u64 TB = 1024ULL * 1024 * 1024 * 1024;
     const u64 GB = 1024ULL * 1024 * 1024;
     const u64 MB = 1024ULL * 1024;
     const u64 KB = 1024ULL;
@@ -2647,7 +2745,10 @@ int FormatSizeHumanIntoBuf(u64 size, Str buf) {
     Str suffix;
     u64 divisor;
 
-    if (size >= GB) {
+    if (size >= TB) {
+        suffix = StrL(" TB");
+        divisor = TB;
+    } else if (size >= GB) {
         suffix = StrL(" GB");
         divisor = GB;
     } else if (size >= MB) {

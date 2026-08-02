@@ -89,8 +89,8 @@ static LRESULT CALLBACK WndWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM
     }
 }
 
-static LRESULT CALLBACK WndSubclassedWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR subclassId,
-                                                DWORD_PTR data) {
+static LRESULT CALLBACK WndSubclassedWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR /*subclassId*/,
+                                                DWORD_PTR /*data*/) {
     return WndWindowProc(hwnd, msg, wp, lp);
 }
 
@@ -130,7 +130,7 @@ void Wnd::SetVisibility(Visibility newVisibility) {
         ::ShowWindow(hwnd, isVisible ? SW_SHOW : SW_HIDE);
     } else {
         BOOL bIsVisible = toBOOL(isVisible);
-        SetWindowStyle(hwnd, WS_VISIBLE, bIsVisible);
+        HwndSetWindowStyle(hwnd, WS_VISIBLE, bIsVisible);
     }
 }
 
@@ -142,7 +142,7 @@ Visibility Wnd::GetVisibility() {
         CrashMe();
         return true;
     }
-    bool isVisible = IsWindowStyleSet(hwnd, WS_VISIBLE);
+    bool isVisible = HwndIsWindowStyleSet(hwnd, WS_VISIBLE);
     return isVisible;
 #endif
 }
@@ -177,7 +177,7 @@ void Wnd::OnAttach() {}
 void Wnd::OnFocus() {}
 
 // Override this to handle WM_COMMAND messages
-bool Wnd::OnCommand(WPARAM wparam, LPARAM lparam) {
+bool Wnd::OnCommand(WPARAM /*wparam*/, LPARAM /*lparam*/) {
     //  UINT id = LOWORD(wparam);
     //  switch (id)
     //  {
@@ -221,12 +221,11 @@ void Wnd::OnContextMenu(Point ptScreen) {
     ev.w = this;
     ev.mouseScreen = ptScreen;
 
-    POINT ptW = ToPOINT(ptScreen);
+    Point ptW = ptScreen;
     if (ptScreen.x != -1) {
-        MapWindowPoints(HWND_DESKTOP, hwnd, &ptW, 1);
+        ptW = HwndMapWindowPoint(HWND_DESKTOP, hwnd, ptW);
     }
-    ev.mouseWindow.x = ptW.x;
-    ev.mouseWindow.y = ptW.y;
+    ev.mouseWindow = ptW;
     onContextMenu.Call(&ev);
 }
 
@@ -234,14 +233,14 @@ void Wnd::OnDropFiles(HDROP drop_info) {}
 
 void Wnd::OnGetMinMaxInfo(MINMAXINFO* mmi) {}
 
-LRESULT Wnd::OnMouseEvent(UINT msg, WPARAM wparam, LPARAM lparam) {
+LRESULT Wnd::OnMouseEvent(UINT /*msg*/, WPARAM /*wparam*/, LPARAM /*lparam*/) {
     return -1;
 }
 
 void Wnd::OnMove(POINTS*) {}
 
 // Processes notification (WM_NOTIFY) messages from a child window.
-LRESULT Wnd::OnNotify(int controlId, NMHDR* nmh) {
+LRESULT Wnd::OnNotify(int /*controlId*/, NMHDR* /*nmh*/) {
     // You can use either OnNotifyReflect or OnNotify to handle notifications
     // Override OnNotifyReflect to handle notifications in the CWnd class that
     //   generated the notification.   OR
@@ -285,11 +284,11 @@ LRESULT Wnd::OnNotifyReflect(WPARAM, LPARAM) {
 void Wnd::OnPaint(HDC hdc, PAINTSTRUCT* ps) {
     auto br = BackgroundBrush();
     if (br != nullptr) {
-        FillRect(hdc, &ps->rcPaint, br);
+        HdcFillRect(hdc, ToRect(ps->rcPaint), br);
     }
 }
 
-void Wnd::OnSize(UINT msg, UINT type, SIZE size) {}
+void Wnd::OnSize(UINT msg, UINT type, Size size) {}
 
 void Wnd::OnTaskbarCallback(UINT msg, LPARAM lparam) {}
 
@@ -369,8 +368,8 @@ void Wnd::Close() {
     PostMessageW(hwnd, WM_CLOSE, 0, 0);
 }
 
-void Wnd::SetPos(RECT* r) {
-    ::MoveWindow(hwnd, r);
+void Wnd::SetPos(Rect* r) {
+    HwndMoveWindow(hwnd, r);
 }
 
 void Wnd::SetBounds(Rect bounds) {
@@ -384,10 +383,9 @@ void Wnd::SetBounds(Rect bounds) {
     bounds.dx -= (insets.right + insets.left);
     bounds.dy -= (insets.bottom + insets.top);
 
-    auto r = ToRECT(bounds);
-    ::MoveWindow(hwnd, &r);
+    HwndMoveWindow(hwnd, &bounds);
     // TODO: optimize if doesn't change position
-    ::InvalidateRect(hwnd, nullptr, TRUE);
+    HwndInvalidate(hwnd, true);
 }
 
 // A function used internally to call OnMessageReflect. Don't call or override this function.
@@ -691,7 +689,7 @@ LRESULT Wnd::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 
         case WM_ENTERSIZEMOVE:
         case WM_EXITSIZEMOVE: {
-            SIZE size = {};
+            Size size{};
             OnSize(msg, 0, size);
             break;
         }
@@ -729,7 +727,7 @@ LRESULT Wnd::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         }
 
         case WM_SIZE: {
-            SIZE size = {LOWORD(lparam), HIWORD(lparam)};
+            Size size = {LOWORD(lparam), HIWORD(lparam)};
             OnSize(msg, static_cast<UINT>(wparam), size);
             break;
         }
@@ -764,7 +762,7 @@ LRESULT Wnd::FinalWindowProc(UINT msg, WPARAM wparam, LPARAM lparam) {
     }
 }
 
-bool Wnd::PreTranslateMessage(MSG& msg) {
+bool Wnd::PreTranslateMessage(MSG& /*msg*/) {
     return false;
 }
 
@@ -780,7 +778,7 @@ void Wnd::Attach(HWND hwnd) {
 // Attaches a CWnd object to a dialog item.
 void Wnd::AttachDlgItem(UINT id, HWND parent) {
     ReportIf(!::IsWindow(parent));
-    HWND wnd = ::GetDlgItem(parent, id);
+    HWND wnd = ::GetDlgItem(parent, (int)id);
     Attach(wnd);
 }
 
@@ -1177,7 +1175,7 @@ void DrawCloseButton(const DrawCloseButtonArgs& args) {
     // so we have to explicitly mirror all rendering horizontally
     if (HwndIsRtl(hwnd) && !args.noMirror) {
         g.ScaleTransform(-1, 1);
-        g.TranslateTransform((float)ClientRect(hwnd).dx, 0, Gdiplus::MatrixOrderAppend);
+        g.TranslateTransform((float)HwndClientRect(hwnd).dx, 0, Gdiplus::MatrixOrderAppend);
     }
     Gdiplus::Color c;
 
@@ -1225,7 +1223,7 @@ void DrawCloseButton2(const DrawCloseButtonArgs& args) {
         r2.right += p;
         r2.top -= p;
         r2.bottom += p;
-        FillRect(hdc, &r2, brush);
+        HdcFillRect(hdc, ToRect(r2), brush);
         // Ellipse(hdc, r2.left, r2.top, r2.right, r2.bottom);
     }
     AutoDeletePen pen(CreatePen(PS_SOLID, 2, lineCol));

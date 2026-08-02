@@ -80,7 +80,7 @@ enum {
     CmdFindToggleMatchCase = 269,
     CmdSaveAnnotations = 270,
     CmdSaveAnnotationsNewFile = 271,
-    CmdDiscardAnnotations = 272,
+    CmdDiscardChanges = 272,
     CmdEditAnnotations = 273,
     CmdDeleteAnnotation = 274,
     CmdZoomFitPage = 275,
@@ -263,8 +263,11 @@ enum {
     CmdTocCollapseSameLevel = 452,
     CmdToggleFavoritesSort = 453,
     CmdZoomFitHeight = 454,
-    CmdRefHoverPushToJabRef = 455,
-    CmdNone = 456,
+    CmdDeleteFileAndOpenNext = 455,
+    CmdShowGeneratedHTML = 456,
+    CmdDeleteCachedFiles = 457,
+    CmdRefHoverPushToJabRef = 458,
+    CmdNone = 459,
 
     /* range for file history */
     CmdFileHistoryFirst,

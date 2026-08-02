@@ -56,13 +56,21 @@ static TempStr NormalizeMarkdownUrlTemp(Str url) {
     return str::JoinTemp(kMdVirtualHost, plainUrl);
 }
 
+// Keep the fragment when navigating the browser. GetFullPathTemp() intentionally
+// removes it for page lookup and state tracking, but WebView2 needs it to scroll
+// to a heading within the current HTML page.
+static Str MarkdownBrowserNavigationUrl(Str url) {
+    str::TrimPrefix(url, kMdVirtualHost);
+    return url;
+}
+
 static TempStr RelPathFromBaseTemp(Str filePath, Str baseDir) {
     TempStr normFile = path::NormalizeTemp(filePath);
     TempStr normBase = path::NormalizeTemp(baseDir);
-    if (!normBase || !str::StartsWith(normFile, normBase)) {
+    if (!normBase || !str::TrimPrefix(normFile, normBase)) {
         return path::GetBaseNameTemp(filePath);
     }
-    Str rel = Str(normFile.s + normBase.len, normFile.len - normBase.len);
+    Str rel = normFile;
     while (len(rel) > 0 && (rel.s[0] == '\\' || rel.s[0] == '/')) {
         rel.s++;
         rel.len--;
@@ -99,12 +107,13 @@ static IPageDestination* NewMarkdownNamedDest(Str url, int pageNo) {
         dest = pdest;
     }
     dest->pageNo = pageNo;
-    dest->rect = RectF(DEST_USE_DEFAULT, DEST_USE_DEFAULT, DEST_USE_DEFAULT, DEST_USE_DEFAULT);
+    dest->rect = RectF(kDestUseDefault, kDestUseDefault, kDestUseDefault, kDestUseDefault);
     return dest;
 }
 
 static TocItem* NewMarkdownTocItem(TocItem* parent, Str title, int pageNo, Str url) {
-    auto res = new TocItem(parent, title, pageNo);
+    auto res = AllocTocItem(nullptr, title, pageNo);
+    res->parent = parent;
     res->dest = NewMarkdownNamedDest(url, pageNo);
     return res;
 }
@@ -184,10 +193,10 @@ TempStr MarkdownModel::FileToVirtualUrlTemp(Str filePath) const {
 }
 
 TempStr MarkdownModel::VirtualUrlToFileTemp(Str url) const {
-    if (!url || !str::StartsWith(url, kMdVirtualHost)) {
+    if (!url || !str::TrimPrefix(url, kMdVirtualHost)) {
         return {};
     }
-    Str pathPart = Str(url.s + kMdVirtualHostLen, url.len - kMdVirtualHostLen);
+    Str pathPart = url;
     Str fragment = str::SliceFromChar(pathPart, '#');
     if (fragment) {
         pathPart = Str(pathPart.s, (int)(fragment.s - pathPart.s));
@@ -340,7 +349,7 @@ bool MarkdownModel::DisplayPage(Str pageUrl) {
         if (cb) {
             auto item = NewMarkdownTocItem(nullptr, nullptr, 1, pageUrl);
             cb->GotoLink(item->dest);
-            delete item;
+            FreeTocItemRec(nullptr, item);
         }
         return false;
     }
@@ -355,10 +364,7 @@ bool MarkdownModel::DisplayPage(Str pageUrl) {
     str::ReplaceWithCopy(&currentPageUrl, plainUrl);
     currentPageNo = pageNo;
     if (docView) {
-        TempStr navUrl = plainUrl;
-        if (str::StartsWith(navUrl, kMdVirtualHost)) {
-            navUrl = Str(navUrl.s + kMdVirtualHostLen, navUrl.len - kMdVirtualHostLen);
-        }
+        Str navUrl = MarkdownBrowserNavigationUrl(pageUrl);
         docView->NavigateToDataUrl(navUrl);
     }
     return true;
@@ -556,7 +562,7 @@ float MarkdownModel::GetNextZoomStep(float towardsLevel) const {
     int iCurrZoom = (int)currZoom;
     int iTowardsLevel = (int)towardsLevel;
     int iNewZoom = iTowardsLevel;
-    if (iCurrZoom < towardsLevel) {
+    if ((float)iCurrZoom < towardsLevel) {
         for (int i = 0; i < nZoomLevels; i++) {
             int iZoom = (int)zoomLevels[i];
             if (iZoom > iCurrZoom) {
@@ -564,7 +570,7 @@ float MarkdownModel::GetNextZoomStep(float towardsLevel) const {
                 break;
             }
         }
-    } else if (iCurrZoom > towardsLevel) {
+    } else if ((float)iCurrZoom > towardsLevel) {
         for (int i = nZoomLevels - 1; i >= 0; i--) {
             int iZoom = (int)zoomLevels[i];
             if (iZoom < iCurrZoom) {
@@ -606,7 +612,7 @@ bool MarkdownModel::OnBeforeNavigate(Str url, bool newWindow) {
     if (url && cb) {
         auto item = NewMarkdownTocItem(nullptr, nullptr, 1, url);
         cb->GotoLink(item->dest);
-        delete item;
+        FreeTocItemRec(nullptr, item);
     }
     return false;
 }
@@ -741,6 +747,13 @@ bool MarkdownModel::IsSupportedFileType(FileType kind) {
     return kind == FileType::Markdown;
 }
 
+#if defined(DEBUG)
+bool MarkdownModel_UnitTestBrowserNavigationUrl() {
+    Str url = StrL("https://sumatrapdf.markdown/issue-5842.html#target-heading");
+    return str::Eq(MarkdownBrowserNavigationUrl(url), StrL("issue-5842.html#target-heading"));
+}
+#endif
+
 bool MarkdownModel::Load(Str fileName) {
     str::ReplaceWithCopy(&this->fileName, fileName);
     str::ReplaceWithCopy(&baseDir, path::GetDirTemp(fileName));
@@ -815,7 +828,7 @@ bool MarkdownModel::Load(Str fileName) {
     }
 
     if (foundRoot) {
-        auto realRoot = new TocItem();
+        auto realRoot = AllocTocItem(nullptr, {}, 0);
         realRoot->child = root;
         tocTree = new TocTree(realRoot);
     }

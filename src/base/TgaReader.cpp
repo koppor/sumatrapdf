@@ -233,7 +233,11 @@ static void CopyPixelToBGRA(u8* dst, const u8* src, int bits, int alphaBits, Ima
             dst[0] = Scale5To8(v & 0x1f);
             dst[1] = Scale5To8((v >> 5) & 0x1f);
             dst[2] = Scale5To8((v >> 10) & 0x1f);
-            dst[3] = (bits == 16 && alphaBits == 1 && alphaType != Alpha_Ignore) ? ((v & 0x8000) ? 255 : 0) : 255;
+            if (bits == 16 && alphaBits == 1 && alphaType != Alpha_Ignore) {
+                dst[3] = (v & 0x8000) ? 255 : 0;
+            } else {
+                dst[3] = 255;
+            }
             break;
         }
         case 24:
@@ -272,7 +276,7 @@ static void ReadPixel(ReadState& s, u8* dst, int bits, int alphaBits, ImageAlpha
         case Type_Palette_RLE:
             idx = ((u8)s.data[0] | (2 == s.n ? ((u8)s.data[1] << 8) : 0)) - s.cmap.firstEntry;
             if (0 <= idx && idx < s.cmap.length) {
-                src = s.cmap.data + idx * s.cmap.n;
+                src = s.cmap.data + ((size_t)idx * s.cmap.n);
             } else {
                 s.failed = true;
             }
@@ -316,7 +320,7 @@ Pixmap* PixmapFromData(Str d) {
         s.cmap.n = (headerLE->cmapBitDepth + 7) / 8;
         s.cmap.length = convLE(headerLE->cmapLength);
         s.cmap.firstEntry = convLE(headerLE->cmapFirstEntry);
-        s.data += s.cmap.length * s.cmap.n;
+        s.data += (size_t)s.cmap.length * s.cmap.n;
         if (s.data > s.end) {
             return nullptr;
         }
@@ -345,9 +349,9 @@ Pixmap* PixmapFromData(Str d) {
         return nullptr;
     }
     for (int y = 0; y < h; y++) {
-        u8* rowOut = pixmap->data + pixmap->stride * (invertY ? y : h - 1 - y);
+        u8* rowOut = pixmap->data + ((size_t)pixmap->stride * (invertY ? y : h - 1 - y));
         for (int x = 0; x < w; x++) {
-            ReadPixel(s, rowOut + 4 * (invertX ? w - 1 - x : x), bits, alphaBits, alphaType);
+            ReadPixel(s, rowOut + ((size_t)4 * (invertX ? w - 1 - x : x)), bits, alphaBits, alphaType);
         }
     }
     if (s.failed) {
@@ -362,7 +366,7 @@ inline bool memeq3(const char* pix1, const char* pix2) {
 }
 
 static void GetPixmapPixelBGR(Pixmap* pixmap, int x, int y, char bgr[3]) {
-    const u8* src = pixmap->data + (size_t)y * pixmap->stride + (size_t)x * PixmapBytesPerPixel(pixmap->format);
+    const u8* src = pixmap->data + ((size_t)y * pixmap->stride) + ((size_t)x * PixmapBytesPerPixel(pixmap->format));
     if (pixmap->format == PixmapFormat::RGBA8) {
         bgr[0] = (char)src[2];
         bgr[1] = (char)src[1];

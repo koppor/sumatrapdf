@@ -299,10 +299,10 @@ void RenderCache::Add(PageRenderRequest& req, Pixmap* bmp) {
 static RectF GetTileRect(RectF pagerect, TilePosition tile) {
     ReportIf(tile.res > 30);
     RectF rect;
-    rect.dx = pagerect.dx / (1ULL << tile.res);
-    rect.dy = pagerect.dy / (1ULL << tile.res);
-    rect.x = pagerect.x + tile.col * rect.dx;
-    rect.y = pagerect.y + ((1ULL << tile.res) - tile.row - 1) * rect.dy;
+    rect.dx = pagerect.dx / (float)(1ULL << tile.res);
+    rect.dy = pagerect.dy / (float)(1ULL << tile.res);
+    rect.x = pagerect.x + ((float)tile.col * rect.dx);
+    rect.y = pagerect.y + ((float)((1ULL << tile.res) - tile.row - 1) * rect.dy);
     return rect;
 }
 
@@ -342,10 +342,10 @@ static bool IsTileVisible(DisplayModel* dm, int pageNo, TilePosition tile, float
     Rect r = pageInfo->pageOnScreen;
     Rect tileOnScreen = GetTileOnScreen(engine, pageNo, rotation, zoom, tile, r);
     // consider nearby tiles visible depending on the fuzz factor
-    tileOnScreen.x -= (int)(tileOnScreen.dx * fuzz * 0.5);
-    tileOnScreen.dx = (int)(tileOnScreen.dx * (fuzz + 1));
-    tileOnScreen.y -= (int)(tileOnScreen.dy * fuzz * 0.5);
-    tileOnScreen.dy = (int)(tileOnScreen.dy * (fuzz + 1));
+    tileOnScreen.x -= (int)((float)tileOnScreen.dx * fuzz * 0.5);
+    tileOnScreen.dx = (int)((float)tileOnScreen.dx * (fuzz + 1));
+    tileOnScreen.y -= (int)((float)tileOnScreen.dy * fuzz * 0.5);
+    tileOnScreen.dy = (int)((float)tileOnScreen.dy * (fuzz + 1));
     Rect screen(Point(), dm->GetViewPort().Size());
     return !tileOnScreen.Intersect(screen).IsEmpty();
 }
@@ -457,8 +457,8 @@ USHORT RenderCache::GetTileRes(DisplayModel* dm, int pageNo) const {
     int rotation = dm->GetRotation();
     RectF pixelbox = engine->Transform(mediabox, pageNo, zoom, rotation);
 
-    float factorW = (float)pixelbox.dx / (maxTileSize.dx + 1);
-    float factorH = (float)pixelbox.dy / (maxTileSize.dy + 1);
+    float factorW = (float)pixelbox.dx / (float)(maxTileSize.dx + 1);
+    float factorH = (float)pixelbox.dy / (float)(maxTileSize.dy + 1);
     // using the geometric mean instead of the maximum factor
     // so that the tile area doesn't get too small in comparison
     // to maxTileSize (but remains smaller)
@@ -467,8 +467,8 @@ USHORT RenderCache::GetTileRes(DisplayModel* dm, int pageNo) const {
     // use larger tiles when fitting page or width or when a page is smaller
     // than the visible canvas width/height or when rendering pages
     // without clipping optimizations
-    if (zoomVirt == kZoomFitPage || zoomVirt == kZoomFitWidth || pixelbox.dx <= viewPort.dx ||
-        pixelbox.dy < viewPort.dy || !engine->HasClipOptimizations(pageNo)) {
+    if (zoomVirt == kZoomFitPage || zoomVirt == kZoomFitWidth || pixelbox.dx <= (float)viewPort.dx ||
+        pixelbox.dy < (float)viewPort.dy || !engine->HasClipOptimizations(pageNo)) {
         factorAvg /= 2.0;
     }
 
@@ -1035,22 +1035,23 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
     Size bmpSize = Size(renderedBmp->width, renderedBmp->height);
     int xSrc = -std::min(tileOnScreen.x, 0);
     int ySrc = -std::min(tileOnScreen.y, 0);
-    float factor = std::min(1.0f * bmpSize.dx / tileOnScreen.dx, 1.0f * bmpSize.dy / tileOnScreen.dy);
+    float factor =
+        std::min(1.0f * (float)bmpSize.dx / (float)tileOnScreen.dx, 1.0f * (float)bmpSize.dy / (float)tileOnScreen.dy);
 
     Rect target = bounds;
     Rect source(xSrc, ySrc, bounds.dx, bounds.dy);
     if (factor != 1.0f) {
-        source.x = (int)(xSrc * factor);
-        source.y = (int)(ySrc * factor);
-        source.dx = (int)(bounds.dx * factor);
-        source.dy = (int)(bounds.dy * factor);
+        source.x = (int)((float)xSrc * factor);
+        source.y = (int)((float)ySrc * factor);
+        source.dx = (int)((float)bounds.dx * factor);
+        source.dy = (int)((float)bounds.dy * factor);
     }
     BlitPixmapRegion(renderedBmp, hdc, target, source);
 
     if (gShowTileLayout) {
         HPEN pen = CreatePen(PS_SOLID, 1, RGB(0xff, 0xff, 0x00));
         HGDIOBJ oldPen = SelectObject(hdc, pen);
-        DrawRect(hdc, bounds);
+        HdcDrawRect(hdc, bounds);
         DeletePen(SelectObject(hdc, oldPen));
     }
 
@@ -1131,9 +1132,9 @@ int RenderCache::Paint(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, PageI
                                     isTargetRes ? &neededScaling : nullptr);
         if (!(isTargetRes && 0 == renderDelay) && tile.res < maxRes) {
             queue.Append(TilePosition(tile.res + 1, tile.row * 2, tile.col * 2));
-            queue.Append(TilePosition(tile.res + 1, tile.row * 2, tile.col * 2 + 1));
-            queue.Append(TilePosition(tile.res + 1, tile.row * 2 + 1, tile.col * 2));
-            queue.Append(TilePosition(tile.res + 1, tile.row * 2 + 1, tile.col * 2 + 1));
+            queue.Append(TilePosition(tile.res + 1, tile.row * 2, (tile.col * 2) + 1));
+            queue.Append(TilePosition(tile.res + 1, (tile.row * 2) + 1, tile.col * 2));
+            queue.Append(TilePosition(tile.res + 1, (tile.row * 2) + 1, (tile.col * 2) + 1));
         }
         if (isTargetRes && renderDelay != 0) {
             neededScaling = true;
@@ -1196,10 +1197,9 @@ struct DebugTextWnd : Wnd {
 };
 
 DebugTextWnd::~DebugTextWnd() {
-    if (monoFont) {
-        DeleteObject(monoFont);
-        monoFont = nullptr;
-    }
+    // monoFont is from HdcCreateSimpleFont — cached for the app lifetime.
+    // Do not DeleteObject it or the shared cache returns a dead HFONT next time.
+    monoFont = nullptr;
 }
 
 static void DeleteDebugTextWndInstance(DebugTextWnd* w) {
@@ -1215,7 +1215,7 @@ void DebugTextWnd::LayoutToClient() {
     if (!edit || !hwnd) {
         return;
     }
-    Rect rc = ClientRect(hwnd);
+    Rect rc = HwndClientRect(hwnd);
     edit->SetBounds(rc);
 }
 
@@ -1229,6 +1229,10 @@ void DebugTextWnd::UpdateTheme() {
     if (UseDarkModeLib()) {
         DarkMode::setDarkWndSafe(hwnd);
         DarkMode::setWindowEraseBgSubclass(hwnd);
+    }
+    // Re-apply monospaced font after darkmode child theming (may reset font).
+    if (edit && monoFont) {
+        HwndSetFont(edit->hwnd, monoFont);
     }
     RedrawWindow(hwnd, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
@@ -1259,9 +1263,10 @@ bool DebugTextWnd::Create(Str title, int fontSize) {
     edit = new Edit();
     edit->Create(args);
     SendMessageW(edit->hwnd, EM_SETREADONLY, TRUE, 0);
+    SendMessageW(edit->hwnd, EM_SETLIMITTEXT, 0, 0);
 
     HDC hdc = GetDC(hwnd);
-    monoFont = CreateSimpleFont(hdc, "Consolas", fontSize);
+    monoFont = HdcCreateSimpleFont(hdc, "Consolas", fontSize);
     ReleaseDC(hwnd, hdc);
     if (monoFont) {
         edit->font = monoFont;
@@ -1482,7 +1487,7 @@ static TempStr FormatCacheBytesTemp(i64 bytes) {
     if (bytes < 1024) {
         return fmt("%d B", (int)bytes);
     }
-    if (bytes < 1024 * 1024) {
+    if (bytes < 1024LL * 1024) {
         return fmt("%.1f KB", bytes / 1024.0);
     }
     return fmt("%.2f MB", bytes / (1024.0 * 1024.0));

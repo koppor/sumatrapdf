@@ -21,8 +21,18 @@ function isWhitelisted(path: string): boolean {
   return whitelisted.includes(name);
 }
 
+// Repo uses LF; clang-format on Windows may leave or introduce CRLF.
+function ensureLf(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
 async function formatFile(clangFormatPath: string, path: string): Promise<void> {
   await $`${clangFormatPath} -i -style=file ${path}`.quiet();
+  const text = await Bun.file(path).text();
+  const lf = ensureLf(text);
+  if (lf !== text) {
+    await Bun.write(path, lf);
+  }
 }
 
 async function main() {
@@ -41,7 +51,7 @@ async function main() {
     "src/base/tests/*.h",
     "src/wingui/*",
     "src/uia/*",
-    "src/tools/*",
+    "src/tools/**/*.{cpp,c,h,hpp}",
     "src/ifilter/*.cpp",
     "src/ifilter/*.h",
     "src/previewer/*.cpp",

@@ -3,6 +3,7 @@
 
 #include "base/Base.h"
 #include "base/Dpi.h"
+#include "base/Win.h"
 
 #include "OverlayScrollbar.h"
 #include "Theme.h"
@@ -20,7 +21,7 @@ static bool gThickArrows = true;
 // all live overlay scrollbars, for global mouse tracking
 static Vec<OverlayScrollbar*> gAllScrollbars;
 static UINT_PTR gMouseTrackTimer = 0;
-static POINT gLastMousePos = {-1, -1};
+static Point gLastMousePos = {-1, -1};
 static constexpr UINT_PTR kMouseTrackTimerID = 100;
 static constexpr int kMouseTrackIntervalMs = 50;
 
@@ -72,19 +73,18 @@ static bool IsVert(OverlayScrollbar* sb) {
 
 // Get the track rect in client coords of the scrollbar window
 static Rect GetTrackRect(OverlayScrollbar* sb) {
-    RECT rc;
-    GetClientRect(sb->hwnd, &rc);
+    Rect rc = HwndClientRect(sb->hwnd);
     int arrowSize = 0;
     int gap = 0;
     if (IsThick(sb)) {
-        arrowSize = IsVert(sb) ? (rc.right - rc.left) : (rc.bottom - rc.top);
+        arrowSize = IsVert(sb) ? rc.dx : rc.dy;
         gap = DpiScale(sb->hwndOwner, 2);
     }
     int total = arrowSize + gap;
     if (IsVert(sb)) {
-        return Rect(0, total, rc.right - rc.left, (rc.bottom - rc.top) - 2 * total);
+        return Rect(0, total, rc.dx, rc.dy - (2 * total));
     }
-    return Rect(total, 0, (rc.right - rc.left) - 2 * total, rc.bottom - rc.top);
+    return Rect(total, 0, rc.dx - (2 * total), rc.dy);
 }
 
 // Calculate thumb rect within the track
@@ -117,23 +117,21 @@ static Rect GetThumbRect(OverlayScrollbar* sb) {
 }
 
 static Rect GetArrowTopRect(OverlayScrollbar* sb) {
-    RECT rc;
-    GetClientRect(sb->hwnd, &rc);
-    int arrowSize = IsVert(sb) ? (rc.right - rc.left) : (rc.bottom - rc.top);
+    Rect rc = HwndClientRect(sb->hwnd);
+    int arrowSize = IsVert(sb) ? rc.dx : rc.dy;
     if (IsVert(sb)) {
-        return Rect(0, 0, rc.right - rc.left, arrowSize);
+        return Rect(0, 0, rc.dx, arrowSize);
     }
-    return Rect(0, 0, arrowSize, rc.bottom - rc.top);
+    return Rect(0, 0, arrowSize, rc.dy);
 }
 
 static Rect GetArrowBottomRect(OverlayScrollbar* sb) {
-    RECT rc;
-    GetClientRect(sb->hwnd, &rc);
-    int arrowSize = IsVert(sb) ? (rc.right - rc.left) : (rc.bottom - rc.top);
+    Rect rc = HwndClientRect(sb->hwnd);
+    int arrowSize = IsVert(sb) ? rc.dx : rc.dy;
     if (IsVert(sb)) {
-        return Rect(0, (rc.bottom - rc.top) - arrowSize, rc.right - rc.left, arrowSize);
+        return Rect(0, rc.dy - arrowSize, rc.dx, arrowSize);
     }
-    return Rect((rc.right - rc.left) - arrowSize, 0, arrowSize, rc.bottom - rc.top);
+    return Rect(rc.dx - arrowSize, 0, arrowSize, rc.dy);
 }
 
 static void SendScrollMsg(OverlayScrollbar* sb, UINT scrollMsg, WPARAM wp) {
@@ -146,17 +144,16 @@ static UINT ScrollMsgForType(OverlayScrollbar* sb) {
 
 // Get scrollbar rect in screen coordinates (for thick size, used for proximity check)
 static Rect GetScrollbarScreenRect(OverlayScrollbar* sb) {
-    RECT ownerRc;
-    GetWindowRect(sb->hwndOwner, &ownerRc);
+    Rect ownerRc = HwndWindowRect(sb->hwndOwner);
     int scrollW = ScaledWidth(sb, true); // use thick width for proximity
     if (IsVert(sb)) {
-        return Rect(ownerRc.right - scrollW, ownerRc.top, scrollW, ownerRc.bottom - ownerRc.top);
+        return Rect(ownerRc.x + ownerRc.dx - scrollW, ownerRc.y, scrollW, ownerRc.dy);
     }
-    return Rect(ownerRc.left, ownerRc.bottom - scrollW, ownerRc.right - ownerRc.left, scrollW);
+    return Rect(ownerRc.x, ownerRc.y + ownerRc.dy - scrollW, ownerRc.dx, scrollW);
 }
 
 // Distance from point to rect edge (0 if inside)
-static int DistToRect(POINT pt, Rect rc) {
+static int DistToRect(Point pt, Rect rc) {
     int dx = 0;
     int dy = 0;
     if (pt.x < rc.x) {
@@ -178,7 +175,7 @@ static int DistToRect(POINT pt, Rect rc) {
     if (dy == 0) {
         return dx;
     }
-    return (int)sqrt((double)(dx * dx + dy * dy));
+    return (int)sqrt((double)((dx * dx) + (dy * dy)));
 }
 
 // Check if hwnd is the same as or an ancestor of child
@@ -194,14 +191,13 @@ static bool IsOrIsParentOf(HWND hwnd, HWND child) {
 
 // Update the layered window with the current appearance
 static void PaintScrollbar(OverlayScrollbar* sb) {
-    if (!sb->hwnd || !IsWindowVisible(sb->hwnd)) {
+    if (!sb->hwnd || !HwndIsVisible(sb->hwnd)) {
         return;
     }
 
-    RECT wrc;
-    GetWindowRect(sb->hwnd, &wrc);
-    int w = wrc.right - wrc.left;
-    int h = wrc.bottom - wrc.top;
+    Rect wrc = HwndWindowRect(sb->hwnd);
+    int w = wrc.dx;
+    int h = wrc.dy;
     if (w <= 0 || h <= 0) {
         return;
     }
@@ -248,7 +244,7 @@ static void PaintScrollbar(OverlayScrollbar* sb) {
         int y1 = std::min(r.y + r.dy, h);
         for (int y = y0; y < y1; y++) {
             for (int x = x0; x < x1; x++) {
-                pixels[y * w + x] = pixel;
+                pixels[(y * w) + x] = pixel;
             }
         }
     };
@@ -291,41 +287,41 @@ static void PaintScrollbar(OverlayScrollbar* sb) {
             if (IsVert(sb)) {
                 float sz = (float)arrowTop.dx / 3.0f;
                 // up triangle
-                float cx = (float)(arrowTop.x + arrowTop.dx / 2);
-                float cy = (float)(arrowTop.y + arrowTop.dy / 2);
+                float cx = (float)(arrowTop.x + (arrowTop.dx / 2));
+                float cy = (float)(arrowTop.y + (arrowTop.dy / 2));
                 Gdiplus::PointF upPts[3] = {
-                    {cx, cy - sz * 0.7f},
-                    {cx - sz, cy + sz * 0.7f},
-                    {cx + sz, cy + sz * 0.7f},
+                    {cx, cy - (sz * 0.7f)},
+                    {cx - sz, cy + (sz * 0.7f)},
+                    {cx + sz, cy + (sz * 0.7f)},
                 };
                 gfx.FillPolygon(&br, upPts, 3);
                 // down triangle
-                cx = (float)(arrowBot.x + arrowBot.dx / 2);
-                cy = (float)(arrowBot.y + arrowBot.dy / 2);
+                cx = (float)(arrowBot.x + (arrowBot.dx / 2));
+                cy = (float)(arrowBot.y + (arrowBot.dy / 2));
                 Gdiplus::PointF downPts[3] = {
-                    {cx - sz, cy - sz * 0.7f},
-                    {cx + sz, cy - sz * 0.7f},
-                    {cx, cy + sz * 0.7f},
+                    {cx - sz, cy - (sz * 0.7f)},
+                    {cx + sz, cy - (sz * 0.7f)},
+                    {cx, cy + (sz * 0.7f)},
                 };
                 gfx.FillPolygon(&br, downPts, 3);
             } else {
                 float sz = (float)arrowTop.dy / 3.0f;
                 // left triangle
-                float cx = (float)(arrowTop.x + arrowTop.dx / 2);
-                float cy = (float)(arrowTop.y + arrowTop.dy / 2);
+                float cx = (float)(arrowTop.x + (arrowTop.dx / 2));
+                float cy = (float)(arrowTop.y + (arrowTop.dy / 2));
                 Gdiplus::PointF leftPts[3] = {
-                    {cx - sz * 0.7f, cy},
-                    {cx + sz * 0.7f, cy - sz},
-                    {cx + sz * 0.7f, cy + sz},
+                    {cx - (sz * 0.7f), cy},
+                    {cx + (sz * 0.7f), cy - sz},
+                    {cx + (sz * 0.7f), cy + sz},
                 };
                 gfx.FillPolygon(&br, leftPts, 3);
                 // right triangle
-                cx = (float)(arrowBot.x + arrowBot.dx / 2);
-                cy = (float)(arrowBot.y + arrowBot.dy / 2);
+                cx = (float)(arrowBot.x + (arrowBot.dx / 2));
+                cy = (float)(arrowBot.y + (arrowBot.dy / 2));
                 Gdiplus::PointF rightPts[3] = {
-                    {cx - sz * 0.7f, cy - sz},
-                    {cx - sz * 0.7f, cy + sz},
-                    {cx + sz * 0.7f, cy},
+                    {cx - (sz * 0.7f), cy - sz},
+                    {cx - (sz * 0.7f), cy + sz},
+                    {cx + (sz * 0.7f), cy},
                 };
                 gfx.FillPolygon(&br, rightPts, 3);
             }
@@ -339,40 +335,40 @@ static void PaintScrollbar(OverlayScrollbar* sb) {
 
             if (IsVert(sb)) {
                 int sz = arrowTop.dx / 5;
-                float cx = (float)(arrowTop.x + arrowTop.dx / 2);
-                float cy = (float)(arrowTop.y + arrowTop.dy / 2) + (float)inset / 2;
+                float cx = (float)(arrowTop.x + (arrowTop.dx / 2));
+                float cy = (float)(arrowTop.y + (arrowTop.dy / 2)) + ((float)inset / 2);
                 Gdiplus::PointF upPts[3] = {
-                    {cx - sz, cy + sz / 2.0f},
-                    {cx, cy - sz / 2.0f},
-                    {cx + sz, cy + sz / 2.0f},
+                    {cx - (float)sz, cy + ((float)sz / 2.0f)},
+                    {cx, cy - ((float)sz / 2.0f)},
+                    {cx + (float)sz, cy + ((float)sz / 2.0f)},
                 };
                 gfx.DrawLines(&pen, upPts, 3);
 
-                cx = (float)(arrowBot.x + arrowBot.dx / 2);
-                cy = (float)(arrowBot.y + arrowBot.dy / 2) - (float)inset / 2;
+                cx = (float)(arrowBot.x + (arrowBot.dx / 2));
+                cy = (float)(arrowBot.y + (arrowBot.dy / 2)) - ((float)inset / 2);
                 Gdiplus::PointF downPts[3] = {
-                    {cx - sz, cy - sz / 2.0f},
-                    {cx, cy + sz / 2.0f},
-                    {cx + sz, cy - sz / 2.0f},
+                    {cx - (float)sz, cy - ((float)sz / 2.0f)},
+                    {cx, cy + ((float)sz / 2.0f)},
+                    {cx + (float)sz, cy - ((float)sz / 2.0f)},
                 };
                 gfx.DrawLines(&pen, downPts, 3);
             } else {
                 int sz = arrowTop.dy / 5;
-                float cx = (float)(arrowTop.x + arrowTop.dx / 2) + (float)inset / 2;
-                float cy = (float)(arrowTop.y + arrowTop.dy / 2);
+                float cx = (float)(arrowTop.x + (arrowTop.dx / 2)) + ((float)inset / 2);
+                float cy = (float)(arrowTop.y + (arrowTop.dy / 2));
                 Gdiplus::PointF leftPts[3] = {
-                    {cx + sz / 2.0f, cy - sz},
-                    {cx - sz / 2.0f, cy},
-                    {cx + sz / 2.0f, cy + sz},
+                    {cx + ((float)sz / 2.0f), cy - (float)sz},
+                    {cx - ((float)sz / 2.0f), cy},
+                    {cx + ((float)sz / 2.0f), cy + (float)sz},
                 };
                 gfx.DrawLines(&pen, leftPts, 3);
 
-                cx = (float)(arrowBot.x + arrowBot.dx / 2) - (float)inset / 2;
-                cy = (float)(arrowBot.y + arrowBot.dy / 2);
+                cx = (float)(arrowBot.x + (arrowBot.dx / 2)) - ((float)inset / 2);
+                cy = (float)(arrowBot.y + (arrowBot.dy / 2));
                 Gdiplus::PointF rightPts[3] = {
-                    {cx - sz / 2.0f, cy - sz},
-                    {cx + sz / 2.0f, cy},
-                    {cx - sz / 2.0f, cy + sz},
+                    {cx - ((float)sz / 2.0f), cy - (float)sz},
+                    {cx + ((float)sz / 2.0f), cy},
+                    {cx - ((float)sz / 2.0f), cy + (float)sz},
                 };
                 gfx.DrawLines(&pen, rightPts, 3);
             }
@@ -381,7 +377,7 @@ static void PaintScrollbar(OverlayScrollbar* sb) {
 
     POINT ptSrc = {0, 0};
     SIZE szWnd = {w, h};
-    POINT ptDst = {wrc.left, wrc.top};
+    POINT ptDst = {wrc.x, wrc.y};
     BLENDFUNCTION blend{};
     blend.BlendOp = AC_SRC_OVER;
     blend.SourceConstantAlpha = 255;
@@ -454,6 +450,18 @@ static void HideScrollbarWindow(OverlayScrollbar* sb) {
     SetState(sb, State::SmartInvisible);
 }
 
+// Restart the thin-bar auto-hide countdown (showAfterScrollMs). SetState only
+// arms the timer on a state transition, so continuous scroll while already
+// SmartThin would otherwise let the earlier mouse-stop / first-reveal timer
+// fire and hide the bar mid-scroll.
+static void RestartSmartThinAutoHide(OverlayScrollbar* sb) {
+    if (!sb->hwnd || sb->state != State::SmartThin) {
+        return;
+    }
+    KillTimer(sb->hwnd, OverlayScrollbar::kTimerAutoHide);
+    SetTimer(sb->hwnd, OverlayScrollbar::kTimerAutoHide, sb->showAfterScrollMs, nullptr);
+}
+
 // ---- Global mouse tracking ----
 
 static void CALLBACK MouseTrackTimerProc(HWND, UINT, UINT_PTR, DWORD) {
@@ -462,8 +470,7 @@ static void CALLBACK MouseTrackTimerProc(HWND, UINT, UINT_PTR, DWORD) {
         return;
     }
 
-    POINT pt;
-    GetCursorPos(&pt);
+    Point pt = GetCursorPosition();
 
     bool mouseMoved = (pt.x != gLastMousePos.x || pt.y != gLastMousePos.y);
     gLastMousePos = pt;
@@ -492,9 +499,8 @@ static void CALLBACK MouseTrackTimerProc(HWND, UINT, UINT_PTR, DWORD) {
         }
 
         // Check if mouse is over the owner window's client area
-        RECT ownerRc;
-        GetWindowRect(sb->hwndOwner, &ownerRc);
-        bool overOwner = PtInRect(&ownerRc, pt);
+        Rect ownerRc = HwndWindowRect(sb->hwndOwner);
+        bool overOwner = ownerRc.Contains(pt);
 
         // Check distance to scrollbar area
         Rect sbRect = GetScrollbarScreenRect(sb);
@@ -517,11 +523,10 @@ static void CALLBACK MouseTrackTimerProc(HWND, UINT, UINT_PTR, DWORD) {
                 ShowScrollbarWindow(sb, true);
             }
             // Update thumb hover state
-            POINT clientPt = pt;
-            ScreenToClient(sb->hwnd, &clientPt);
+            Point clientPt = HwndScreenToClient(sb->hwnd, pt);
             Rect thumbRc = GetThumbRect(sb);
             bool wasOver = sb->mouseOverThumb;
-            sb->mouseOverThumb = thumbRc.Contains(Point(clientPt.x, clientPt.y));
+            sb->mouseOverThumb = thumbRc.Contains(clientPt);
             if (wasOver != sb->mouseOverThumb) {
                 PaintScrollbar(sb);
             }
@@ -592,7 +597,7 @@ static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, 
                     UINT repeatMs = 0;
                     SystemParametersInfoW(SPI_GETKEYBOARDSPEED, 0, &repeatMs, 0);
                     // SPI_GETKEYBOARDSPEED returns 0-31, map to ~33-500ms (same as OS key repeat)
-                    repeatMs = 400 - repeatMs * 12;
+                    repeatMs = 400 - (repeatMs * 12);
                     SetTimer(hwnd, OverlayScrollbar::kTimerRepeatScroll, repeatMs, nullptr);
                 }
                 return 0;
@@ -658,7 +663,7 @@ static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, 
                     sb->repeatIsInitial = true;
                     UINT delayMs = 0;
                     SystemParametersInfoW(SPI_GETKEYBOARDDELAY, 0, &delayMs, 0);
-                    delayMs = 250 + delayMs * 250; // 0-3 maps to 250-1000ms
+                    delayMs = 250 + (delayMs * 250); // 0-3 maps to 250-1000ms
                     SetTimer(hwnd, OverlayScrollbar::kTimerRepeatScroll, delayMs, nullptr);
                     return 0;
                 }
@@ -669,7 +674,7 @@ static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, 
                     sb->repeatIsInitial = true;
                     UINT delayMs = 0;
                     SystemParametersInfoW(SPI_GETKEYBOARDDELAY, 0, &delayMs, 0);
-                    delayMs = 250 + delayMs * 250;
+                    delayMs = 250 + (delayMs * 250);
                     SetTimer(hwnd, OverlayScrollbar::kTimerRepeatScroll, delayMs, nullptr);
                     return 0;
                 }
@@ -688,7 +693,7 @@ static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, 
                 int scrollableTrack = trackLen - thumbLen;
                 int scrollableRange = range - (int)sb->nPage;
                 int clickInTrack = (IsVert(sb) ? my : mx) - (IsVert(sb) ? track.y : track.x);
-                int thumbOffset = clickInTrack - thumbLen / 2;
+                int thumbOffset = clickInTrack - (thumbLen / 2);
                 thumbOffset = setMinMax(thumbOffset, 0, scrollableTrack);
                 int newPos = sb->nMin;
                 if (scrollableTrack > 0 && scrollableRange > 0) {
@@ -714,7 +719,7 @@ static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, 
             Rect track = GetTrackRect(sb);
             if (track.Contains(pt)) {
                 int clickPos = IsVert(sb) ? my : mx;
-                int thumbMid = IsVert(sb) ? (thumbRc.y + thumbRc.dy / 2) : (thumbRc.x + thumbRc.dx / 2);
+                int thumbMid = IsVert(sb) ? (thumbRc.y + (thumbRc.dy / 2)) : (thumbRc.x + (thumbRc.dx / 2));
                 UINT code;
                 if (clickPos < thumbMid) {
                     code = IsVert(sb) ? SB_PAGEUP : SB_PAGELEFT;
@@ -726,7 +731,7 @@ static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, 
                 sb->repeatIsInitial = true;
                 UINT delayMs = 0;
                 SystemParametersInfoW(SPI_GETKEYBOARDDELAY, 0, &delayMs, 0);
-                delayMs = 250 + delayMs * 250;
+                delayMs = 250 + (delayMs * 250);
                 SetTimer(hwnd, OverlayScrollbar::kTimerRepeatScroll, delayMs, nullptr);
                 return 0;
             }
@@ -760,9 +765,8 @@ static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, 
             // pass through rightmost 2px of vertical scrollbar for frame resize
             if (IsVert(sb)) {
                 int x = GET_X_LPARAM(lp);
-                RECT rc;
-                GetWindowRect(hwnd, &rc);
-                if ((rc.right - x) <= 2) {
+                Rect rc = HwndWindowRect(hwnd);
+                if ((rc.x + rc.dx - x) <= 2) {
                     return HTTRANSPARENT;
                 }
             }
@@ -866,11 +870,37 @@ void OverlayScrollbarSetInfo(OverlayScrollbar* sb, const SCROLLINFO* si, bool re
     }
 
     if (redraw && changed) {
+        // Scroll moved: re-reveal the thin smart bar if auto-hidden, repaint the
+        // thumb, and keep the auto-hide timer alive while scrolling continues
+        // (wheel / keyboard / smooth-scroll ticks — not only mouse motion).
         if (IsVisible(sb)) {
             PaintScrollbar(sb);
+            if (sb->state == State::SmartThin) {
+                RestartSmartThinAutoHide(sb);
+            }
         } else {
             ShowScrollbarWindow(sb, false);
         }
+    }
+}
+
+// Show the thin smart overlay after scroll activity (mouse wheel, keys, etc.).
+// Unlike mouse-move tracking, this does not require cursor motion (#5859).
+void OverlayScrollbarNotifyScroll(OverlayScrollbar* sb) {
+    if (!sb || !IsActive(sb) || sb->isDragging) {
+        return;
+    }
+    if (sb->mode == OverlayScrollbar::Mode::Thick) {
+        return;
+    }
+    // Leave thick-from-proximity alone; only (re)show the thin indicator.
+    if (IsThick(sb)) {
+        return;
+    }
+    if (sb->state != State::SmartThin) {
+        ShowScrollbarWindow(sb, false);
+    } else {
+        RestartSmartThinAutoHide(sb);
     }
 }
 
@@ -898,8 +928,7 @@ void OverlayScrollbarUpdatePos(OverlayScrollbar* sb) {
         return;
     }
 
-    RECT ownerRc;
-    GetWindowRect(sb->hwndOwner, &ownerRc);
+    Rect ownerRc = HwndWindowRect(sb->hwndOwner);
 
     int scrollW = ScaledWidth(sb, IsThick(sb));
     int x, y, w, h;
@@ -918,14 +947,14 @@ void OverlayScrollbarUpdatePos(OverlayScrollbar* sb) {
     }
 
     if (IsVert(sb)) {
-        x = ownerRc.right - scrollW;
-        y = ownerRc.top;
+        x = ownerRc.x + ownerRc.dx - scrollW;
+        y = ownerRc.y;
         w = scrollW;
-        h = ownerRc.bottom - ownerRc.top - siblingInset;
+        h = ownerRc.dy - siblingInset;
     } else {
-        x = ownerRc.left;
-        y = ownerRc.bottom - scrollW;
-        w = ownerRc.right - ownerRc.left - siblingInset;
+        x = ownerRc.x;
+        y = ownerRc.y + ownerRc.dy - scrollW;
+        w = ownerRc.dx - siblingInset;
         h = scrollW;
     }
 
@@ -941,7 +970,7 @@ void OverlayScrollbarUpdatePos(OverlayScrollbar* sb) {
     // re-show the window if the state says it should be visible
     // (RelayoutFrame hides overlay scrollbar windows with SW_HIDE
     // to prevent them from appearing at stale positions)
-    if (IsVisible(sb) && !IsWindowVisible(sb->hwnd)) {
+    if (IsVisible(sb) && !HwndIsVisible(sb->hwnd)) {
         swpFlags |= SWP_SHOWWINDOW;
     }
     // When not visible, don't change Z-order — HWND_TOP on an owned popup
@@ -967,25 +996,28 @@ void OverlayScrollbarShow(OverlayScrollbar* sb, bool show) {
     if (!sb) {
         return;
     }
-    // skip if already in the desired visibility state
-    if (show && IsActive(sb) && IsWindowVisible(sb->hwnd)) {
-        return;
-    }
-    if (!show && !IsActive(sb)) {
-        return;
-    }
-    if (show) {
+    if (!show) {
         if (!IsActive(sb)) {
-            ShowScrollbarWindow(sb, false);
-        } else if (IsVisible(sb) && !IsWindowVisible(sb->hwnd)) {
-            // re-show if window was temporarily hidden (e.g. during relayout)
-            OverlayScrollbarUpdatePos(sb);
-            ShowWindow(sb->hwnd, SW_SHOWNOACTIVATE);
-            PaintScrollbar(sb);
+            return;
         }
-    } else {
         SetState(sb, State::Hidden);
+        return;
     }
+
+    // Already painted thin/thick — nothing to do. SmartInvisible still has an
+    // IsWindowVisible layered HWND (fully transparent), so do not treat that as
+    // shown: keyboard scroll / UpdateScrollbars must re-reveal it (#5850).
+    if (IsVisible(sb) && HwndIsVisible(sb->hwnd)) {
+        return;
+    }
+    if (!IsActive(sb) || sb->state == State::SmartInvisible) {
+        ShowScrollbarWindow(sb, false);
+        return;
+    }
+    // re-show if window was temporarily hidden (e.g. during relayout)
+    OverlayScrollbarUpdatePos(sb);
+    ShowWindow(sb->hwnd, SW_SHOWNOACTIVATE);
+    PaintScrollbar(sb);
 }
 
 void OverlayScrollbarSetMode(OverlayScrollbar* sb, OverlayScrollbar::Mode mode) {

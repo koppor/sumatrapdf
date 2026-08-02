@@ -2,7 +2,7 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/DirIter.h"
+#include "base/DirScan.h"
 #include "base/Dpi.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
@@ -60,6 +60,15 @@ struct NavFilesInFolderWnd : Wnd {
     ListBox* listBox = nullptr;
     Str currDir; // owned
 
+    // "n/m" shown after the path: n entries in currDir, m in the whole tree
+    // below it. m needs a full traversal, so it arrives from a background
+    // thread; countGen discards results for a directory we've navigated away
+    // from. countTotalPartial means the traversal hit kMaxTreeCount.
+    int countDirect = 0;
+    int countTotal = -1; // -1: still counting
+    bool countTotalPartial = false;
+    i64 countGen = 0; // from gNavCountGen, so it can't collide with a previous window's
+
     bool PreTranslateMessage(MSG&) override;
     LRESULT WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) override;
 
@@ -69,10 +78,14 @@ struct NavFilesInFolderWnd : Wnd {
     void OnListDoubleClick();
     void GoUp();
     void DrawListBoxItem(ListBox::DrawItemEvent* ev);
+    void UpdateDirLabel();
 };
 
 static NavFilesInFolderWnd* gNavFilesWnd = nullptr;
 static HWND gHwndToActivateOnNavClose = nullptr;
+// never reset, so an in-flight count from a closed window can't be mistaken
+// for one belonging to a window opened afterwards
+static i64 gNavCountGen = 0;
 
 NavFilesInFolderWnd::~NavFilesInFolderWnd() {
     str::Free(currDir);
@@ -105,6 +118,82 @@ static void ScheduleDeleteNavFilesWnd() {
 static bool CanOpenFile(Str path) {
     FileType kind = GuessFileTypeFromName(path);
     return IsSupportedFileType(kind, true) || DocIsSupportedFileType(kind);
+}
+
+// Traversing a big tree (or a network drive) can take a long time and the user
+// can browse anywhere, including a drive root, so stop counting after this many
+// entries and show the total as "n+".
+constexpr int kMaxTreeCount = 50 * 1000;
+
+// true for entries the listing shows: sub-directories and openable files,
+// skipping hidden ones. Keep in sync with FillEntriesForDir().
+static bool IsCountedEntry(DirIterEntry* de, bool* isDirOut) {
+    *isDirOut = false;
+    if (de->fd->dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) {
+        return false;
+    }
+    if (IsDirectory(de)) {
+        *isDirOut = true;
+        return true;
+    }
+    return CanOpenFile(de->name);
+}
+
+// number of entries under dir, including all sub-directories. Uses an explicit
+// worklist rather than DirIter's recurse so hidden directories are pruned the
+// same way the listing prunes them.
+static int CountEntriesInTree(Str dir, bool* partialOut) {
+    *partialOut = false;
+    int n = 0;
+    StrVec dirs;
+    dirs.Append(dir);
+    // dirs grows while we iterate: index-based so appends can't invalidate it
+    for (int i = 0; i < len(dirs); i++) {
+        DirIter di{dirs[i]};
+        di.includeFiles = true;
+        di.includeDirs = true;
+        for (DirIterEntry* de : di) {
+            bool isDir = false;
+            if (!IsCountedEntry(de, &isDir)) {
+                continue;
+            }
+            n++;
+            if (n >= kMaxTreeCount) {
+                *partialOut = true;
+                return n;
+            }
+            if (isDir) {
+                dirs.Append(de->filePath);
+            }
+        }
+    }
+    return n;
+}
+
+struct CountTreeData {
+    Str dir; // owned
+    i64 gen = 0;
+    int total = 0;
+    bool partial = false;
+};
+
+static void CountTreeFinished(CountTreeData* d) {
+    NavFilesInFolderWnd* wnd = gNavFilesWnd;
+    // ignore if the window is gone or the user already navigated elsewhere
+    if (wnd && wnd->countGen == d->gen) {
+        wnd->countTotal = d->total;
+        wnd->countTotalPartial = d->partial;
+        wnd->UpdateDirLabel();
+    }
+    str::Free(d->dir);
+    delete d;
+}
+
+static void CountTreeThread(CountTreeData* d) {
+    d->total = CountEntriesInTree(d->dir, &d->partial);
+    auto fn = MkFunc0<CountTreeData>(CountTreeFinished, d);
+    uitask::Post(fn, "CountTreeFinished");
+    DestroyTempArena();
 }
 
 // dirs first, then files, each sorted naturally by name
@@ -169,7 +258,7 @@ static void FillEntriesForDir(ListBoxModelNav* m, Str dir) {
 
 // display name for entry i resolved to a full path in currDir
 static TempStr NavEntryPathTemp(NavFilesInFolderWnd* wnd, NavFileEntry& e) {
-    if (str::Eq(e.name, "..")) {
+    if (str::Eq(e.name, StrL(".."))) {
         return path::GetDirTemp(wnd->currDir);
     }
     Str name = e.name;
@@ -179,9 +268,89 @@ static TempStr NavEntryPathTemp(NavFilesInFolderWnd* wnd, NavFileEntry& e) {
     return path::JoinTemp(wnd->currDir, name);
 }
 
+// entry display name without a trailing path separator (dirs use "name\\")
+static Str NavEntryBaseName(const NavFileEntry& e) {
+    Str name = e.name;
+    if (e.isDir && name.len > 0 && path::IsSep(name.s[name.len - 1])) {
+        return Str(name.s, name.len - 1);
+    }
+    return name;
+}
+
+// index of selectPath in the listing, or 0 if not found / empty
+static int FindEntryIndex(NavFilesInFolderWnd* wnd, ListBoxModelNav* m, Str selectPath) {
+    if (!m || len(selectPath) == 0) {
+        return 0;
+    }
+    for (int i = 0; i < len(m->entries); i++) {
+        TempStr path = NavEntryPathTemp(wnd, m->entries[i]);
+        if (str::EqI(path, selectPath) || path::IsSame(path, selectPath)) {
+            return i;
+        }
+    }
+    // basename fallback (path form differences: long-path prefix, slash style, etc.)
+    TempStr base = path::GetBaseNameTemp(selectPath);
+    for (int i = 0; i < len(m->entries); i++) {
+        if (str::EqI(NavEntryBaseName(m->entries[i]), base)) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+// select idx and scroll so it is visible (centered when possible)
+static void SelectAndEnsureVisible(ListBox* lb, int idx) {
+    if (!lb || !lb->hwnd || idx < 0) {
+        return;
+    }
+    int n = lb->GetCount();
+    if (n <= 0) {
+        return;
+    }
+    if (idx >= n) {
+        idx = n - 1;
+    }
+    lb->SetCurrentSelection(idx);
+
+    int itemH = lb->GetItemHeight(0);
+    if (itemH <= 0) {
+        LbSetTopIndex(lb->hwnd, idx);
+        return;
+    }
+    Rect client = HwndClientRect(lb->hwnd);
+    int visible = client.dy / itemH;
+    if (visible < 1) {
+        visible = 1;
+    }
+    int top = idx - visible / 2;
+    if (top < 0) {
+        top = 0;
+    }
+    int maxTop = n - visible;
+    if (maxTop < 0) {
+        maxTop = 0;
+    }
+    if (top > maxTop) {
+        top = maxTop;
+    }
+    LbSetTopIndex(lb->hwnd, top);
+}
+
+// "<path>  n/m": n entries here, m in this directory and its sub-directories
+void NavFilesInFolderWnd::UpdateDirLabel() {
+    TempStr total;
+    if (countTotal < 0) {
+        total = str::DupTemp("…"); // still counting the tree
+    } else if (countTotalPartial) {
+        total = fmt("%d+", countTotal);
+    } else {
+        total = fmt("%d", countTotal);
+    }
+    dirLabel->SetText(fmt("%s  %d/%s", currDir, countDirect, total));
+}
+
 void NavFilesInFolderWnd::SetDir(Str dir, Str selectPath) {
     str::ReplaceWithCopy(&currDir, dir);
-    dirLabel->SetText(currDir);
 
     auto m = (ListBoxModelNav*)listBox->model;
     if (!m) {
@@ -190,18 +359,26 @@ void NavFilesInFolderWnd::SetDir(Str dir, Str selectPath) {
     FillEntriesForDir(m, currDir);
     listBox->SetModel(m);
 
-    int selIdx = 0;
-    if (len(selectPath) > 0) {
-        for (int i = 0; i < len(m->entries); i++) {
-            TempStr path = NavEntryPathTemp(this, m->entries[i]);
-            if (path::IsSame(path, selectPath)) {
-                selIdx = i;
-                break;
-            }
-        }
+    // ".." is navigation, not an entry of this directory
+    countDirect = m->ItemsCount();
+    if (countDirect > 0 && str::Eq(m->entries[0].name, StrL(".."))) {
+        countDirect--;
     }
+    countTotal = -1;
+    countTotalPartial = false;
+    countGen = ++gNavCountGen;
+    UpdateDirLabel();
+    {
+        auto d = new CountTreeData;
+        d->dir = str::Dup(currDir);
+        d->gen = countGen;
+        auto fn = MkFunc0<CountTreeData>(CountTreeThread, d);
+        RunAsync(fn, "CountTreeThread");
+    }
+
     if (m->ItemsCount() > 0) {
-        listBox->SetCurrentSelection(selIdx);
+        int selIdx = FindEntryIndex(this, m, selectPath);
+        SelectAndEnsureVisible(listBox, selIdx);
     }
     HwndScheduleRepaint(listBox->hwnd);
 }
@@ -223,7 +400,7 @@ void NavFilesInFolderWnd::ExecuteCurrentSelection() {
         return;
     }
     NavFileEntry& e = m->entries[idx];
-    if (str::Eq(e.name, "..")) {
+    if (str::Eq(e.name, StrL(".."))) {
         GoUp();
         return;
     }
@@ -242,6 +419,7 @@ void NavFilesInFolderWnd::ExecuteCurrentSelection() {
     if (tab && !MaybeSaveAnnotations(tab)) {
         return;
     }
+    DismissNextFileScrollHint(mainWin);
     LoadArgs args(path, mainWin);
     args.forceReuse = true;
     StartLoadDocument(&args);
@@ -253,12 +431,21 @@ void NavFilesInFolderWnd::OnListDoubleClick() {
 }
 
 bool NavFilesInFolderWnd::PreTranslateMessage(MSG& msg) {
-    if (msg.message != WM_KEYDOWN) {
+    // only keys aimed at this window or its children
+    if (hwnd && msg.hwnd != hwnd && !IsChild(hwnd, msg.hwnd)) {
         return false;
     }
-    if (msg.wParam == VK_ESCAPE) {
+    bool isKey = (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN);
+    bool isEscChar = (msg.message == WM_CHAR && msg.wParam == VK_ESCAPE);
+    if (!isKey && !isEscChar) {
+        return false;
+    }
+    if (msg.wParam == VK_ESCAPE || isEscChar) {
         ScheduleDeleteNavFilesWnd();
         return true;
+    }
+    if (!isKey) {
+        return false;
     }
     if (msg.wParam == VK_RETURN) {
         ExecuteCurrentSelection();
@@ -276,6 +463,11 @@ LRESULT NavFilesInFolderWnd::WndProc(HWND hwndIn, UINT msg, WPARAM wp, LPARAM lp
         ScheduleDeleteNavFilesWnd();
         return 0;
     }
+    // Esc when this popup (not a child) has focus
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
+        ScheduleDeleteNavFilesWnd();
+        return 0;
+    }
     return WndProcDefault(hwndIn, msg, wp, lp);
 }
 
@@ -287,7 +479,7 @@ void NavFilesInFolderWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
     }
 
     HDC hdc = ev->hdc;
-    RECT rc = ev->itemRect;
+    Rect rc = ev->itemRect;
     NavFileEntry& e = m->entries[ev->itemIndex];
 
     COLORREF colBg = IsSpecialColor(lb->bgColor) ? GetSysColor(COLOR_WINDOW) : lb->bgColor;
@@ -297,7 +489,7 @@ void NavFilesInFolderWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
     }
 
     SetBkColor(hdc, colBg);
-    ExtTextOutW(hdc, 0, 0, ETO_OPAQUE, &rc, nullptr, 0, nullptr);
+    HdcFillRectWithBkColor(hdc, rc);
 
     bool isRtl = HwndIsRtl(lb->hwnd);
     if (isRtl) {
@@ -313,24 +505,23 @@ void NavFilesInFolderWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
     }
 
     int padX = DpiScale(lb->hwnd, 4);
-    rc.left += padX;
-    rc.right -= padX;
+    rc.x += padX;
+    rc.dx -= 2 * padX;
 
     // human readable file size on the right (files only)
-    RECT rcText = rc;
+    Rect rcText = rc;
     TempWStr rightW = nullptr;
     int rightDx = 0;
     if (!e.isDir && e.size > 0) {
         TempStr sizeStr = str::FormatSizeShortTemp(e.size);
         rightW = ToWStrTemp(sizeStr);
-        SIZE szRight{};
-        GetTextExtentPoint32W(hdc, rightW.s, len(rightW), &szRight);
-        rightDx = szRight.cx;
+        rightDx = HdcGetTextExtentPoint32(hdc, sizeStr).dx;
         int gap = DpiScale(lb->hwnd, 8);
         if (isRtl) {
-            rcText.left += rightDx + gap;
+            rcText.x += rightDx + gap;
+            rcText.dx -= rightDx + gap;
         } else {
-            rcText.right -= rightDx + gap;
+            rcText.dx -= rightDx + gap;
         }
     }
 
@@ -338,21 +529,22 @@ void NavFilesInFolderWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
         uint drawFmt = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS;
         drawFmt |= isRtl ? (DT_RIGHT | DT_RTLREADING) : DT_LEFT;
         TempWStr nameW = ToWStrTemp(e.name);
-        DrawTextW(hdc, nameW.s, -1, &rcText, drawFmt);
+        HdcDrawText(hdc, nameW, rcText, drawFmt);
     }
 
     if (rightW) {
-        RECT rcRight = rc;
+        Rect rcRight = rc;
         uint drawFmt = DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
         if (isRtl) {
-            rcRight.right = rc.left + rightDx;
+            rcRight.dx = rightDx;
             drawFmt |= DT_LEFT | DT_RTLREADING;
         } else {
-            rcRight.left = rc.right - rightDx;
+            rcRight.x = rc.x + rc.dx - rightDx;
+            rcRight.dx = rightDx;
             drawFmt |= DT_RIGHT;
         }
         SetTextColor(hdc, AccentColor(colText, 80));
-        DrawTextW(hdc, rightW.s, -1, &rcRight, drawFmt);
+        HdcDrawText(hdc, rightW, rcRight, drawFmt);
         SetTextColor(hdc, colText);
     }
 
@@ -362,8 +554,8 @@ void NavFilesInFolderWnd::DrawListBoxItem(ListBox::DrawItemEvent* ev) {
 }
 
 static void PositionNavFilesWnd(HWND hwnd, HWND hwndRelative) {
-    Rect rRelative = WindowRect(hwndRelative);
-    Rect r = WindowRect(hwnd);
+    Rect rRelative = HwndWindowRect(hwndRelative);
+    Rect r = HwndWindowRect(hwnd);
     int x = rRelative.x + (rRelative.dx / 2) - (r.dx / 2);
     int y = rRelative.y + (rRelative.dy / 2) - (r.dy / 2);
     Rect r2 = ShiftRectToWorkArea({x, y, r.dx, r.dy}, hwndRelative, true);
@@ -460,8 +652,11 @@ bool NavFilesInFolderWnd::Create(MainWindow* mainWin) {
     Str filePath = tab ? tab->filePath : Str{};
     TempStr dir = path::GetDirTemp(filePath);
     SetDir(dir, filePath);
+    // remember selection: layout below changes listbox size, so LB_SETCURSEL
+    // during SetDir may not leave the item visible in the final viewport
+    int selIdx = listBox->GetCurrentSelection();
 
-    auto rc = ClientRect(mainWin->hwndFrame);
+    auto rc = HwndClientRect(mainWin->hwndFrame);
     int dy = rc.dy - 72;
     if (dy < 480) {
         dy = 480;
@@ -469,6 +664,10 @@ bool NavFilesInFolderWnd::Create(MainWindow* mainWin) {
     int dx = limitValue(rc.dx - 256, 480, 720);
     LayoutAndSizeToContent(layout, dx, dy, hwnd);
     PositionNavFilesWnd(hwnd, mainWin->hwndFrame);
+
+    if (selIdx >= 0) {
+        SelectAndEnsureVisible(listBox, selIdx);
+    }
 
     SetIsVisible(true);
     HwndSetFocus(listBox->hwnd);
@@ -478,7 +677,11 @@ bool NavFilesInFolderWnd::Create(MainWindow* mainWin) {
 void ShowNavFilesInFolder(MainWindow* win) {
     if (gNavFilesWnd) {
         if (gNavFilesWnd->hwnd && IsWindow(gNavFilesWnd->hwnd)) {
-            HwndSetFocus(gNavFilesWnd->hwnd);
+            if (gNavFilesWnd->listBox) {
+                HwndSetFocus(gNavFilesWnd->listBox->hwnd);
+            } else {
+                HwndSetFocus(gNavFilesWnd->hwnd);
+            }
             return;
         }
         ScheduleDeleteNavFilesWnd();
@@ -492,11 +695,14 @@ void ShowNavFilesInFolder(MainWindow* win) {
     wnd->onClose = MkFunc1Void<Wnd::CloseEvent*>(OnNavFilesWndClose);
     wnd->onDestroy = MkFunc1Void<Wnd::DestroyEvent*>(OnNavFilesWndDestroy);
     wnd->font = GetAppBiggerFont(win->hwndFrame);
+    // set before Create so Esc during Create can dismiss
+    gNavFilesWnd = wnd;
+    gHwndToActivateOnNavClose = win->hwndFrame;
     bool ok = wnd->Create(win);
     if (!ok) {
+        gNavFilesWnd = nullptr;
+        gHwndToActivateOnNavClose = nullptr;
         delete wnd;
         return;
     }
-    gNavFilesWnd = wnd;
-    gHwndToActivateOnNavClose = win->hwndFrame;
 }

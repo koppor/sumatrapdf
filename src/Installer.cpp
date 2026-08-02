@@ -9,6 +9,16 @@
 #include "base/Timer.h"
 #include "base/LzmaSimpleArchive.h"
 
+// Restart Manager is in the MSVC Windows SDK; mingw-w64 (Wine CI) has no
+// RestartManager.h / Rstrtmgr.lib. Holders listing is best-effort UI only.
+#if defined(_MSC_VER)
+#include <RestartManager.h>
+#pragma comment(lib, "Rstrtmgr.lib")
+#define HAS_RESTART_MANAGER 1
+#else
+#define HAS_RESTART_MANAGER 0
+#endif
+
 #include "wingui/UIModels.h"
 #include "wingui/Layout.h"
 #include "wingui/WinGui.h"
@@ -100,7 +110,7 @@ Str GetInstallerLogPath() {
     return path::Join(dir, kLogFileName);
 }
 
-// Write a file during install/upgrade. libmupdf.dll is often locked by
+// Write a file during install/upgrade. libsumatrapdf.dll is often locked by
 // SumatraPDF.exe, dllhost/prevhost (preview), or PdfFilter; a plain
 // CreateFile(CREATE_ALWAYS) then fails and leaves the old DLL (size mismatch
 // with the new exe). Retry: direct write, temp+rename, kill holders, delete.
@@ -208,60 +218,538 @@ static bool WriteInstallerFileRobust(Str path, Str data) {
     return false;
 }
 
-// If installDir already has libmupdf.dll (upgrade), rename it out of the way
-// first. If rename fails the file is locked (explorer preview, filter, etc.)
-// — abort before we copy a new exe that won't match the old DLL.
-static bool MoveAsideExistingLibmupdf(Str installDir) {
-    TempStr dllPath = path::JoinTemp(installDir, StrL("libmupdf.dll"));
-    if (!file::Exists(dllPath)) {
-        logf("MoveAsideExistingLibmupdf: no existing '%s'\n", dllPath);
-        return true;
-    }
-    TempStr copyPath = path::JoinTemp(installDir, StrL("libmupdf.dll.copy"));
-    i64 existingSize = file::GetSize(dllPath);
-    logf("MoveAsideExistingLibmupdf: '%s' (size=%lld) -> '%s'\n", dllPath, (long long)existingSize, copyPath);
+// --- Rename locked install files aside before extract ----------------------------
+// Upgrades rename libsumatrapdf.dll / PdfFilter.dll / PdfPreview.dll to *.copy so we
+// can write new files even when the old DLL is still mapped. If rename stays
+// blocked, show a dialog that retries every 3s (or silent retries for ~60s).
 
-    DWORD attrs = file::GetAttributes(dllPath);
-    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY)) {
-        logf("  clearing READONLY on existing dll\n");
-        file::SetAttributes(dllPath, attrs & ~FILE_ATTRIBUTE_READONLY);
-    }
+static Str kInstallDocsURL() {
+    return StrL("https://www.sumatrapdfreader.org/docs/Installation");
+}
 
-    if (file::Exists(copyPath)) {
-        logf("  removing previous '%s'\n", copyPath);
-        if (!file::Delete(copyPath)) {
-            logf("  failed to delete previous .copy\n");
-            LogLastError();
-            // try replace via MoveFileEx below
+// Wait until a service is stopped (or timeout / query failure).
+static bool WaitServiceStopped(SC_HANDLE svc, Str name, int maxWaitMs = 15000) {
+    SERVICE_STATUS st{};
+    int waited = 0;
+    while (waited < maxWaitMs) {
+        if (!QueryServiceStatus(svc, &st)) {
+            logf("WaitServiceStopped('%s'): QueryServiceStatus failed err=%u\n", name, GetLastError());
+            return false;
         }
-    }
-
-    // free locks before rename
-    int killed = KillProcessesWithModule(dllPath, true);
-    logf("  KillProcessesWithModule killed=%d\n", killed);
-
-    for (int attempt = 1; attempt <= 3; attempt++) {
-        logf("  rename attempt %d/3\n", attempt);
-        // Prefer atomic replace if .copy still exists
-        if (MoveFileExW(CWStrTemp(dllPath), CWStrTemp(copyPath), MOVEFILE_REPLACE_EXISTING)) {
-            logf("MoveAsideExistingLibmupdf: rename ok\n");
+        if (st.dwCurrentState == SERVICE_STOPPED) {
             return true;
         }
-        DWORD err = GetLastError();
-        logf("  MoveFileEx failed lastError=%u\n", err);
-        LogLastError(err);
-        KillProcessesWithModule(dllPath, true);
-        if (attempt < 3) {
-            Sleep(250u * (DWORD)attempt);
+        Sleep(500);
+        waited += 500;
+    }
+    logf("WaitServiceStopped('%s'): timed out (state=%u)\n", name, st.dwCurrentState);
+    return false;
+}
+
+// Stop a service and its active dependents first (depth-limited).
+// Fixes ERROR_DEPENDENT_SERVICES_RUNNING (1051) when stopping WSearch alone.
+static void StopServiceAndDependents(SC_HANDLE scm, Str serviceName, int depth = 0) {
+    if (depth > 8 || !scm || !serviceName) {
+        return;
+    }
+    SC_HANDLE svc =
+        OpenServiceW(scm, CWStrTemp(serviceName), SERVICE_STOP | SERVICE_QUERY_STATUS | SERVICE_ENUMERATE_DEPENDENTS);
+    if (!svc) {
+        logf("StopServiceAndDependents('%s'): OpenService failed err=%u\n", serviceName, GetLastError());
+        return;
+    }
+    SERVICE_STATUS st{};
+    if (QueryServiceStatus(svc, &st) && st.dwCurrentState == SERVICE_STOPPED) {
+        if (depth == 0) {
+            logf("StopServiceAndDependents('%s'): already stopped\n", serviceName);
         }
+        CloseServiceHandle(svc);
+        return;
     }
 
-    logf("MoveAsideExistingLibmupdf: FAILED — file in use\n");
-    NotifyFailed(
-        _TRA("Could not update libmupdf.dll because it is in use by another program "
-             "(SumatraPDF, Windows Explorer preview, or search).\n"
-             "Close those programs and try again."));
+    // Active dependents must be stopped before this service (MSDN EnumDependentServices).
+    DWORD bytesNeeded = 0;
+    DWORD nServices = 0;
+    EnumDependentServicesW(svc, SERVICE_ACTIVE, nullptr, 0, &bytesNeeded, &nServices);
+    DWORD enumErr = GetLastError();
+    if (enumErr == ERROR_MORE_DATA && bytesNeeded > 0) {
+        auto* deps = (ENUM_SERVICE_STATUSW*)malloc(bytesNeeded);
+        if (deps && EnumDependentServicesW(svc, SERVICE_ACTIVE, deps, bytesNeeded, &bytesNeeded, &nServices)) {
+            logf("StopServiceAndDependents('%s'): %u active dependent(s)\n", serviceName, nServices);
+            // EnumDependentServices returns dependents in reverse dependency order;
+            // still stop each recursively so grandchildren are covered.
+            for (DWORD i = 0; i < nServices; i++) {
+                TempStr depName = ToUtf8Temp(deps[i].lpServiceName);
+                logf("  dependent: '%s' (display '%s')\n", depName, ToUtf8Temp(deps[i].lpDisplayName));
+                StopServiceAndDependents(scm, depName, depth + 1);
+            }
+        } else if (deps) {
+            logf("StopServiceAndDependents('%s'): EnumDependentServices failed err=%u\n", serviceName, GetLastError());
+        }
+        free(deps);
+    }
+
+    if (!ControlService(svc, SERVICE_CONTROL_STOP, &st)) {
+        DWORD err = GetLastError();
+        if (err != ERROR_SERVICE_NOT_ACTIVE) {
+            logf("StopServiceAndDependents('%s'): ControlService(STOP) failed err=%u\n", serviceName, err);
+        }
+    } else {
+        logf("StopServiceAndDependents('%s'): stop requested\n", serviceName);
+        if (WaitServiceStopped(svc, serviceName)) {
+            logf("StopServiceAndDependents('%s'): stopped\n", serviceName);
+        }
+    }
+    CloseServiceHandle(svc);
+}
+
+// Stop Windows Search (and dependents) so SearchIndexer / SearchFilterHost
+// release PdfFilter.dll. Best-effort: fails quietly if absent or denied.
+static void StopWindowsSearchService() {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) {
+        logf("StopWindowsSearchService: OpenSCManager failed err=%u\n", GetLastError());
+        return;
+    }
+    StopServiceAndDependents(scm, StrL("WSearch"), 0);
+    CloseServiceHandle(scm);
+}
+
+// Restart Manager: list processes that hold a path open (for "file in use" UI).
+// Returns a multi-line string "name (pid N)\n..." or empty if none / RM fails.
+static TempStr ProcessesHoldingFileTemp(Str path) {
+#if !HAS_RESTART_MANAGER
+    (void)path;
+    return {};
+#else
+    if (!path) {
+        return {};
+    }
+    DWORD session = 0;
+    WCHAR sessionKey[CCH_RM_SESSION_KEY + 1] = {};
+    DWORD err = RmStartSession(&session, 0, sessionKey);
+    if (err != ERROR_SUCCESS) {
+        logf("ProcessesHoldingFile: RmStartSession failed err=%u\n", err);
+        return {};
+    }
+
+    TempWStr pathW = ToWStrTemp(path);
+    LPCWSTR files[1] = {pathW.s};
+    err = RmRegisterResources(session, 1, files, 0, nullptr, 0, nullptr);
+    if (err != ERROR_SUCCESS) {
+        logf("ProcessesHoldingFile: RmRegisterResources failed err=%u path='%s'\n", err, path);
+        RmEndSession(session);
+        return {};
+    }
+
+    UINT nNeeded = 0;
+    UINT nInfo = 0;
+    DWORD reason = 0;
+    err = RmGetList(session, &nNeeded, &nInfo, nullptr, &reason);
+    if (err != ERROR_MORE_DATA && err != ERROR_SUCCESS) {
+        logf("ProcessesHoldingFile: RmGetList (size) failed err=%u\n", err);
+        RmEndSession(session);
+        return {};
+    }
+    if (nNeeded == 0) {
+        logf("ProcessesHoldingFile: no holders for '%s'\n", path);
+        RmEndSession(session);
+        return {};
+    }
+
+    size_t bytes = sizeof(RM_PROCESS_INFO) * nNeeded;
+    auto* infos = (RM_PROCESS_INFO*)malloc(bytes);
+    if (!infos) {
+        RmEndSession(session);
+        return {};
+    }
+    memset(infos, 0, bytes);
+    nInfo = nNeeded;
+    err = RmGetList(session, &nNeeded, &nInfo, infos, &reason);
+    if (err != ERROR_SUCCESS) {
+        logf("ProcessesHoldingFile: RmGetList failed err=%u\n", err);
+        free(infos);
+        RmEndSession(session);
+        return {};
+    }
+
+    str::Builder sb;
+    for (UINT i = 0; i < nInfo; i++) {
+        TempStr app = ToUtf8Temp(infos[i].strAppName);
+        DWORD pid = infos[i].Process.dwProcessId;
+        // Prefer strAppName; fall back if empty
+        if (len(app) == 0) {
+            app = StrL("(unknown)");
+        }
+        logf("ProcessesHoldingFile: holder pid=%u app='%s' type=%u\n", pid, app, (unsigned)infos[i].ApplicationType);
+        if (len(sb) > 0) {
+            sb.Append("\n");
+        }
+        sb.Append(fmt("• %s (pid %u)", app, pid));
+    }
+    free(infos);
+    RmEndSession(session);
+    if (len(sb) == 0) {
+        return {};
+    }
+    return str::DupTemp(ToStr(sb));
+#endif
+}
+
+static void StartWindowsSearchService() {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) {
+        return;
+    }
+    SC_HANDLE svc = OpenServiceW(scm, L"WSearch", SERVICE_START | SERVICE_QUERY_STATUS);
+    if (!svc) {
+        CloseServiceHandle(scm);
+        return;
+    }
+    SERVICE_STATUS st{};
+    if (QueryServiceStatus(svc, &st) && st.dwCurrentState == SERVICE_RUNNING) {
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        return;
+    }
+    if (StartServiceW(svc, 0, nullptr)) {
+        log("StartWindowsSearchService: start requested\n");
+    } else {
+        DWORD err = GetLastError();
+        if (err != ERROR_SERVICE_ALREADY_RUNNING) {
+            logf("StartWindowsSearchService: StartService failed err=%u\n", err);
+        }
+    }
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+}
+
+// Last MoveFileEx failure for move-aside UI / NotifyFailed wording.
+static DWORD gLastMoveAsideError = 0;
+
+// One rename attempt: clear RO, delete stale .copy, kill holders, MoveFileEx.
+static bool TryRenameAsideOnce(Str path, Str copyPath) {
+    if (!file::Exists(path)) {
+        return true;
+    }
+    DWORD attrs = file::GetAttributes(path);
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY)) {
+        file::SetAttributes(path, attrs & ~FILE_ATTRIBUTE_READONLY);
+    }
+    if (file::Exists(copyPath)) {
+        file::Delete(copyPath);
+    }
+    KillProcessesWithModule(path, true);
+    if (MoveFileExW(CWStrTemp(path), CWStrTemp(copyPath), MOVEFILE_REPLACE_EXISTING)) {
+        logf("TryRenameAsideOnce: ok '%s' -> '%s'\n", path, copyPath);
+        gLastMoveAsideError = 0;
+        return true;
+    }
+    DWORD err = GetLastError();
+    gLastMoveAsideError = err;
+    logf("TryRenameAsideOnce: MoveFileEx failed for '%s' lastError=%u\n", path, err);
+    LogLastError(err);
     return false;
+}
+
+struct MoveAsideDlgCtx {
+    Str path;
+    Str copyPath;
+    Str fileName;
+    bool success = false;
+    bool aborted = false;
+    DWORD lastTryTick = 0;
+};
+
+// ACCESS_DENIED with no process holders → permissions/UAC, not "file in use".
+static bool MoveAsideLooksLikeAccessDenied(Str path) {
+    if (gLastMoveAsideError != ERROR_ACCESS_DENIED) {
+        return false;
+    }
+    TempStr holders = ProcessesHoldingFileTemp(path);
+    return !holders;
+}
+
+// Dialog body: prefer live Restart Manager holders; ACCESS_DENIED vs file-in-use.
+static TempStr FormatMoveAsideDialogContentTemp(Str fileName, Str path) {
+    TempStr holders = ProcessesHoldingFileTemp(path);
+    if (holders) {
+        return fmt(_TRA("Could not update %s because another program still has the file open.\n\n"
+                        "Programs currently using this file:\n"
+                        "%s\n\n"
+                        "What to try:\n"
+                        "• Close the programs listed above\n"
+                        "• Close Explorer windows that show a PDF preview pane\n"
+                        "• Stop the \"Windows Search\" service temporarily (services.msc)\n\n"
+                        "The installer keeps retrying every few seconds. Click Abort to cancel.\n\n"
+                        "More help: <a href=\"%s\">Installation documentation</a>")
+                       .s,
+                   fileName, holders, kInstallDocsURL());
+    }
+    if (gLastMoveAsideError == ERROR_ACCESS_DENIED) {
+        return fmt(_TRA("Could not update %s due to insufficient permissions.\n\n"
+                        "The install folder is protected (for example Program Files) or access was denied.\n\n"
+                        "What to try:\n"
+                        "• Run the installer again and accept the administrator (UAC) prompt\n"
+                        "• Or install to a folder your account can write to (Options)\n"
+                        "• Temporarily disable Controlled Folder Access / antivirus blocking\n\n"
+                        "The installer keeps retrying every few seconds. Click Abort to cancel.\n\n"
+                        "More help: <a href=\"%s\">Installation documentation</a>")
+                       .s,
+                   fileName, kInstallDocsURL());
+    }
+    return fmt(_TRA("Could not update %s because another program still has the file open.\n\n"
+                    "Common causes:\n"
+                    "• Windows Search Indexer (loads PdfFilter.dll for PDF search)\n"
+                    "• File Explorer PDF preview (loads PdfPreview.dll / libsumatrapdf.dll)\n"
+                    "• Another SumatraPDF window or PDF application\n\n"
+                    "What to try:\n"
+                    "• Close Explorer windows that show a PDF preview pane\n"
+                    "• Stop the \"Windows Search\" service temporarily (services.msc)\n"
+                    "• Close all SumatraPDF and other PDF apps\n\n"
+                    "The installer keeps retrying every few seconds. Click Abort to cancel.\n\n"
+                    "More help: <a href=\"%s\">Installation documentation</a>")
+                   .s,
+               fileName, kInstallDocsURL());
+}
+
+static void NotifyMoveAsideFailed(Str fileName, Str path, bool userAborted) {
+    if (MoveAsideLooksLikeAccessDenied(path)) {
+        if (userAborted) {
+            NotifyFailed(fmt(_TRA("Installation aborted: could not update %s (access denied; try running as "
+                                  "administrator).")
+                                 .s,
+                             fileName));
+        } else {
+            NotifyFailed(fmt(_TRA("Could not update %s: access denied. Run the installer as administrator, "
+                                  "or choose a folder you can write to. "
+                                  "See https://www.sumatrapdfreader.org/docs/Installation")
+                                 .s,
+                             fileName));
+        }
+        return;
+    }
+    if (userAborted) {
+        NotifyFailed(fmt(_TRA("Installation aborted: could not update %s (file in use).").s, fileName));
+    } else {
+        NotifyFailed(fmt(_TRA("Could not update %s because it is in use by another program. "
+                              "Stop Windows Search / close Explorer previews and try again. "
+                              "See https://www.sumatrapdfreader.org/docs/Installation")
+                             .s,
+                         fileName));
+    }
+}
+
+static HRESULT CALLBACK MoveAsideBlockedDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                                       LONG_PTR lpRefData) {
+    auto* ctx = (MoveAsideDlgCtx*)lpRefData;
+    switch (msg) {
+        case TDN_CREATED:
+            ctx->lastTryTick = GetTickCount();
+            break;
+        case TDN_TIMER: {
+            // Auto-retry rename every 3 seconds while the dialog is open.
+            DWORD now = GetTickCount();
+            if (now - ctx->lastTryTick >= 3000) {
+                ctx->lastTryTick = now;
+                logf("MoveAside dialog: retry rename '%s'\n", ctx->path);
+                // Search hosts often re-grab PdfFilter; stop again before retry.
+                if (str::EqI(ctx->fileName, StrL("PdfFilter.dll")) || str::EqI(ctx->fileName, StrL("PdfPreview.dll"))) {
+                    StopWindowsSearchService();
+                }
+                // Refresh holder list so the user sees who still has the file.
+                TempStr content = FormatMoveAsideDialogContentTemp(ctx->fileName, ctx->path);
+                SendMessageW(hwnd, TDM_UPDATE_ELEMENT_TEXT, TDE_CONTENT, (LPARAM)CWStrTemp(content));
+                if (TryRenameAsideOnce(ctx->path, ctx->copyPath)) {
+                    ctx->success = true;
+                    // Close dialog (IDCANCEL button); success is recorded in ctx.
+                    SendMessageW(hwnd, TDM_CLICK_BUTTON, IDCANCEL, 0);
+                }
+            }
+            return S_FALSE; // keep timer running
+        }
+        case TDN_HYPERLINK_CLICKED:
+            LaunchBrowser(ToUtf8Temp(WStr((wchar_t*)lParam)));
+            break;
+        case TDN_BUTTON_CLICKED:
+            if (ctx->success) {
+                return S_OK; // close after auto-success
+            }
+            if ((int)wParam == IDCANCEL) {
+                ctx->aborted = true;
+                return S_OK; // abort install
+            }
+            return S_FALSE;
+    }
+    return S_OK;
+}
+
+// Blocking dialog: retries rename every 3s until success or user aborts.
+// Returns true if renamed (or file gone), false if user aborted.
+static bool ShowMoveAsideBlockedDialog(Str path, Str copyPath, Str fileName) {
+    MoveAsideDlgCtx ctx{};
+    ctx.path = path;
+    ctx.copyPath = copyPath;
+    ctx.fileName = fileName;
+
+    TempStr content = FormatMoveAsideDialogContentTemp(fileName, path);
+
+    TASKDIALOG_BUTTON buttons[1];
+    buttons[0].nButtonID = IDCANCEL;
+    buttons[0].pszButtonText = CWStrTemp(_TRA("Abort installation"));
+
+    TASKDIALOGCONFIG cfg{};
+    DWORD flags = TDF_SIZE_TO_CONTENT | TDF_ENABLE_HYPERLINKS | TDF_CALLBACK_TIMER | TDF_ALLOW_DIALOG_CANCELLATION |
+                  TDF_POSITION_RELATIVE_TO_WINDOW;
+    if (trans::IsCurrLangRtl()) {
+        flags |= TDF_RTL_LAYOUT;
+    }
+    cfg.cbSize = sizeof(cfg);
+    cfg.hwndParent = gWnd ? gWnd->hwnd : nullptr;
+    cfg.pszWindowTitle = L"SumatraPDF";
+    cfg.pszMainInstruction = CWStrTemp(fmt(_TRA("Cannot update %s").s, fileName));
+    cfg.pszContent = CWStrTemp(content);
+    cfg.dwFlags = (TASKDIALOG_FLAGS)flags;
+    cfg.pfCallback = MoveAsideBlockedDialogCallback;
+    cfg.lpCallbackData = (LONG_PTR)&ctx;
+    cfg.pButtons = buttons;
+    cfg.cButtons = 1;
+    cfg.nDefaultButton = IDCANCEL;
+    cfg.pszMainIcon = TD_WARNING_ICON;
+
+    logf("ShowMoveAsideBlockedDialog: '%s'\n", path);
+    TaskDialogIndirect(&cfg, nullptr, nullptr, nullptr);
+    logf("ShowMoveAsideBlockedDialog: done success=%d aborted=%d\n", (int)ctx.success, (int)ctx.aborted);
+    return ctx.success;
+}
+
+// Rename path to path+".copy" so a new file can be written. Returns false only
+// if the user aborts (interactive) or silent retries are exhausted.
+static bool MoveAsideInstallFile(Str installDir, Str fileName, bool silent) {
+    TempStr path = path::JoinTemp(installDir, fileName);
+    if (!file::Exists(path)) {
+        logf("MoveAsideInstallFile: no existing '%s'\n", path);
+        return true;
+    }
+    TempStr copyPath = str::JoinTemp(path, ".copy");
+    i64 existingSize = file::GetSize(path);
+    logf("MoveAsideInstallFile: '%s' (size=%lld) -> '%s' silent=%d\n", path, (long long)existingSize, copyPath,
+         (int)silent);
+
+    // Quick attempts without UI
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        logf("  quick rename attempt %d/3\n", attempt);
+        if (str::EqI(fileName, StrL("PdfFilter.dll")) || str::EqI(fileName, StrL("PdfPreview.dll"))) {
+            StopWindowsSearchService();
+        }
+        if (TryRenameAsideOnce(path, copyPath)) {
+            return true;
+        }
+        KillProcessesWithModule(path, true);
+        Sleep(300u * (DWORD)attempt);
+    }
+
+    if (silent) {
+        // Silent install: retry every 3s for ~60s, then fail.
+        for (int i = 0; i < 20; i++) {
+            logf("  silent rename retry %d/20 after 3s\n", i + 1);
+            Sleep(3000);
+            if (str::EqI(fileName, StrL("PdfFilter.dll")) || str::EqI(fileName, StrL("PdfPreview.dll"))) {
+                StopWindowsSearchService();
+            }
+            if (TryRenameAsideOnce(path, copyPath)) {
+                return true;
+            }
+        }
+        logf("MoveAsideInstallFile: silent FAILED for '%s'\n", path);
+        NotifyMoveAsideFailed(fileName, path, false);
+        return false;
+    }
+
+    // Interactive: blocking dialog that retries every 3s until success or abort.
+    if (!ShowMoveAsideBlockedDialog(path, copyPath, fileName)) {
+        logf("MoveAsideInstallFile: user aborted for '%s'\n", path);
+        NotifyMoveAsideFailed(fileName, path, true);
+        return false;
+    }
+    return true;
+}
+
+// Through 3.6 the engine DLL was libmupdf.dll; 3.7+ ships libsumatrapdf.dll.
+// Best-effort only: a locked legacy file must not abort install — the new DLL
+// has a different name and can still be written. Prefer rename-aside so a
+// still-mapped module can unload later; fall back to delete when possible.
+static void MoveAsideOrDeleteLegacyLibmupdf(Str installDir) {
+    TempStr path = path::JoinTemp(installDir, StrL("libmupdf.dll"));
+    if (!file::Exists(path)) {
+        logf("MoveAsideOrDeleteLegacyLibmupdf: no legacy '%s'\n", path);
+        return;
+    }
+    logf("MoveAsideOrDeleteLegacyLibmupdf: found legacy '%s' size=%lld\n", path, (long long)file::GetSize(path));
+    KillProcessesWithModule(path, true);
+    TempStr copyPath = str::JoinTemp(path, ".copy");
+    if (TryRenameAsideOnce(path, copyPath)) {
+        logf("MoveAsideOrDeleteLegacyLibmupdf: renamed to '%s'\n", copyPath);
+        return;
+    }
+    DWORD attrs = file::GetAttributes(path);
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY)) {
+        file::SetAttributes(path, attrs & ~FILE_ATTRIBUTE_READONLY);
+    }
+    if (file::Delete(path)) {
+        logf("MoveAsideOrDeleteLegacyLibmupdf: deleted '%s'\n", path);
+        return;
+    }
+    logf("MoveAsideOrDeleteLegacyLibmupdf: could not rename/delete '%s' (ok; install continues)\n", path);
+    LogLastError();
+}
+
+// Rename lockable DLLs aside before extract so new files can be written freely.
+static bool PrepareInstallDirByRenaming(Str installDir, bool silent) {
+    logf("PrepareInstallDirByRenaming('%s' silent=%d)\n", installDir, (int)silent);
+    StopWindowsSearchService();
+    // Order: filter/preview first (often locked by Search/Explorer), then engine DLL.
+    static const Str kFiles[] = {
+        StrL("PdfFilter.dll"),
+        StrL("PdfPreview.dll"),
+        StrL("libsumatrapdf.dll"),
+    };
+    for (Str name : kFiles) {
+        if (!MoveAsideInstallFile(installDir, name, silent)) {
+            return false;
+        }
+    }
+    // The exe itself: a just-killed (TerminateProcess is async) or relaunched
+    // instance can still map SumatraPDF.exe, which would make CopySelfToDir's
+    // overwrite fail with a sharing violation. Rename it aside too - renaming a
+    // mapped image is allowed even though overwriting/deleting it is not.
+    if (!MoveAsideInstallFile(installDir, Str(kExeName), silent)) {
+        return false;
+    }
+    // Older installs: move libmupdf.dll out of the way without blocking on it.
+    MoveAsideOrDeleteLegacyLibmupdf(installDir);
+    return true;
+}
+
+static void DeleteInstallCopyLeftovers(Str destDir) {
+    static const Str kCopies[] = {
+        StrL("libsumatrapdf.dll.copy"), StrL("libmupdf.dll.copy"),   StrL("PdfFilter.dll.copy"),
+        StrL("PdfPreview.dll.copy"),    StrL("SumatraPDF.exe.copy"),
+    };
+    for (Str name : kCopies) {
+        TempStr copyPath = path::JoinTemp(destDir, name);
+        if (!file::Exists(copyPath)) {
+            continue;
+        }
+        if (file::Delete(copyPath)) {
+            logf("  deleted leftover '%s'\n", copyPath);
+        } else {
+            logf("  could not delete leftover '%s' (ok to ignore)\n", copyPath);
+        }
+    }
+    // If a still-locked legacy DLL survived prepare, try again after extract
+    // (holders may have exited); never fail the install on this.
+    MoveAsideOrDeleteLegacyLibmupdf(destDir);
 }
 
 static bool ExtractInstallerFiles(lzma::SimpleArchive* archive, Str destDir) {
@@ -298,16 +786,7 @@ static bool ExtractInstallerFiles(lzma::SimpleArchive* archive, Str destDir) {
         ProgressStep();
     }
 
-    // leftover from MoveAsideExistingLibmupdf after a successful upgrade
-    TempStr copyPath = path::JoinTemp(destDir, StrL("libmupdf.dll.copy"));
-    if (file::Exists(copyPath)) {
-        if (file::Delete(copyPath)) {
-            logf("  deleted leftover '%s'\n", copyPath);
-        } else {
-            logf("  could not delete leftover '%s' (ok to ignore)\n", copyPath);
-        }
-    }
-
+    DeleteInstallCopyLeftovers(destDir);
     return true;
 }
 
@@ -462,6 +941,9 @@ static void InstallerThread(Flags* cli) {
     bool freeAllUsers = gPrevInstall.allUsers || allUsers;
     ShellExtInstallState removedExts{};
     FreeInstallationFilesInUse(cli->installDir, freeAllUsers, &removedExts);
+    // SearchIndexer often keeps PdfFilter.dll mapped after unregister; stop it
+    // before renames (started again in Exit).
+    StopWindowsSearchService();
 
     if (!ExtractInstallerFiles(cli->installDir)) {
         log("ExtractInstallerFiles() failed\n");
@@ -520,8 +1002,10 @@ static void InstallerThread(Flags* cli) {
     log("Installer thread finished\n");
 Exit:
     str::Free(removedExts.installDir);
+    // Best-effort: restore search indexing after we may have stopped WSearch.
+    StartWindowsSearchService();
     // Pre-release debug report (no symbols download) so we learn about failed
-    // upgrades (e.g. locked libmupdf.dll) with the install log attached.
+    // upgrades (e.g. locked libsumatrapdf.dll) with the install log attached.
     if (gInstallFailed) {
         TempStr cond = fmt("Installation failed: %s", gFirstError ? gFirstError : StrL("(no details)"));
         logf("InstallerThread: upload debug report: %s\n", cond);
@@ -588,7 +1072,7 @@ static void StartInstallation(InstallerWnd* wnd) {
     // create a progress bar in place of the Options button
     int dx = DpiScale(wnd->hwnd, GetInstallerWinDx() / 2);
     Rect rc(0, 0, dx, gButtonDy);
-    rc = MapRectToWindow(rc, wnd->btnOptions->hwnd, wnd->hwnd);
+    rc = HwndMapRectToWindow(rc, wnd->btnOptions->hwnd, wnd->hwnd);
 
     int nInstallationSteps = gArchive.filesCount;
     nInstallationSteps++; // for copying files to installation dir
@@ -674,7 +1158,15 @@ static void OnButtonInstall(InstallerWnd* wnd) {
     // note: this checkbox isn't created on Windows 2000 and XP
     cli->withPreview = wnd->checkboxRegisterPreview && wnd->checkboxRegisterPreview->IsChecked();
 
-    bool needsElevation = cli->allUsers || gPrevInstall.allUsers;
+    // Program Files always needs machine-style install + elevation
+    if (IsPathUnderProgramFiles(cli->installDir) && !cli->allUsers) {
+        logf("OnButtonInstall: install dir under Program Files; forcing allUsers\n");
+        cli->allUsers = true;
+    }
+
+    bool needsElevation = InstallNeedsElevation(cli->installDir, cli->allUsers || gPrevInstall.allUsers);
+    logf("OnButtonInstall: needsElevation=%d elevated=%d allUsers=%d dir='%s'\n", (int)needsElevation,
+         (int)IsProcessRunningElevated(), (int)cli->allUsers, cli->installDir);
     if (needsElevation && !IsProcessRunningElevated()) {
         RestartElevatedForAllUsers(cli);
         ::ExitProcess(0);
@@ -702,7 +1194,7 @@ static void OnButtonStartSumatra() {
 
 constexpr int kBtnIdShowInstallLog = 100;
 
-static HRESULT CALLBACK InstallationFailedDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+static HRESULT CALLBACK InstallationFailedDialogCallback(HWND /*hwnd*/, UINT msg, WPARAM wParam, LPARAM lParam,
                                                          LONG_PTR /*lpRefData*/) {
     switch (msg) {
         case TDN_BUTTON_CLICKED:
@@ -839,7 +1331,14 @@ static TempStr GetDefaultInstallationDirTemp(bool forAllUsers, bool ignorePrev) 
 
 static void SetInstallButtonElevationState() {
     bool forAllUsers = gWnd->checkboxForAllUsers->IsChecked();
-    bool mustElevate = forAllUsers || gPrevInstall.allUsers;
+    Str dir = gCliNew.installDir;
+    if (gWnd->editInstallationDir && gWnd->editInstallationDir->hwnd) {
+        TempStr editDir = HwndGetTextTemp(gWnd->editInstallationDir->hwnd);
+        if (editDir && editDir.s[0]) {
+            dir = editDir;
+        }
+    }
+    bool mustElevate = InstallNeedsElevation(dir, forAllUsers || gPrevInstall.allUsers);
     Button_SetElevationRequiredState(gWnd->btnInstall->hwnd, mustElevate);
 }
 
@@ -1011,7 +1510,7 @@ static void CreateInstallerWindowControls(InstallerWnd* wnd, Flags* cli) {
     {
         // button position: bottom-right
         HWND parent = ::GetParent(b->hwnd);
-        Rect r = ClientRect(parent);
+        Rect r = HwndClientRect(parent);
         Size size = b->GetIdealSize();
         int x = r.dx - size.dx - margin;
         int y = r.dy - size.dy - margin;
@@ -1019,7 +1518,7 @@ static void CreateInstallerWindowControls(InstallerWnd* wnd, Flags* cli) {
     }
     ShowAndEnable(wnd->btnInstall, showInstallButton);
 
-    Rect r = ClientRect(hwnd);
+    Rect r = HwndClientRect(hwnd);
     wnd->btnOptions = CreateDefaultButton(hwnd, _TRA("&Options"), isRtl);
     b = wnd->btnOptions;
     b->onClick = MkFunc0(OnButtonOptions, wnd);
@@ -1044,7 +1543,7 @@ static void CreateInstallerWindowControls(InstallerWnd* wnd, Flags* cli) {
     // build options controls going from the bottom
     y -= (staticDy + margin);
 
-    RECT rc;
+    Rect rc;
     int checkDy;
     // only show this checkbox if the CPU arch of DLL and OS match
     // (assuming that the installer has the same CPU arch as its content!)
@@ -1058,7 +1557,7 @@ static void CreateInstallerWindowControls(InstallerWnd* wnd, Flags* cli) {
         wnd->checkboxRegisterPreview = CreateCheckbox(hwnd, s, isChecked);
         checkDy = wnd->checkboxRegisterPreview->GetIdealSize().dy;
 
-        rc = {x, y, x + dx, y + checkDy};
+        rc = {x, y, dx, checkDy};
         wnd->checkboxRegisterPreview->SetPos(&rc);
         y -= checkDy;
 
@@ -1069,7 +1568,7 @@ static void CreateInstallerWindowControls(InstallerWnd* wnd, Flags* cli) {
         s = _TRA("Let Windows Desktop Search &search PDF documents");
         wnd->checkboxRegisterSearchFilter = CreateCheckbox(hwnd, s, isChecked);
         checkDy = wnd->checkboxRegisterSearchFilter->GetIdealSize().dy;
-        rc = {x, y, x + dx, y + checkDy};
+        rc = {x, y, dx, checkDy};
         wnd->checkboxRegisterSearchFilter->SetPos(&rc);
         y -= checkDy;
     }
@@ -1087,7 +1586,7 @@ static void CreateInstallerWindowControls(InstallerWnd* wnd, Flags* cli) {
         if (wnd->checkboxRegisterPreview) {
             checkDy = wnd->checkboxRegisterPreview->GetIdealSize().dy;
         }
-        rc = {x, y, x + dx, y + checkDy};
+        rc = {x, y, dx, checkDy};
         wnd->checkboxForAllUsers->SetPos(&rc);
         y -= checkDy;
     }
@@ -1116,13 +1615,16 @@ static void CreateInstallerWindowControls(InstallerWnd* wnd, Flags* cli) {
     x = margin;
     dx = r.dx - (2 * margin) - btnDx - DpiScale(hwnd, 4);
 
-    rc = {x, y, x + dx, y + editDy};
+    // Rect is (x, y, dx, dy) — not (left, top, right, bottom). Using right/bottom
+    // here made the edit (and label below) cover most of the client area with a
+    // white background when Options was shown (issue #5860).
+    rc = {x, y, dx, editDy};
     wnd->editInstallationDir->SetBounds(rc);
 
     y -= editDy;
 
     Str s2 = _TRA("Install SumatraPDF in &folder:");
-    rc = {x, y, x + r.dx, y + staticDy};
+    rc = {x, y, r.dx - 2 * margin, staticDy};
 
     Static::CreateArgs args;
     args.parent = hwnd;
@@ -1269,7 +1771,7 @@ static bool CreateInstallerWindow(Flags* cli) {
 
     SetDefaultMsg();
 
-    CenterDialog(gWnd->hwnd);
+    HwndCenterDialog(gWnd->hwnd);
     ShowWindow(gWnd->hwnd, SW_SHOW);
 
     return true;
@@ -1342,28 +1844,28 @@ static bool OpenEmbeddedFilesArchive() {
     return true;
 }
 
-bool ExtractLibmupdfToDir(Str destDir) {
-    logf("ExtractLibmupdfToDir: destDir='%s'\n", destDir);
+bool ExtractLibsumatrapdfToDir(Str destDir) {
+    logf("ExtractLibsumatrapdfToDir: destDir='%s'\n", destDir);
     if (!OpenEmbeddedFilesArchive()) {
-        log("ExtractLibmupdfToDir: OpenEmbeddedFilesArchive failed\n");
+        log("ExtractLibsumatrapdfToDir: OpenEmbeddedFilesArchive failed\n");
         return false;
     }
-    int idx = lzma::GetIdxFromName(&gArchive, "libmupdf.dll");
+    int idx = lzma::GetIdxFromName(&gArchive, "libsumatrapdf.dll");
     if (idx < 0) {
-        log("ExtractLibmupdfToDir: libmupdf.dll not found in archive\n");
+        log("ExtractLibsumatrapdfToDir: libsumatrapdf.dll not found in archive\n");
         return false;
     }
     lzma::FileInfo* fi = &gArchive.files[idx];
-    logf("ExtractLibmupdfToDir: archive entry uncompressed=%u compressed=%u\n", (unsigned)fi->uncompressedSize,
+    logf("ExtractLibsumatrapdfToDir: archive entry uncompressed=%u compressed=%u\n", (unsigned)fi->uncompressedSize,
          (unsigned)fi->compressedSize);
     u8* uncompressed = lzma::GetFileDataByIdx(&gArchive, idx, nullptr);
     if (!uncompressed) {
-        log("ExtractLibmupdfToDir: failed to decompress libmupdf.dll\n");
+        log("ExtractLibsumatrapdfToDir: failed to decompress libsumatrapdf.dll\n");
         return false;
     }
     if (!dir::CreateAll(destDir)) {
         free(uncompressed);
-        logf("ExtractLibmupdfToDir: couldn't create directory '%s'\n", destDir);
+        logf("ExtractLibsumatrapdfToDir: couldn't create directory '%s'\n", destDir);
         LogLastError();
         return false;
     }
@@ -1372,10 +1874,10 @@ bool ExtractLibmupdfToDir(Str destDir) {
     bool ok = WriteInstallerFileRobust(filePath, d);
     free(uncompressed);
     if (!ok) {
-        logf("ExtractLibmupdfToDir: failed to write '%s'\n", filePath);
+        logf("ExtractLibsumatrapdfToDir: failed to write '%s'\n", filePath);
         return false;
     }
-    logf("ExtractLibmupdfToDir: extracted '%s' size=%lld\n", filePath, (long long)file::GetSize(filePath));
+    logf("ExtractLibsumatrapdfToDir: extracted '%s' size=%lld\n", filePath, (long long)file::GetSize(filePath));
     return true;
 }
 
@@ -1389,10 +1891,12 @@ bool ExtractInstallerFiles(Str dir) {
         return false;
     }
 
-    // First: move any existing libmupdf.dll aside. If it's locked, abort before
-    // overwriting SumatraPDF.exe (which would leave a new exe + old DLL).
-    if (!MoveAsideExistingLibmupdf(dir)) {
-        log("ExtractInstallerFiles: MoveAsideExistingLibmupdf failed\n");
+    // Rename lockable DLLs aside (PdfFilter / PdfPreview / libsumatrapdf) before
+    // extract. Dialog retries every 3s if a file stays locked; user can abort.
+    // Legacy libmupdf.dll (through 3.6) is moved/deleted best-effort (different name).
+    bool silent = gCliNew.silent || (gCli && gCli->silent);
+    if (!PrepareInstallDirByRenaming(dir, silent)) {
+        log("ExtractInstallerFiles: PrepareInstallDirByRenaming failed\n");
         return false;
     }
 
@@ -1437,7 +1941,7 @@ static bool ShouldInstallMismatchedArch(HWND hwndParent) {
     s = _TRA("You're installing 32-bit SumatraPDF on 64-bit OS.\nWould you like to download\n64-bit version?");
     dialogConfig.pszContent = CWStrTemp(s);
     dialogConfig.nDefaultButton = kBtnIdContinue;
-    dialogConfig.dwFlags = flags;
+    dialogConfig.dwFlags = (TASKDIALOG_FLAGS)flags;
     dialogConfig.cxWidth = 0;
     dialogConfig.pfCallback = nullptr;
     dialogConfig.dwCommonButtons = 0;
@@ -1479,17 +1983,7 @@ int RunInstaller() {
         StartLogToFile(installerLogPath, removeLog);
     }
     logf("------------- Starting SumatraPDF installation\n");
-    {
-        DWORD parentPid = 0;
-        TempStr path = GetParentProcessPath(&parentPid);
-        if (path) {
-            logf("Parent process: pid=%d, path='%s'\n", (int)parentPid, path);
-        } else if (parentPid != 0) {
-            logf("Parent process: pid=%d, path unknown\n", (int)parentPid);
-        } else {
-            logf("Parent process: unknown\n");
-        }
-    }
+    LogParentProcessChain();
     if (!gCli->silent && !IsProcessAndOsArchSame()) {
         logfa("quitting because !IsProcessAndOsArchSame()\n");
         bool ok = ShouldInstallMismatchedArch(nullptr);
@@ -1519,6 +2013,11 @@ int RunInstaller() {
         auto dir = GetDefaultInstallationDirTemp(gCliNew.allUsers, false);
         gCliNew.installDir = str::Dup(dir);
     }
+    // Program Files installs must be all-users (and will elevate below)
+    if (IsPathUnderProgramFiles(gCliNew.installDir) && !gCliNew.allUsers) {
+        logf("RunInstaller: install dir under Program Files; forcing allUsers\n");
+        gCliNew.allUsers = true;
+    }
     TempStr cmdLine = ToUtf8Temp(GetCommandLineW());
     logf("RunInstaller: '%s', cmdLine: '%s', installing into dir '%s'\n", GetSelfExePathTemp(), cmdLine,
          gCliNew.installDir);
@@ -1531,8 +2030,9 @@ int RunInstaller() {
     bool isElevated = IsProcessRunningElevated();
     logf("RunInstaller: requiresSilentElevation: %d, isElevated: %d\n", (int)requiresSilentElevation, (int)isElevated);
     if (requiresSilentElevation && !isElevated) {
-        bool needsElevation = gCliNew.allUsers || gPrevInstall.allUsers;
-        logf("RunInstaller: needsElevation: %d\n", (int)needsElevation);
+        bool needsElevation = InstallNeedsElevation(gCliNew.installDir, gCliNew.allUsers || gPrevInstall.allUsers);
+        logf("RunInstaller: needsElevation: %d (allUsers=%d prevAllUsers=%d underPF=%d)\n", (int)needsElevation,
+             (int)gCliNew.allUsers, (int)gPrevInstall.allUsers, (int)IsPathUnderProgramFiles(gCliNew.installDir));
         if (needsElevation) {
             logf(
                 "Restarting as elevated: gCli->silent: %d, gCli->fastInstall: %d, isElevated: %d, gCli->allUsers: %d, "

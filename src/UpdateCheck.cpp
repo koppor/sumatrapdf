@@ -7,6 +7,7 @@
 #include "base/Http.h"
 #include "base/Win.h"
 #include "base/File.h"
+#include "base/Crypto.h"
 
 #include "wingui/Layout.h"
 #include "wingui/UIModels.h"
@@ -244,6 +245,13 @@ static bool ShouldCheckForUpdate(UpdateCheck updateCheckType) {
 }
 
 void StartInstallerAutoUpgrade(Str installerPath) {
+    TempStr expectedSigner = GetExecutableSignerTemp(GetSelfExePathTemp());
+    TempStr installerSigner = GetExecutableSignerTemp(installerPath);
+    if (!expectedSigner || !installerSigner || !str::Eq(expectedSigner, installerSigner) ||
+        !IsPEFileSigned(installerPath)) {
+        logf("StartInstallerAutoUpgrade: refusing an update with an untrusted signature\n");
+        return;
+    }
     str::Builder cmd;
     if (IsOurExeInstalled()) {
         // no need for sleep because it shows the installer dialog anyway
@@ -290,7 +298,7 @@ static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
 
     auto mainInstr = _TRA("New version available");
     auto ver = updateInfo->latestVer;
-    auto fmtStr = _TRA("You have version '%s' and version '%s' is available.\nDo you want to install new version?");
+    auto fmtStr = _TRA("You have version '%s' and version '%s' is available.\nDo you want to install the new version?");
     auto content = str::Dup(fmt(fmtStr.s, StrL(CURR_VERSION_STRA), ver));
 
     auto installerPath = updateInfo->installerPath;
@@ -323,7 +331,7 @@ static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
     dialogConfig.pszMainInstruction = CWStrTemp(mainInstr);
     dialogConfig.pszContent = CWStrTemp(content);
     dialogConfig.nDefaultButton = kBtnIdInstall;
-    dialogConfig.dwFlags = flags;
+    dialogConfig.dwFlags = (TASKDIALOG_FLAGS)flags;
     dialogConfig.cxWidth = 0;
     dialogConfig.pfCallback = nullptr;
     dialogConfig.dwCommonButtons = 0;
@@ -413,8 +421,13 @@ static void DownloadUpdateAsync(DownloadUpdateAsyncData* data) {
     UpdateProgressData pd;
     pd.hwndForNotif = hwndForNotif;
     auto cb = MkFunc1<UpdateProgressData, HttpProgress*>(UpdateProgressCb, &pd);
-    bool ok = HttpGetToFile(updateInfo->dlURL, installerPath, cb);
+    constexpr i64 kMaxUpdateDownloadSize = 256LL * 1024 * 1024;
+    bool ok = HttpGetToFile(updateInfo->dlURL, installerPath, cb, kMaxUpdateDownloadSize);
     logf("ShowAutoUpdateDialog: HttpGetToFile(): ok=%d, downloaded to '%s'\n", (int)ok, installerPath);
+    TempStr expectedSigner = GetExecutableSignerTemp(GetSelfExePathTemp());
+    TempStr installerSigner = ok ? GetExecutableSignerTemp(installerPath) : TempStr{};
+    ok = ok && expectedSigner && installerSigner && str::Eq(expectedSigner, installerSigner) &&
+         IsPEFileSigned(installerPath);
     if (ok) {
         updateInfo->installerPath = str::Dup(installerPath);
     } else {
@@ -482,7 +495,7 @@ void DownloadAndInstallPendingUpdate(MainWindow* win) {
     RunAsync(fn, "DownloadUpdateAsync");
 }
 
-static bool ShouldDownloadUpdate(UpdateInfo* updateInfo, UpdateCheck updateCheckType) {
+static bool ShouldDownloadUpdate(UpdateInfo* updateInfo) {
     if (gIsStoreBuild) {
         // I assume store will take care of updates
         return false;
@@ -498,8 +511,8 @@ static bool ShouldDownloadUpdate(UpdateInfo* updateInfo, UpdateCheck updateCheck
     return hasUpdate;
 }
 
-static HRESULT CALLBACK TaskDialogHyperlinkCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
-                                                    LONG_PTR lpRefData) {
+static HRESULT CALLBACK TaskDialogHyperlinkCallback(HWND /*hwnd*/, UINT msg, WPARAM /*wParam*/, LPARAM lParam,
+                                                    LONG_PTR /*lpRefData*/) {
     if (msg == TDN_HYPERLINK_CLICKED) {
         WCHAR* url = (WCHAR*)lParam;
         SumatraLaunchBrowser(ToUtf8Temp(url));
@@ -535,7 +548,7 @@ Visit <a href="%s">%s</a> to download the latest version.)",
     dialogConfig.cbSize = sizeof(TASKDIALOGCONFIG);
     dialogConfig.pszWindowTitle = CWStrTemp(title);
     dialogConfig.pszContent = CWStrTemp(content);
-    dialogConfig.dwFlags = flags;
+    dialogConfig.dwFlags = (TASKDIALOG_FLAGS)flags;
     dialogConfig.dwCommonButtons = TDCBF_CLOSE_BUTTON;
     dialogConfig.cButtons = dimof(buttons);
     dialogConfig.pButtons = buttons;
@@ -547,6 +560,50 @@ Visit <a href="%s">%s</a> to download the latest version.)",
     TaskDialogIndirect(&dialogConfig, &buttonPressedId, nullptr, nullptr);
     if (buttonPressedId == kBtnIdVisitWebsite) {
         SumatraLaunchBrowser(kExpectedDlHost);
+    }
+}
+
+// Shown only for a user-initiated update check that couldn't download/parse the
+// update info. Tells the user and points them at the download page so they can
+// update manually (e.g. if TLS validation or the network failed).
+static void NotifyUpdateCheckFailed(HWND hwndParent, DWORD err) {
+    logf("NotifyUpdateCheckFailed: err=%#x\n", (unsigned)err);
+    auto title = _TRA("SumatraPDF Update");
+    auto mainInstr = _TRA("Couldn't check for updates");
+    TempStr msg = fmt(_TRA("Couldn't download update information (error %#x).").s, err);
+    TempStr content = fmt(R"(%s
+
+Visit <a href="%s">%s</a> to download the latest version.)",
+                          msg, StrL(kWebisteDownloadPageURL), StrL(kWebisteDownloadPageURL));
+
+    TASKDIALOGCONFIG dialogConfig{};
+    DWORD flags =
+        TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT | TDF_ENABLE_HYPERLINKS | TDF_POSITION_RELATIVE_TO_WINDOW;
+    if (trans::IsCurrLangRtl()) {
+        flags |= TDF_RTL_LAYOUT;
+    }
+
+    constexpr int kBtnIdVisitWebsite = 100;
+    TASKDIALOG_BUTTON buttons[1];
+    buttons[0].nButtonID = kBtnIdVisitWebsite;
+    buttons[0].pszButtonText = CWStrTemp(_TRA("Visit &Website"));
+
+    dialogConfig.cbSize = sizeof(TASKDIALOGCONFIG);
+    dialogConfig.pszWindowTitle = CWStrTemp(title);
+    dialogConfig.pszMainInstruction = CWStrTemp(mainInstr);
+    dialogConfig.pszContent = CWStrTemp(content);
+    dialogConfig.dwFlags = (TASKDIALOG_FLAGS)flags;
+    dialogConfig.dwCommonButtons = TDCBF_CLOSE_BUTTON;
+    dialogConfig.cButtons = dimof(buttons);
+    dialogConfig.pButtons = buttons;
+    dialogConfig.nDefaultButton = kBtnIdVisitWebsite;
+    dialogConfig.pszMainIcon = TD_WARNING_ICON;
+    dialogConfig.hwndParent = hwndParent;
+    dialogConfig.pfCallback = TaskDialogHyperlinkCallback;
+    int buttonPressedId = 0;
+    TaskDialogIndirect(&dialogConfig, &buttonPressedId, nullptr, nullptr);
+    if (buttonPressedId == kBtnIdVisitWebsite) {
+        SumatraLaunchBrowser(kWebisteDownloadPageURL);
     }
 }
 
@@ -600,7 +657,7 @@ static DWORD MaybeStartUpdateDownload(HWND hwndParent, HttpRsp* rsp, UpdateCheck
         return 0;
     }
     HWND hwndForNotif = win->hwndCanvas;
-    if (!ShouldDownloadUpdate(updateInfo, updateCheckType)) {
+    if (!ShouldDownloadUpdate(updateInfo)) {
         Str myVer = StrL(UPDATE_CHECK_VERA);
         logf("ShowAutoUpdateDialog: myVer >= latestVer ('%s' >= '%s')\n", myVer, updateInfo->latestVer);
         /* if automated => don't notify that there is no new version */
@@ -713,9 +770,9 @@ static void UpdateCheckFinish(UpdateCheckAsyncData* data) {
     DWORD err = MaybeStartUpdateDownload(hwnd, rsp, updateCheckType);
     if ((err != 0) && (updateCheckType == UpdateCheck::UserInitiated)) {
         RemoveNotificationsForGroup(win->hwndCanvas, kNotifUpdateCheckInProgress);
-        // notify the user about network error during a manual update check
-        TempStr msg = fmt(_TRA("Can't connect to the Internet (error %#x).").s, err);
-        MessageBoxWarning(hwnd, msg, _TRA("SumatraPDF Update"));
+        // a manual check that couldn't fetch update info: tell the user and point
+        // them at the website so they can update manually
+        NotifyUpdateCheckFailed(hwnd, err);
     }
 }
 

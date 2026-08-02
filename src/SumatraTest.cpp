@@ -23,6 +23,9 @@
 #include "SearchAndDDE.h"
 #include "ReadAloudHighlight.h"
 #include "Translations.h"
+#include "MarkdownModel.h"
+#include "TableOfContents.h"
+#include "wingui/BrowserDocView.h"
 
 #include <chm.h>
 #include "EbookBase.h"
@@ -177,6 +180,22 @@ static IPageDestination* NthDestInToc(TocItem* item, int target, int& counter) {
     return nullptr;
 }
 
+static TocItem* NthTocItemWithDest(TocItem* item, int target, int& counter) {
+    for (; item; item = item->next) {
+        if (item->dest) {
+            counter++;
+            if (counter == target) {
+                return item;
+            }
+        }
+        TocItem* found = NthTocItemWithDest(item->child, target, counter);
+        if (found) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
 // Headless test for PDF destination zoom resolution (issue #5537). Resolves the
 // <no>-th (1-based) outline destination and returns "page=P zoom=Z". zoom is in
 // SumatraPDF units (1.0 == 100%); zoom=0 means "retain current zoom" (what /XYZ
@@ -275,10 +294,10 @@ TempStr ChmResultTemp(Str chmPath, int* exitCodeOut) {
 
             for (int i = 0; i < nEntries; i++) {
                 chm_entry* e = entries[i];
-                if (e->path && str::Eq(e->path, "/payload")) {
+                if (e->path && str::Eq(e->path, StrL("/payload"))) {
                     payloadEntry = e;
                 }
-                if (e->length == 0 || e->length > 128 * 1024 * 1024) {
+                if (e->length == 0 || e->length > 128ULL * 1024 * 1024) {
                     continue;
                 }
                 u8* buf = AllocArray<u8>((int)e->length + 1);
@@ -295,7 +314,7 @@ TempStr ChmResultTemp(Str chmPath, int* exitCodeOut) {
                 free(buf);
             }
 
-            if (payloadEntry && payloadEntry->length > 0 && payloadEntry->length <= 128 * 1024 * 1024) {
+            if (payloadEntry && payloadEntry->length > 0 && payloadEntry->length <= 128ULL * 1024 * 1024) {
                 // chm_read_entry reads the whole entry, so the buffer must be
                 // at least entry->length bytes; this decompresses /payload and
                 // lets ASan catch the LZX overflow (issue-chm-lzx)
@@ -575,7 +594,7 @@ static bool FindWordCenter(EngineBase* engine, int pageNo, Str word, double* xOu
         if (!str::Eq(Utf8SliceByCodepoints(text, i, wordLen), word)) {
             continue;
         }
-        int mid = i + wordLen / 2;
+        int mid = i + (wordLen / 2);
         int midByte = Utf8CodepointToByteIndex(text, mid);
         for (; mid < textLen && !coords[mid].x && !coords[mid].dx; mid++) {
             int nextByte = midByte;
@@ -587,8 +606,8 @@ static bool FindWordCenter(EngineBase* engine, int pageNo, Str word, double* xOu
         if (mid >= textLen) {
             return false;
         }
-        *xOut = coords[mid].x + coords[mid].dx / 2.0;
-        *yOut = coords[mid].y + coords[mid].dy / 2.0;
+        *xOut = coords[mid].x + (coords[mid].dx / 2.0);
+        *yOut = coords[mid].y + (coords[mid].dy / 2.0);
         return true;
     }
     return false;
@@ -751,6 +770,50 @@ TempStr TocNavigateResultTemp(int destNo, int* exitCodeOut) {
         *exitCodeOut = ok ? 0 : 1;
     }
     return ToStrTemp(out);
+}
+
+// With destNo > 0, start navigation to that Markdown TOC item through the real
+// deferred TOC path. With destNo == 0, report whether WebView has reached the
+// requested vertical scroll position. Used by tests/issue-5842.ts.
+TempStr MarkdownTocNavigateResultTemp(int destNo, int minScrollY, int* exitCodeOut) {
+    str::Builder out;
+    auto finish = [&](Str msg, int code) -> TempStr {
+        out.Append(msg);
+        out.AppendChar('\n');
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        return ToStrTemp(out);
+    };
+
+    if (gWindows.IsEmpty()) {
+        return finish(StrL("NOTREADY no-window"), 2);
+    }
+    MainWindow* win = gWindows[0];
+    if (!win || !win->IsDocLoaded()) {
+        return finish(StrL("NOTREADY no-doc"), 2);
+    }
+    MarkdownModel* mm = win->ctrl ? win->ctrl->AsMarkdown() : nullptr;
+    if (!mm || !mm->docView) {
+        return finish(StrL("NOTREADY no-markdown-webview"), 2);
+    }
+
+    if (destNo > 0) {
+        TocTree* toc = mm->GetToc();
+        int counter = 0;
+        TocItem* item = toc && toc->root ? NthTocItemWithDest(toc->root, destNo, counter) : nullptr;
+        if (!item) {
+            return finish(fmt("ERROR no-dest destNo=%d", destNo), 1);
+        }
+        GoToTocItem(win, item);
+        return finish(fmt("NAVIGATING dest=%d name=%s", destNo, PageDestGetName(item->dest)), 0);
+    }
+
+    Point pos = mm->docView->GetScrollPos();
+    if (pos.y < minScrollY) {
+        return finish(fmt("NOTREADY scrollY=%d min=%d", pos.y, minScrollY), 2);
+    }
+    return finish(fmt("OK scrollX=%d scrollY=%d", pos.x, pos.y), 0);
 }
 
 // Follow the first internal link on page 1 after pinning the viewport to the

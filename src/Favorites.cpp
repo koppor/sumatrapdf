@@ -351,6 +351,8 @@ static Favorite* FindByName(FileState* ds, Str name) {
 
 // Silently set/update favorite "/" to the current page so the user can jump
 // back after searching (command palette $ Favorites, or the Favorites sidebar).
+// Session-only: isTemporary is true so SerializeStruct skips the entry when
+// writing settings (issue #5862).
 void SetSearchStartFavorite(MainWindow* win) {
     if (!win || !win->IsDocLoaded() || !win->ctrl) {
         return;
@@ -382,19 +384,21 @@ void SetSearchStartFavorite(MainWindow* win) {
     Str markName = SearchStartFavName();
     Favorite* fn = FindByName(fs, markName);
     if (fn) {
-        if (fn->pageNo == pageNo && str::Eq(fn->pageLabel, pl)) {
+        if (fn->isTemporary && fn->pageNo == pageNo && str::Eq(fn->pageLabel, pl)) {
             return; // already marks this page
         }
         fn->pageNo = pageNo;
         str::ReplaceWithCopy(&fn->pageLabel, pl);
+        // mark as session-only even if a prior build persisted a "/" entry
+        fn->isTemporary = true;
         SortFileFavorites(fs);
     } else {
         fn = NewFavorite(pageNo, markName, pl);
+        fn->isTemporary = true;
         fs->favorites->Append(fn);
         SortFileFavorites(fs);
     }
     UpdateFavoritesTreeForAllWindows();
-    // Settings are written on normal save/exit; no need to flush on every Ctrl+F.
 }
 
 static void RemoveFav(Str filePath, int pageNo) {
@@ -933,7 +937,7 @@ static void PrepareFavoritesTabUi(MainWindow* win) {
     }
 }
 
-static LRESULT CALLBACK WndProcFavFilterEdit(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR subclassId,
+static LRESULT CALLBACK WndProcFavFilterEdit(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR /*subclassId*/,
                                              DWORD_PTR data) {
     MainWindow* win = (MainWindow*)data;
     if (msg == WM_KEYDOWN) {
@@ -1192,12 +1196,12 @@ static void DrawFavItemHighlight(TreeView::CustomDrawEvent* ev, MainWindow* win)
         return;
     }
 
-    RECT labelRect;
+    Rect labelRect;
     TreeView* tv = ev->treeView;
     if (!tv->GetItemRect(ev->treeItem, true, labelRect)) {
         return;
     }
-    RECT itemRect{};
+    Rect itemRect{};
     tv->GetItemRect(ev->treeItem, false, itemRect);
 
     NMTVCUSTOMDRAW* tvcd = ev->nm;
@@ -1350,7 +1354,7 @@ static void FavTreeContextMenu(ContextMenuEvent* ev) {
         return;
     }
 
-    POINT pt{};
+    Point pt{};
     TreeItem ti = GetOrSelectTreeItemAtPos(ev, pt);
     if (!ti) {
         pt = {ev->mouseScreen.x, ev->mouseScreen.y};
@@ -1399,8 +1403,8 @@ void LayoutFavoritesContainer(MainWindow* win) {
     if (!win || !win->favLayout || !win->hwndFavBox) {
         return;
     }
-    // ClientRect: layout is in parent client coordinates
-    Rect rc = ClientRect(win->hwndFavBox);
+    // HwndClientRect: layout is in parent client coordinates
+    Rect rc = HwndClientRect(win->hwndFavBox);
     if (rc.IsEmpty()) {
         return;
     }

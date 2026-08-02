@@ -12,7 +12,7 @@
 // BGRA8 (premultiplied) is the canonical layout because it is the natively zero-copy
 // layout on all three platforms (Gdiplus 32bppPARGB, CoreGraphics
 // PremultipliedFirst|ByteOrder32Little, cairo ARGB32). The Windows-specific zero-copy
-// conversion helpers live in GdiPlus.h (NewGdiplusBitmapFromPixmap / PixmapFromGdiplus).
+// conversion helpers live in GdiPlusUtil.h (NewGdiplusBitmapFromPixmap / PixmapFromGdiplus).
 //
 // A Pixmap may additionally be backed by a platform "present" object so it can be blitted
 // to the screen with no copy (a GDI DIB section on Windows; later a CGImage/cairo surface
@@ -49,10 +49,21 @@ struct Pixmap {
 };
 
 Str PixmapToBmpFormat(const Pixmap* pixmap);
+Pixmap* GetClipboardImageAsPixmap();
 
 #if defined(_WIN32)
-// frees a DIB-section-backed Pixmap's native handles (and its pixels). implemented in
-// Win.cpp where <windows.h> is available. Does nothing if not DIB-backed.
+struct RenderedBitmap;
+
+Pixmap* AllocPixmapDIB(int w, int h);
+bool BlitPixmap(Pixmap* p, HDC hdc, Rect target);
+bool BlitPixmapRegion(Pixmap* p, HDC hdc, Rect target, Rect source);
+Pixmap* PixmapFromHBITMAP(HBITMAP hbmp, Size size, HANDLE hMap = nullptr);
+Pixmap* PixmapFromRenderedBitmap(RenderedBitmap* rb);
+RenderedBitmap* RenderedBitmapFromPixmap(Pixmap* px);
+void RecolorPixmap(Pixmap* px, COLORREF textColor, COLORREF bgColor, COLORREF linkColor = 0,
+                   Vec<Rect>* skipRects = nullptr);
+
+// frees a DIB-section-backed Pixmap's native handles (and its pixels).
 void FreePixmapNativeBitmap(Pixmap* p);
 #endif
 

@@ -18,6 +18,8 @@ Install and set up Claude Code using Anthropic's official guide:
 
 After installation, make sure `claude` (or `claude.exe`) is on your `PATH`. SumatraPDF also looks in `%USERPROFILE%\.local\bin\`, `%USERPROFILE%\AppData\Local\Programs\claude-code\`, and `%USERPROFILE%\AppData\Roaming\npm\`.
 
+The model picker includes Claude Code's documented aliases: `default`, `best`, `sonnet`, `opus`, `haiku`, `sonnet[1m]`, `opus[1m]`, and `opusplan`. Claude Code resolves these aliases according to the user's account and configured provider.
+
 ## Grok Build
 
 This feature can also use **[Grok Build](https://x.ai/news/grok-build-cli)** (the `grok` command-line tool).
@@ -29,6 +31,8 @@ Install Grok Build and sign in using xAI's instructions. SumatraPDF looks for `g
 Open the panel with **View → Grok chat** (`CmdAIChatWithGrokBuild`), or search for `Grok` in the command palette.
 
 Grok Build settings are in the `GrokBuild` section of [advanced settings](Advanced-options-settings.md). The **Always Approve** checkbox passes `--always-approve` to Grok Build.
+
+The first time you open the Grok chat panel in an app session, SumatraPDF runs `grok models` and uses the models available to the signed-in Grok CLI in the model picker. If that query fails, the picker falls back to `grok-4.5`.
 
 ## OpenAI Codex
 
@@ -48,7 +52,7 @@ Open the panel with **View → Codex chat** (`CmdAIChatWithOpenAICodex`), or sea
 
 Codex settings are in the `CodexBuild` section of [advanced settings](Advanced-options-settings.md). The **Skip Sandbox** checkbox passes `--dangerously-bypass-approvals-and-sandbox` to Codex — use only if you understand the security implications.
 
-In the chat panel you can pick a model (default `gpt-5.5`; `gpt-5.4` and `o3` are also available) and a sandbox mode: **Read-only**, **Workspace write**, or **Full access**.
+The first time you open the Codex chat panel in an app session, SumatraPDF asks the signed-in Codex CLI which models are available and uses them in the model picker. If that query fails, the picker falls back to `gpt-5.5`, `gpt-5.4`, and `o3`. You can also pick a sandbox mode: **Read-only**, **Workspace write**, or **Full access**.
 
 ## How to use
 

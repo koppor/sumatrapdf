@@ -2,7 +2,7 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/DirIter.h"
+#include "base/DirScan.h"
 #include "base/File.h"
 #include "base/Win.h"
 
@@ -388,28 +388,204 @@ static TempStr MarkdownPageCssTemp() {
     return fmt(kMarkdownPageCssFmt, cssVars);
 }
 
-Str MarkdownToHtmlPage(Str markdown) {
-    if (!markdown) {
+// Markdown pages are exposed to WebView2 as generated .html resources. Keep
+// relative links on that virtual resource graph instead of navigating to the
+// source .md name.
+static TempStr MarkdownLinkToHtmlTemp(Str url) {
+    if (!url || url.s[0] == '#' || str::StartsWith(url, StrL("//"))) {
         return {};
+    }
+
+    int pathLen = url.len;
+    for (int i = 0; i < url.len; i++) {
+        char c = url.s[i];
+        if (c == '?' || c == '#') {
+            pathLen = i;
+            break;
+        }
+        if (c == ':') {
+            return {};
+        }
+    }
+
+    Str path(url.s, pathLen);
+    int extLen = 0;
+    if (str::EndsWithI(path, StrL(".markdown"))) {
+        extLen = 9;
+    } else if (str::EndsWithI(path, StrL(".md"))) {
+        extLen = 3;
+    } else {
+        return {};
+    }
+
+    Str base(url.s, pathLen - extLen);
+    Str suffix(url.s + pathLen, url.len - pathLen);
+    return fmt("%s.html%s", base, suffix);
+}
+
+static void RewriteMarkdownLinks(cmark_node* doc) {
+    cmark_iter* iter = cmark_iter_new(doc);
+    cmark_event_type ev;
+    while ((ev = cmark_iter_next(iter)) != CMARK_EVENT_DONE) {
+        if (ev != CMARK_EVENT_ENTER) {
+            continue;
+        }
+        cmark_node* node = cmark_iter_get_node(iter);
+        if (cmark_node_get_type(node) != CMARK_NODE_LINK) {
+            continue;
+        }
+        const char* url = cmark_node_get_url(node);
+        if (!url) {
+            continue;
+        }
+        TempStr htmlUrl = MarkdownLinkToHtmlTemp(Str(url));
+        if (htmlUrl) {
+            cmark_node_set_url(node, CStrTemp(htmlUrl));
+        }
+    }
+    cmark_iter_free(iter);
+}
+
+static bool IsSafeAnchorId(Str id) {
+    if (!id) {
+        return false;
+    }
+    for (int i = 0; i < id.len; i++) {
+        char c = id.s[i];
+        bool isAlphaNum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        if (!isAlphaNum && c != '-' && c != '_' && c != ':' && c != '.') {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool ParseSafeAnchorOpen(Str html, Str* idOut) {
+    str::TrimWSInPlace(html, str::TrimOpt::Both);
+    Str prefix = StrL("<a id=\"");
+    Str suffix = StrL("\">");
+    if (!str::TrimPrefix(html, prefix) || !str::EndsWith(html, suffix)) {
+        return false;
+    }
+    Str id(html.s, html.len - suffix.len);
+    if (!IsSafeAnchorId(id)) {
+        return false;
+    }
+    *idOut = id;
+    return true;
+}
+
+static bool ParseSafeEmptyAnchor(Str html, Str* idOut) {
+    str::TrimWSInPlace(html, str::TrimOpt::Both);
+    Str prefix = StrL("<a id=\"");
+    Str suffix = StrL("\"></a>");
+    if (!str::TrimPrefix(html, prefix) || !str::EndsWith(html, suffix)) {
+        return false;
+    }
+    Str id(html.s, html.len - suffix.len);
+    if (!IsSafeAnchorId(id)) {
+        return false;
+    }
+    *idOut = id;
+    return true;
+}
+
+static cmark_node* NewSafeAnchorNode(cmark_node_type type, Str id) {
+    cmark_node* node = cmark_node_new(type);
+    if (!node) {
+        return nullptr;
+    }
+    TempStr html = fmt("<a id=\"%s\"></a>", id);
+    if (!cmark_node_set_on_enter(node, CStrTemp(html))) {
+        cmark_node_free(node);
+        return nullptr;
+    }
+    return node;
+}
+
+// cmark's safe renderer drops all raw HTML. Preserve empty anchors with a
+// strictly validated id so links in generated reports keep working without
+// enabling arbitrary HTML in WebView2.
+static void PreserveSafeEmptyAnchors(cmark_node* parent) {
+    for (cmark_node* node = cmark_node_first_child(parent); node;) {
+        cmark_node* next = cmark_node_next(node);
+        cmark_node_type type = cmark_node_get_type(node);
+        if (type == CMARK_NODE_HTML_BLOCK || type == CMARK_NODE_HTML_INLINE) {
+            Str raw = DupCmarkChunk(&node->as.literal);
+            Str id;
+            if (ParseSafeEmptyAnchor(raw, &id)) {
+                cmark_node_type customType =
+                    type == CMARK_NODE_HTML_BLOCK ? CMARK_NODE_CUSTOM_BLOCK : CMARK_NODE_CUSTOM_INLINE;
+                cmark_node* replacement = NewSafeAnchorNode(customType, id);
+                if (replacement && cmark_node_insert_before(node, replacement)) {
+                    cmark_node_unlink(node);
+                    cmark_node_free(node);
+                } else if (replacement) {
+                    cmark_node_free(replacement);
+                }
+                str::Free(raw);
+                node = next;
+                continue;
+            }
+
+            Str openId;
+            cmark_node* close = next;
+            if (type == CMARK_NODE_HTML_INLINE && ParseSafeAnchorOpen(raw, &openId) && close &&
+                cmark_node_get_type(close) == CMARK_NODE_HTML_INLINE) {
+                Str closeRaw = DupCmarkChunk(&close->as.literal);
+                str::TrimWSInPlace(closeRaw, str::TrimOpt::Both);
+                if (str::Eq(closeRaw, StrL("</a>"))) {
+                    next = cmark_node_next(close);
+                    cmark_node* replacement = NewSafeAnchorNode(CMARK_NODE_CUSTOM_INLINE, openId);
+                    if (replacement && cmark_node_insert_before(node, replacement)) {
+                        cmark_node_unlink(node);
+                        cmark_node_free(node);
+                        cmark_node_unlink(close);
+                        cmark_node_free(close);
+                    } else if (replacement) {
+                        cmark_node_free(replacement);
+                    }
+                }
+                str::Free(closeRaw);
+            }
+            str::Free(raw);
+        } else {
+            PreserveSafeEmptyAnchors(node);
+        }
+        node = next;
+    }
+}
+
+static char* MarkdownToHtmlBody(Str markdown) {
+    if (!markdown) {
+        return nullptr;
     }
 
     EnsureCmarkPluginsRegistered();
 
-    int options = CMARK_OPT_UNSAFE | CMARK_OPT_LIBERAL_HTML_TAG;
+    int options = CMARK_OPT_DEFAULT;
     cmark_parser* parser = cmark_parser_new(options);
     AttachGfmExtensions(parser);
     cmark_parser_feed(parser, markdown.s, (size_t)markdown.len);
     cmark_node* doc = cmark_parser_finish(parser);
     if (!doc) {
         cmark_parser_free(parser);
-        return {};
+        return nullptr;
     }
+
+    RewriteMarkdownLinks(doc);
+    PreserveSafeEmptyAnchors(doc);
 
     // Render before cmark_parser_free(); the extensions list is owned by the parser.
     cmark_llist* extensions = cmark_parser_get_syntax_extensions(parser);
     char* body = cmark_render_html(doc, options, extensions);
     cmark_parser_free(parser);
     cmark_node_free(doc);
+    return body;
+}
+
+Str MarkdownToHtmlPage(Str markdown) {
+    char* body = MarkdownToHtmlBody(markdown);
     if (!body) {
         return {};
     }
@@ -427,4 +603,39 @@ Str MarkdownToHtmlPage(Str markdown) {
     mem->free(body);
 
     return html.TakeStr();
+}
+
+bool MarkdownToc_UnitTestHtmlLinks() {
+    TempStr url = MarkdownLinkToHtmlTemp(StrL("other.md"));
+    if (!str::Eq(url, StrL("other.html"))) {
+        return false;
+    }
+    url = MarkdownLinkToHtmlTemp(StrL("sub/page.markdown#heading"));
+    if (!str::Eq(url, StrL("sub/page.html#heading"))) {
+        return false;
+    }
+    url = MarkdownLinkToHtmlTemp(StrL("UPPER.MD?x=1#part"));
+    if (!str::Eq(url, StrL("UPPER.html?x=1#part"))) {
+        return false;
+    }
+    bool linksOk = !MarkdownLinkToHtmlTemp(StrL("https://example.com/readme.md")) &&
+                   !MarkdownLinkToHtmlTemp(StrL("//example.com/readme.md")) &&
+                   !MarkdownLinkToHtmlTemp(StrL("#heading"));
+
+    Str markdown = StrL(
+        "<a id=\"finding-14\"></a>\n\n"
+        "before <a id=\"inline-anchor\"></a> after\n\n"
+        "<a id=\"bad\" onclick=\"alert(1)\"></a>\n\n"
+        "<script>alert(2)</script>\n");
+    char* body = MarkdownToHtmlBody(markdown);
+    if (!body) {
+        return false;
+    }
+    Str html(body);
+    bool anchorsOk = str::Contains(html, StrL("<a id=\"finding-14\"></a>")) &&
+                     str::Contains(html, StrL("<a id=\"inline-anchor\"></a>")) &&
+                     !str::Contains(html, StrL("onclick")) && !str::Contains(html, StrL("<script>"));
+    cmark_mem* mem = cmark_get_default_mem_allocator();
+    mem->free(body);
+    return linksOk && anchorsOk;
 }

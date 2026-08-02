@@ -3,7 +3,7 @@
 
 #include "base/Base.h"
 #include <chm.h>
-#include "base/ByteReader.h"
+#include "base/ByteReaderWriter.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
 #include "base/Win.h"
@@ -45,10 +45,10 @@ static chm_entry* ChmResolveObject(const ChmFile* chm, Str fileName) {
     if (!fileName) {
         return nullptr;
     }
-    if (!str::StartsWith(fileName, "/")) {
+    if (!str::StartsWith(fileName, StrL("/"))) {
         fileName = str::JoinTemp(StrL("/"), fileName);
-    } else if (str::StartsWith(fileName, "///")) {
-        fileName = Str(fileName.s + 2, fileName.len - 2);
+    } else if (str::StartsWith(fileName, StrL("///"))) {
+        str::TrimPrefix(fileName, StrL("//"));
     }
 
     chm_entry* e = ChmLookupPath(chm, fileName);
@@ -69,7 +69,7 @@ TempStr ChmFile::GetDataTemp(Str fileName) const {
     if (!e) {
         return {};
     }
-    if (e->length > 128 * 1024 * 1024) {
+    if (e->length > 128ULL * 1024 * 1024) {
         // limit to 128 MB
         return {};
     }
@@ -88,8 +88,8 @@ TempStr ChmFile::GetDataTemp(Str fileName) const {
 }
 
 TempStr SmartToUtf8Temp(Str s, uint codepage) {
-    if (str::StartsWith(s, UTF8_BOM)) {
-        return str::DupTemp(Str(s.s + 3, s.len - 3));
+    if (str::TrimPrefix(s, UTF8_BOM)) {
+        return str::DupTemp(s);
     }
     if (CP_UTF8 == codepage) {
         return str::DupTemp(s);
@@ -98,18 +98,22 @@ TempStr SmartToUtf8Temp(Str s, uint codepage) {
 }
 
 static Str GetCharZ(Str d, int off) {
-    u8* data = (u8*)d.s;
-    int n = d.len;
-    if (off >= n) {
+    // off comes from file-controlled unsigned DWORDs narrowed to int, so it can
+    // be negative; reject that along with the upper bound to avoid an OOB read.
+    if (off < 0 || off >= d.len) {
         return {};
     }
-    ReportIf(!memchr(data + off, '\0', (size_t)(n - off + 1))); // data is zero-terminated
-    u8* str = data + off;
-    Str s = Str((char*)str);
-    if (len(s) == 0) {
+    char* start = d.s + off;
+    size_t remaining = (size_t)(d.len - off);
+    char* end = (char*)memchr(start, '\0', remaining);
+    if (!end) {
         return {};
     }
-    return str::Dup(s);
+    int slen = (int)(end - start);
+    if (slen == 0) {
+        return {};
+    }
+    return str::Dup(Str(start, slen));
 }
 
 // http://www.nongnu.org/chmspec/latest/Internal.html#WINDOWS
@@ -126,28 +130,28 @@ void ChmFile::ParseWindowsData() {
     }
 
     ByteReader rw(windowsData);
-    int entries = (int)rw.DWordLE(0);
-    int entrySize = (int)rw.DWordLE(4);
+    int entries = (int)rw.UInt32LE(0);
+    int entrySize = (int)rw.UInt32LE(4);
     if (entrySize < 188) {
         return;
     }
 
     for (int i = 0; i < entries && (i + 1) * entrySize <= windowsLen; i++) {
-        int off = 8 + i * entrySize;
+        int off = 8 + (i * entrySize);
         if (str::IsNull(title)) {
-            DWORD strOff = rw.DWordLE(off + 0x14);
+            DWORD strOff = rw.UInt32LE(off + 0x14);
             title = GetCharZ(stringsData, (int)strOff);
         }
         if (str::IsNull(tocPath)) {
-            DWORD strOff = rw.DWordLE(off + 0x60);
+            DWORD strOff = rw.UInt32LE(off + 0x60);
             tocPath = GetCharZ(stringsData, (int)strOff);
         }
         if (str::IsNull(indexPath)) {
-            DWORD strOff = rw.DWordLE(off + 0x64);
+            DWORD strOff = rw.UInt32LE(off + 0x64);
             indexPath = GetCharZ(stringsData, (int)strOff);
         }
         if (str::IsNull(homePath)) {
-            DWORD strOff = rw.DWordLE(off + 0x68);
+            DWORD strOff = rw.UInt32LE(off + 0x68);
             homePath = GetCharZ(stringsData, (int)strOff);
         }
     }
@@ -237,11 +241,11 @@ bool ChmFile::ParseSystemData() {
     for (int off = 4; off + 4 < d.len; off += (int)n + 4) {
         // Note: at some point we seem to get off-sync i.e. I'm seeing
         // many entries with type == 0 and length == 0. Seems harmless.
-        n = r.WordLE(off + 2);
+        n = r.UInt16LE(off + 2);
         if (n == 0) {
             continue;
         }
-        WORD type = r.WordLE(off);
+        WORD type = r.UInt16LE(off);
         switch (type) {
             case 0:
                 if (str::IsNull(tocPath)) {
@@ -265,7 +269,7 @@ bool ChmFile::ParseSystemData() {
                 break;
             case 4:
                 if (!codepage && n >= 4) {
-                    codepage = LcidToCodepage(r.DWordLE(off + 4));
+                    codepage = LcidToCodepage(r.UInt32LE(off + 4));
                 }
                 break;
             case 6:
@@ -289,14 +293,14 @@ TempStr ChmFile::ResolveTopicID(unsigned int id) const {
     TempStr ivbData = GetDataTemp("/#IVB");
     int ivbLen = ivbData.len;
     ByteReader br(ivbData);
-    if ((ivbLen % 8) != 4 || ivbLen - 4 != (int)br.DWordLE(0)) {
+    if ((ivbLen % 8) != 4 || ivbLen - 4 != (int)br.UInt32LE(0)) {
         return {};
     }
 
     for (int off = 4; off < ivbLen; off += 8) {
-        if (br.DWordLE(off) == id) {
+        if (br.UInt32LE(off) == id) {
             TempStr stringsData = GetDataTemp("/#STRINGS");
-            Str res = GetCharZ(stringsData, (int)br.DWordLE(off + 4));
+            Str res = GetCharZ(stringsData, (int)br.UInt32LE(off + 4));
             if (!res) {
                 return {};
             }
@@ -350,7 +354,7 @@ bool ChmFile::Load(Str path) {
     int n = file::ReadN(path, (u8*)header, sizeof(header));
     if (n < (int)sizeof(header)) {
         ByteReader r(Str(header, sizeof(header)));
-        DWORD lcid = r.DWordLE(20);
+        DWORD lcid = r.UInt32LE(20);
         fileCodepage = LcidToCodepage(lcid);
     }
     if (!codepage) {
@@ -441,9 +445,9 @@ static bool VisitChmTocItem(EbookTocVisitor* visitor, const GumboNode* objNode, 
         if (!attrName || !attrVal) {
             continue;
         }
-        if (str::EqI(attrName->value, "Name")) {
+        if (str::EqI(attrName->value, StrL("Name"))) {
             name = str::DupTemp(attrVal->value);
-        } else if (str::EqI(attrName->value, "Local")) {
+        } else if (str::EqI(attrName->value, StrL("Local"))) {
             local = str::DupTemp(StripItsProtocol(Str(attrVal->value)));
         }
     }
@@ -484,15 +488,15 @@ static bool VisitChmIndexItem(EbookTocVisitor* visitor, const GumboNode* objNode
         if (!attrName || !attrVal) {
             continue;
         }
-        if (str::EqI(attrName->value, "Keyword")) {
+        if (str::EqI(attrName->value, StrL("Keyword"))) {
             keyword = Str(attrVal->value);
-        } else if (str::EqI(attrName->value, "Name")) {
+        } else if (str::EqI(attrName->value, StrL("Name"))) {
             name = Str(attrVal->value);
             // some CHM documents seem to use a lonely Name instead of Keyword
             if (!keyword) {
                 keyword = name;
             }
-        } else if (str::EqI(attrName->value, "Local") && name) {
+        } else if (str::EqI(attrName->value, StrL("Local")) && name) {
             references.Append(name);
             references.Append(StripItsProtocol(Str(attrVal->value)));
         }
@@ -606,7 +610,7 @@ static bool WalkBrokenChmTocOrIndex(EbookTocVisitor* visitor, const GumboNode* r
         }
         if (node->type == GUMBO_NODE_ELEMENT && GumboTagNameIs(node, "object")) {
             const GumboAttribute* type = gumbo_get_attribute(&node->v.element.attributes, "type");
-            if (type && str::EqI(type->value, "text/sitemap")) {
+            if (type && str::EqI(type->value, StrL("text/sitemap"))) {
                 *hadOneInOut |= isIndex ? VisitChmIndexItem(visitor, node, 1) : VisitChmTocItem(visitor, node, 1);
                 continue; // don't recurse into the object's <param> children
             }
@@ -683,7 +687,7 @@ static int ChmEntityByte(WCHAR c) {
 // codepage. Labels that decoded to real Unicode (codepoints > 0xFF, i.e. raw
 // non-Latin bytes already converted by SmartToUtf8Temp) are left untouched, as
 // are pure-ASCII labels (issue #842).
-static const TempStr FixChmTocEntitiesTemp(Str s, uint codepage) {
+static TempStr FixChmTocEntitiesTemp(Str s, uint codepage) {
     uint cp = (codepage == CP_ACP) ? GetACP() : codepage;
     if (!s || !ChmTocNeedsEntityRemap(cp)) {
         return s;

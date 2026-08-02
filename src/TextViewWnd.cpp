@@ -27,14 +27,14 @@ struct TextViewWnd : Wnd {
     void UpdateTheme();
     static Str FormatTextForEdit(Str text);
     LRESULT WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) override;
+    bool PreTranslateMessage(MSG& msg) override;
     void ScheduleDelete();
 };
 
 TextViewWnd::~TextViewWnd() {
-    if (monoFont) {
-        DeleteObject(monoFont);
-        monoFont = nullptr;
-    }
+    // monoFont is from HdcCreateSimpleFont — cached for the app lifetime.
+    // Do not DeleteObject it or the shared cache returns a dead HFONT next time.
+    monoFont = nullptr;
 }
 
 static void DeleteTextViewWndInstance(TextViewWnd* w) {
@@ -50,7 +50,7 @@ void TextViewWnd::LayoutToClient() {
     if (!edit || !hwnd) {
         return;
     }
-    Rect rc = ClientRect(hwnd);
+    Rect rc = HwndClientRect(hwnd);
     edit->SetBounds(rc);
 }
 
@@ -64,6 +64,10 @@ void TextViewWnd::UpdateTheme() {
     if (UseDarkModeLib()) {
         DarkMode::setDarkWndSafe(hwnd);
         DarkMode::setWindowEraseBgSubclass(hwnd);
+    }
+    // Re-apply monospaced font after darkmode child theming (may reset font).
+    if (edit && monoFont) {
+        HwndSetFont(edit->hwnd, monoFont);
     }
     RedrawWindow(hwnd, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
@@ -102,9 +106,10 @@ bool TextViewWnd::Create(Str title, Str text) {
     edit = new Edit();
     edit->Create(args);
     SendMessageW(edit->hwnd, EM_SETREADONLY, TRUE, 0);
+    SendMessageW(edit->hwnd, EM_SETLIMITTEXT, 0, 0);
 
     HDC hdc = GetDC(hwnd);
-    monoFont = CreateSimpleFont(hdc, "Consolas", 14);
+    monoFont = HdcCreateSimpleFont(hdc, "Consolas", 14);
     ReleaseDC(hwnd, hdc);
     if (monoFont) {
         edit->font = monoFont;
@@ -134,6 +139,18 @@ LRESULT TextViewWnd::WndProc(HWND hwndIn, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     return WndProcDefault(hwndIn, msg, wp, lp);
+}
+
+bool TextViewWnd::PreTranslateMessage(MSG& msg) {
+    if (!hwnd) {
+        return false;
+    }
+    // Esc closes PDF Info / Errors / outline text windows (issue #5856)
+    if ((msg.message == WM_KEYDOWN || msg.message == WM_CHAR) && msg.wParam == VK_ESCAPE) {
+        Close();
+        return true;
+    }
+    return false;
 }
 
 static void TeardownTextViewWnd(TextViewWnd* w) {

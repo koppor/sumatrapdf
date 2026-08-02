@@ -397,10 +397,6 @@ PointF ToPointFl(const Point p) {
     return {(float)p.x, (float)p.y};
 }
 
-Gdiplus::Point ToGdipPoint(const Point p) {
-    return Gdiplus::Point(p.x, p.y);
-}
-
 Point ToPoint(const PointF p) {
     return Point{(int)p.x, (int)p.y};
 }
@@ -409,16 +405,8 @@ POINT ToPOINT(const Point& p) {
     return {p.x, p.y};
 }
 
-Gdiplus::PointF ToGdipPointF(const PointF p) {
-    return Gdiplus::PointF(p.x, p.y);
-}
-
 SizeF ToSizeFl(const Size s) {
     return {(float)s.dx, (float)s.dy};
-}
-
-SIZE ToSIZE(const Size s) {
-    return {s.dx, s.dy};
 }
 
 Size ToSize(const SizeF s) {

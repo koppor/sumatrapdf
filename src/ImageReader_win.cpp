@@ -8,7 +8,7 @@
 #include "base/ScopedWin.h"
 #include "base/TgaReader.h"
 #include "base/Win.h"
-#include "base/GdiPlus.h"
+#include "base/GdiPlusUtil.h"
 #include "AvifReader.h"
 #include "JxlReader.h"
 #include "WebpReader.h"
@@ -80,8 +80,8 @@ static Bitmap* WICDecodeImageFromStream(IStream* stream) {
     HR(pConverter->GetSize(&w, &h));
     double xres, yres;
     HR(pConverter->GetResolution(&xres, &yres));
-    Bitmap bmp(w, h, PixelFormat32bppARGB);
-    Gdiplus::Rect bmpRect(0, 0, w, h);
+    Bitmap bmp((INT)w, (INT)h, PixelFormat32bppARGB);
+    Gdiplus::Rect bmpRect(0, 0, (INT)w, (INT)h);
     BitmapData bmpData;
     Status ok = bmp.LockBits(&bmpRect, Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &bmpData);
     if (ok != Ok) {
@@ -92,18 +92,22 @@ static Bitmap* WICDecodeImageFromStream(IStream* stream) {
     bmp.SetResolution((float)xres, (float)yres);
 #undef HR
     ApplyExifOrientation(&bmp, orientation);
-    return bmp.Clone(0, 0, bmp.GetWidth(), bmp.GetHeight(), PixelFormat32bppARGB);
+    return bmp.Clone(0, 0, (INT)bmp.GetWidth(), (INT)bmp.GetHeight(), PixelFormat32bppARGB);
 }
 
 static void MaybeFlipBitmap(Bitmap* bmp) {
     u8 buf[64] = {}; // empirically is 26
 
+    // propSize is derived from the image's EXIF Orientation field, so a crafted
+    // TIFF can make it exceed buf (e.g. many Orientation values). GetPropertyItem
+    // would then write propSize bytes past the fixed stack buffer - a stack
+    // overflow. The ReportIf here used to be diagnostic-only and did not stop it,
+    // so reject an oversized property before calling GDI+.
     UINT propSize = bmp->GetPropertyItemSize(PropertyTagOrientation);
-    if (propSize == 0) {
+    if (propSize == 0 || propSize > dimof(buf)) {
         bmp->GetLastStatus(); // clear last status
         return;
     }
-    ReportIf(propSize > dimof(buf));
 
     auto status = bmp->GetPropertyItem(PropertyTagOrientation, propSize, (Gdiplus::PropertyItem*)buf);
     if (status != Status::Ok) {
@@ -111,6 +115,10 @@ static void MaybeFlipBitmap(Bitmap* bmp) {
         return;
     }
     auto propItem = (Gdiplus::PropertyItem*)buf;
+    // guard against a malformed/short property before reading the first value
+    if (!propItem->value || propItem->length < sizeof(u16)) {
+        return;
+    }
     u16* propValPtr = (u16*)propItem->value;
     ApplyExifOrientation(bmp, propValPtr[0]);
 }
@@ -163,7 +171,7 @@ static Pixmap* PixmapFromDataWin(Str bmpData) {
     }
 
     // HEIC/AVIF: in Debug, prefer heicdec so we exercise our decoder; fall back
-    // to WIC. In Release, try WIC first — tools/bench_image (Release x64) found
+    // to WIC. In Release, try WIC first — src/tools/bench_image (Release x64) found
     // the OS HEIF codec via WIC faster than heicdec (~1.2x AVIF / ~2x HEIC when
     // the Windows codec is installed), then fall back to heicdec.
     if (FileType::Heic == kind || FileType::Avif == kind) {
@@ -219,13 +227,21 @@ static Vec<Pixmap*> PixmapsFromMultiFrameData(Str bmpData, FileType kind) {
         return res;
     }
     const GUID* dim = (FileType::Tiff == kind) ? &Gdiplus::FrameDimensionPage : &Gdiplus::FrameDimensionTime;
-    UINT nFrames = bmp->GetFrameCount(dim);
+    constexpr UINT kMaxImageFrames = 1000;
+    constexpr i64 kMaxDecodedFrameBytes = 512LL * 1024 * 1024;
+    UINT nFrames = std::min(bmp->GetFrameCount(dim), kMaxImageFrames);
+    i64 decodedBytes = 0;
     for (UINT i = 0; i < nFrames; i++) {
         if (bmp->SelectActiveFrame(dim, i) != Gdiplus::Ok) {
             break;
         }
         Pixmap* px = PixmapFromGdiplus(bmp);
         if (px) {
+            decodedBytes += PixmapByteSize(px);
+            if (decodedBytes > kMaxDecodedFrameBytes) {
+                FreePixmap(px);
+                break;
+            }
             res.Append(px);
         }
     }
@@ -233,7 +249,7 @@ static Vec<Pixmap*> PixmapsFromMultiFrameData(Str bmpData, FileType kind) {
     return res;
 }
 
-// Prefer the fastest decoder per format (see tools/bench_image, Release x64):
+// Prefer the fastest decoder per format (see src/tools/bench_image, Release x64):
 //   JPEG/JP2 → MuPDF/libjpeg-turbo (beats WIC/GDI+)
 //   WebP     → libwebp (beats WIC; GDI+ often missing)
 //   HEIC/AVIF→ Debug: heicdec then WIC; Release: WIC then heicdec
@@ -290,7 +306,7 @@ RenderedBitmap* LoadRenderedBitmap(Str path) {
     HBITMAP hbmp = nullptr;
     RenderedBitmap* rendered = nullptr;
     if (bmp->GetHBITMAP((Gdiplus::ARGB)Gdiplus::Color::White, &hbmp) == Gdiplus::Ok) {
-        rendered = new RenderedBitmap(hbmp, Size(bmp->GetWidth(), bmp->GetHeight()));
+        rendered = new RenderedBitmap(hbmp, Size((int)bmp->GetWidth(), (int)bmp->GetHeight()));
     }
     delete bmp;
 
