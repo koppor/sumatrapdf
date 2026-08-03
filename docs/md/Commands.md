@@ -268,6 +268,8 @@ CmdSearchSelectionWithWikipedia,,Search Selection with Wikipedia,ver 3.6+
 CmdSearchSelectionWithGoogleScholar,,Search Selection with Google Scholar,ver 3.6+
 CmdSendByEmail,,Send Document By Email...,
 CmdInvokeInverseSearch,,Invoke Inverse Search,ver 3.6+
+CmdExec,,Execute a program,"ver 3.7+, for [custom shortcuts](Customize-keyboard-shortcuts.md): runs a program with arguments. Arguments: `exe` (default): command line where `%1` is the document path, `%d` its directory, `%p` the current page, `%z` zoom, `%x` / `%y` scroll position, `%%` a literal %; `filter`: only run if the document path matches (e.g. `*.pdf`)"
+CmdRefHoverPushToJabRef,Ctrl + J,Push Reference to JabRef,"ver 3.7+, pushes the bibliography entry shown in the reference hover popup to a running JabRef instance (via its local HTTP server on port 23119)"
 
 ```
 
