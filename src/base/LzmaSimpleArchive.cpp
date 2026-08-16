@@ -29,18 +29,18 @@ namespace lzma {
 struct ISzAllocatorAlloc : ISzAlloc {
     Arena* a;
 
-    static void* _Alloc(void* p, size_t size) {
+    static void* AllocCb(void* p, size_t size) {
         ISzAllocatorAlloc* alloc = (ISzAllocatorAlloc*)p;
         return ::Alloc(alloc->a, size);
     }
-    static void _Free(void* p, void* address) {
+    static void FreeCb(void* p, void* address) {
         ISzAllocatorAlloc* alloc = (ISzAllocatorAlloc*)p;
         ::Free(alloc->a, address);
     }
 
     explicit ISzAllocatorAlloc(Arena* a) {
-        this->Alloc = _Alloc;
-        this->Free = _Free;
+        this->Alloc = AllocCb;
+        this->Free = FreeCb;
         this->a = a;
     }
 };
@@ -49,7 +49,7 @@ struct ISzAllocatorAlloc : ISzAlloc {
 static bool crc_table_ready = false;
 static u32 crc_table[256];
 
-u32 lzma_crc32(u32 crc32, const u8* data, size_t data_len) {
+static u32 lzma_crc32(u32 crc32, const u8* data, size_t data_len) {
     if (!crc_table_ready) {
         u32 i, j;
         u32 h = 1;
@@ -289,6 +289,7 @@ static bool ExtractFileByIdx(SimpleArchive* archive, int idx, Str dstDir, Arena*
     return ok;
 }
 
+// files is an array of Str entries, last element must be empty
 bool ExtractFiles(Str archivePath, Str dstDir, Str* files, Arena* a) {
     auto d = file::ReadFileWithArena(archivePath, a);
     if (len(d) == 0) {

@@ -6,7 +6,7 @@ import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { cmdId, EXE, runStandalone, tmpPath } from "./util.ts";
 import { enumWindows, getClassName, getWindowPid, sleep } from "./winapi.ts";
-import { sendCommand, waitForFrame } from "./win-automation.ts";
+import { sendCommand, waitForFrame, killAndWait } from "./win-automation.ts";
 
 const DLL = join(dirname(EXE), "libsumatrapdf.dll");
 
@@ -31,22 +31,27 @@ async function assertFileDialog(name: string, ini: string, expected: boolean): P
       throw new Error(`${name}: SumatraPDF window did not appear`);
     }
     sendCommand(frame, cmdId("CmdOpenFile"));
-    await sleep(800);
-
+    const deadline = Date.now() + (expected ? 3000 : 250);
     let foundFileDialog = false;
-    enumWindows((hwnd) => {
-      if (getWindowPid(hwnd) === proc.pid && getClassName(hwnd) === "#32770") {
-        foundFileDialog = true;
-        return false;
+    while (Date.now() < deadline) {
+      enumWindows((hwnd) => {
+        if (getWindowPid(hwnd) === proc.pid && getClassName(hwnd) === "#32770") {
+          foundFileDialog = true;
+          return false;
+        }
+        return true;
+      });
+      if (foundFileDialog) {
+        break;
       }
-      return true;
-    });
+      await sleep(30);
+    }
     if (foundFileDialog !== expected) {
       throw new Error(`${name}: expected file dialog=${expected}, got ${foundFileDialog}`);
     }
   } finally {
     if (proc.exitCode === null) {
-      proc.kill();
+      await killAndWait(proc);
     }
   }
 }

@@ -4,12 +4,15 @@
 #include "base/Base.h"
 #include "base/File.h"
 #include "base/Win.h"
-#include "base/Dpi.h"
+#include "gui/Dpi.h"
 #include "base/UITask.h"
 
-#include "wingui/UIModels.h"
-#include "wingui/Layout.h"
-#include "wingui/WinGui.h"
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
+#include "gui/PlatformFont.h"
+#include "gui/Gfx.h"
+#include "gui/VirtCtrl.h"
 
 #include "Settings.h"
 #include "GlobalPrefs.h"
@@ -28,61 +31,33 @@
 #include "SumatraConfig.h"
 #include "Print.h"
 #include "Theme.h"
-#include "DarkModeSubclass.h"
+#include "DarkMode_win.h"
 
 void ShowProperties(HWND parent, DocController* ctrl);
 
 constexpr int kButtonPadding = 8;
 
-struct PropertiesWnd : Wnd {
-    ~PropertiesWnd() override;
-
+struct PropertiesWnd : WindowBase {
     HWND hwndParent = nullptr;
     Edit* editProps = nullptr;
-    Button* btnCopyToClipboard = nullptr;
-    HFONT propsFont = nullptr;
+    VirtButton* btnCopyToClipboard = nullptr;
+    PlatformFont* propsFont = nullptr;
     str::Builder propsText;
     Point initialPos;
-    // CloseDocumentInCurrentTab and DeleteMainWindow can both try to tear the
-    // properties window down; only one deferred delete may run.
-    bool deleteScheduled = false;
 
     bool Create(HWND parent);
-    void LayoutToClient();
-    void UpdateTheme();
+    void UpdateTheme() override;
+    void ApplyDarkMode() override;
     void SetPropsText(Str text);
     void SizeToContent();
-    void CopyToClipboard();
-    LRESULT WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) override;
-    bool PreTranslateMessage(MSG& msg) override;
-    bool OnCommand(WPARAM wparam, LPARAM lparam) override;
-    void ScheduleDelete();
+    void CopyToClipboard(VirtMouseEvent* ev = nullptr);
+    void OnCommand(WindowBase::CommandEvent* ev);
 };
 
 static Vec<PropertiesWnd*> gPropertiesWindows;
 
-PropertiesWnd::~PropertiesWnd() {
-    // propsFont is from HdcCreateSimpleFont — cached for the app lifetime.
-    // Do not DeleteObject it or the cache returns a dead HFONT on the next open
-    // (Document Properties then falls back to a proportional font; issue #5852).
-    propsFont = nullptr;
-}
-
-static void DeletePropertiesWndInstance(PropertiesWnd* w) {
-    delete w;
-}
-
-void PropertiesWnd::ScheduleDelete() {
-    if (deleteScheduled) {
-        return;
-    }
-    deleteScheduled = true;
-    auto fn = MkFunc0<PropertiesWnd>(DeletePropertiesWndInstance, this);
-    uitask::Post(fn, "SafeDeletePropertiesWnd");
-}
-
-static int ButtonPadding(HWND hwnd) {
-    return DpiScale(hwnd, kButtonPadding);
+static int ButtonPadding() {
+    return DpiScale(kButtonPadding);
 }
 
 PropertiesWnd* FindPropertyWindowByHwnd(HWND hwnd) {
@@ -308,8 +283,8 @@ static TempStr FormatPageSizeTemp(EngineBase* engine, int pageNo, int rotation) 
     TempStr mmStr = FormatPageSizeUnitTemp(size, 25.4, StrL("mm"));
 
     // Pixel size at the document's native DPI (PDF media box is typically 72 dpi)
-    int pxW = (int)((size.dx * fileDpi) + 0.5f);
-    int pxH = (int)((size.dy * fileDpi) + 0.5f);
+    int pxW = (int)lroundf(size.dx * fileDpi);
+    int pxH = (int)lroundf(size.dy * fileDpi);
     TempStr pxStr = fmt("%dx%d px", pxW, pxH);
 
     // Locale unit first, then the other two, then pixels (issue #2186)
@@ -482,7 +457,7 @@ static void GetAllProps(DocController* ctrl, Props& propsOut) {
     }
 }
 
-void AppendDateProp(str::Builder& out, Str key, Str val, bool isPdfDate) {
+static void AppendDateProp(str::Builder& out, Str key, Str val, bool isPdfDate) {
     SYSTEMTIME date;
     int timeZone = 0;
     bool ok = false;
@@ -513,6 +488,85 @@ static void AddImageProperties(EngineBase* engine, int pageNo, str::Builder& out
     }
 }
 
+// Types whose name is more than an upper-cased extension. Everything else
+// reads fine as-is (".pdf" -> "PDF"), so only the exceptions live here.
+static Str FileTypeDisplayName(FileType ft) {
+    if (ft == FileType::Jxl) {
+        return StrL("JPEG-XL");
+    }
+    return {};
+}
+
+// The file type as sniffed from the content, which is what the app went by
+// when it picked an engine - the extension can say something else entirely.
+// Only for a plain file on disk: a directory document has no content of its
+// own, an embedded PDF stream isn't a file, and in plugin mode the "path" is
+// a URL we can't read.
+static void AppendFileType(str::Builder& out, Str path) {
+    if (gPluginMode || len(path) == 0) {
+        return;
+    }
+    if (path::IsDirectory(path) || !file::Exists(path)) {
+        return;
+    }
+    FileType ft = GuessFileTypeFromFile(path);
+    if (ft == FileType::Unknown) {
+        return;
+    }
+    Str name = FileTypeDisplayName(ft);
+    if (!name) {
+        TempStr ext = GetExtForFileTypeTemp(ft);
+        if (len(ext) < 2) {
+            return;
+        }
+        // ".pdf" reads better as "PDF" next to the file name it belongs to
+        TempStr fromExt = str::DupTemp(Str(ext.s + 1, ext.len - 1));
+        str::ToUpperInPlace(fromExt);
+        name = fromExt;
+    }
+    AppendProp(out, _TRA("File Type:"), name);
+}
+
+// Which way the pages run, and where that came from. An EPUB can state it with
+// page-progression-direction; for everything else it's the manga-mode default
+// or the user's own toggle (issue #1264).
+// Not shown for a standalone image (no page sequence) or a one-page document
+// that neither declares a direction nor has had manga mode toggled (#5950).
+static bool ShouldShowReadingDirection(DisplayModel* dm) {
+    if (!dm) {
+        return false;
+    }
+    EngineBase* engine = dm->GetEngine();
+    if (!engine || engine->kind == kindEngineImage) {
+        return false;
+    }
+    const PageLayout& layout = engine->preferredLayout;
+    if (layout.r2lDeclared) {
+        return true;
+    }
+    if (dm->GetDisplayR2L() != layout.r2l) {
+        return true;
+    }
+    return dm->PageCount() > 1;
+}
+
+static void AppendReadingDirection(str::Builder& out, DisplayModel* dm) {
+    if (!ShouldShowReadingDirection(dm)) {
+        return;
+    }
+    bool r2l = dm->GetDisplayR2L();
+    Str dir = r2l ? _TRA("Right to left") : _TRA("Left to right");
+    Str src;
+    const PageLayout& layout = dm->GetEngine()->preferredLayout;
+    if (layout.r2lDeclared && r2l == layout.r2l) {
+        src = _TRA("from the document");
+    } else if (r2l != layout.r2l) {
+        src = _TRA("changed by you");
+    }
+    TempStr val = src ? str::JoinTemp(dir, StrL(" ("), src, StrL(")")) : TempStr(dir);
+    AppendProp(out, _TRA("Reading Direction:"), val);
+}
+
 static void GetPropsText(DocController* ctrl, str::Builder& out) {
     ReportIf(!ctrl);
 
@@ -534,6 +588,8 @@ static void GetPropsText(DocController* ctrl, str::Builder& out) {
         strTemp = FormatFileSizeTransTemp(fileSize);
         AppendProp(out, _TRA("File Size:"), strTemp);
     }
+    AppendFileType(out, path);
+    AppendReadingDirection(out, dm);
 
     Props props;
     GetAllProps(ctrl, props);
@@ -649,9 +705,7 @@ static void AlignPropertiesText(str::Builder& text) {
         int lineLen = nl >= 0 ? nl : rest.len;
         int labelBytes = 0;
         int labelWidth = GetPropertyLabelWidth(Str(rest.s, lineLen), &labelBytes);
-        if (labelWidth > maxLabelWidth) {
-            maxLabelWidth = labelWidth;
-        }
+        maxLabelWidth = std::max(labelWidth, maxLabelWidth);
         off += lineLen + (nl >= 0 ? 1 : 0);
     }
     if (maxLabelWidth == 0) {
@@ -684,7 +738,7 @@ static void AlignPropertiesText(str::Builder& text) {
     text.Reset(ToStr(aligned));
 }
 
-void PropertiesWnd::CopyToClipboard() {
+void PropertiesWnd::CopyToClipboard(VirtMouseEvent*) {
     CopyTextToClipboard(ToStr(propsText));
 }
 
@@ -708,11 +762,6 @@ void PropertiesWnd::SizeToContent() {
     if (!editProps) {
         return;
     }
-    HWND hwndEdit = editProps->hwnd;
-
-    HFONT font = (HFONT)SendMessageW(hwndEdit, WM_GETFONT, 0, 0);
-    HDC hdcEdit = GetDC(hwndEdit);
-    HGDIOBJ origFont = SelectObject(hdcEdit, font);
     int maxLineDx = 0;
     int nLines = 0;
     Str text = ToStr(propsText);
@@ -720,42 +769,35 @@ void PropertiesWnd::SizeToContent() {
         Str rest = Str(text.s + off, text.len - off);
         int nl = str::IndexOfChar(rest, '\n');
         int lineLen = nl >= 0 ? nl : rest.len;
-        Size size = HdcGetTextExtentPoint32(hdcEdit, Str(rest.s, lineLen));
-        if (size.dx > maxLineDx) {
-            maxLineDx = size.dx;
-        }
+        Size size = PlatformFontMeasureText(propsFont, Str(rest.s, lineLen));
+        maxLineDx = std::max(size.dx, maxLineDx);
         nLines++;
         off += lineLen + (nl >= 0 ? 1 : 0);
     }
     maxLineDx += 16;
 
-    TEXTMETRICW tm{};
-    GetTextMetricsW(hdcEdit, &tm);
-    int lineHeight = tm.tmHeight + tm.tmExternalLeading;
+    int lineHeight = PlatformFontLineHeight(propsFont);
     // a bit of slack so the longest lines don't touch the right edge
-    maxLineDx += 4 * tm.tmAveCharWidth;
-
-    SelectObject(hdcEdit, origFont);
-    ReleaseDC(hwndEdit, hdcEdit);
+    maxLineDx += 4 * PlatformFontMeasureText(propsFont, "x").dx;
 
     // add padding for scrollbar, border, window frame
-    int editPadding = GetSystemMetrics(SM_CXVSCROLL) + (2 * GetSystemMetrics(SM_CXEDGE)) + 16;
-    int frameDx = GetSystemMetrics(SM_CXFRAME) * 2;
+    int editPadding = DpiGetSystemMetrics(SM_CXVSCROLL) + (2 * DpiGetSystemMetrics(SM_CXEDGE)) + 16;
+    int frameDx = DpiGetSystemMetrics(SM_CXFRAME) * 2;
     int wantedClientDx = maxLineDx + editPadding;
     if (btnCopyToClipboard) {
         Size buttonSize = btnCopyToClipboard->GetIdealSize();
-        wantedClientDx = std::max(wantedClientDx, buttonSize.dx + (2 * ButtonPadding(hwnd)));
+        wantedClientDx = std::max(wantedClientDx, buttonSize.dx + (2 * ButtonPadding()));
     }
     int wantedDx = wantedClientDx + frameDx;
 
     // calculate height to fit all lines
-    int editBorderDy = 2 * GetSystemMetrics(SM_CYEDGE);
-    int frameDy = (GetSystemMetrics(SM_CYFRAME) * 2) + GetSystemMetrics(SM_CYCAPTION);
-    int btnAreaDy = DpiScale(hwnd, 40);
+    int editBorderDy = 2 * DpiGetSystemMetrics(SM_CYEDGE);
+    int frameDy = (DpiGetSystemMetrics(SM_CYFRAME) * 2) + DpiGetSystemMetrics(SM_CYCAPTION);
+    int btnAreaDy = DpiScale(40);
     if (btnCopyToClipboard) {
-        btnAreaDy = std::max(btnAreaDy, btnCopyToClipboard->GetIdealSize().dy + (2 * ButtonPadding(hwnd)));
+        btnAreaDy = std::max(btnAreaDy, btnCopyToClipboard->GetIdealSize().dy + (2 * ButtonPadding()));
     }
-    int bottomMargin = ButtonPadding(hwnd);
+    int bottomMargin = ButtonPadding();
     int wantedDy = ((nLines + 3) * lineHeight) + editBorderDy + btnAreaDy + bottomMargin + frameDy;
 
     // cap at 80% of screen
@@ -767,69 +809,27 @@ void PropertiesWnd::SizeToContent() {
 
     Rect wRc = HwndWindowRect(hwnd);
     MoveWindow(hwnd, wRc.x, wRc.y, wantedDx, wantedDy, TRUE);
-    LayoutToClient();
+    DoLayout();
 }
 
-void PropertiesWnd::LayoutToClient() {
-    if (!layout || !hwnd) {
-        return;
-    }
-    Rect rc = HwndClientRect(hwnd);
-    Constraints bc = Tight({rc.dx, rc.dy});
-    layout->Layout(bc);
-    layout->SetBounds({0, 0, rc.dx, rc.dy});
+void PropertiesWnd::ApplyDarkMode() {
+    DarkModeApplyToWindowAndEraseBg(hwnd);
 }
 
 void PropertiesWnd::UpdateTheme() {
-    COLORREF colBg = ThemeWindowControlBackgroundColor();
-    COLORREF colTxt = ThemeWindowTextColor();
-    SetColors(colTxt, colBg);
-    if (editProps) {
-        editProps->SetColors(colTxt, colBg);
-    }
-    if (btnCopyToClipboard) {
-        btnCopyToClipboard->SetColors(colTxt, colBg);
-    }
-    if (UseDarkModeLib()) {
-        DarkMode::setDarkWndSafe(hwnd);
-        DarkMode::setWindowEraseBgSubclass(hwnd);
-    }
+    WindowBase::UpdateTheme();
     // Re-apply monospaced font after darkmode child theming (may reset font).
     if (editProps && propsFont) {
-        HwndSetFont(editProps->hwnd, propsFont);
+        editProps->SetFont(propsFont);
     }
-    RedrawWindow(hwnd, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
 }
 
-LRESULT PropertiesWnd::WndProc(HWND hwndIn, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_SIZE) {
-        LayoutToClient();
-        return 0;
-    }
-    return WndProcDefault(hwndIn, msg, wp, lp);
-}
-
-bool PropertiesWnd::PreTranslateMessage(MSG& msg) {
-    if (!hwnd) {
-        return false;
-    }
-    if (msg.hwnd != hwnd && !IsChild(hwnd, msg.hwnd)) {
-        return false;
-    }
-    if (msg.message == WM_CHAR && msg.wParam == VK_ESCAPE) {
-        Close();
-        return true;
-    }
-    return false;
-}
-
-bool PropertiesWnd::OnCommand(WPARAM wparam, LPARAM lparam) {
-    auto cmd = LOWORD(wparam);
+void PropertiesWnd::OnCommand(WindowBase::CommandEvent* ev) {
+    auto cmd = LOWORD(ev->wparam);
     if (cmd == CmdCopySelection) {
         CopyToClipboard();
-        return true;
+        ev->didHandle = true;
     }
-    return Wnd::OnCommand(wparam, lparam);
 }
 
 static void SavePropertiesWindowPos(PropertiesWnd* w, HWND hwnd) {
@@ -844,9 +844,9 @@ static void SavePropertiesWindowPos(PropertiesWnd* w, HWND hwnd) {
     }
 }
 
-// WM_CLOSE must clean up here: Wnd::Destroy() clears hwnd and drops the Wnd from
+// WM_CLOSE must clean up here: WindowBase::Destroy() clears hwnd and drops the WindowBase from
 // the hwnd map before DestroyWindow(), so WM_DESTROY never reaches onDestroy.
-static void OnPropertiesClose(Wnd::CloseEvent* ev) {
+static void OnPropertiesClose(WindowBase::CloseEvent* ev) {
     PropertiesWnd* w = (PropertiesWnd*)ev->e->self;
     if (!w || w->deleteScheduled) {
         return;
@@ -856,7 +856,7 @@ static void OnPropertiesClose(Wnd::CloseEvent* ev) {
     w->ScheduleDelete();
 }
 
-static void OnPropertiesDestroy(Wnd::DestroyEvent* ev) {
+static void OnPropertiesDestroy(WindowBase::DestroyEvent* ev) {
     PropertiesWnd* w = (PropertiesWnd*)ev->e->self;
     // Fallback if the window was destroyed without WM_CLOSE (or Close already
     // scheduled the deferred free — then deleteScheduled is set and we no-op).
@@ -879,7 +879,7 @@ bool PropertiesWnd::Create(HWND parent) {
         args.title = _TRA("Document Properties");
         args.visible = false;
         args.style = WS_OVERLAPPEDWINDOW;
-        args.font = GetAppFont(parent);
+        args.font = GetAppFont();
         args.isRtl = isRtl;
         args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
         CreateCustom(args);
@@ -917,13 +917,14 @@ bool PropertiesWnd::Create(HWND parent) {
         auto* btnRow = new HBox();
         btnRow->alignMain = MainAxisAlign::MainEnd;
         btnRow->alignCross = CrossAxisAlign::CrossCenter;
-        btnCopyToClipboard = CreateButton(hwnd, _TRA("Copy To Clipboard"),
-                                          MkMethod0<PropertiesWnd, &PropertiesWnd::CopyToClipboard>(this), isRtl);
-        btnRow->AddChild(new Padding(btnCopyToClipboard, DpiScaledInsets(hwnd, kButtonPadding, 0, 0, 0)));
+        btnRow->gap = GetAppFont()->averageCharWidth;
+        btnCopyToClipboard = NewThemedButton(hwnd, _TRA("Copy To Clipboard"), GetAppFont(), true);
+        btnCopyToClipboard->onClick = MkMethod1<PropertiesWnd, VirtMouseEvent*, &PropertiesWnd::CopyToClipboard>(this);
+        btnRow->AddChild(new Padding(btnCopyToClipboard, DpiScaledInsets(kButtonPadding, 0, 0, 0)));
         vbox->AddChild(btnRow);
     }
 
-    layout = new Padding(vbox, DpiScaledInsets(hwnd, 0, kButtonPadding, kButtonPadding, kButtonPadding));
+    layout = new Padding(vbox, DpiScaledInsets(0, kButtonPadding, kButtonPadding, kButtonPadding));
 
     SetPropsText(ToStr(propsText));
     SizeToContent();
@@ -962,7 +963,7 @@ struct GetFontsData {
 
 static void GetFontsThread(GetFontsData* data) {
     TempStr val = data->engine->GetPropertyTemp(DocProp::FontList);
-    auto result = new GetFontsResult;
+    auto* result = new GetFontsResult;
     result->hwnd = data->hwnd;
     if (val) {
         result->fontsText.Append("\n");
@@ -996,8 +997,10 @@ void ShowProperties(HWND parent, DocController* ctrl) {
     wnd->propsText.Append("\n");
     wnd->propsText.Append(_TRA("Getting font information..."));
 
-    wnd->onClose = MkFunc1Void<Wnd::CloseEvent*>(OnPropertiesClose);
-    wnd->onDestroy = MkFunc1Void<Wnd::DestroyEvent*>(OnPropertiesDestroy);
+    wnd->closeOnEsc = true;
+    wnd->onClose = MkFunc1Void<WindowBase::CloseEvent*>(OnPropertiesClose);
+    wnd->onDestroy = MkFunc1Void<WindowBase::DestroyEvent*>(OnPropertiesDestroy);
+    wnd->onCommand = MkMethod1<PropertiesWnd, WindowBase::CommandEvent*, &PropertiesWnd::OnCommand>(wnd);
     if (!wnd->Create(parent)) {
         gPropertiesWindows.Remove(wnd);
         delete wnd;
@@ -1007,7 +1010,7 @@ void ShowProperties(HWND parent, DocController* ctrl) {
     Point savedPos = gGlobalPrefs->propWinPos;
     if (!savedPos.IsEmpty()) {
         SetWindowPos(wnd->hwnd, nullptr, savedPos.x, savedPos.y, 0, 0, SWP_NOZORDER | SWP_NOSIZE);
-        wnd->LayoutToClient();
+        wnd->DoLayout();
     } else {
         HwndCenterDialog(wnd->hwnd, parent);
     }
@@ -1019,12 +1022,12 @@ void ShowProperties(HWND parent, DocController* ctrl) {
 
     DisplayModel* dm = ctrl->AsFixed();
     if (!dm || !dm->engine) {
-        auto result = new GetFontsResult;
+        auto* result = new GetFontsResult;
         result->hwnd = wnd->hwnd;
         OnGetFontsFinished(result);
         return;
     }
-    auto data = new GetFontsData;
+    auto* data = new GetFontsData;
     data->hwnd = wnd->hwnd;
     data->engine = dm->engine;
     data->engine->AddRef();

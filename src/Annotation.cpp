@@ -9,7 +9,7 @@ extern "C" {
 #include <mupdf/pdf.h>
 }
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "Annotation.h"
 #include "Settings.h"
@@ -43,7 +43,9 @@ static Str TranslateAnnotTypeNameTemp(Str english, Str menuKey = {}) {
     Str key = menuKey ? menuKey : english;
     Str tr = trans::GetTranslation(key);
     if (str::Contains(tr, StrL("&"))) {
-        return str::ReplaceTemp(tr, StrL("&"), Str{});
+        // StrL(""), not Str{}: ReplaceTemp rejects a null replacement and
+        // returns an empty string, which blanked every name with an access key
+        return str::ReplaceTemp(tr, StrL("&"), StrL(""));
     }
     return tr;
 }
@@ -134,6 +136,8 @@ static bool IsAnnotationInEngine(EngineMupdf* e, Annotation* annot) {
 }
 
 // Safe to call MuPDF with annot->pdfannot.
+// True if annot is non-null, has a live pdf_annot*, and is still listed in
+// its EngineMupdf page (markup or form widget). Use before any MuPDF call.
 bool AnnotationIsLive(Annotation* annot) {
     if (!annot || !annot->engine || !annot->pdfannot) {
         return false;
@@ -162,8 +166,8 @@ RectF GetBounds(Annotation* annot) {
         return annot ? annot->bounds : RectF{};
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     fz_rect rc = {};
 
@@ -192,10 +196,10 @@ void SetRect(Annotation* annot, RectF r) {
         return;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     bool failed = false;
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         fz_rect rc = ToFzRect(r);
         fz_try(ctx) {
@@ -239,13 +243,14 @@ static Str MupdfCStrTemp(const char* s) {
     return str::DupTemp(Str(s));
 }
 
+// EditAnnotations.cpp
 Str Author(Annotation* annot) {
     if (!AnnotationIsLive(annot)) {
         return {};
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
 
     Str res;
@@ -259,13 +264,21 @@ Str Author(Annotation* annot) {
     return res;
 }
 
+SeqStrings gQuaddingNames = "Left\0Center\0Right\0";
+
+// name of a text alignment as used by the FreeTextAlignment setting and the
+// `alignment` command argument -> PDF /Q value, -1 if not a known name
+int QuaddingFromName(Str s) {
+    return SeqStrIndexIS(gQuaddingNames, s);
+}
+
 int Quadding(Annotation* annot) {
     if (!AnnotationIsLive(annot)) {
         return 0;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     int res = 0;
     fz_try(ctx) {
@@ -288,9 +301,9 @@ bool SetQuadding(Annotation* annot, int newQuadding) {
         return false;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         ReportIf(!IsValidQuadding(newQuadding));
         bool didChange = Quadding(annot) != newQuadding;
@@ -315,9 +328,9 @@ void SetQuadPointsAsRect(Annotation* annot, const Vec<RectF>& rects) {
         return;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         int n = len(rects);
         if (n == 0) {
@@ -362,13 +375,15 @@ static void UpdateFormFieldPage(fz_context* ctx, pdf_annot* a) {
     }
 }
 
+// PDF form (widget) fields. GetWidgetType returns a pdf_widget_type value
+// (PDF_WIDGET_TYPE_*), or 0 (UNKNOWN) when annot isn't a form widget.
 int GetWidgetType(Annotation* annot) {
     if (!AnnotationIsLive(annot) || annot->type != AnnotationType::Widget) {
         return PDF_WIDGET_TYPE_UNKNOWN;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     int wt = PDF_WIDGET_TYPE_UNKNOWN;
     fz_try(ctx) {
@@ -385,8 +400,8 @@ WidgetCursorKind GetWidgetCursorKind(Annotation* annot) {
         return WidgetCursorKind::None;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     WidgetCursorKind kind = WidgetCursorKind::None;
     fz_try(ctx) {
@@ -406,18 +421,20 @@ WidgetCursorKind GetWidgetCursorKind(Annotation* annot) {
     return kind;
 }
 
+// Toggle a checkbox / radio-button form field in place. Returns true if it was
+// a (non-read-only) checkbox/radio and got toggled.
 bool ToggleFormButton(Annotation* annot) {
     if (!AnnotationIsLive(annot) || annot->type != AnnotationType::Widget) {
         return false;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     bool changed = false;
     {
         // BaseCtx(), not a Ctx() clone: toggling regenerates the appearance,
         // which runs the button's format/calculate JS; mupdf executes (and
         // rethrows errors) on _ctx, so the fz_try must be on that context.
-        auto ctx = e->BaseCtx();
+        auto* ctx = e->BaseCtx();
         ScopedRecursiveMutex cs(&e->docLock);
         fz_try(ctx) {
             int wt = pdf_widget_type(ctx, a);
@@ -462,13 +479,14 @@ bool ToggleFormButton(Annotation* annot) {
     return changed;
 }
 
+// pdf_annot_field_flags (PDF_FIELD_IS_*, PDF_TX_FIELD_IS_* bits), or 0.
 int GetWidgetFieldFlags(Annotation* annot) {
     if (!AnnotationIsLive(annot) || annot->type != AnnotationType::Widget) {
         return 0;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     int flags = 0;
     fz_try(ctx) {
@@ -480,13 +498,14 @@ int GetWidgetFieldFlags(Annotation* annot) {
     return flags;
 }
 
+// current text value of a form field (owned temp copy), or "" .
 Str GetWidgetValue(Annotation* annot) {
     if (!AnnotationIsLive(annot) || annot->type != AnnotationType::Widget) {
-        return Str();
+        return {};
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     Str res;
     fz_try(ctx) {
@@ -498,13 +517,14 @@ Str GetWidgetValue(Annotation* annot) {
     return res;
 }
 
+// font size from the field's /DA (in PDF points), or 0 for auto-size.
 float GetWidgetFontSize(Annotation* annot) {
     if (!AnnotationIsLive(annot) || annot->type != AnnotationType::Widget) {
         return 0;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     float size = 0;
     fz_try(ctx) {
@@ -520,13 +540,14 @@ float GetWidgetFontSize(Annotation* annot) {
     return size;
 }
 
+// max length of a text field (chars), or 0 for unlimited.
 int GetWidgetMaxLen(Annotation* annot) {
     if (!AnnotationIsLive(annot) || annot->type != AnnotationType::Widget) {
         return 0;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     int maxLen = 0;
     fz_try(ctx) {
@@ -539,19 +560,20 @@ int GetWidgetMaxLen(Annotation* annot) {
     return maxLen;
 }
 
+// set a text field's value (runs validation); returns true if accepted.
 bool SetWidgetTextValue(Annotation* annot, Str value) {
     if (!AnnotationIsLive(annot) || annot->type != AnnotationType::Widget) {
         return false;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     bool ok = false;
     TempStr valueZ = str::DupTemp(value);
     {
         // BaseCtx(), not a Ctx() clone: regenerating the appearance runs the
         // field's format/calculate JS, which mupdf executes (and rethrows
         // errors) on _ctx -- the fz_try must be on that same context.
-        auto ctx = e->BaseCtx();
+        auto* ctx = e->BaseCtx();
         ScopedRecursiveMutex cs(&e->docLock);
         fz_try(ctx) {
             ok = pdf_set_text_field_value(ctx, a, len(valueZ) == 0 ? "" : valueZ.s) != 0;
@@ -569,13 +591,14 @@ bool SetWidgetTextValue(Annotation* annot, Str value) {
     return ok;
 }
 
+// options of a combobox/listbox field (display strings), appended to `out`.
 void GetWidgetChoiceOptions(Annotation* annot, StrVec& out) {
     if (!AnnotationIsLive(annot) || annot->type != AnnotationType::Widget) {
         return;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     fz_try(ctx) {
         int n = pdf_choice_widget_options(ctx, a, 0, nullptr);
@@ -593,19 +616,20 @@ void GetWidgetChoiceOptions(Annotation* annot, StrVec& out) {
     }
 }
 
+// set a choice field's value to one of its options; returns true if applied.
 bool SetWidgetChoiceValue(Annotation* annot, Str value) {
     if (!AnnotationIsLive(annot) || annot->type != AnnotationType::Widget) {
         return false;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     bool ok = false;
     TempStr valueZ = str::DupTemp(value);
     {
         // BaseCtx(), not a Ctx() clone: regenerating the appearance runs the
         // field's format/calculate JS, which mupdf executes (and rethrows
         // errors) on _ctx -- the fz_try must be on that same context.
-        auto ctx = e->BaseCtx();
+        auto* ctx = e->BaseCtx();
         ScopedRecursiveMutex cs(&e->docLock);
         fz_try(ctx) {
             pdf_set_choice_field_value(ctx, a, len(valueZ) == 0 ? "" : valueZ.s);
@@ -655,8 +679,8 @@ Str Contents(Annotation* annot) {
         return {};
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     Str res;
     fz_try(ctx) {
@@ -676,14 +700,14 @@ bool SetContents(Annotation* annot, Str sv) {
         return false;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     Str currValue = Contents(annot);
     if (str::Eq(sv, currValue)) {
         return false;
     }
     TempStr valueZ = str::DupTemp(sv);
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         fz_try(ctx) {
             pdf_set_annot_contents(ctx, a, len(valueZ) == 0 ? "" : valueZ.s);
@@ -708,7 +732,7 @@ void DeleteAnnotation(Annotation* annot) {
         delete annot;
         return;
     }
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     if (!a) {
         // Already stripped from mupdf; drop from engine list if still present.
         if (IsAnnotationInEngine(e, annot)) {
@@ -726,7 +750,7 @@ void DeleteAnnotation(Annotation* annot) {
     }
     bool failed = false;
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         pdf_page* page = nullptr;
         fz_try(ctx) {
@@ -754,8 +778,8 @@ int PopupId(Annotation* annot) {
         return -1;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     pdf_obj* obj = nullptr;
     int res = -1;
@@ -795,8 +819,8 @@ time_t ModificationDate(Annotation* annot) {
         return 0;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     int64_t res = 0;
     fz_try(ctx) {
@@ -814,8 +838,8 @@ Str IconName(Annotation* annot) {
         return {};
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     Str iconName;
     fz_try(ctx) {
@@ -836,14 +860,14 @@ void SetIconName(Annotation* annot, Str iconName) {
         return;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     Str curr = IconName(annot);
     if (str::Eq(curr, iconName)) {
         return;
     }
     TempStr nameZ = str::DupTemp(iconName);
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         fz_try(ctx) {
             pdf_set_annot_icon_name(ctx, a, len(nameZ) == 0 ? "" : nameZ.s);
@@ -861,9 +885,9 @@ void SetLineEndStyles(Annotation* annot, int end) {
         return;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         fz_try(ctx) {
             pdf_set_annot_line_end_style(ctx, a, (pdf_line_ending)end);
@@ -881,9 +905,9 @@ void SetLineStartStyles(Annotation* annot, int start) {
         return;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         fz_try(ctx) {
             pdf_set_annot_line_start_style(ctx, a, (pdf_line_ending)start);
@@ -947,8 +971,8 @@ PdfColor GetColor(Annotation* annot) {
         return 0;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     float color[4]{};
     int n = -1;
@@ -972,9 +996,9 @@ bool SetColor(Annotation* annot, PdfColor c) {
         return false;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         bool didChange = false;
         float color[4]{};
@@ -1034,8 +1058,8 @@ PdfColor InteriorColor(Annotation* annot) {
         return 0;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     float color[4]{};
     int n = -1;
@@ -1058,9 +1082,9 @@ bool SetInteriorColor(Annotation* annot, PdfColor c) {
         return false;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         bool didChange = false;
         float color[4]{};
@@ -1103,8 +1127,8 @@ Str DefaultAppearanceTextFont(Annotation* annot) {
         return {};
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     const char* fontNameZ = nullptr;
     float sizeF{0.0};
@@ -1124,10 +1148,10 @@ void SetDefaultAppearanceTextFont(Annotation* annot, Str sv) {
         return;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     TempStr fontZ = str::DupTemp(sv);
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         const char* fontNameZ = nullptr;
         float sizeF{0.0};
@@ -1150,8 +1174,8 @@ int DefaultAppearanceTextSize(Annotation* annot) {
         return 0;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     const char* fontNameZ = nullptr;
     float sizeF{0.0};
@@ -1171,9 +1195,9 @@ void SetDefaultAppearanceTextSize(Annotation* annot, int textSize) {
         return;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         const char* fontNameZ = nullptr;
         float sizeF{0.0};
@@ -1196,8 +1220,8 @@ PdfColor DefaultAppearanceTextColor(Annotation* annot) {
         return 0;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     const char* fontNameZ = nullptr;
     float sizeF{0.0};
@@ -1218,9 +1242,9 @@ void SetDefaultAppearanceTextColor(Annotation* annot, PdfColor col) {
         return;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         const char* fontNameZ = nullptr;
         float sizeF{0.0};
@@ -1250,8 +1274,8 @@ void GetLineEndingStyles(Annotation* annot, int* start, int* end) {
         return;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     pdf_line_ending leStart = PDF_ANNOT_LE_NONE;
     pdf_line_ending leEnd = PDF_ANNOT_LE_NONE;
@@ -1275,8 +1299,8 @@ int BorderWidth(Annotation* annot) {
         return 0;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     float res = 0;
     fz_try(ctx) {
@@ -1296,9 +1320,9 @@ void SetBorderWidth(Annotation* annot, int newWidth) {
         return;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         fz_try(ctx) {
             pdf_set_annot_border_width(ctx, a, (float)newWidth);
@@ -1317,8 +1341,8 @@ int Opacity(Annotation* annot) {
         return 0;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
-    auto ctx = e->Ctx();
+    auto* a = annot->pdfannot;
+    auto* ctx = e->Ctx();
     ScopedRecursiveMutex cs(&e->docLock);
     float fopacity = 0;
     fz_try(ctx) {
@@ -1337,9 +1361,9 @@ void SetOpacity(Annotation* annot, int newOpacity) {
         return;
     }
     EngineMupdf* e = annot->engine;
-    auto a = annot->pdfannot;
+    auto* a = annot->pdfannot;
     {
-        auto ctx = e->Ctx();
+        auto* ctx = e->Ctx();
         ScopedRecursiveMutex cs(&e->docLock);
         ReportIf(newOpacity < 0 || newOpacity > 255);
         newOpacity = setMinMax(newOpacity, 0, 255);
@@ -1451,7 +1475,7 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
     EngineMupdf* epdf = AsEngineMupdf(engine);
     fz_context* ctx = epdf->Ctx();
 
-    auto pageInfo = epdf->GetFzPageInfo(pageNo, true);
+    auto* pageInfo = epdf->GetFzPageInfo(pageNo, true);
     pdf_annot* annot = nullptr;
     pdf_page* page = nullptr;
     auto typ = args->annotType;
@@ -1585,6 +1609,10 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
                 if (args->borderWidth >= 0) {
                     pdf_set_annot_border_width(ctx, annot, (float)args->borderWidth);
                 }
+                // left is MuPDF's default; leave /Q out of the file for it
+                if (args->quadding > kQuaddingLeft) {
+                    pdf_set_annot_quadding(ctx, annot, args->quadding);
+                }
                 const char* content = CStrTemp(args->content);
                 if (!str::IsEmptyOrWhiteSpace(content)) {
                     pdf_set_annot_contents(ctx, annot, content);
@@ -1640,7 +1668,7 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
         }
     }
 
-    auto res = MakeAnnotationWrapper(epdf, annot, pageNo);
+    auto* res = MakeAnnotationWrapper(epdf, annot, pageNo);
     MarkNotificationAsModified(epdf, res, AnnotationChange::Add);
 
     if (typ == AnnotationType::Text) {
@@ -1650,14 +1678,9 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
         }
     }
     if (col.parsedOk) {
-        switch (typ) {
-            case AnnotationType::FreeText:
-                // do nothing. for free text we set text color via pdf_set_annot_default_appearance
-                // and SetColor() sets background color
-                break;
-            default:
-                SetColor(res, col.pdfCol);
-                break;
+        // FreeText: text color via pdf_set_annot_default_appearance; SetColor is bg
+        if (typ != AnnotationType::FreeText) {
+            SetColor(res, col.pdfCol);
         }
     }
     pdf_drop_annot(ctx, annot);

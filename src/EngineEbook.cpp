@@ -6,13 +6,13 @@
 
 #include "base/Base.h"
 #include "base/Archive.h"
-#include "base/Dpi.h"
+#include "gui/Dpi.h"
 #include "base/File.h"
 #include "base/HtmlTags.h"
 #include "base/Pixmap.h"
 
-#include "GumboHtmlParser.h"
 #include "GumboHelpers.h"
+#include "GumboHtmlParser.h"
 
 #include "DocProperties.h"
 #include "ImageReader.h"
@@ -21,6 +21,8 @@
 #include "EbookBase.h"
 #include "PalmDbReader.h"
 #include "EbookDoc.h"
+#include "gui/PlatformFont.h"
+#include "gui/PlatformText.h"
 #include "HtmlFormatter.h"
 #include "EbookFormatter.h"
 
@@ -30,11 +32,8 @@
 #include "base/Win.h"
 #include "base/Zip.h"
 
-#include "mui/Mui.h"
-
 using Gdiplus::ARGB;
 using Gdiplus::Bitmap;
-using Gdiplus::Color;
 using Gdiplus::FontFamily;
 using Gdiplus::Graphics;
 using Gdiplus::Matrix;
@@ -53,6 +52,7 @@ Kind kindEngineHtml = "engineHtml";
 Kind kindEngineTxt = "engineTxt";
 
 static Str gDefaultFontName;
+static Str gDefaultChmFontName;
 static float gDefaultFontSize = 10.f;
 
 static WStr GetDefaultFontName() {
@@ -61,6 +61,13 @@ static WStr GetDefaultFontName() {
         return ToWStrTemp(s);
     }
     return WStrL(L"Georgia");
+}
+
+static WStr GetDefaultChmFontName() {
+    if (gDefaultChmFontName) {
+        return ToWStrTemp(gDefaultChmFontName);
+    }
+    return GetDefaultFontName();
 }
 
 static float GetDefaultFontSize() {
@@ -83,6 +90,10 @@ void SetDefaultEbookFont(Str name, float size) {
     // use a somewhat smaller size than in the EbookUI, since fit page/width
     // is likely to be above 100% for the paperback page dimensions
     gDefaultFontSize = size * 0.8f;
+}
+
+void SetDefaultChmFont(Str name) {
+    gDefaultChmFontName = name ? str::Dup(GetPermArena(), name) : Str();
 }
 
 /* common classes for EPUB, FictionBook2, Mobi, PalmDOC, CHM, HTML and TXT engines */
@@ -134,6 +145,7 @@ class EngineEbook : public EngineBase {
 
     IPageDestination* GetNamedDest(Str name) override;
     RenderedBitmap* GetImageForPageElement(IPageElement* el) override;
+    Str GetImageDataForPageElement(IPageElement* el) override;
 
     bool BenchLoadPage(int pageNo) override;
 
@@ -385,9 +397,9 @@ Pixmap* EngineEbook::RenderPage(RenderPageArgs& args) {
     DeleteObject(SelectObject(hDC, hbmp));
 
     Graphics g(hDC);
-    mui::InitGraphicsMode(&g);
+    InitGraphicsMode(&g);
 
-    Color white(0xFF, 0xFF, 0xFF);
+    Gdiplus::Color white(0xFF, 0xFF, 0xFF);
     SolidBrush tmpBrush(white);
     Gdiplus::Rect screenR(ToGdipRect(screen));
     screenR.Inflate(1, 1);
@@ -406,8 +418,8 @@ Pixmap* EngineEbook::RenderPage(RenderPageArgs& args) {
 
     ScopedMutex scope(&pagesAccess);
 
-    mui::ITextRender* textDraw = mui::TextRenderGdiplus::Create(&g);
-    DrawHtmlPage(&g, textDraw, GetHtmlPage(pageNo), pageBorder, pageBorder, false, Color((ARGB)Color::Black),
+    PlatformTextRender* textDraw = CreateGdiplusTextRender(&g);
+    DrawHtmlPage(&g, textDraw, GetHtmlPage(pageNo), pageBorder, pageBorder, false, kColBlack,
                  cookie ? &cookie->abort : nullptr);
     delete textDraw;
     DeleteDC(hDC);
@@ -569,7 +581,7 @@ Vec<IPageElement*> EngineEbook::GetElements(int pageNo) {
 static RenderedBitmap* getImageFromData(Str imageData) {
     HBITMAP hbmp = nullptr;
     Bitmap* bmp = NewGdiplusBitmapFromPixmap(PixmapFromData(imageData));
-    if (!bmp || bmp->GetHBITMAP((ARGB)Color::White, &hbmp) != Ok) {
+    if (!bmp || bmp->GetHBITMAP((ARGB)Gdiplus::Color::White, &hbmp) != Ok) {
         delete bmp;
         return nullptr;
     }
@@ -593,6 +605,22 @@ RenderedBitmap* EngineEbook::GetImageForPageElement(IPageElement* iel) {
     ReportIf(i.type != DrawInstrType::Image);
     return getImageFromData(i.GetImage());
 #endif
+}
+
+Str EngineEbook::GetImageDataForPageElement(IPageElement* iel) {
+    if (!iel || iel->GetKind() != kindPageElementImage) {
+        return {};
+    }
+    PageElementImage* el = (PageElementImage*)iel;
+    Vec<DrawInstr>* pageInstrs = GetHtmlPage(el->pageNo);
+    if (!pageInstrs || el->imageID < 0 || el->imageID >= len(*pageInstrs)) {
+        return {};
+    }
+    auto&& i = (*pageInstrs)[el->imageID];
+    if (i.type != DrawInstrType::Image) {
+        return {};
+    }
+    return str::Dup(i.GetImage());
 }
 
 // don't delete the result
@@ -678,14 +706,14 @@ TempStr EngineEbook::ExtractFontListTemp() {
             seenFonts.Append(i.font);
 
 #if OS_WIN
-            mui::CachedFont* font = i.font->GetCachedFont();
+            PlatformFont* font = i.font;
             FontFamily family;
-            if (!font || !font->font) {
+            if (!font || !font->gdiFont) {
                 // TODO: handle gdi
                 ReportIf(font && !font->GetHFont());
                 continue;
             }
-            Status ok = font->font->GetFamily(&family);
+            Status ok = font->gdiFont->GetFamily(&family);
             if (ok != Ok) {
                 continue;
             }
@@ -697,8 +725,7 @@ TempStr EngineEbook::ExtractFontListTemp() {
             TempStr fontName = ToUtf8Temp(fontNameW);
             AppendIfNotExists(&fonts, fontName);
 #else
-            TempStr fontName = ToUtf8Temp(i.font->GetName());
-            AppendIfNotExists(&fonts, fontName);
+            AppendIfNotExists(&fonts, i.font->GetName());
 #endif
         }
     }
@@ -755,8 +782,7 @@ void EbookTocBuilder::Visit(Str name, Str url, int level) {
     } else {
         dest = engine->GetNamedDest(url);
         if (!dest && str::ContainsChar(url, '%')) {
-            TempStr decodedUrl = str::DupTemp(url);
-            url::DecodeInPlace(decodedUrl.s);
+            TempStr decodedUrl = url::DecodeTemp(url);
             dest = engine->GetNamedDest(decodedUrl);
         }
     }
@@ -877,6 +903,7 @@ bool EngineEpub::FinishLoading() {
     }
 
     preferredLayout = PageLayout(PageLayout::Type::Book);
+    preferredLayout.r2lDeclared = doc->HasReadingDirection();
     if (doc->IsRTL()) {
         preferredLayout.r2l = true;
     }
@@ -918,6 +945,7 @@ EngineBase* EngineEpub::CreateFromData(Str data) {
     return engine;
 }
 
+/* EngineEbook.cpp */
 EngineBase* CreateEngineEpubFromFile(Str fileName) {
     return EngineEpub::CreateFromFile(fileName);
 }
@@ -1383,8 +1411,7 @@ void ChmFormatter::HandleTagImg(HtmlToken* t) {
     bool needAlt = true;
     AttrInfo* attr = t->GetAttrByName(StrL("src"));
     if (attr) {
-        Str src = str::DupTemp(attr->val);
-        url::DecodeInPlace(src);
+        TempStr src = url::DecodeTemp(attr->val);
         Str img = chmDoc->GetImageData(src, pagePath);
         needAlt = !img || !EmitImage(img);
     }
@@ -1430,8 +1457,7 @@ void ChmFormatter::HandleTagLink(HtmlToken* t) {
         return;
     }
 
-    TempStr src = str::DupTemp(attr->val);
-    url::DecodeInPlace(src);
+    TempStr src = url::DecodeTemp(attr->val);
     TempStr data = chmDoc->GetFileData(src, pagePath);
     if ((u8*)data.s) {
         ParseStyleSheet(data);
@@ -1636,7 +1662,8 @@ bool EngineChm::Load(Str fileName) {
     args.htmlStr = dataCache->GetHtmlData();
     args.pageDx = (float)pageRect.dx - (2 * pageBorder);
     args.pageDy = (float)pageRect.dy - (2 * pageBorder);
-    args.SetFontName(GetDefaultFontName());
+    args.SetFontName(GetDefaultChmFontName());
+    args.overrideFontName = len(gDefaultChmFontName) > 0;
     args.fontSize = GetDefaultFontSize();
     args.textAllocator = a;
     args.textRenderMethod = GetTextRenderMethod();
@@ -1936,4 +1963,5 @@ EngineBase* CreateEngineTxtFromFile(Str fileName) {
 
 void EngineEbookCleanup() {
     gDefaultFontName = {};
+    gDefaultChmFontName = {};
 }

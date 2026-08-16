@@ -8,7 +8,7 @@
 #include "base/UITask.h"
 #include "base/Win.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "Settings.h"
 #include "DocController.h"
@@ -212,13 +212,13 @@ static void AppendDeviceCapabilities(str::Builder& out, const WCHAR* nameW, cons
     } else if (bins == (DWORD)-1) {
         out.Append(fmt("  error: call to DeviceCapabilities failed with error %#x\n", GetLastError()));
     } else {
-        ScopedMem<WORD> binValues(AllocArray<WORD>((int)bins));
-        DeviceCapabilitiesW(nameW, portW, DC_BINS, (WCHAR*)binValues.Get(), nullptr);
-        ScopedMem<WCHAR> binNameValues(AllocArray<WCHAR>(24 * (int)binNames));
-        DeviceCapabilitiesW(nameW, portW, DC_BINNAMES, binNameValues.Get(), nullptr);
+        WORD* binValues = AllocArrayTemp<WORD>((int)bins);
+        DeviceCapabilitiesW(nameW, portW, DC_BINS, (WCHAR*)binValues, nullptr);
+        WCHAR* binNameValues = AllocArrayTemp<WCHAR>(24 * (int)binNames);
+        DeviceCapabilitiesW(nameW, portW, DC_BINNAMES, binNameValues, nullptr);
         for (DWORD j = 0; j < bins; j++) {
-            TempStr s = ToUtf8Temp(WStr(binNameValues.Get() + (24 * (size_t)j)));
-            out.Append(fmt("  bin %d: '%s' (%d)\n", (int)j, s, binValues.Get()[j]));
+            TempStr s = ToUtf8Temp(WStr(binNameValues + (24 * (size_t)j)));
+            out.Append(fmt("  bin %d: '%s' (%d)\n", (int)j, s, binValues[j]));
         }
     }
 
@@ -226,19 +226,19 @@ static void AppendDeviceCapabilities(str::Builder& out, const WCHAR* nameW, cons
     DWORD papers = DeviceCapabilitiesW(nameW, portW, DC_PAPERS, nullptr, nullptr);
     DWORD paperNames = DeviceCapabilitiesW(nameW, portW, DC_PAPERNAMES, nullptr, nullptr);
     if (papers > 0 && papers != (DWORD)-1) {
-        ScopedMem<WORD> paperValues(AllocArray<WORD>((int)papers));
-        DeviceCapabilitiesW(nameW, portW, DC_PAPERS, (WCHAR*)paperValues.Get(), nullptr);
+        WORD* paperValues = AllocArrayTemp<WORD>((int)papers);
+        DeviceCapabilitiesW(nameW, portW, DC_PAPERS, (WCHAR*)paperValues, nullptr);
         // paper names are 64 WCHARs each
-        ScopedMem<WCHAR> paperNameValues(AllocArray<WCHAR>(64 * (int)paperNames));
-        DeviceCapabilitiesW(nameW, portW, DC_PAPERNAMES, paperNameValues.Get(), nullptr);
+        WCHAR* paperNameValues = AllocArrayTemp<WCHAR>(64 * (int)paperNames);
+        DeviceCapabilitiesW(nameW, portW, DC_PAPERNAMES, paperNameValues, nullptr);
         // paper sizes in tenths of a millimeter
-        ScopedMem<POINT> paperSizes(AllocArray<POINT>((int)papers));
-        DeviceCapabilitiesW(nameW, portW, DC_PAPERSIZE, (WCHAR*)paperSizes.Get(), nullptr);
+        POINT* paperSizes = AllocArrayTemp<POINT>((int)papers);
+        DeviceCapabilitiesW(nameW, portW, DC_PAPERSIZE, (WCHAR*)paperSizes, nullptr);
         out.Append("  paper sizes:\n");
         for (DWORD j = 0; j < papers; j++) {
-            TempStr s = ToUtf8Temp(WStr(paperNameValues.Get() + (64 * (size_t)j)));
-            POINT sz = paperSizes.Get()[j];
-            out.Append(fmt("    '%s' (id %d, %.1f x %.1f mm)\n", s, paperValues.Get()[j], sz.x / 10.0, sz.y / 10.0));
+            TempStr s = ToUtf8Temp(WStr(paperNameValues + (64 * (size_t)j)));
+            POINT sz = paperSizes[j];
+            out.Append(fmt("    '%s' (id %d, %.1f x %.1f mm)\n", s, paperValues[j], sz.x / 10.0, sz.y / 10.0));
         }
     }
 
@@ -279,12 +279,12 @@ static void AppendDeviceCapabilities(str::Builder& out, const WCHAR* nameW, cons
     // resolutions
     DWORD nRes = DeviceCapabilitiesW(nameW, portW, DC_ENUMRESOLUTIONS, nullptr, nullptr);
     if (nRes > 0 && nRes != (DWORD)-1) {
-        ScopedMem<LONG> resPairs(AllocArray<LONG>(2 * (int)nRes));
-        DeviceCapabilitiesW(nameW, portW, DC_ENUMRESOLUTIONS, (WCHAR*)resPairs.Get(), nullptr);
+        LONG* resPairs = AllocArrayTemp<LONG>(2 * (int)nRes);
+        DeviceCapabilitiesW(nameW, portW, DC_ENUMRESOLUTIONS, (WCHAR*)resPairs, nullptr);
         out.Append("  resolutions:");
         for (DWORD j = 0; j < nRes; j++) {
-            LONG xDpi = resPairs.Get()[(size_t)j * 2];
-            LONG yDpi = resPairs.Get()[(j * 2) + 1];
+            LONG xDpi = resPairs[(size_t)j * 2];
+            LONG yDpi = resPairs[(j * 2) + 1];
             out.Append(fmt(" %dx%d", (int)xDpi, (int)yDpi));
         }
         out.Append("\n");
@@ -293,11 +293,11 @@ static void AppendDeviceCapabilities(str::Builder& out, const WCHAR* nameW, cons
     // N-up (pages per sheet)
     DWORD nup = DeviceCapabilitiesW(nameW, portW, DC_NUP, nullptr, nullptr);
     if (nup > 0 && nup != (DWORD)-1) {
-        ScopedMem<DWORD> nupValues(AllocArray<DWORD>((int)nup));
-        DeviceCapabilitiesW(nameW, portW, DC_NUP, (WCHAR*)nupValues.Get(), nullptr);
+        DWORD* nupValues = AllocArrayTemp<DWORD>((int)nup);
+        DeviceCapabilitiesW(nameW, portW, DC_NUP, (WCHAR*)nupValues, nullptr);
         out.Append("  pages per sheet (N-up):");
         for (DWORD j = 0; j < nup; j++) {
-            out.Append(fmt(" %d", (int)nupValues.Get()[j]));
+            out.Append(fmt(" %d", (int)nupValues[j]));
         }
         out.Append("\n");
     }
@@ -306,14 +306,14 @@ static void AppendDeviceCapabilities(str::Builder& out, const WCHAR* nameW, cons
     DWORD nMedia = DeviceCapabilitiesW(nameW, portW, DC_MEDIATYPENAMES, nullptr, nullptr);
     if (nMedia > 0 && nMedia != (DWORD)-1) {
         // media type names are 64 WCHARs each
-        ScopedMem<WCHAR> mediaNames(AllocArray<WCHAR>(64 * (int)nMedia));
-        DeviceCapabilitiesW(nameW, portW, DC_MEDIATYPENAMES, mediaNames.Get(), nullptr);
-        ScopedMem<DWORD> mediaValues(AllocArray<DWORD>((int)nMedia));
-        DeviceCapabilitiesW(nameW, portW, DC_MEDIATYPES, (WCHAR*)mediaValues.Get(), nullptr);
+        WCHAR* mediaNames = AllocArrayTemp<WCHAR>(64 * (int)nMedia);
+        DeviceCapabilitiesW(nameW, portW, DC_MEDIATYPENAMES, mediaNames, nullptr);
+        DWORD* mediaValues = AllocArrayTemp<DWORD>((int)nMedia);
+        DeviceCapabilitiesW(nameW, portW, DC_MEDIATYPES, (WCHAR*)mediaValues, nullptr);
         out.Append("  media types:\n");
         for (DWORD j = 0; j < nMedia; j++) {
-            TempStr s = ToUtf8Temp(WStr(mediaNames.Get() + (64 * (size_t)j)));
-            out.Append(fmt("    '%s' (%d)\n", s, (int)mediaValues.Get()[j]));
+            TempStr s = ToUtf8Temp(WStr(mediaNames + (64 * (size_t)j)));
+            out.Append(fmt("    '%s' (%d)\n", s, (int)mediaValues[j]));
         }
     }
 }
@@ -483,7 +483,7 @@ Printer* NewPrinter(Str printerName) {
         printer->nPaperSizes = (int)n;
         int paperNameSize = 64;
         printer->papers = AllocArray<WORD>((int)n);
-        WCHAR* paperNamesSeq = AllocArray<WCHAR>((paperNameSize * (int)n) + 1);
+        WCHAR* paperNamesSeq = AllocArrayTemp<WCHAR>((paperNameSize * (int)n) + 1);
         printer->paperSizes = AllocArray<POINT>((int)n);
 
         DeviceCapabilitiesW(printerNameW, nullptr, DC_PAPERS, (WCHAR*)printer->papers, nullptr);
@@ -494,7 +494,6 @@ Printer* NewPrinter(Str printerName) {
             TempStr name = ToUtf8Temp(WStr(paperNamesSeq + ((size_t)i * paperNameSize)));
             printer->paperNames.Append(name);
         }
-        free(paperNamesSeq);
     }
 
     {
@@ -509,14 +508,13 @@ Printer* NewPrinter(Str printerName) {
         if (n > 0) {
             int binNameSize = 24;
             printer->bins = AllocArray<WORD>((int)n);
-            WCHAR* binNamesSeq = AllocArray<WCHAR>((binNameSize * (int)n) + 1);
+            WCHAR* binNamesSeq = AllocArrayTemp<WCHAR>((binNameSize * (int)n) + 1);
             DeviceCapabilitiesW(printerNameW, nullptr, DC_BINS, (WCHAR*)printer->bins, nullptr);
             DeviceCapabilitiesW(printerNameW, nullptr, DC_BINNAMES, binNamesSeq, nullptr);
             for (int i = 0; i < (int)n; i++) {
                 TempStr name = ToUtf8Temp(WStr(binNamesSeq + ((size_t)i * binNameSize)));
                 printer->binNames.Append(name);
             }
-            free(binNamesSeq);
         }
     }
 
@@ -545,7 +543,7 @@ Exit:
 }
 
 static void SetCustomPaperSize(Printer* printer, SizeF size) {
-    auto devMode = printer->devMode;
+    auto* devMode = printer->devMode;
     devMode->dmPaperSize = 0;
     devMode->dmPaperWidth = (short)size.dx;
     devMode->dmPaperLength = (short)size.dy;
@@ -555,9 +553,9 @@ static void SetCustomPaperSize(Printer* printer, SizeF size) {
 // Make sure dy > dx i.e. it's tall not wide
 static Size NormalizePaperSize(Size s) {
     if (s.dy > s.dx) {
-        return Size(s.dx, s.dy);
+        return {s.dx, s.dy};
     }
-    return Size(s.dy, s.dx);
+    return {s.dy, s.dx};
 }
 
 static void MessageBoxWarningCond(bool show, Str msg, Str title) {
@@ -629,8 +627,8 @@ static bool PrintPageInBands(EngineBase& engine, HDC hdc, int pageNo, float zoom
         return false;
     }
     RectF devFull = engine.Transform(pageRectFull, pageNo, zoom, rotation);
-    int fullW = (int)(devFull.dx + 0.5f);
-    int fullH = (int)(devFull.dy + 0.5f);
+    int fullW = (int)lroundf(devFull.dx);
+    int fullH = (int)lroundf(devFull.dy);
     if (fullW <= 0 || fullH <= 0) {
         return false;
     }
@@ -706,7 +704,7 @@ static bool PrintToDevice(const PrintData& pd) {
 
     logf("PrintToDevice: printer: '%s', file: '%s'\n", pd.printer->name, pd.engine->FilePath());
     auto progressCb = pd.progressCb;
-    auto abortCookie = pd.abortCookie;
+    auto* abortCookie = pd.abortCookie;
     int res;
 
     EngineBase& engine = *pd.engine;
@@ -761,7 +759,7 @@ static bool PrintToDevice(const PrintData& pd) {
 
     UpdateProgress(progressCb, current, total);
 
-    auto devMode = pd.printer->devMode;
+    auto* devMode = pd.printer->devMode;
     // http://blogs.msdn.com/b/oldnewthing/archive/2012/11/09/10367057.aspx
     WCHAR* printerName = CWStrTemp(pd.printer->name);
 
@@ -1095,9 +1093,6 @@ static void UpdatePrintProgress(UpdatePrintProgressData* d) {
     delete d;
 }
 
-class PrintThreadData;
-void RemovePrintNotif(PrintThreadData* self, NotificationWnd*);
-
 class PrintThreadData {
   public:
     NotificationWnd* wnd = nullptr;
@@ -1109,7 +1104,7 @@ class PrintThreadData {
     ThreadHandle thread = nullptr; // close the print thread handle after execution
 
     // called when printing has been canceled
-    void RemovePrintNotification() {
+    void RemovePrintNotification(NotificationWnd* = nullptr) {
         isCanceled = true;
         cookie.Abort();
         if (this->wnd && IsMainWindowValid(win)) {
@@ -1124,7 +1119,7 @@ class PrintThreadData {
         NotificationCreateArgs args;
         args.hwndParent = win->hwndCanvas;
         args.timeoutMs = 0;
-        auto fn = MkFunc1(RemovePrintNotif, this);
+        auto fn = MkMethod1<PrintThreadData, NotificationWnd*, &PrintThreadData::RemovePrintNotification>(this);
         args.onRemoved = fn;
         // don't use a groupId for this notification so that
         // multiple printing notifications could coexist between tabs
@@ -1141,7 +1136,7 @@ class PrintThreadData {
     }
 
     void UpdateProgress(int current, int total) {
-        auto data = new UpdatePrintProgressData;
+        auto* data = new UpdatePrintProgressData;
         data->wnd = wnd;
         data->current = current;
         data->total = total;
@@ -1152,10 +1147,6 @@ class PrintThreadData {
     bool WasCanceled() { return isCanceled || !IsMainWindowValid(win) || win->printCanceled; }
 };
 
-void RemovePrintNotif(PrintThreadData* self, NotificationWnd*) {
-    self->RemovePrintNotification();
-}
-
 struct DeletePrinterThreadData {
     MainWindow* win;
     ThreadHandle thread;
@@ -1163,7 +1154,7 @@ struct DeletePrinterThreadData {
 };
 
 static void DeletePrinterThread(DeletePrinterThreadData* d) {
-    auto win = d->win;
+    auto* win = d->win;
     if (IsMainWindowValid(win) && d->thread == win->printThread) {
         win->printThread = nullptr;
     }
@@ -1196,7 +1187,7 @@ static void PrintThread(PrintThreadData* ptd) {
     pd->abortCookie = &ptd->cookie;
     PrintToDevice(*pd);
 
-    auto data = new DeletePrinterThreadData;
+    auto* data = new DeletePrinterThreadData;
     data->win = win;
     data->thread = thread;
     data->threadData = ptd;
@@ -1365,7 +1356,7 @@ void PrintCurrentFile(MainWindow* win, bool waitForCompletion) {
     if (!dm) {
         return;
     }
-    auto engine = dm->GetEngine();
+    auto* engine = dm->GetEngine();
     EngineBase* pinnedEngine = nullptr;
     ReportIf(!engine);
     if (!engine) {
@@ -1433,7 +1424,7 @@ void PrintCurrentFile(MainWindow* win, bool waitForCompletion) {
         TempStr defName = GetDefaultPrinterNameTemp();
         Printer* seed = defName ? NewPrinter(defName) : nullptr;
         if (seed && seed->devMode) {
-            auto p = seed->devMode;
+            auto* p = seed->devMode;
             pdex.hDevMode = GlobalMemDup(p, p->dmSize + p->dmDriverExtra);
         }
         delete seed;
@@ -1531,7 +1522,7 @@ void PrintCurrentFile(MainWindow* win, bool waitForCompletion) {
     }
 
     if (devMode) {
-        auto dmCopy = (DEVMODEW*)memdup(devMode, devMode->dmSize + devMode->dmDriverExtra);
+        auto* dmCopy = (DEVMODEW*)memdup(devMode, devMode->dmSize + devMode->dmDriverExtra);
         printer->SetDevMode(dmCopy);
         GlobalUnlock(pdex.hDevMode);
     }
@@ -1761,7 +1752,7 @@ static short GetStandardPaperByName(Str paperName) {
 
 // wantedName can be a paper name, like "A6" or number for DMPAPER_* contstants like DMPAPER_LETTER
 static short GetPaperByName(Printer* printer, Str wantedName) {
-    auto devMode = printer->devMode;
+    auto* devMode = printer->devMode;
 
     TempStr name = str::DupTemp(wantedName);
     str::TrimWSInPlace(name, str::TrimOpt::Both);
@@ -1810,7 +1801,7 @@ static short GetPaperKind(Str kindName) {
 }
 
 static short GetPaperSourceByName(Printer* printer, Str binName) {
-    auto devMode = printer->devMode;
+    auto* devMode = printer->devMode;
     // "auto" lets the printer pick the input tray whose paper matches the
     // document's page size (matches Adobe's "Choose paper source by PDF page
     // size"; issues #349, #534)
@@ -1872,16 +1863,12 @@ static void ApplyPdfViewerPrintPrefs(const PdfViewerPrintPrefs& prefs, DEVMODEW*
         devMode->dmFields |= DM_COPIES;
     }
     if (prefs.hasDuplex) {
-        switch (prefs.duplex) {
-            case PdfDuplexPref::Simplex:
-                devMode->dmDuplex = DMDUP_SIMPLEX;
-                break;
-            case PdfDuplexPref::FlipShortEdge:
-                devMode->dmDuplex = DMDUP_HORIZONTAL;
-                break;
-            case PdfDuplexPref::FlipLongEdge:
-                devMode->dmDuplex = DMDUP_VERTICAL;
-                break;
+        if (prefs.duplex == PdfDuplexPref::Simplex) {
+            devMode->dmDuplex = DMDUP_SIMPLEX;
+        } else if (prefs.duplex == PdfDuplexPref::FlipShortEdge) {
+            devMode->dmDuplex = DMDUP_HORIZONTAL;
+        } else if (prefs.duplex == PdfDuplexPref::FlipLongEdge) {
+            devMode->dmDuplex = DMDUP_VERTICAL;
         }
         devMode->dmFields |= DM_DUPLEX;
     }
@@ -1893,7 +1880,7 @@ static void ApplyPdfViewerPrintPrefs(const PdfViewerPrintPrefs& prefs, DEVMODEW*
 
 static void ApplyPrintSettings(Printer* printer, Str settings, int pageCount, Vec<PRINTPAGERANGE>& ranges,
                                Print_Advanced_Data& advanced) {
-    auto devMode = printer->devMode;
+    auto* devMode = printer->devMode;
     auto suffix = [](Str s, int n) -> Str { return Str(s.s + n, s.len - n); };
 
     StrVec rangeList;
@@ -2033,7 +2020,7 @@ static short DetectPrinterPaperSize(EngineBase* engine, Printer* printer) {
     Size sizeP = NormalizePaperSize(Size((int)size.dx, (int)size.dy));
 
     int n = printer->nPaperSizes;
-    auto sizes = printer->paperSizes;
+    auto* sizes = printer->paperSizes;
     // find equivalent paper size with 1mm tolerance
     for (int i = 0; i < n; i++) {
         POINT sz = sizes[i];
@@ -2064,7 +2051,7 @@ static bool SetPrinterCustomPaperSizeForEngine(EngineBase* engine, Printer* prin
     RectF mediabox = engine->PageMediabox(1);
     SizeF size = engine->Transform(mediabox, 1, 254.0f / engine->GetFileDPI(), 0).Size();
 
-    auto devMode = printer->devMode;
+    auto* devMode = printer->devMode;
     size_t devModeSize = devMode->dmSize + devMode->dmDriverExtra;
     char* backup = (char*)MemDup(GetTempArena(), devMode, devModeSize);
     SetCustomPaperSize(printer, size);
@@ -2121,7 +2108,7 @@ PrintResult PrintFile2(EngineBase* engine, Str printerName, bool displayErrors, 
 
     // set paper size to match the size of the document's first page
     // (will be overridden by any paper= value in -print-settings)
-    auto devMode = printer->devMode;
+    auto* devMode = printer->devMode;
     short printerDefaultPaper = devMode->dmPaperSize;
     devMode->dmPaperSize = GetPaperSize(engine);
     {

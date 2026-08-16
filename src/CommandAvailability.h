@@ -32,10 +32,13 @@ struct AppCommandCtx {
     bool isMarkdown = false;
     bool isCbx = false;
     bool isImageCollection = false;
+    // reflowable document (epub, mobi, fb2, ...): the ebook settings apply
+    bool isReflowable = false;
+    bool isFixedPage = false;
     bool isSinglePage = false;
     bool hasToc = false;
 
-    Point cursorPos = {};
+    Point cursorPos;
     bool hasSelection = false;
     // selection is text (as opposed to rectangular block selection)
     bool hasTextSelection = false;

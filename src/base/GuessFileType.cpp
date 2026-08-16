@@ -3,7 +3,7 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 // This file must only contain code that doesn't depend on
-// external libraries (mupdf/, ext/). GuessFileTypeFromFile.cpp has
+// external libraries (ext/). GuessFileTypeFromFile.cpp has
 // the parts that need base/Archive.h (and thus ext/libarchive).
 
 #include "base/Base.h"
@@ -103,16 +103,29 @@ static FileType gExtsType[] = {DEF_EXT_KIND(KIND)};
 #undef KIND
 
 static FileType GetTypeByFileExt(Str path) {
-    TempStr ext = path::GetExtTemp(path);
-    int idx = SeqStrIndexIS(gFileExts, ext);
-    if (idx < 0) {
+    // Prefer the longest registered suffix so multi-dot names like
+    // "book.fb2.zip" map to Fb2z rather than Zip (path::GetExtTemp only
+    // returns the last ".zip" component).
+    int n = dimofi(gExtsType);
+    int bestIdx = -1;
+    int bestLen = 0;
+    for (int i = 0; i < n; i++) {
+        TempStr ext = SeqStrByIndex(gFileExts, i);
+        if (len(ext) == 0) {
+            continue;
+        }
+        if (!str::EndsWithI(path, ext)) {
+            continue;
+        }
+        if (len(ext) > bestLen) {
+            bestLen = len(ext);
+            bestIdx = i;
+        }
+    }
+    if (bestIdx < 0) {
         return FileType::Unknown;
     }
-    int n = (int)dimof(gExtsType);
-    if (idx >= n) {
-        return FileType::Unknown;
-    }
-    return gExtsType[idx];
+    return gExtsType[bestIdx];
 }
 
 TempStr GetExtForFileTypeTemp(FileType ft) {
@@ -121,17 +134,6 @@ TempStr GetExtForFileTypeTemp(FileType ft) {
         return SeqStrByIndex(gFileExts, idx);
     }
     return {};
-}
-
-// ensure gFileExts and gExtsType match
-static bool gDidVerifyExtsMatch = false;
-static void VerifyExtsMatch() {
-    if (gDidVerifyExtsMatch) {
-        return;
-    }
-    ReportIf(FileType::Epub != GetTypeByFileExt("foo.epub"));
-    ReportIf(FileType::Jp2 != GetTypeByFileExt("foo.JP2"));
-    gDidVerifyExtsMatch = true;
 }
 
 int FileTypeIndexOf(const FileType* types, int nTypes, FileType ft) {
@@ -276,8 +278,8 @@ static bool HasJxlSignature(Str d) {
     static const u8 jxlContainer[] = {0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20, 0x0d, 0x0a, 0x87, 0x0a};
 
     const u8* data = (const u8*)d.s;
-    return (d.len >= (int)sizeof(jxlCodestream) && memeq(data, jxlCodestream, (int)sizeof(jxlCodestream))) ||
-           (d.len >= (int)sizeof(jxlContainer) && memeq(data, jxlContainer, (int)sizeof(jxlContainer)));
+    return (d.len >= sizeofi(jxlCodestream) && memeq(data, jxlCodestream, sizeofi(jxlCodestream))) ||
+           (d.len >= sizeofi(jxlContainer) && memeq(data, jxlContainer, sizeofi(jxlContainer)));
 }
 
 #pragma pack(push, 1)
@@ -366,7 +368,7 @@ static FileType DetectFileTypeFromData(Str d) {
     // TODO: sniff .fb2 content
     u8* data = (u8*)d.s;
     int dataLen = d.len;
-    int n = (int)dimof(gFileSigs);
+    int n = dimofi(gFileSigs);
 
     for (int i = 0; i < n; i++) {
         Str sig = gFileSigs[i].sig;
@@ -1264,13 +1266,12 @@ EmbeddedPdfName ParseEmbeddedPdfName(Str path) {
     return res;
 }
 
-FileType GuessFileTypeFromName(Str path) {
-    VerifyExtsMatch();
-
+// path::IsDirectory() is expensive on network drives so we can pass notDir=true if we know the path is not a directory
+FileType GuessFileTypeFromName(Str path, bool notDir) {
     if (!path) {
         return FileType::Unknown;
     }
-    if (path::IsDirectory(path)) {
+    if (!notDir && path::IsDirectory(path)) {
         return FileType::Directory;
     }
     FileType res = GetTypeByFileExt(path);
@@ -1335,6 +1336,8 @@ TempStr GfxFileExtFromDataTemp(Str d) {
 
 // compares the guessed type's canonical extension (the first extension
 // registered for it, e.g. ".pdf" for sample.ai) to expectedExt
+// Headless test helper: compare GuessFileTypeFromName's canonical extension
+// to an expected one (e.g. "sample.ai" -> ".pdf").
 TempStr FileKindResultTemp(Str path, Str expectedExt, int* exitCodeOut) {
     str::Builder out;
     auto fail = [&](Str msg) -> Str {

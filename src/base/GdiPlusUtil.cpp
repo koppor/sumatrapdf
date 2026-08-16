@@ -19,8 +19,15 @@ using Gdiplus::Status;
 using Gdiplus::StringFormat;
 using Gdiplus::StringFormatFlagsMeasureTrailingSpaces;
 
+void InitGraphicsMode(Graphics* g) {
+    g->SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+    g->SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g->SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+    g->SetPageUnit(Gdiplus::UnitPixel);
+}
+
 Gdiplus::RectF RectToRectF(const Gdiplus::Rect r) {
-    return Gdiplus::RectF((float)r.X, (float)r.Y, (float)r.Width, (float)r.Height);
+    return {(float)r.X, (float)r.Y, (float)r.Width, (float)r.Height};
 }
 
 // note: gdi+ seems to under-report the width, the longer the text, the
@@ -32,7 +39,7 @@ Gdiplus::RectF RectToRectF(const Gdiplus::Rect r) {
 RectF MeasureTextAccurate(Graphics* g, Font* f, WStr s) {
     int n = s.len;
     if (0 == n) {
-        return RectF(0, 0, 0, 0); // TODO: should set height to font's height
+        return {0, 0, 0, 0}; // TODO: should set height to font's height
     }
     // note: frankly, I don't see a difference between those StringFormat variations
     StringFormat sf(StringFormat::GenericTypographic());
@@ -101,8 +108,6 @@ RectF MeasureTextQuick(Graphics* g, Font* f, WStr s) {
                 case 't':
                 case 'f':
                 case 'I':
-                    correct += 0.1f;
-                    break;
                 case '.':
                 case ',':
                 case '!':
@@ -192,6 +197,9 @@ float GetSpaceDx(Graphics* g, Font* f, TextMeasureAlgorithm algo) {
 #endif
 }
 
+// float     GetSpaceDx(Graphics *g, Font *f, TextMeasureAlgorithm algo=nullptr);
+// int   StringLenForWidth(Graphics *g, Font *f, const WCHAR *s, size_t len, float dx, TextMeasureAlgorithm
+// algo=nullptr);
 void GetBaseTransform(Matrix& m, Gdiplus::RectF pageRect, float zoom, int rotation) {
     rotation = rotation % 360;
     if (rotation < 0) {
@@ -223,12 +231,16 @@ void ApplyExifOrientation(Bitmap* bmp, int exifOrientation) {
         return;
     }
     int iRot = exifOrientation - 2;
-    if (iRot < (int)dimof(rfts)) {
+    if (iRot < dimofi(rfts)) {
         bmp->RotateFlip(rfts[iRot]);
     }
 }
 
+// 0 (an invalid gdi+ format) when the pixels aren't ours to read
 static Gdiplus::PixelFormat PixmapToGdiplusPixelFormat(const Pixmap* px) {
+    if (px->format == PixmapFormat::Native) {
+        return 0;
+    }
     if (px->format == PixmapFormat::BGR8) {
         return PixelFormat24bppRGB;
     }
@@ -257,6 +269,10 @@ Gdiplus::Bitmap* NewGdiplusBitmapFromPixmap(Pixmap* px) {
         return nullptr;
     }
     Gdiplus::PixelFormat fmt = PixmapToGdiplusPixelFormat(px);
+    if (!fmt) {
+        FreePixmap(px);
+        return nullptr;
+    }
     auto* bmp = new PixmapBackedBitmap(px, fmt);
     if (bmp->GetLastStatus() != Gdiplus::Ok) {
         delete bmp; // also frees px
@@ -328,6 +344,9 @@ Gdiplus::Bitmap* WrapPixmapGdiplus(const Pixmap* px) {
         return nullptr;
     }
     Gdiplus::PixelFormat fmt = PixmapToGdiplusPixelFormat(px);
+    if (!fmt) {
+        return nullptr;
+    }
     auto* bmp = new Gdiplus::Bitmap(px->width, px->height, px->stride, fmt, px->data);
     if (bmp->GetLastStatus() != Gdiplus::Ok) {
         delete bmp;
@@ -344,7 +363,7 @@ CLSID GetGdiPlusEncoderClsid(WStr format) {
     if (ok != Ok || 0 == size) {
         return null;
     }
-    ScopedMem<Gdiplus::ImageCodecInfo> codecInfo((Gdiplus::ImageCodecInfo*)malloc(size));
+    auto* codecInfo = (Gdiplus::ImageCodecInfo*)AllocTemp((int)size);
     if (!codecInfo) {
         return null;
     }

@@ -23,8 +23,6 @@ function makelzsa_files()
     "DirScan.h",
     "DirScan.cpp",
     "DirScan_win.cpp",
-    "Dpi.h",
-    "Dpi_win.cpp",
     "File.h",
     "File.cpp",
     "File_win.cpp",
@@ -43,6 +41,10 @@ function makelzsa_files()
     "WinDynCalls.h",
     "WinDynCalls_win.cpp",
     "Win.*",
+  })
+  files_in_dir("src/gui", {
+    "Dpi.h",
+    "Dpi_win.cpp",
   })
 
   -- LZMA files needed by LzmaSimpleArchive (decode) and MakeLzSA.cpp (encode)
@@ -266,28 +268,6 @@ function libarchive_files()
     "archive_parse_date.c",
     -- filter fork (needed by program filter)
     "filter_fork_windows.c",
-  })
-end
-
-function jbig2dec_files()
-  -- TODO: probably can be
-  -- files { "ext/jbig2dec/jbig2*.c", "ext/jbig2dec/jbig2*.h" }
-  files_in_dir("ext/jbig2dec", {
-    "jbig2.c",
-    "jbig2_arith.c",
-    "jbig2_arith_iaid.c",
-    "jbig2_arith_int.c",
-    "jbig2_generic.c",
-    "jbig2_halftone.c",
-    "jbig2_huffman.c",
-    "jbig2_hufftab.c",
-    "jbig2_image.c",
-    "jbig2_mmr.c",
-    "jbig2_page.c",
-    "jbig2_refinement.c",
-    "jbig2_segment.c",
-    "jbig2_symbol_dict.c",
-    "jbig2_text.c",
   })
 end
 
@@ -618,10 +598,22 @@ files {
 function sumatrapdf_files()
   files_in_dir("src", {
     "Accelerators.*",
+    "ShortcutParse.*",
     "Actions.*",
     "AvifReader.*",
+    "DarkMode_win.*",
+    "AddFavoriteDialog.*",
     "AdvancedSettingsDialog.*",
+    "ChangeColorDialog.*",
+    "ChangeLanguageDialog.*",
+    "ChangeScrollbarDialog.*",
     "ChangeThemeDialog.*",
+    "CustomZoomDialog.*",
+    "EbookSettingsDialog.*",
+    "GetPasswordDialog.*",
+    "GoToPageDialog.*",
+    "InverseSearchDialog.*",
+    "SettingsDialog.*",
     "AppSettings.*",
     "AppTools.*",
     "Canvas.*",
@@ -631,23 +623,31 @@ function sumatrapdf_files()
     "ChmModel.*",
     "MarkdownModel.*",
     "MarkdownToc.*",
+    "EmbeddedResources.*",
     "AIChatCommon.*",
     "AIChatPanel.*",
-    "ClaudeCode.*",
-    "CodexBuild.*",
-    "GrokBuild.*",
+    "AIAntiGravity.*",
+    "AIClaudeCode.*",
+    "AICodexBuild.*",
+    "AIGrokBuild.*",
     "CommandAvailability.*",
     "CommandPalette.*",
     "CommandPaletteCollect.*",
     "CommandPaletteDraw.*",
     "CommandPaletteFilter.*",
+    "FilterUtil.*",
     "FilterHighlightDraw.*",
     "Commands.*",
     "CrashHandler.*",
     "ImageSaveCropResize.*",
+    "ImageEditHostSumatra.cpp",
     "DisplayMode.*",
     "DisplayModel.*",
     "DocumentLayout.*",
+    "PageRenderPolicy.*",
+    "PageRenderService.*",
+    "ReaderModel.*",
+    "gui/CommandPaletteModel.*",
     "DocController.h",
     "DocProperties.*",
     "EditAnnotations.*",
@@ -665,10 +665,14 @@ function sumatrapdf_files()
     "ImageReader.cpp",
     "ImageReader_win.cpp",
     "GlobalPrefs.*",
+    "HangDetector.*",
     "HomePage.*",
     "Installer.*",
     "InstallerCommon.cpp",
     "JxlReader.*",
+    "KeyboardHelp.*",
+    "KeyboardHelp_win.cpp",
+    "LinkFollow.*",
     "MainWindow.*",
     "Menu.*",
     "NavFilesInFolder.*",
@@ -676,7 +680,6 @@ function sumatrapdf_files()
     "PdfSync.*",
     "PdfTools.*",
     "PngOptimizer.*",
-    "TipText.h",
     "Print.*",
     "ProgressUpdateUI.*",
     "ReadAloudHighlight.*",
@@ -698,7 +701,10 @@ function sumatrapdf_files()
     "SearchAndDDE.*",
     "OverlayScrollbar.*",
     "Screenshot.*",
+    "ScreenshotCapture.*",
+    "SelectTextKeyboard.*",
     "Selection.*",
+    "SelectionHandlers.*",
     "SelectionToolbar.*",
     "SelectionTranslate.*",
     "Settings.h",
@@ -726,7 +732,10 @@ function sumatrapdf_files()
     "TextToSpeech.*",
     "TextViewWnd.*",
     "Theme.*",
+    "Theme_win.*",
     "Toolbar.*",
+    "ToolbarInternal.h",
+    "Toolbar_win.*",
     "TranslationLangs.cpp",
     "Translations.*",
     "TreeModel.*",
@@ -813,13 +822,12 @@ function base_files()
     "DirScan.h",
     "DirScan.cpp",
     "DirScan_win.cpp",
-    "Dpi.h",
-    "Dpi_win.cpp",
     "Exif.*",
     "File.h",
     "File.cpp",
     "File_win.cpp",
-    "FileWatcher.*",
+    "FileWatcher.h",
+    "FileWatcher.cpp",
     "GdiPlusUtil.cpp",
     "GdiPlusUtil.h",
     "Geom.*",
@@ -856,19 +864,37 @@ function base_files()
     "Win.*",
     "Zip.*",
   })
-end
-
-function wingui_files()
-  files_in_dir("src/wingui", {
-    "*.h",
-    "*.cpp",
+  files_in_dir("src/gui", {
+    "Dpi.h",
+    "Dpi_win.cpp",
   })
 end
 
-function mui_files()
-  files_in_dir("src/mui", {
-    "Mui.*",
-    "TextRender.*",
+function gui_files()
+  files_in_dir("src/gui", {
+    "DocumentView.h",
+    "Gfx.h",
+    "Gfx_win.cpp",
+    "GfxGdiplus_win.cpp",
+    "GfxDirect2D_win.cpp",
+    "GuiColors.*",
+    "Layout.*",
+    "Layout_win.*",
+    "PlatformFont.*",
+    "PlatformFont_win.*",
+    "PlatformCanvas.h",
+    "PlatformText.*",
+    "PlatformText_win.*",
+    "PlatformWindow.h",
+    "UIModels.*",
+    "VirtCtrl.*",
+    "VirtHost.h",
+    "VirtHost_win.*",
+    "UiPlatform_win.*",
+  })
+  files_in_dir("src/gui/win", {
+    "*.h",
+    "*.cpp",
   })
 end
 
@@ -917,7 +943,7 @@ end
 -- Parser-only subset matching mupdf's Makelists CMARKGFM_SRC (no CLI main.c,
 -- no commonmark/latex/man/xml/plaintext renderers). Generated config headers
 -- (config.h, cmark-gfm_export.h, cmark-gfm_version.h) come from
--- mupdf/scripts/cmark-gfm. Build with -DCMARK_GFM_STATIC_DEFINE.
+-- ext/mupdf/scripts/cmark-gfm. Build with -DCMARK_GFM_STATIC_DEFINE.
 function cmark_gfm_files()
   files_in_dir("ext/cmark-gfm/src", {
     "arena.c", "blocks.c", "buffer.c", "cmark.c", "cmark_ctype.c",
@@ -935,13 +961,13 @@ end
 function mupdf_files()
   files { "ext/mupdf_load_system_font.c" }
 
-  files_in_dir("mupdf/source/cbz", {
+  files_in_dir("ext/mupdf/source/cbz", {
     "mucbz.c",
     "muimg.c",
   })
 
-  files { "mupdf/source/fitz/*.h" }
-  files_in_dir("mupdf/source/fitz", {
+  files { "ext/mupdf/source/fitz/*.h" }
+  files_in_dir("ext/mupdf/source/fitz", {
     "archive.c",
     "barcode.c",
     "bbox-device.c",
@@ -1091,7 +1117,7 @@ function mupdf_files()
     "zip.c",
   })
 
-  files_in_dir("mupdf/source/html", {
+  files_in_dir("ext/mupdf/source/html", {
     "css-apply.c",
     "css-parse.c",
     "css-properties.h",
@@ -1110,7 +1136,7 @@ function mupdf_files()
     "xml-dom.c",
   })
 
-  files_in_dir("mupdf/source/pdf", {
+  files_in_dir("ext/mupdf/source/pdf", {
     "*.h",
     "pdf-af.c",
     "pdf-annot.c",
@@ -1170,14 +1196,14 @@ function mupdf_files()
     "pdf-zugferd.c",
   })
 
-  files_in_dir("mupdf/source/svg", {
+  files_in_dir("ext/mupdf/source/svg", {
     "svg-color.c",
     "svg-doc.c",
     "svg-parse.c",
     "svg-run.c",
   })
 
-  files_in_dir("mupdf/source/xps", {
+  files_in_dir("ext/mupdf/source/xps", {
     "xps-common.c",
     "xps-doc.c",
     "xps-glyphs.c",
@@ -1191,10 +1217,10 @@ function mupdf_files()
     "xps-util.c",
     "xps-zip.c",
   })
-  files_in_dir("mupdf/source/reflow", {
+  files_in_dir("ext/mupdf/source/reflow", {
     "reflow-doc.c",
   })
-  files_in_dir("mupdf/source/tools", {
+  files_in_dir("ext/mupdf/source/tools", {
     "muconvert.c",
     "mudraw.c",
     "mugrep.c",
@@ -1216,14 +1242,14 @@ function mupdf_files()
     "pdftrim.c",
   })
   files {
-    "mupdf/include/mupdf/*.h",
-    "mupdf/include/mupdf/fitz/*.h",
-    "mupdf/include/mupdf/helpers/*.h",
-    "mupdf/include/mupdf/pdf/*.h",
+    "ext/mupdf/include/mupdf/*.h",
+    "ext/mupdf/include/mupdf/fitz/*.h",
+    "ext/mupdf/include/mupdf/helpers/*.h",
+    "ext/mupdf/include/mupdf/pdf/*.h",
   }
   files {
-    "mupdf/source/helpers/mu-threads/mu-threads.c",
-    "mupdf/source/helpers/pkcs7/pkcs7-windows.c",
+    "ext/mupdf/source/helpers/mu-threads/mu-threads.c",
+    "ext/mupdf/source/helpers/pkcs7/pkcs7-windows.c",
   }
 end
 
@@ -1271,12 +1297,11 @@ function test_util_files()
     "DirScan.h",
     "DirScan.cpp",
     "DirScan_win.cpp",
-    "Dpi.h",
-    "Dpi_win.cpp",
     "File.h",
     "File.cpp",
     "File_win.cpp",
-    "FileWatcher.*",
+    "FileWatcher.h",
+    "FileWatcher.cpp",
     "Geom.*",
     "GuessFileType.*",
     "HtmlTags.*",
@@ -1301,6 +1326,13 @@ function test_util_files()
     "WinDynCalls_win.cpp",
     "Win.*",
   })
+  files_in_dir("src/gui", {
+    "CommandPaletteModel.*",
+    "Dpi.h",
+    "Dpi_win.cpp",
+    "Layout.h",
+    "Layout.cpp",
+  })
   files_in_dir("src", {
     --"AppTools.*",
     "Commands.*",
@@ -1308,6 +1340,8 @@ function test_util_files()
     "DisplayMode.*",
     "DocProperties.*",
     "Flags.*",
+    "FilterUtil.*",
+    "PageRenderPolicy.*",
     "RefHoverDetect.*",
     "RefHoverTextDetect.*",
     "SettingsStructs.*",
@@ -1382,6 +1416,32 @@ function logview_files()
   files {
     "src/tools/logview/logview.cpp",
   }
+  -- Layout.cpp and VirtCtrl.cpp end in a #if DEBUG unit-test block calling utassert()
+  files_in_dir("src/base", {
+    "UtAssert.*",
+  })
+  -- the subset of gui logview's UI needs (no tree view, tabs, web view, ...)
+  files_in_dir("src/gui", {
+    "UIModels.*",
+    "Layout.*",
+    "Layout_win.*",
+    "PlatformFont.*",
+    "PlatformFont_win.*",
+    "PlatformText.*",
+    "PlatformText_win.*",
+    "Gfx.h",
+    "Gfx_win.cpp",
+    "GfxGdiplus_win.cpp",
+    "GfxDirect2D_win.cpp",
+    "GuiColors.*",
+    "UiPlatform_win.*",
+    "VirtCtrl.*",
+  })
+  files_in_dir("src/gui/win", {
+    "WindowBase.*",
+    "Edit.*",
+    "Tooltip.*",
+  })
 end
 
 function pdf_preview_files()
@@ -1414,8 +1474,10 @@ function pdf_preview_files()
     "HtmlFormatter.*",
     "JxlReader.*",
     "MobiDoc.*",
-    "mui/Mui.*",
-    "mui/TextRender.*",
+    "gui/PlatformFont.*",
+    "gui/PlatformFont_win.*",
+    "gui/PlatformText.*",
+    "gui/PlatformText_win.*",
     "MUPDF_Exports.cpp",
     "PalmDbReader.*",
     "PdfCadDetect.*",
@@ -1482,13 +1544,12 @@ function pdf_preview2_files()
 
   files_in_dir("src", {
     "CrashHandlerNoOp.cpp",
-    "mui/Mui.*",
     "RegistryPreview.*",
     "SumatraConfig.*",
     "base/Base.*",
     "base/Color.*",
-    "base/Dpi.h",
-    "base/Dpi_win.cpp",
+    "gui/Dpi.h",
+    "gui/Dpi_win.cpp",
     "base/File.h",
     "base/File.cpp",
     "base/File_win.cpp",
@@ -1514,13 +1575,12 @@ function search_filter2_files()
   })
   files_in_dir("src", {
     "CrashHandlerNoOp.cpp",
-    "mui/Mui.*",
     "RegistrySearchFilter.*",
     "SumatraConfig.*",
     "base/Base.*",
     "base/Color.*",
-    "base/Dpi.h",
-    "base/Dpi_win.cpp",
+    "gui/Dpi.h",
+    "gui/Dpi_win.cpp",
     "base/File.h",
     "base/File.cpp",
     "base/File_win.cpp",

@@ -9,7 +9,7 @@ extern "C" {
 #include <mupdf/pdf.h>
 }
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "DocProperties.h"
 #include "DocController.h"
@@ -18,8 +18,12 @@ extern "C" {
 #include "ImageReader.h"
 #include "PdfCreator.h"
 
+// EngineImages.cpp — avoid including EngineAll.h (needs full FileType for defaults)
+Str EngineImagesGetImageData(EngineBase*, int pageNo);
+
 static Str gPdfProducer;
 
+// this name is included in all saved PDF files
 void PdfCreator::SetProducerName(Str name) {
     if (!str::Eq(gPdfProducer, name)) {
         gPdfProducer = str::Dup(GetPermArena(), name);
@@ -88,22 +92,13 @@ static fz_image* render_to_pixmap(fz_context* ctx, HBITMAP hbmp, Size size) {
     return img;
 }
 
-static void fz_print_cb(void* /*user*/, const char* msg) {
-    log(Str(msg));
-}
-
-static void installFitzErrorCallbacks(fz_context* ctx) {
-    fz_set_warning_callback(ctx, fz_print_cb, nullptr);
-    fz_set_error_callback(ctx, fz_print_cb, nullptr);
-}
-
 PdfCreator::PdfCreator() {
+    // fz_new_context_windows() routes mupdf warnings / errors to log()
     ctx = fz_new_context_windows(kFzStoreUnlimited);
     if (!ctx) {
         return;
     }
 
-    installFitzErrorCallbacks(ctx);
     fz_try(ctx) {
         doc = pdf_create_document(ctx);
     }
@@ -119,7 +114,8 @@ PdfCreator::~PdfCreator() {
     fz_drop_context_windows(ctx);
 }
 
-pdf_obj* add_image_res(fz_context* ctx, pdf_document* doc, pdf_obj* resources, Str name, fz_image* image) {
+__unused static pdf_obj* add_image_res(fz_context* ctx, pdf_document* doc, pdf_obj* resources, Str name,
+                                       fz_image* image) {
     pdf_obj *subres, *ref;
 
     subres = pdf_dict_get(ctx, resources, PDF_NAME(XObject));
@@ -295,10 +291,10 @@ static const DocProp propsToCopy[] = {
 
 bool PdfCreator::CopyProperties(EngineBase* engine) const {
     bool ok;
-    for (int i = 0; i < dimof(propsToCopy); i++) {
-        TempStr value = engine->GetPropertyTemp(propsToCopy[i]);
+    for (DocProp prop : propsToCopy) {
+        TempStr value = engine->GetPropertyTemp(prop);
         if (value) {
-            ok = SetProperty(propsToCopy[i], value);
+            ok = SetProperty(prop, value);
             if (!ok) {
                 return false;
             }
@@ -349,6 +345,7 @@ bool PdfCreator::SaveToFile(Str filePath) const {
     return true;
 }
 
+// creates a simple PDF with all pages rendered as a single image
 bool PdfCreator::RenderToFile(Str pdfFileName, EngineBase* engine, int dpi) {
     PdfCreator* c = new PdfCreator();
     bool ok = true;
@@ -369,6 +366,74 @@ bool PdfCreator::RenderToFile(Str pdfFileName, EngineBase* engine, int dpi) {
     }
     c->CopyProperties(engine);
     ok = c->SaveToFile(pdfFileName);
+    delete c;
+    return ok;
+}
+
+// Comic book / image folder / multi-page image → multi-page PDF (issue #4118).
+// 1) Embed original bytes when MuPDF can re-wrap them (JPEG, PNG, …).
+// 2) Else optional fallbackToEmbeddable (e.g. decode → optimized PNG).
+// 3) Else render the page at native resolution.
+// Pages that fail every path are skipped.
+bool PdfCreator::SaveImageCollectionAsPdf(Str pdfFileName, EngineBase* engine,
+                                          ImageDataFallbackFn fallbackToEmbeddable) {
+    if (!engine || !engine->IsImageCollection() || engine->PageCount() <= 0) {
+        return false;
+    }
+
+    PdfCreator* c = new PdfCreator();
+    if (!c->ctx || !c->doc) {
+        delete c;
+        return false;
+    }
+
+    float dpi = engine->GetFileDPI();
+    if (dpi <= 0) {
+        dpi = 96.0f;
+    }
+
+    int pagesAdded = 0;
+    int nPages = engine->PageCount();
+    for (int i = 1; i <= nPages; i++) {
+        bool pageOk = false;
+
+        Str data = EngineImagesGetImageData(engine, i);
+        if (len(data) > 0) {
+            pageOk = c->AddPageFromImageData(data, dpi);
+            if (!pageOk && fallbackToEmbeddable) {
+                // WebP, JXL, HEIC, AVIF, TGA, … — convert to something PDF can store.
+                Str converted = fallbackToEmbeddable(data);
+                if (len(converted) > 0) {
+                    pageOk = c->AddPageFromImageData(converted, dpi);
+                }
+                str::Free(converted);
+            }
+        }
+
+        if (!pageOk) {
+            // Last resort: render at native resolution (zoom 1.0 relative to file DPI).
+            RenderPageArgs args(i, 1.0f, 0, nullptr, RenderTarget::Export);
+            Pixmap* bmp = engine->RenderPage(args);
+            if (bmp && bmp->hbmp) {
+                pageOk = AddPageFromHBITMAP(c, bmp->hbmp, Size(bmp->width, bmp->height), dpi);
+            }
+            FreePixmap(bmp);
+        }
+
+        if (pageOk) {
+            pagesAdded++;
+        } else {
+            logf("PdfCreator::SaveImageCollectionAsPdf: skipped page %d (embed+convert+render failed)\n", i);
+        }
+    }
+
+    if (pagesAdded == 0) {
+        delete c;
+        return false;
+    }
+
+    c->CopyProperties(engine);
+    bool ok = c->SaveToFile(pdfFileName);
     delete c;
     return ok;
 }

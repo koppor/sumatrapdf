@@ -3,9 +3,12 @@
 
 #include "base/Base.h"
 
-#include "wingui/UIModels.h"
-#include "wingui/Layout.h"
-#include "wingui/WinGui.h"
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
+#include "gui/PlatformFont.h"
+#include "gui/Gfx.h"
+#include "gui/VirtCtrl.h"
 
 #include "FilterHighlightDraw.h"
 #include "CommandPalette.h"
@@ -70,7 +73,7 @@ void CommandPaletteWnd::FilterStringsForQuery(Str filter, StrVecCP& strings) {
 void CommandPaletteWnd::QueryChanged() {
     Str filter = CommandPaletteSkipWS(Str(editQuery->GetTextTemp()));
     int currSelIdx = 0;
-    auto m = (ListBoxModelCP*)listBox->model;
+    auto* m = (ListBoxModelCP*)listBox->model;
     int nItemsPrev = m->ItemsCount();
     if (smartTabMode) {
         if (!stickyMode) {

@@ -5,10 +5,12 @@
 #include "base/File.h"
 #include "base/Win.h"
 #include "base/DirScan.h"
+#include "base/ScopedWin.h"
 
 #include "SumatraConfig.h"
 #include "Version.h"
 #include "Installer.h"
+#include "AppTools.h"
 
 // All registry manipulation needed for installer / uninstaller
 
@@ -94,6 +96,7 @@ static DWORD GetDirSize(Str dir, bool recur) {
     return (DWORD)totalSize;
 }
 
+// RegistryInstaller.cpp
 bool WriteUninstallerRegistryInfo(HKEY hkey, bool allUsers, Str installDir) {
     logf("WriteUninstallerRegistryInfo(hKey: %s, allUsers: %d, installDir: '%s')\n", RegKeyNameTemp(hkey),
          (int)allUsers, installDir);
@@ -117,8 +120,8 @@ bool WriteUninstallerRegistryInfo(HKEY hkey, bool allUsers, Str installDir) {
     // Windows XP doesn't allow to view the version number at a glance,
     // so include it in the DisplayName
     if (!IsWindowsVistaOrGreater()) {
-        TempStr key = str::JoinTemp(kAppName, StrL(" "), CURR_VERSION_STRA);
-        ok &= LoggedWriteRegStr(hkey, regPathUninst, "DisplayName", key);
+        TempStr displayName = str::JoinTemp(kAppName, StrL(" "), CURR_VERSION_STRA);
+        ok &= LoggedWriteRegStr(hkey, regPathUninst, "DisplayName", displayName);
     }
     // non-recursive because we don't want to count space used for thumbnails
     // which is in installDir for local install
@@ -352,7 +355,7 @@ UnregisterFromBeingDefaultViewer() and RemoveInstallRegistryKeys() in Installer.
 #define kRegExplorerPdfExt "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.pdf"
 #define kRegClassesPdf "Software\\Classes\\.pdf"
 
-TempStr GetRegClassesAppsTemp(Str appName) {
+static TempStr GetRegClassesAppsTemp(Str appName) {
     return str::JoinTemp(StrL("Software\\Classes\\Applications\\"), appName, StrL(".exe"));
 }
 
@@ -371,7 +374,7 @@ bool WriteExtendedFileExtensionInfo(HKEY hkey, Str installedExePath) {
 
     // in case these values don't exist yet (we won't delete these at uninstallation)
     ok &= LoggedWriteRegStr(hkey, kRegClassesPdf, "Content Type", "application/pdf");
-    key = "Software\\Classes\\MIME\\Database\\Content Type\\application/pdf";
+    key = R"(Software\Classes\MIME\Database\Content Type\application/pdf)";
     ok &= LoggedWriteRegStr(hkey, key, "Extension", ".pdf");
 
     if (!ok) {
@@ -565,4 +568,137 @@ void ReRegisterFileAssociations() {
     if (didRegister) {
         ShellNotifyAssociationsChanged();
     }
+}
+
+// Normalize to ".pdf" form (leading dot, lowercased for display is caller's job).
+static TempStr NormalizeExtTemp(Str ext) {
+    if (len(ext) == 0) {
+        return {};
+    }
+    if (ext.s[0] == '.') {
+        return str::DupTemp(ext);
+    }
+    return str::JoinTemp(StrL("."), ext);
+}
+
+static bool IsOurProgId(Str progId, Str ext) {
+    if (len(progId) == 0) {
+        return false;
+    }
+    // current scheme: SumatraPDF.pdf
+    TempStr ours = str::JoinTemp(kAppName, ext);
+    if (str::EqI(progId, ours)) {
+        return true;
+    }
+    // pre-3.4 scheme used plain "SumatraPDF" for .pdf
+    return str::EqI(progId, kAppName);
+}
+
+// true if we appear under OpenWithProgids for this extension (HKCU or HKLM)
+static bool HaveRegisteredOpenWithForExt(Str ext) {
+    return HasOurOpenWithEntry(HKEY_CURRENT_USER, ext) || HasOurOpenWithEntry(HKEY_LOCAL_MACHINE, ext);
+}
+
+// true when ShellExecute for this extension would launch our exe / ProgID
+static bool IsSumatraDefaultForExt(Str ext) {
+    WCHAR* extW = CWStrTemp(ext);
+    if (!extW || !*extW) {
+        return false;
+    }
+    WCHAR* appNameW = CWStrTemp(kAppName);
+
+    ScopedComPtr<IApplicationAssociationRegistration> aar;
+    HRESULT hr =
+        CoCreateInstance(CLSID_ApplicationAssociationRegistration, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&aar));
+    if (SUCCEEDED(hr) && aar) {
+        // RegisteredApplications name is kAppName ("SumatraPDF")
+        BOOL isDefault = FALSE;
+        hr = aar->QueryAppIsDefault(extW, AT_FILEEXTENSION, AL_EFFECTIVE, appNameW, &isDefault);
+        if (SUCCEEDED(hr)) {
+            return isDefault != FALSE;
+        }
+
+        LPWSTR assoc = nullptr;
+        hr = aar->QueryCurrentDefault(extW, AT_FILEEXTENSION, AL_EFFECTIVE, &assoc);
+        if (SUCCEEDED(hr) && assoc) {
+            TempStr progId = ToUtf8Temp(assoc);
+            CoTaskMemFree(assoc);
+            if (IsOurProgId(progId, ext)) {
+                return true;
+            }
+        }
+    }
+
+    // Fallback: resolve the open executable and compare to ourselves
+    WCHAR pathW[MAX_PATH]{};
+    DWORD cch = dimofi(pathW);
+    hr = AssocQueryStringW(ASSOCF_NONE, ASSOCSTR_EXECUTABLE, extW, nullptr, pathW, &cch);
+    if (SUCCEEDED(hr) && pathW[0]) {
+        TempStr path = ToUtf8Temp(pathW);
+        TempStr self = GetSelfExePathTemp();
+        return path::IsSame(path, self);
+    }
+    return false;
+}
+
+// Explicit user/system default under FileExts\.\UserChoice. Empty means no
+// UserChoice key — we don't nag about those (no app was ever chosen for that type).
+static TempStr ReadUserChoiceProgIdTemp(Str ext) {
+    TempStr key = fmt("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\%s\\UserChoice", ext);
+    return LoggedReadRegStrTemp(HKEY_CURRENT_USER, key, "ProgId");
+}
+
+// Extensions we registered for Open With where something else is explicitly the
+// default (UserChoice points at another ProgId). Used by the home-page bottom bar.
+void CollectNonDefaultRegisteredExtensions(StrVec& out) {
+    out.Reset();
+    if (!IsOurExeInstalled()) {
+        return;
+    }
+    for (int off = 0; SeqStrAt(gSupportedExts, off);) {
+        Str ext = SeqStrAt(gSupportedExts, off);
+        if (HaveRegisteredOpenWithForExt(ext) && !IsSumatraDefaultForExt(ext)) {
+            // only list types with an explicit UserChoice that isn't us — otherwise
+            // every registered format (e.g. .tga) would show after a fresh install
+            TempStr userChoice = ReadUserChoiceProgIdTemp(ext);
+            if (len(userChoice) > 0 && !IsOurProgId(userChoice, ext)) {
+                out.Append(ext);
+            }
+        }
+        if (!SeqStrAdvance(gSupportedExts, off)) {
+            break;
+        }
+    }
+}
+
+// Open the OS UI to pick/set the default app for ext (".pdf" or "pdf").
+void LaunchDefaultAppDialogForExtension(HWND hwnd, Str extIn) {
+    TempStr ext = NormalizeExtTemp(extIn);
+    if (len(ext) == 0) {
+        return;
+    }
+
+    // SHOpenWithDialog: the classic "How do you want to open this file?" UI, which
+    // can set Always use this app. Needs a path-looking string ending in the ext;
+    // the file does not need to exist.
+    TempStr sample = str::JoinTemp(StrL("document"), ext);
+    OPENASINFO info{};
+    info.pcszFile = CWStrTemp(sample);
+    info.oaifInFlags = OAIF_FORCE_REGISTRATION | OAIF_REGISTER_EXT | OAIF_ALLOW_REGISTRATION;
+    HRESULT hr = SHOpenWithDialog(hwnd, &info);
+    if (SUCCEEDED(hr)) {
+        return;
+    }
+
+    // Fall back to Settings > Default apps, preferably focused on our app entry
+    // (Win11 registeredAppUser / registeredAppMachine deep link).
+    TempStr uri;
+    if (HasRegistryValue(HKEY_CURRENT_USER, "SOFTWARE\\RegisteredApplications", kAppName)) {
+        uri = fmt("ms-settings:defaultapps?registeredAppUser=%s", StrL(kAppName));
+    } else if (HasRegistryValue(HKEY_LOCAL_MACHINE, "SOFTWARE\\RegisteredApplications", kAppName)) {
+        uri = fmt("ms-settings:defaultapps?registeredAppMachine=%s", StrL(kAppName));
+    } else {
+        uri = StrL("ms-settings:defaultapps");
+    }
+    ShellExecuteW(hwnd, L"open", CWStrTemp(uri), nullptr, nullptr, SW_SHOWNORMAL);
 }

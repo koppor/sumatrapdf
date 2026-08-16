@@ -78,6 +78,8 @@ EXPORTS
 
 	fz_layout_document
 
+	fz_is_document_reflowable
+
 	fz_page_number_from_location
 
 	fz_lookup_metadata
@@ -181,6 +183,12 @@ EXPORTS
 	fz_new_device_of_size
 
 	fz_load_outline
+	fz_new_outline_iterator
+	fz_drop_outline_iterator
+	fz_outline_iterator_item
+	fz_outline_iterator_next
+	fz_outline_iterator_down
+	fz_outline_iterator_up
 
 	fz_load_page
 
@@ -365,6 +373,8 @@ EXPORTS
 	fz_fin_cached_color_converter
 
 	fz_compressed_buffer_size
+
+	fz_compressed_image_buffer
 
 	fz_open_compressed_buffer
 
@@ -585,6 +595,8 @@ EXPORTS
 	fz_install_load_system_font_funcs
 
 	fz_load_system_font
+
+	fz_lookup_builtin_font
 
 	fz_load_system_cjk_font
 
@@ -809,6 +821,8 @@ EXPORTS
 	fz_clone_path
 
 	fz_bound_path
+
+	fz_walk_path
 
 	fz_adjust_rect_for_stroke
 
@@ -1148,6 +1162,10 @@ EXPORTS
 
 	pdf_parse_link_dest
 
+	pdf_parse_link_action
+
+	pdf_new_link
+
 	pdf_lookup_dest
 
 	pdf_lookup_name
@@ -1405,6 +1423,8 @@ EXPORTS
 	pdf_dict_get_val
 
 	pdf_dict_get
+	pdf_dict_get_rect
+	pdf_dict_get_text_string
 
 	pdf_dict_gets
 
@@ -1788,6 +1808,7 @@ EXPORTS
 	jxl_ctx_new
 	jxl_ctx_free
 	jxl_ctx_set_bgr
+	jxl_ctx_set_srgb_output
 	jxl_decode
 	jxl_decode_size
 	jxl_image_destroy

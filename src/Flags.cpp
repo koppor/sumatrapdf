@@ -42,8 +42,8 @@ enum class Arg {
     FwdSearchColor = 68, FwdSearchPermanent = 69, MangaMode = 70, Search = 71,
     AllUsers = 72, AllUsers2 = 73, RunInstallNow = 74, Adobe = 75,
     DDE = 76, Pwd = 77, EngineDump = 78, SetColorRange = 79,
-    UpgradeFrom = 80, ForTesting = 81, DumpExif = 82, DumpChm = 83,
-    Control = 84, UnitTests = 85,
+    UpgradeFrom = 80, ForTesting = 81, WindowPos = 82, DumpExif = 83,
+    DumpChm = 84, Control = 85, UnitTests = 86,
 };
 
 static SeqStrings gArgNames =
@@ -67,12 +67,13 @@ static SeqStrings gArgNames =
     "fwdsearch-color\0" "fwdsearch-permanent\0" "manga-mode\0" "search\0"
     "all-users\0" "allusers\0" "run-install-now\0" "a\0"
     "dde\0" "pwd\0" "engine-dump\0" "set-color-range\0"
-    "upgrade-from\0" "for-testing\0" "dump-exif\0" "dump-chm\0"
-    "dbg-control\0" "unit-tests\0";
+    "upgrade-from\0" "for-testing\0" "window-pos\0" "dump-exif\0"
+    "dump-chm\0" "dbg-control\0" "unit-tests\0";
 // clang-format on
 // @gen-end flags
 
 #if OS_WIN
+// consoleOnly: skip the GUI text dialog (CLI -list-printers with -console/-silent)
 void ShowPrintersDialog(bool consoleOnly) {
     str::Builder out;
 
@@ -109,6 +110,7 @@ static TempStr ResolveLnkTemp(Str path) {
     return str::DupTemp(path);
 }
 
+// consoleOnly: skip the GUI text dialog (CLI -list-printers with -console/-silent)
 void ShowPrintersDialog(bool) {}
 #endif
 
@@ -202,6 +204,18 @@ static void ParseZoomValue(float* zoom, Str txtOrig) {
     }
 }
 
+// -window-pos <width>x<height>@<x>x<y> e.g. 960x540@960x0
+static void ParseWindowPos(Rect* rect, Str txt) {
+    int dx, dy, x, y;
+    if (str::IsNull(str::Parse(txt, "%dx%d@%dx%d%$", &dx, &dy, &x, &y))) {
+        return;
+    }
+    if (dx <= 0 || dy <= 0) {
+        return;
+    }
+    *rect = Rect(x, y, dx, dy);
+}
+
 // -scroll x,y
 static void ParseScrollValue(Point* scroll, Str txt) {
     int x, y;
@@ -239,7 +253,7 @@ static Arg GetArg(Str s) {
 // https://stackoverflow.com/questions/619158/adobe-reader-command-line-reference
 // https://www.robvanderwoude.com/commandlineswitches.php#Acrobat
 // with Sumatra extensions
-void ParseAdobeFlags(FileArgs& i, Str s) {
+static void ParseAdobeFlags(FileArgs& i, Str s) {
     StrVec parts;
     StrVec parts2;
     Str name;
@@ -625,6 +639,10 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
         }
         if (arg == Arg::Scroll) {
             ParseScrollValue(&i.startScroll, param);
+            continue;
+        }
+        if (arg == Arg::WindowPos) {
+            ParseWindowPos(&i.windowPos, param);
             continue;
         }
         if (arg == Arg::AppData) {

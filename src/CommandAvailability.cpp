@@ -2,9 +2,8 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/Win.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "Settings.h"
 #include "AppSettings.h"
@@ -34,6 +33,10 @@
 
 static UINT_PTR gNoDocWhitelist[] = {
     CmdOpenFile,
+    CmdOpenFileWithOSFilePicker,
+    CmdToggleFilePicker,
+    CmdToggleBoolSetting,
+    CmdNavigateFilesInFolder,
     CmdExit,
     CmdNewWindow,
     CmdContributeTranslation,
@@ -47,6 +50,7 @@ static UINT_PTR gNoDocWhitelist[] = {
     CmdHelpOpenManual,
     CmdHelpOpenManualOnWebsite,
     CmdHelpOpenKeyboardShortcuts,
+    CmdToggleKeyboardHelp,
     CmdHelpVisitWebsite,
     CmdHelpAbout,
     CmdDebugDownloadSymbols,
@@ -57,12 +61,16 @@ static UINT_PTR gNoDocWhitelist[] = {
     CmdDebugToggleRenderInfo,
     CmdDebugToggleCacheInfo,
     CmdDebugToggleRtl,
+    CmdDebugToggleDpiOverride,
     CmdChangeScrollbar,
     CmdToggleFullscreen,
     CmdToggleMenuBar,
     CmdToggleToolbar,
     CmdToggleInverseSearch,
     CmdToggleLinks,
+    CmdToggleDisableLinks,
+    CmdToggleImages,
+    CmdToggleHoverPreview,
     CmdToggleWindowsPreviewer,
     CmdToggleWindowsSearchFilter,
     CmdInvertColors,
@@ -85,6 +93,7 @@ static UINT_PTR gNoDocWhitelist[] = {
 
 UINT_PTR disableIfNoSelection[] = {
     CmdCopySelection,
+    CmdZoomToSelection,
     CmdFindNextSel,
     CmdFindPrevSel,
     CmdTranslateSelection,
@@ -93,6 +102,7 @@ UINT_PTR disableIfNoSelection[] = {
     CmdTranslateSelectionWithGrokBuild,
     CmdTranslateSelectionWithClaudeCode,
     CmdTranslateSelectionWithOpenAICodex,
+    CmdTranslateSelectionWithAntiGravity,
     CmdSearchSelectionWithWikipedia,
     CmdSearchSelectionWithGoogleScholar,
     CmdSearchSelectionWithBing,
@@ -166,6 +176,8 @@ static UINT_PTR removeIfNoCopyPerms[] = {
 static UINT_PTR removeIfNoDiskAccessPerm[] = {
     CmdNewWindow,
     CmdOpenFile,
+    CmdOpenFileWithOSFilePicker,
+    CmdToggleFilePicker,
     CmdOpenNextFileInFolder,
     CmdOpenPrevFileInFolder,
     CmdNavigateFilesInFolder,
@@ -224,6 +236,7 @@ static UINT_PTR removeIfChm[] = {
     CmdZoomFitWidth,
     CmdZoomFitHeight,
     CmdZoomFitContent,
+    CmdDebugShowFitContentArea,
     CmdZoomShrinkToFit,
     CmdZoom6400,
     CmdZoom3200,
@@ -264,6 +277,11 @@ static i32 gBlacklistCommandsFromPalette[] = {
     CmdOpenAttachment,
     CmdCreateShortcutToFile,
     CmdSetDocumentColorsFollowTheme,
+    // needs the name of the setting to toggle, e.g.
+    // [CmdToggleBoolSetting Fullscreen.ShowMenubar]; picking the bare command out
+    // of the palette can only warn that the argument is missing. A custom command
+    // that supplies one has its own id and name and still shows up
+    CmdToggleBoolSetting,
     0,
 };
 
@@ -274,6 +292,7 @@ static i32 gCommandsDebugOnly[] = {
     CmdDebugTestApp,
     CmdDebugShowNotif,
     CmdDebugStartStressTest,
+    CmdDebugToggleDpiOverride,
     0,
 };
 
@@ -361,9 +380,10 @@ AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
         if (engine && engine->IsImageCollection()) {
             ctx.isImageCollection = true;
         }
+        ctx.isReflowable = engine && engine->isReflowable;
         ctx.engineKind = ctx.tab->GetEngineType();
         ctx.canSendEmail = CanSendAsEmailAttachment(ctx.tab);
-        ctx.isPdf = CouldBePDFDoc(ctx.tab);
+        ctx.isPdf = IsPdfDoc(ctx.tab);
         if (ctx.isPdf && engine) {
             ctx.isPdfEncrypted = EngineMupdfIsEncrypted(engine);
         }
@@ -380,7 +400,8 @@ AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
 
     DisplayModel* dm = win->AsFixed();
     if (dm) {
-        auto engine = dm->GetEngine();
+        ctx.isFixedPage = true;
+        auto* engine = dm->GetEngine();
         ctx.hasTextSelection = ctx.hasSelection && dm->textSelection->result.len > 0;
         ctx.supportsAnnots = EngineSupportsAnnotations(engine) && !win->isFullScreen;
         ctx.hasUnsavedAnnotations = EngineHasUnsavedAnnotations(engine);
@@ -392,7 +413,7 @@ AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
         IPageElement* pageEl = dm->GetElementAtPos(cursorPos, nullptr);
         if (pageEl) {
             Str value = pageEl->GetValue();
-            ctx.cursorOnLinkTarget = value && pageEl->Is(kindPageElementDest);
+            ctx.cursorOnLinkTarget = pageEl->Is(kindPageElementDest) && PageDestHasAddress(pageEl->AsLink());
             ctx.cursorOnComment = value && pageEl->Is(kindPageElementComment);
             ctx.cursorOnImage = pageEl->Is(kindPageElementImage);
         }
@@ -436,12 +457,15 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return CommandVisibility::Show;
     }
 
-    if (cmdId == CmdAIChatWithClaudeCode || cmdId == CmdAIChatWithGrokBuild || cmdId == CmdAIChatWithOpenAICodex) {
+    if (cmdId == CmdAIChatWithClaudeCode || cmdId == CmdAIChatWithGrokBuild || cmdId == CmdAIChatWithOpenAICodex ||
+        cmdId == CmdAIChatWithAntiGravity) {
         if (!IsAIChatAvailable()) {
             return CommandVisibility::Hide;
         }
+        // Hide (not disable) so the "AI chat with document" context submenu is
+        // empty and dropped for unsupported types (images, comics, DjVu, …).
         if (!IsAIChatSupportedForTab(ctx.tab)) {
-            return MapForSurface(CommandVisibility::Disable, surface);
+            return CommandVisibility::Hide;
         }
     }
     if (cmdId == CmdTranslateSelectionWithGrokBuild && !IsGrokBuildInstalled()) {
@@ -451,6 +475,9 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return CommandVisibility::Hide;
     }
     if (cmdId == CmdTranslateSelectionWithOpenAICodex && !IsCodexBuildInstalled()) {
+        return CommandVisibility::Hide;
+    }
+    if (cmdId == CmdTranslateSelectionWithAntiGravity && !IsAntiGravityInstalled()) {
         return CommandVisibility::Hide;
     }
 
@@ -561,6 +588,11 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return CommandVisibility::Hide;
     }
 
+    if (!ctx.isReflowable && cmdId == CmdChangeEbookSettings) {
+        // font, line spacing and CSS only mean something for a reflowed document
+        return CommandVisibility::Hide;
+    }
+
     if (!ctx.isPdf) {
         if (cmdId == CmdPdShowInfo || cmdId == CmdPdfBake || cmdId == CmdPdfCompress || cmdId == CmdPdfDecompress ||
             cmdId == CmdPdfEncrypt || cmdId == CmdPdfDecrypt || cmdId == CmdPdfDeletePages ||
@@ -591,11 +623,43 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         }
     }
 
-    if (cmdId == CmdToggleMangaMode) {
-        if (surface == CommandSurface::Palette && ctx.isSinglePage) {
+    bool isTextSelectCmd = cmdId == CmdSelectTextViaKeyboard || cmdId == CmdExtendSelectionCharLeft ||
+                           cmdId == CmdExtendSelectionCharRight || cmdId == CmdExtendSelectionWordLeft ||
+                           cmdId == CmdExtendSelectionWordRight;
+    if (isTextSelectCmd) {
+        // needs a fixed-page engine with extractable text: image collections
+        // have none and CHM / markdown do their own selection (#4684, #4116)
+        Kind k = ctx.engineKind;
+        bool isImage = k == kindEngineImage || k == kindEngineImageDir || k == kindEngineComicBooks;
+        if (ctx.isImageCollection || isImage || ctx.isChm || !k) {
             return CommandVisibility::Hide;
         }
-        if (!ctx.isCbx) {
+    }
+
+    if (cmdId == CmdToggleKeyboardLinkFollowing) {
+        // pages of image collections (comic books, image folders, single
+        // images) can't carry links; CHM / markdown handle their own (#2629)
+        Kind k = ctx.engineKind;
+        bool isImage = k == kindEngineImage || k == kindEngineImageDir || k == kindEngineComicBooks;
+        if (ctx.isImageCollection || isImage || ctx.isChm || !k) {
+            return CommandVisibility::Hide;
+        }
+    }
+
+    if (cmdId == CmdToggleMangaMode) {
+        if (!ctx.isFixedPage) {
+            return CommandVisibility::Hide;
+        }
+        // available in single page view too: right-to-left also decides which
+        // way the page turns and which side of the canvas advances (#1264)
+    }
+
+    if (cmdId == CmdConvertToPDF) {
+        // comic books, image folders, single images (issue #4118)
+        Kind k = ctx.engineKind;
+        bool isImage =
+            k == kindEngineImage || k == kindEngineImageDir || k == kindEngineComicBooks || ctx.isImageCollection;
+        if (!ctx.isDocLoaded || !isImage) {
             return CommandVisibility::Hide;
         }
     }
@@ -652,6 +716,16 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return ctx.hasToc ? CommandVisibility::Show : CommandVisibility::Hide;
     }
 
+    // No extractable text on comics, image folders, or single images.
+    if (cmdId == CmdReadAloud || cmdId == CmdReadAloudFromTopPage || cmdId == CmdReadAloudSelection ||
+        cmdId == CmdPauseReadAloud || cmdId == CmdContinueReadAloud || cmdId == CmdStopReadAloud) {
+        Kind k = ctx.engineKind;
+        bool isImage =
+            k == kindEngineImage || k == kindEngineImageDir || k == kindEngineComicBooks || ctx.isImageCollection;
+        if (isImage) {
+            return CommandVisibility::Hide;
+        }
+    }
     if (cmdId == CmdPauseReadAloud) {
         return ctx.isSpeaking ? CommandVisibility::Show : CommandVisibility::Hide;
     }

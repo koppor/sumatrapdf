@@ -1,6 +1,6 @@
 Project         Version    Date
 ----------------------------------
-../mupdf        1.28.0-rc2
+mupdf           1.28.0-rc2
   https://github.com/ArtifexSoftware/mupdf/releases/tag/1.28.0-rc2
 
 libarchive     3.8.8      2026-06-23
@@ -32,7 +32,7 @@ harfbuzz        13.0.1
 
 jbig2dec        0.20
   https://github.com/ArtifexSoftware/jbig2dec/commits/artifex
-  mupdf thirdparty submodule, commit dc15c39bbbddc90f79c14563d2eb5a794106be8f
+  amalgamated into ext/a-jbig2dec by cmd/a-jbig2dec.ts, see ext/a-jbig2dec/version.txt
 
 libjpeg-turbo   3.1.4.1    2026-03-27
   https://github.com/libjpeg-turbo/libjpeg-turbo/tags
@@ -105,9 +105,9 @@ darkmodelib     trunk      2026-01-16
   https://github.com/ozone10/darkmodelib
   https://github.com/ozone10/darkmodelib/commit/57cc10c819d17c47b6afd295b424153082144193
 
-jxldec          dist       2026-07-28
+jxldec          dist       2026-08-11
   https://github.com/kjk/jxldec
-  commit 0867c84ac9de7d445b14d29e4d20bd660cb7acc0
+  commit 54c8f53001b5f82886a8d96526ad1b0281e7c89a
   amalgamated dist/jxl.c + dist/jxl.h only
   Replaces libjxl + highway + skcms for JPEG XL decode.
 

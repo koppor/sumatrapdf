@@ -79,16 +79,10 @@ static bool PdfDarkModeExtractFeatures(fz_context* ctx, fz_image* image, float p
 
         int blockW = pix->w / kGridBlocks;
         int blockH = pix->h / kGridBlocks;
-        if (blockW < 1) {
-            blockW = 1;
-        }
-        if (blockH < 1) {
-            blockH = 1;
-        }
+        blockW = std::max(blockW, 1);
+        blockH = std::max(blockH, 1);
         int samplesPerBlock = (blockW * blockH > 0) ? (kMaxImageSamples / (kGridBlocks * kGridBlocks)) + 1 : 1;
-        if (samplesPerBlock < 1) {
-            samplesPerBlock = 1;
-        }
+        samplesPerBlock = std::max(samplesPerBlock, 1);
 
         float blockLum[kGridBlocks * kGridBlocks] = {};
         int blockCount[kGridBlocks * kGridBlocks] = {};
@@ -110,13 +104,13 @@ static bool PdfDarkModeExtractFeatures(fz_context* ctx, fz_image* image, float p
                             n++;
                             continue;
                         }
-                        int ri = (int)((r * 255.f) + 0.5f);
-                        int gi = (int)((g * 255.f) + 0.5f);
-                        int bi = (int)((b * 255.f) + 0.5f);
+                        int ri = (int)lroundf(r * 255.f);
+                        int gi = (int)lroundf(g * 255.f);
+                        int bi = (int)lroundf(b * 255.f);
                         buckets[((ri >> 4) << 8) | ((gi >> 4) << 4) | (bi >> 4)]++;
 
-                        float maxC = r > g ? (r > b ? r : b) : (g > b ? g : b);
-                        float minC = r < g ? (r < b ? r : b) : (g < b ? g : b);
+                        float maxC = std::max({r, g, b});
+                        float minC = std::min({r, g, b});
                         float lum = (0.2126f * r) + (0.7152f * g) + (0.0722f * b);
                         lumSum += lum;
                         lumSqSum += lum * lum;
@@ -143,8 +137,8 @@ static bool PdfDarkModeExtractFeatures(fz_context* ctx, fz_image* image, float p
         }
 
         int significantBuckets = 0;
-        for (int i = 0; i < kColorBuckets; i++) {
-            if (buckets[i] * 100 > n) {
+        for (int bucket : buckets) {
+            if (bucket * 100 > n) {
                 significantBuckets++;
             }
         }
@@ -234,12 +228,7 @@ static bool PdfDarkModeExtractFeatures(fz_context* ctx, fz_image* image, float p
             }
             borderVar /= (float)borderN;
             outFeatures->borderUniformity = 1.f - (borderVar / 0.12f);
-            if (outFeatures->borderUniformity < 0.f) {
-                outFeatures->borderUniformity = 0.f;
-            }
-            if (outFeatures->borderUniformity > 1.f) {
-                outFeatures->borderUniformity = 1.f;
-            }
+            outFeatures->borderUniformity = limitValue(outFeatures->borderUniformity, 0.f, 1.f);
         }
     }
     fz_always(ctx) {

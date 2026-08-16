@@ -2,13 +2,15 @@
    License: GPLv3 */
 
 #include "base/Base.h"
+#include "base/Archive.h"
 #include "base/Pixmap.h"
 #include "base/ScopedWin.h"
 #include "base/GdiPlusUtil.h"
 #include "base/Win.h"
-#include "mui/Mui.h"
+#include "gui/PlatformFont.h"
+#include "gui/PlatformText.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "Settings.h"
 #include "DocController.h"
@@ -20,12 +22,61 @@
 
 #include "PdfPreview.h"
 
-constexpr COLORREF kColWindowBg = RGB(0x99, 0x99, 0x99);
+constexpr Color kColWindowBg = MkRgb(0x99, 0x99, 0x99);
 constexpr int kPreviewMargin = 2;
 constexpr UINT kUwmPaintAgain = (WM_USER + 101);
 
 EBookUI* GetEBookUI() {
     return nullptr;
+}
+
+FileEBookUI* GetFileEBookUI(Str) {
+    return nullptr;
+}
+
+// Copy a rendered page into the 32bpp DIB the shell gets, rather than going
+// through GetDIBits(bmp->hbmp): only the mupdf engines render into a DIB
+// section, so for DjVu and the image engines hbmp is null and GetDIBits failed,
+// which is why those never had a thumbnail (issue #1530). Pixmap::data is
+// always there.
+// Rows are written bottom-up (the DIB has a positive biHeight) and anything
+// translucent is composited over white, the same paper the preview window
+// paints behind a page. Alpha ends up opaque, matching WTSAT_RGB:
+// cf. http://msdn.microsoft.com/en-us/library/bb774612(v=VS.85).aspx
+static void CopyPixmapToThumbnail(const Pixmap* bmp, u8* dst, int dx, int dy) {
+    int srcBpp = PixmapBytesPerPixel(bmp->format);
+    bool isRgb = bmp->format == PixmapFormat::RGBA8;
+    bool hasAlpha = srcBpp == 4;
+    bool premul = bmp->premultiplied;
+    for (int y = 0; y < dy; y++) {
+        const u8* src = bmp->data + ((size_t)y * (size_t)bmp->stride);
+        u8* row = dst + ((size_t)(dy - 1 - y) * (size_t)dx * 4);
+        for (int x = 0; x < dx; x++) {
+            int c0 = src[0], c1 = src[1], c2 = src[2];
+            int b = isRgb ? c2 : c0;
+            int r = isRgb ? c0 : c2;
+            int g = c1;
+            int a = hasAlpha ? src[3] : 255;
+            if (a != 255) {
+                int inv = 255 - a;
+                if (premul) {
+                    b += inv;
+                    g += inv;
+                    r += inv;
+                } else {
+                    b = ((b * a) + (255 * inv)) / 255;
+                    g = ((g * a) + (255 * inv)) / 255;
+                    r = ((r * a) + (255 * inv)) / 255;
+                }
+            }
+            row[0] = (u8)std::min(b, 255);
+            row[1] = (u8)std::min(g, 255);
+            row[2] = (u8)std::min(r, 255);
+            row[3] = 0xFF;
+            src += srcBpp;
+            row += 4;
+        }
+    }
 }
 
 IFACEMETHODIMP PdfPreview::GetThumbnail(uint cx, HBITMAP* phbmp, WTS_ALPHATYPE* pdwAlpha) {
@@ -38,13 +89,30 @@ IFACEMETHODIMP PdfPreview::GetThumbnail(uint cx, HBITMAP* phbmp, WTS_ALPHATYPE* 
     logf("PdfPreview::GetThumbnail(cx=%d, engine: %s\n", (int)cx, Str(engine->kind));
 
     RectF page = engine->Transform(engine->PageMediabox(1), 1, 1.0, 0);
-    float zoom = std::min((float)cx / (float)page.dx, (float)cx / (float)page.dy) - 0.001f;
+    float zoom = std::min((float)cx / page.dx, (float)cx / page.dy) - 0.001f;
     Rect thumb = RectF(0, 0, page.dx * zoom, page.dy * zoom).Round();
+
+    page = engine->Transform(ToRectF(thumb), 1, zoom, 0, true);
+    RenderPageArgs args(1, zoom, 0, &page);
+    Pixmap* bmp = engine->RenderPage(args);
+    if (!bmp || !bmp->data) {
+        log("PdfPreview::GetThumbnail: RenderPage() failed\n");
+        FreePixmap(bmp);
+        return E_FAIL;
+    }
+    defer {
+        FreePixmap(bmp);
+    };
+
+    // Size the bitmap from what was actually rendered: rounding can put it a
+    // pixel off `thumb`, and copying with the wrong dimensions shears the image.
+    int dx = bmp->width;
+    int dy = bmp->height;
 
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
-    bmi.bmiHeader.biHeight = thumb.dy;
-    bmi.bmiHeader.biWidth = thumb.dx;
+    bmi.bmiHeader.biHeight = dy;
+    bmi.bmiHeader.biWidth = dx;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -56,32 +124,14 @@ IFACEMETHODIMP PdfPreview::GetThumbnail(uint cx, HBITMAP* phbmp, WTS_ALPHATYPE* 
         return E_OUTOFMEMORY;
     }
 
-    page = engine->Transform(ToRectF(thumb), 1, zoom, 0, true);
-    RenderPageArgs args(1, zoom, 0, &page);
-    Pixmap* bmp = engine->RenderPage(args);
+    CopyPixmapToThumbnail(bmp, bmpData, dx, dy);
 
-    HDC hdc = GetDC(nullptr);
-    if (bmp && GetDIBits(hdc, bmp->hbmp, 0, thumb.dy, bmpData, &bmi, DIB_RGB_COLORS)) {
-        // cf. http://msdn.microsoft.com/en-us/library/bb774612(v=VS.85).aspx
-        for (int i = 0; i < thumb.dx * thumb.dy; i++) {
-            bmpData[(4 * i) + 3] = 0xFF;
-        }
-
-        *phbmp = hthumb;
-        if (pdwAlpha) {
-            *pdwAlpha = WTSAT_RGB;
-        }
-        log("PdfPreview::GetThumbnail: provided thumbnail\n");
-    } else {
-        DeleteObject(hthumb);
-        hthumb = nullptr;
-        log("PdfPreview::GetThumbnail: GetDIBits() failed\n");
+    *phbmp = hthumb;
+    if (pdwAlpha) {
+        *pdwAlpha = WTSAT_RGB;
     }
-
-    ReleaseDC(nullptr, hdc);
-    FreePixmap(bmp);
-
-    return hthumb ? S_OK : E_NOTIMPL;
+    log("PdfPreview::GetThumbnail: provided thumbnail\n");
+    return S_OK;
 }
 
 class PageRenderer {
@@ -122,7 +172,7 @@ class PageRenderer {
 
     RectF GetPageRect(int pageNo) {
         if (preventRecursion) {
-            return RectF();
+            return {};
         }
 
         preventRecursion = true;
@@ -204,7 +254,7 @@ static LRESULT OnPaint(HWND hwnd) {
         if (!page.IsEmpty()) {
             rect.Inflate(-kPreviewMargin, -kPreviewMargin);
             float zoom = (float)std::min((float)rect.dx / page.dx, (float)rect.dy / page.dy) - 0.001f;
-            Rect onScreen = RectF((float)rect.x, (float)rect.y, (float)page.dx * zoom, (float)page.dy * zoom).Round();
+            Rect onScreen = RectF((float)rect.x, (float)rect.y, page.dx * zoom, page.dy * zoom).Round();
             onScreen.Offset((rect.dx - onScreen.dx) / 2, (rect.dy - onScreen.dy) / 2);
 
             RECT rcPage = ToRECT(onScreen);
@@ -320,7 +370,7 @@ IFACEMETHODIMP PdfPreview::DoPreview() {
     WNDCLASSEX wcex{};
     wcex.cbSize = sizeof(wcex);
     wcex.lpfnWndProc = PreviewWndProc;
-    wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wcex.hCursor = GetCachedCursor(IDC_ARROW);
     wcex.lpszClassName = L"SumatraPDF_PreviewPane";
     wcex.style = CS_HREDRAW | CS_VREDRAW;
     RegisterClassEx(&wcex);
@@ -361,40 +411,86 @@ static bool NeedsGdiPlus(PreviewType type) {
            type == PreviewType::Mobi || type == PreviewType::Cbx || type == PreviewType::Tga;
 }
 
-static bool NeedsMui(PreviewType type) {
-    return type == PreviewType::Epub || type == PreviewType::Fb2 || type == PreviewType::Mobi;
-}
-
-PdfPreview::PdfPreview(long* plRefCount, PreviewType type) {
+PdfPreview::PdfPreview(AtomicInt* plRefCount, PreviewType type) {
     m_type = type;
     m_plModuleRef = plRefCount;
-    InterlockedIncrement(m_plModuleRef);
+    AtomicIntInc(m_plModuleRef);
     if (NeedsGdiPlus(type)) {
         m_gdiScope = new ScopedGdiPlus();
-    }
-    if (NeedsMui(type)) {
-        mui::Initialize();
-        m_muiInitialized = true;
     }
 }
 
 PdfPreview::~PdfPreview() {
     Unload();
-    if (m_muiInitialized) {
-        mui::Destroy();
+    if (m_gdiScope) {
+        // the cached gdiplus objects text measuring keeps around must go before
+        // gdiplus itself does
+        PlatformFontDestroy();
+        delete m_gdiScope;
     }
-    delete m_gdiScope;
     InterlockedDecrement(m_plModuleRef);
 }
 
-EngineBase* PdfPreview::LoadEngine(IStream* stream) {
-    Str data = ReadIStream(stream);
+// If data is a zip (fb2z/fbz/fb2.zip), return owned bytes of the .fb2 member.
+// Otherwise return empty (caller uses original data).
+static Str ExtractFb2FromZipData(Str data) {
+    if (len(data) < 4 || data.s[0] != 'P' || data.s[1] != 'K') {
+        return {};
+    }
+    Archive* archive = OpenArchiveFromData(data);
+    if (!archive) {
+        return {};
+    }
+    AutoDelete delArchive(archive);
+    const auto& files = archive->GetFileInfos();
+    int fb2Id = -1;
+    for (auto* fi : files) {
+        if (str::EndsWithI(fi->name, StrL(".fb2"))) {
+            if (fb2Id >= 0) {
+                return {}; // more than one .fb2
+            }
+            fb2Id = fi->fileId;
+        } else if (!str::EndsWithI(fi->name, StrL(".url"))) {
+            // same restrictiveness as Fb2Doc archive load
+            return {};
+        }
+    }
+    if (fb2Id < 0 && len(files) == 1) {
+        fb2Id = 0;
+    }
+    if (fb2Id < 0) {
+        return {};
+    }
+    auto* fi = archive->GetFileDataById(fb2Id);
+    if (!fi || !fi->data) {
+        return {};
+    }
+    // take ownership of the decompressed bytes
+    Str res = Str(fi->data, fi->fileSizeUncompressed);
+    fi->data = nullptr;
+    return res;
+}
+
+// Prefer mupdf for FB2 (same engine as the main viewer). The legacy
+// CreateEngineFb2FromData path fails on some plain FB2 files that mupdf
+// opens fine (issue #1677 sample set). Zip containers are unwrapped first.
+static EngineBase* CreateFb2PreviewEngine(Str data) {
+    Str extracted = ExtractFb2FromZipData(data);
+    Str plain = extracted ? extracted : data;
+    EngineBase* engine = CreateEngineMupdfFromData(plain, "document.fb2", nullptr);
+    str::Free(extracted);
+    if (engine) {
+        return engine;
+    }
+    // fall back to the old formatter engine
+    return CreateEngineFb2FromData(data);
+}
+
+// data stays owned by the caller: every engine below copies what it needs
+EngineBase* PdfPreview::LoadEngine(const Str& data) {
     if (str::IsNull(data)) {
         return nullptr;
     }
-    defer {
-        str::Free(data);
-    };
     switch (m_type) {
         case PreviewType::Pdf:
             return CreateEngineMupdfFromData(data, "foo.pdf", nullptr);
@@ -405,7 +501,7 @@ EngineBase* PdfPreview::LoadEngine(IStream* stream) {
         case PreviewType::Epub:
             return CreateEngineEpubFromData(data);
         case PreviewType::Fb2:
-            return CreateEngineFb2FromData(data);
+            return CreateFb2PreviewEngine(data);
         case PreviewType::Mobi:
             return CreateEngineMobiFromData(data);
         case PreviewType::Cbx:

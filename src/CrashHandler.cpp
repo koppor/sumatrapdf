@@ -6,6 +6,7 @@
 #pragma warning(disable : 4668)
 #include <signal.h>
 #include <memory>
+#include <new.h> // _set_new_handler
 
 #include "base/WinDynCalls.h"
 #include "base/DbgHelpDyn.h"
@@ -14,10 +15,10 @@
 #include "base/LzmaSimpleArchive.h"
 #include "base/Win.h"
 
-#include "wingui/UIModels.h"
-#include "wingui/Layout.h"
-#include "wingui/WinGui.h"
-#include "wingui/WebView.h"
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
+#include "gui/win/WebView.h"
 
 #include "Settings.h"
 #include "GlobalPrefs.h"
@@ -64,7 +65,7 @@ is still possible, the probability should be greatly reduced. */
 static Arena* gCrashHandlerArena = nullptr;
 
 // exit code for a debug report (ReportIf) in a -for-testing run; test runners
-// (cmd/control.ts) treat it as "assertion fired", so keep the value in sync
+// (tests/control.ts) treat it as "assertion fired", so keep the value in sync
 constexpr UINT kDebugReportTestExitCode = 105;
 
 // Note: intentionally not using ScopedMem<> to avoid
@@ -177,7 +178,8 @@ static void AppendUncaughtMupdfError(str::Builder& s) {
 }
 
 static Str BuildCrashInfoText(Str condStr, Str fileLine, bool isCrash, bool captureCallstack) {
-    str::Builder s(16 * 1024, gCrashHandlerArena);
+    str::Builder s(16 * 1024);
+    s.a = gCrashHandlerArena;
     if (!isCrash) {
         captureCallstack = true;
         s.Append("Type: debug report (not crash)\n");
@@ -235,7 +237,8 @@ static Str BuildCrashInfoText(Str condStr, Str fileLine, bool isCrash, bool capt
 }
 
 static Str BuildLocalCrashInfoText(Str condStr, Str fileLine, bool isCrash, bool captureCallstack) {
-    str::Builder s(16 * 1024, gCrashHandlerArena);
+    str::Builder s(16 * 1024);
+    s.a = gCrashHandlerArena;
     if (!isCrash) {
         captureCallstack = true;
         s.Append("Type: debug report (not crash)\n");
@@ -268,7 +271,7 @@ static Str BuildLocalCrashInfoText(Str condStr, Str fileLine, bool isCrash, bool
     return s.TakeStr();
 }
 
-void SaveCrashInfo(Str d) {
+static void SaveCrashInfo(Str d) {
     if (!gCrashFilePath) {
         logf("SaveCrashInfo: skipping because !gCrashFilePath");
         return;
@@ -290,16 +293,18 @@ static void WriteCrashInfoToStdErr(Str d) {
     WriteFile(h, (u8*)d.s, (DWORD)d.len, &written, nullptr);
 }
 
-void UploadCrashReport(Str d) {
+static void UploadCrashReport(Str d) {
     log("UploadCrashReport()\n");
     if (len(d) == 0) {
         return;
     }
 
-    str::Builder headers(256, gCrashHandlerArena);
+    str::Builder headers(256);
+    headers.a = gCrashHandlerArena;
     headers.Append("Content-Type: text/plain");
 
-    str::Builder data(16 * 1024, gCrashHandlerArena);
+    str::Builder data(16 * 1024);
+    data.a = gCrashHandlerArena;
     data.Append(d);
 
     HttpPost(kCrashHandlerServer, kCrashHandlerServerPort, kCrashHandlerServerSubmitURL, &headers, &data);
@@ -429,7 +434,8 @@ static bool gAddSymbolServer = false;
 static bool gAddExeDir = false;
 
 static TempStr BuildSymbolPathTemp(Str symDir) {
-    str::Builder path(2048, GetTempArena());
+    str::Builder path(2048);
+    path.a = GetTempArena();
 
     bool symDirExists = dir::Exists(symDir);
 
@@ -601,7 +607,7 @@ void _uploadDebugReport(Str condStr, Str fileLine, bool isCrash, bool captureCal
     loga("_uploadDebugReport() finished\n");
 }
 
-static DWORD WINAPI CrashDumpThread(LPVOID) {
+static DWORD WINAPI CrashDumpThread(LPVOID /*data*/) {
     WaitForSingleObject(gDumpEvent, INFINITE);
     if (!gCrashed) {
         return 0;
@@ -692,7 +698,7 @@ static void GetOsVersion(str::Builder& s) {
     int servicePackMajor = ver.wServicePackMajor;
     int servicePackMinor = ver.wServicePackMinor;
     int buildNumber = (int)ver.dwBuildNumber & 0xFFFF;
-    auto arch = "64-bit";
+    const auto* arch = "64-bit";
     if (IsProcess32()) {
         arch = IsRunningInWow64() ? "Wow64" : "32-bit";
     }
@@ -707,11 +713,11 @@ static void GetOsVersion(str::Builder& s) {
 }
 
 static void GetProcessorName(str::Builder& s) {
-    auto key = "HARDWARE\\DESCRIPTION\\System\\CentralProcessor";
+    const auto* key = R"(HARDWARE\DESCRIPTION\System\CentralProcessor)";
     TempStr name = ReadRegStrTemp(HKEY_LOCAL_MACHINE, key, "ProcessorNameString");
     if (!name) {
         // if more than one processor
-        key = "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0";
+        key = R"(HARDWARE\DESCRIPTION\System\CentralProcessor\0)";
         name = ReadRegStrTemp(HKEY_LOCAL_MACHINE, key, "ProcessorNameString");
     }
     if (name) {
@@ -719,8 +725,6 @@ static void GetProcessorName(str::Builder& s) {
     }
 }
 
-// note: don't build this with fmt() - its format grammar treats the '\{' before
-// the GUID as an escape and would drop the backslash, corrupting the key
 #define GFX_DRIVER_KEY_PREFIX "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\"
 
 static void GetGraphicsDriverInfo(str::Builder& s) {
@@ -780,8 +784,8 @@ static void GetSystemInfo(str::Builder& s) {
     }
     {
         // get computer name
-        TempStr s1 = ReadRegStrTemp(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\BIOS", "SystemFamily");
-        TempStr s2 = ReadRegStrTemp(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\BIOS", "SystemVersion");
+        TempStr s1 = ReadRegStrTemp(HKEY_LOCAL_MACHINE, R"(HARDWARE\DESCRIPTION\System\BIOS)", "SystemFamily");
+        TempStr s2 = ReadRegStrTemp(HKEY_LOCAL_MACHINE, R"(HARDWARE\DESCRIPTION\System\BIOS)", "SystemVersion");
 
         if (!s1 && !s2) {
             // no-op
@@ -845,14 +849,16 @@ static void GetSystemInfo(str::Builder& s) {
 
 // returns true if running on wine
 static bool BuildModulesInfo() {
-    str::Builder s(1024, gCrashHandlerArena);
+    str::Builder s(1024);
+    s.a = gCrashHandlerArena;
     bool isWine = GetModules(s, false);
     gModulesInfo = s.TakeStr();
     return isWine;
 }
 
 static void BuildSystemInfo() {
-    str::Builder s(1024, gCrashHandlerArena);
+    str::Builder s(1024);
+    s.a = gCrashHandlerArena;
     GetProgramInfo(s);
     GetOsVersion(s);
     GetSystemInfo(s);
@@ -867,22 +873,44 @@ bool SetSymbolsDir(Str symDir) {
     return true;
 }
 
-void __cdecl onSignalAbort(int) {
+static void __cdecl onSignalAbort(int /*sig*/) {
     // put the signal back because can be called many times
     // (from multiple threads) and raise() resets the handler
     signal(SIGABRT, onSignalAbort);
     CrashMe();
 }
 
-void onTerminate() {
+static void onTerminate() {
     CrashMe();
 }
 
-void onUnexpected() {
+// The CRT calls this when an API is handed something it refuses to work with -
+// atof(nullptr), a bad printf format, an out-of-range index in a checked
+// iterator... The default handler is _invoke_watson(), which fails the process
+// fast without going through SetUnhandledExceptionFilter or the vectored
+// handler, so those crashes died silently with no report (#5909). Crash the way
+// everything else here does, so the normal machinery walks the stack and sends
+// a report. The arguments only carry anything in a debug CRT, so ignore them.
+static void __cdecl onInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, uintptr_t) {
     CrashMe();
 }
 
-// shadow crt's _purecall() so that we're called instead of CRT
+// new couldn't get the memory. Without a handler this ends in std::bad_alloc,
+// which with _HAS_EXCEPTIONS=0 aborts somewhere down in the CRT; crashing here
+// keeps the frame that asked for the memory on the stack, which is the only
+// interesting part of an out-of-memory report. Never returns (returning 0 would
+// tell new to give up, 1 to retry the allocation).
+static int __cdecl onNewFailed(size_t) {
+    CrashMe();
+    return 0;
+}
+
+__unused static void onUnexpected() {
+    CrashMe();
+}
+
+// shadow crt's _purecall() so that we're called instead of CRT.
+// must keep external linkage: that's how it overrides the CRT's definition
 int __cdecl _purecall() {
     CrashMe();
     return 0;
@@ -991,6 +1019,19 @@ void InstallCrashHandler(Str crashDumpPath, Str crashFilePath, Str symDir, bool 
 
     signal(SIGABRT, onSignalAbort);
 #if COMPILER_MSVC
+    // must be the global one: threads that never call the thread-local setter
+    // (i.e. all of ours) fall back to it
+    _set_invalid_parameter_handler(onInvalidParameter);
+    _set_new_handler(onNewFailed);
+    // deliberately not _set_new_mode(1): that would route failed malloc() to the
+    // new handler too, and plenty of code here checks malloc for null and
+    // recovers instead of dying
+    //
+    // abort() runs the SIGABRT handler above, which crashes and reports. Take
+    // the CRT's own reactions out of the way: _CALL_REPORTFAULT would hand the
+    // process to WER, _WRITE_ABORT_MSG prints a message no user of a GUI app
+    // ever sees
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
     ::set_terminate(onTerminate);
     // set_unexpected() is unavailable with MSVC 17.3+ (_HAS_CXX17 / P0003R5).
     //::set_unexpected(onUnexpected);

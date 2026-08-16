@@ -26,22 +26,16 @@ TempWStr GetDirTemp(WStr path);
 
 TempStr GetNonVirtualTemp(Str virtualPath);
 
-Str Join(Arena* a, Str path, Str fileName);
-Str Join(Str path, Str fileName);
-WStr Join(WStr path, WStr fileName, WStr fileName2 = WStr());
-TempStr JoinTemp(Str path, Str fileName, Str fileName2 = Str());
-TempWStr JoinTemp(WStr path, WStr fileName, WStr fileName2 = WStr());
+Str Join(Arena* a, Str dir, Str name);
+Str Join(Str dir, Str name);
+WStr Join(WStr dir, WStr name, WStr name2 = WStr());
+TempStr JoinTemp(Str dir, Str name, Str name2 = Str());
+TempWStr JoinTemp(WStr dir, WStr name, WStr name2 = WStr());
 
 bool IsDirectory(Str path);
 
-// Like GetFileAttributesW: returns attributes or INVALID_FILE_ATTRIBUTES.
-// On Windows, network-drive results are cached for 1 hour (shared with
-// GetCachedAttributesEx) to avoid repeated slow metadata round-trips.
-// Non-Windows: no cache (same as an uncached attribute query).
 DWORD GetCachedAttributes(Str path);
 #if OS_WIN
-// Like GetFileAttributesExW(..., GetFileExInfoStandard, ...). Network paths
-// share the same 1-hour cache as GetCachedAttributes.
 bool GetCachedAttributesEx(Str path, WIN32_FILE_ATTRIBUTE_DATA* out);
 #endif
 
@@ -74,12 +68,10 @@ Type GetType(Str path);
 } // namespace path
 
 TempStr GetTempFilePathTemp(Str filePrefix = Str());
-// Path of this process image (exe or DLL that contains this code).
 TempStr GetSelfExePathTemp();
 #if OS_WIN
 TempWStr GetSelfExePathW();
 #endif
-// Directory containing GetSelfExePathTemp().
 TempStr GetSelfExeDirTemp();
 TempStr GetPathInExeDirTemp(Str fileName = Str());
 TempStr MakeUniqueFilePathTemp(Str path);
@@ -103,7 +95,6 @@ Str ReadFile(Str path);
 int ReadN(Str path, u8* buf, size_t toRead);
 bool WriteFile(Str path, Str);
 
-i64 GetSize(FileHandle h);
 i64 GetSize(Str path);
 
 // read-only memory-mapped view of an entire file
@@ -160,15 +151,14 @@ bool Exists(WStr dir);
 bool Exists(Str dir);
 
 bool Create(Str dir);
-bool CreateForFile(Str path);
-bool CreateAll(Str dir);
+bool CreateForFile(Str path, int* errOut = nullptr);
+bool CreateAll(Str dir, int* errOut = nullptr);
 bool RemoveAll(Str dir);
+bool Empty(Str dir);
 bool HasWriteAccess(Str dir);
 
 } // namespace dir
 
-// global file utilities (paths are UTF-8); moved here from Base.h
-// (formerly src/common/file_util.cpp)
 bool FileSystemEntryExists(Str s);
 Str FindFirstValidParentDir(Str path);
 Str PathGetDirTemp(Str path);

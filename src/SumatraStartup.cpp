@@ -8,20 +8,21 @@
 #include "base/WinDynCalls.h"
 #include "base/DbgHelpDyn.h"
 #include "base/DirScan.h"
-#include "base/Dpi.h"
+#include "gui/Dpi.h"
 #include "base/File.h"
 #include "base/FileWatcher.h"
 #include "base/GdiPlusUtil.h"
-#include "mui/Mui.h"
+#include "gui/PlatformFont.h"
+#include "gui/PlatformText.h"
 #include "base/UITask.h"
 #include "base/Win.h"
 #include "base/LzmaSimpleArchive.h"
 
 #include "SumatraConfig.h"
 
-#include "wingui/UIModels.h"
-#include "wingui/Layout.h"
-#include "wingui/WinGui.h"
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
 
 #include "Settings.h"
 #include "DisplayMode.h"
@@ -51,6 +52,7 @@
 #include "AppSettings.h"
 #include "Canvas.h"
 #include "CrashHandler.h"
+#include "HangDetector.h"
 #include "Print.h"
 #include "SearchAndDDE.h"
 #include "SumatraProperties.h"
@@ -66,8 +68,9 @@
 #include "RegistryPreview.h"
 #include "ExternalViewers.h"
 #include "Theme.h"
-#include "DarkModeSubclass.h"
+#include "DarkMode_win.h"
 #include "CommandPalette.h"
+#include "SelectTextKeyboard.h"
 #include "SumatraControl.h"
 #include "SumatraLog.h"
 
@@ -87,7 +90,7 @@ static NO_INLINE bool MaybeMakePluginWindow(MainWindow* win, HWND hwndParent) {
         return false;
     }
 
-    auto hwndFrame = win->hwndFrame;
+    auto* hwndFrame = win->hwndFrame;
 
     // first SetParent as top-level window (may fail but primes the window manager)
     SetParent(hwndFrame, hwndParent);
@@ -116,7 +119,6 @@ static HBRUSH gWinClassBgBrush = nullptr;
 
 static bool RegisterWinClass() {
     WNDCLASSEX wcex;
-    ATOM atom;
 
     HMODULE h = GetModuleHandleW(nullptr);
     HBRUSH bgBrush = CreateSolidBrush(ThemeMainWindowBackgroundColor());
@@ -126,19 +128,19 @@ static bool RegisterWinClass() {
     wcex.style = 0;
     wcex.hIcon = LoadIconW(h, MAKEINTRESOURCEW(GetAppIconID()));
     wcex.hbrBackground = bgBrush;
-    atom = RegisterClassEx(&wcex);
+    RegisterClassEx(&wcex);
 
     FillWndClassEx(wcex, CANVAS_CLASS_NAME, WndProcCanvas);
     // remove CS_HREDRAW | CS_VREDRAW to avoid full invalidation on resize
     wcex.style = CS_DBLCLKS;
     wcex.hbrBackground = bgBrush;
-    atom = RegisterClassEx(&wcex);
+    RegisterClassEx(&wcex);
 
     return true;
 }
 
 static bool InstanceInit() {
-    auto h = GetModuleHandleA(nullptr);
+    auto* h = GetModuleHandleA(nullptr);
     gCursorDrag = LoadCursor(h, MAKEINTRESOURCE(IDC_CURSORDRAG));
     gBitmapReloadingCue = LoadBitmap(h, MAKEINTRESOURCE(IDB_RELOADING_CUE));
     return true;
@@ -314,7 +316,9 @@ static void MaybeStartSearch(MainWindow* win, Str searchTerm) {
     if (!win || !searchTerm) {
         return;
     }
-    HwndSetText(win->hwndFindEdit, searchTerm);
+    if (win->findEdit) {
+        win->findEdit->SetText(searchTerm);
+    }
     bool wasModified = true;
     bool showProgress = true;
     FindTextOnThread(win, TextSearch::Direction::Forward, searchTerm, wasModified, showProgress);
@@ -373,7 +377,7 @@ void SetTabState(WindowTab* tab, TabState* state) {
         return;
     }
 
-    auto win = tab->win;
+    auto* win = tab->win;
     DocController* ctrl = tab->ctrl;
     DisplayModel* dm = tab->AsFixed();
 
@@ -418,7 +422,7 @@ void SetTabState(WindowTab* tab, TabState* state) {
 
 static void RestoreMissingTabOnStartup(MainWindow* win, TabState* state) {
     logf("RestoreTabOnStartup: file not found '%s', creating placeholder tab\n", state->filePath);
-    gFileHistory.MarkFileInexistent(state->filePath, true);
+    FileHistoryMarkFileInexistent(state->filePath, true);
     WindowTab* tab = new WindowTab(win);
     tab->SetFilePath(state->filePath);
     tab->tabState = state;
@@ -678,32 +682,29 @@ static HACCEL FindAcceleratorsForHwnd(HWND hwnd, HWND* hwndAccel, bool* forwardS
     if (!win) {
         return nullptr;
     }
-    if (hwnd == win->hwndFrame || hwnd == win->hwndCanvas) {
-        *hwndAccel = win->hwndFrame;
-        return accTable;
-    }
+    // Edit / tree keep a reduced table so letters and arrows type/navigate.
+    // Every other child (Virt toolbar, tabs HWND, canvas, WebView host, …)
+    // uses the main table — those windows take focus on click, and returning
+    // nullptr here is why Ctrl+W stopped closing a tab after the Virt toolbar.
     WCHAR clsName[256];
     int n = GetClassNameW(hwnd, clsName, dimof(clsName));
-    if (n == 0) {
-        return nullptr;
+    *hwndAccel = win->hwndFrame;
+    if (n <= 0) {
+        return accTable;
     }
     if (wstr::EqI(clsName, WC_EDITW)) {
-        *hwndAccel = win->hwndFrame;
         if (forwardSysKeys) {
             *forwardSysKeys = true;
         }
         return editAccTable;
     }
-
     if (wstr::EqI(clsName, WC_TREEVIEWW)) {
-        *hwndAccel = win->hwndFrame;
         if (forwardSysKeys) {
             *forwardSysKeys = true;
         }
         return treeViewAccTable;
     }
-
-    return nullptr;
+    return accTable;
 }
 
 static bool MaybeTranslateAccelerator(MSG& msg) {
@@ -711,6 +712,19 @@ static bool MaybeTranslateAccelerator(MSG& msg) {
     bool doAccels = ((msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST) ||
                      (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST));
     if (!doAccels) return false;
+
+    // Arrows, Home/End and PageUp/PageDown normally accelerate to scroll /
+    // go-to-page commands. While the keyboard selection caret is up they move
+    // the caret instead, so skip the accelerator and let FrameOnKeydown see the
+    // key (issues #4684, #4116).
+    if (msg.message == WM_KEYDOWN && !IsAltPressed()) {
+        WPARAM key = msg.wParam;
+        bool isCaretKey = key == VK_LEFT || key == VK_RIGHT || key == VK_UP || key == VK_DOWN || key == VK_HOME ||
+                          key == VK_END || key == VK_PRIOR || key == VK_NEXT;
+        if (isCaretKey && SelectTextWithKeyboardActive(FindMainWindowByHwnd(msg.hwnd))) {
+            return false;
+        }
+    }
 
     // Shift+arrows normally accelerate to scroll. When a PDF text selection is
     // active, skip the accelerator so FrameOnKeydown can extend the selection
@@ -721,6 +735,26 @@ static bool MaybeTranslateAccelerator(MSG& msg) {
             MainWindow* win = FindMainWindowByHwnd(msg.hwnd);
             if (win && win->AsFixed() && win->AsFixed()->textSelection &&
                 win->AsFixed()->textSelection->result.len > 0) {
+                return false;
+            }
+        }
+    }
+
+    // On the home page the arrows, Enter and Del drive the keyboard selection of
+    // the file list (issue #1136) rather than scrolling / other accelerators.
+    // Send them to the canvas, which is where that's handled. The search box is
+    // an edit control, so it keeps its own keys.
+    if (msg.message == WM_KEYDOWN && !IsCtrlPressed() && !IsShiftPressed() && !IsAltPressed()) {
+        WPARAM key = msg.wParam;
+        bool isNavKey =
+            key == VK_LEFT || key == VK_RIGHT || key == VK_UP || key == VK_DOWN || key == VK_RETURN || key == VK_DELETE;
+        if (isNavKey) {
+            MainWindow* win = FindMainWindowByHwnd(msg.hwnd);
+            // only for the frame / canvas: the search box needs its own arrows
+            // for caret movement (it handles Down itself, to enter the list)
+            bool isFrameOrCanvas = win && (msg.hwnd == win->hwndFrame || msg.hwnd == win->hwndCanvas);
+            if (isFrameOrCanvas && win->IsCurrentTabAbout() && win->hwndCanvas) {
+                msg.hwnd = win->hwndCanvas;
                 return false;
             }
         }
@@ -764,26 +798,12 @@ static void ResetTempArenaWithLogging() {
     }
     if (isNewMax) {
         char human[32];
-        FormatSizeHumanIntoBuf(gPeakBytes, Str(human, (int)sizeof(human)));
+        FormatSizeHumanIntoBuf(gPeakBytes, Str(human, sizeofi(human)));
         logf("temp allocator new max: %s allocations, peak %s bytes (%s)\n",
              str::FormatNumWithThousandSepTemp((i64)gMaxAllocs), str::FormatNumWithThousandSepTemp((i64)gPeakBytes),
              Str(human));
     }
     ResetTempArena();
-}
-
-// Logs an arena's lifetime allocation count and peak bytes. Call on exit, before
-// logging is torn down.
-static void LogArenaStats(Str what, Arena* a) {
-    if (!a) {
-        return;
-    }
-    u64 nAllocs = a->nAllocsLifetime;
-    u64 peakBytes = a->peakBytesLifetime;
-    char human[32];
-    FormatSizeHumanIntoBuf(peakBytes, Str(human, (int)sizeof(human)));
-    logf("%s lifetime: %s allocations, peak %s bytes (%s)\n", what, str::FormatNumWithThousandSepTemp((i64)nAllocs),
-         str::FormatNumWithThousandSepTemp((i64)peakBytes), Str(human));
 }
 
 static int RunMessageLoop() {
@@ -811,23 +831,30 @@ static int RunMessageLoop() {
 static void FreeLibsumatrapdfDll();
 
 static void ShutdownCommon() {
-    mui::Destroy();
+    PlatformFontDestroy();
     uitask::Destroy();
     FreeLibsumatrapdfDll();
     UninstallCrashHandler();
     dbghelp::FreeCallstackLogs();
 }
 
-static void ReplaceColor(Str* col, Str maybeColor) {
+static void ReplaceColor(ParsedColor& col, Str maybeColor) {
     ParsedColor c;
     ParseColor(c, maybeColor);
     if (c.parsedOk) {
-        TempStr colNewStr = SerializeColorTemp(c.col);
-        str::ReplaceWithCopy(col, colNewStr);
+        SetColorText(col, SerializeColorTemp(c.col));
     }
 }
 
 static void UpdateGlobalPrefs(const Flags& i) {
+    if (!i.windowPos.IsEmpty()) {
+        // -window-pos stands in for the remembered position: code that has to
+        // know the window's shape before it's on screen reads it from here
+        // (EbookLayoutAspectForWindow), and a remembered maximized state would
+        // otherwise ignore the rectangle we were given
+        gGlobalPrefs->windowPos = i.windowPos;
+        gGlobalPrefs->windowState = WIN_STATE_NORMAL;
+    }
     if (i.inverseSearchCmdLine) {
         str::ReplaceWithCopy(&gGlobalPrefs->inverseSearchCmdLine, i.inverseSearchCmdLine);
         gGlobalPrefs->enableTeXEnhancements = true;
@@ -846,12 +873,12 @@ static void UpdateGlobalPrefs(const Flags& i) {
             // -bgcolor is for backwards compat (was used pre-1.3)
             // -bg-color is for consistency
             param = i.globalPrefArgs[++n];
-            ReplaceColor(&gGlobalPrefs->mainWindowBackground, param);
+            ReplaceColor(gGlobalPrefs->mainWindowBackground, param);
         } else if (str::EqI(arg, StrL("-set-color-range"))) {
             param = i.globalPrefArgs[++n];
-            ReplaceColor(&gGlobalPrefs->fixedPageUI.textColor, param);
+            ReplaceColor(gGlobalPrefs->fixedPageUI.textColor, param);
             param = i.globalPrefArgs[++n];
-            ReplaceColor(&gGlobalPrefs->fixedPageUI.backgroundColor, param);
+            ReplaceColor(gGlobalPrefs->fixedPageUI.backgroundColor, param);
         } else if (str::EqI(arg, StrL("-fwdsearch-offset"))) {
             param = i.globalPrefArgs[++n];
             gGlobalPrefs->forwardSearch.highlightOffset = ParseInt(param);
@@ -862,7 +889,7 @@ static void UpdateGlobalPrefs(const Flags& i) {
             gGlobalPrefs->enableTeXEnhancements = true;
         } else if (str::EqI(arg, StrL("-fwdsearch-color"))) {
             param = i.globalPrefArgs[++n];
-            ReplaceColor(&gGlobalPrefs->forwardSearch.highlightColor, param);
+            ReplaceColor(gGlobalPrefs->forwardSearch.highlightColor, param);
             gGlobalPrefs->enableTeXEnhancements = true;
         } else if (str::EqI(arg, StrL("-fwdsearch-permanent"))) {
             param = i.globalPrefArgs[++n];
@@ -966,7 +993,7 @@ static HRESULT CALLBACK LoadLibsumatrapdfDialogCallback(HWND /*hwnd*/, UINT msg,
 // if true, and libsumatrapdf.dll is not next to the exe, extract it to the build data
 // dir and load from there (portable / single-exe). if false, only try next to
 // the exe; missing dll is handled by ForceRunningAsInstaller.
-bool gSingleExe = true;
+static bool gSingleExe = true;
 
 static HMODULE gLibsumatrapdfDll = nullptr;
 // Last LoadLibrary(Ex) failure for libsumatrapdf.dll (0 if none / size mismatch skip).
@@ -1372,7 +1399,7 @@ Learn more at https://www.sumatrapdfreader.org/docs/Corrupted-installation
         printf("%s", corruptedInstallationConsole.s);
     }
 
-    auto title = L"SumatraPDF installer";
+    const auto* title = L"SumatraPDF installer";
     TASKDIALOGCONFIG dialogConfig{};
 
     DWORD flags =
@@ -1392,7 +1419,7 @@ Learn more at https://www.sumatrapdfreader.org/docs/Corrupted-installation
     dialogConfig.dwCommonButtons = TDCBF_CLOSE_BUTTON;
     dialogConfig.pszMainIcon = TD_ERROR_ICON;
 
-    auto hr = TaskDialogIndirect(&dialogConfig, nullptr, nullptr, nullptr);
+    TaskDialogIndirect(&dialogConfig, nullptr, nullptr, nullptr);
     HandleRedirectedConsoleOnShutdown();
     ::ExitProcess(1);
 }
@@ -1583,10 +1610,8 @@ struct PreviewLogFile {
     Str path;
     FILETIME ft;
 };
-static int CmpPreviewLogNewestFirst(const void* a, const void* b) {
-    auto la = (const PreviewLogFile*)a;
-    auto lb = (const PreviewLogFile*)b;
-    return -CompareFileTime(&la->ft, &lb->ft); // newest (largest time) first
+static int CmpPreviewLogNewestFirst(const PreviewLogFile* a, const PreviewLogFile* b) {
+    return -CompareFileTime(&a->ft, &b->ft); // newest (largest time) first
 }
 static void DeleteOldPdfPreviewLogs(int keep) {
     TempStr dir = GetPdfPreviewLogDirTemp();
@@ -1606,7 +1631,7 @@ static void DeleteOldPdfPreviewLogs(int keep) {
     }
     int n = len(files);
     if (n > keep) {
-        files.Sort(CmpPreviewLogNewestFirst);
+        VecSort(files, CmpPreviewLogNewestFirst);
         for (int i = keep; i < n; i++) {
             logf("DeleteOldPdfPreviewLogs: deleting '%s'\n", files[i].path);
             file::Delete(files[i].path);
@@ -1695,10 +1720,8 @@ static int WineDpiFromEnv() {
         if (scale < 1.f) {
             continue;
         }
-        int dpi = (int)((96.f * scale) + 0.5f);
-        if (dpi > bestDpi) {
-            bestDpi = dpi;
-        }
+        int dpi = (int)lroundf(96.f * scale);
+        bestDpi = std::max(dpi, bestDpi);
     }
     return bestDpi;
 }
@@ -1725,7 +1748,7 @@ static void LogWineDpiInfo() {
     logf(
         "WineDpi: screenDpi=%d monitorDpi=(%u,%u) GetDpiForMonitor hr=0x%lx envDpi=%d overrideDpi=%d "
         "SM_CYCAPTION=%d SM_CYFRAME=%d SM_CXPADDEDBORDER=%d screen=(%d,%d)\n",
-        screenDpi, monitorDpiX, monitorDpiY, (unsigned long)hr, envDpi, DpiGet(HWND_DESKTOP),
+        screenDpi, monitorDpiX, monitorDpiY, (unsigned long)hr, envDpi, DpiGetForHwnd(HWND_DESKTOP),
         GetSystemMetrics(SM_CYCAPTION), GetSystemMetrics(SM_CYFRAME), GetSystemMetrics(SM_CXPADDEDBORDER),
         GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
 }
@@ -1796,9 +1819,6 @@ char** fz_argv_from_wargv(int argc, wchar_t** wargv);
 void fz_free_argv(int argc, char** argv);
 int fz_redirect_io_to_existing_console();
 }
-
-// in src/base/Win.cpp (part of the base lib)
-bool WasLaunchedByPowershellWithPipeRedirect();
 
 // must match premake5.lua
 #define FZ_ENABLE_JS 1
@@ -2104,7 +2124,8 @@ static void InstallSumatraCrashHandler(bool localOnly) {
     InstallCrashHandler(crashDumpPath, crashFilePath, symDir, localOnly);
 }
 
-int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPSTR, _In_ int) {
+int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevInstance*/, _In_ LPSTR /*lpCmdLine*/,
+                     _In_ int /*nCmdShow*/) {
     int exitCode = 1; // by default it's error
     int nWithDde = 0;
     MainWindow* win = nullptr;
@@ -2141,6 +2162,12 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
         logf("ASAN_OPTIONS: '%s'\n", asanOpts ? asanOpts : StrL("<not set>"));
     }
 
+    // Before the store-installer return below: everything past this point may
+    // uitask::Post(), and posting before Initialize() neither runs nor frees the
+    // task (see the guard in uitask::Post). Only needs a message queue, so it can
+    // run this early - ahead of Ole/common controls/GDI+/mui.
+    uitask::Initialize();
+
     Flags flags;
     if (ExeHasNameOfStoreInstaller()) {
         InstallSumatraCrashHandler(false);
@@ -2149,7 +2176,9 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
         flags.silent = true;
         flags.storeInstaller = true;
         gCli = &flags;
-        return RunInstaller();
+        int ret = RunInstaller();
+        uitask::Destroy();
+        return ret;
     }
 
     ParseFlags(GetPermArena(), GetCommandLineW(), flags, gToolNames);
@@ -2158,10 +2187,14 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
     InstallSumatraCrashHandler(flags.forTesting || flags.controlPipeName);
 
     ScopedOle ole;
+    if (FAILED(ole.hr)) {
+        // the UI thread has to be an STA: PrintDlgEx, the shell file dialogs
+        // and drag & drop all need one. Without it the Windows 11 unified print
+        // dialog hangs inside PrintDlgExW instead of returning
+        logf("WinMain: OleInitialize() failed with 0x%08x\n", (uint)ole.hr);
+    }
     InitAllCommonControls();
     ScopedGdiPlus gdiPlus(true);
-    mui::Initialize();
-    uitask::Initialize();
 
     // when running a command-line tool (e.g. `info file.pdf`), keep logging off
     // the console so it doesn't contaminate the tool's stdout (issue #5677)
@@ -2174,6 +2207,19 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
     logf("wine: %s\n", Str(IsRunningOnWine() ? "true" : "false"));
     logf("elevated: %d\n", (int)IsProcessRunningElevated());
     LogWineDpiInfo();
+    {
+        // the cursor is on the monitor the user launched from. GetForegroundWindow
+        // / HWND_DESKTOP report the *primary* monitor, which made the first
+        // layout 2.5× too big when starting on a 100% screen next to a 250%
+        // primary (discussion #4831).
+        POINT pt{};
+        if (GetCursorPos(&pt)) {
+            int dpi = DpiGetForPoint(pt.x, pt.y);
+            DpiSet(dpi, dpi);
+        } else {
+            DpiSetFromHwnd(GetDesktopWindow());
+        }
+    }
 
     bool isInstaller = flags.install || flags.runInstallNow || flags.fastInstall || IsInstallerAndNamedAsSuch();
     if (flags.justExtractFiles) {
@@ -2432,10 +2478,7 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE, _In_ LPST
     gRenderCache = new RenderCache();
 
     // TODO: for reasons I don't understand, this must be called before LoadSettings()
-    if (UseDarkModeLib()) {
-        DarkMode::initDarkMode();
-        DarkMode::setColorizeTitleBarConfig(true);
-    }
+    DarkModeInit();
 
     LoadSettings();
     UpdateGlobalPrefs(flags);
@@ -2678,7 +2721,7 @@ ContinueOpenWindow:
 
     for (Str path : flags.fileNames) {
         if (restoreSession) {
-            auto tab = FindTabByFile(path);
+            auto* tab = FindTabByFile(path);
             if (tab) {
                 tabToSelect = tab;
                 if (flags.forwardSearchOrigin && flags.forwardSearchLine && win->AsFixed() && win->AsFixed()->pdfSync) {
@@ -2695,7 +2738,7 @@ ContinueOpenWindow:
         // or already be mid-load from a reuseInstance open that arrived during
         // an earlier password dialog.
         if (IsDocumentOpenOrLoading(path)) {
-            if (auto existing = FindMainWindowByFile(path, true)) {
+            if (auto* existing = FindMainWindowByFile(path, true)) {
                 win = existing;
                 tabToSelect = FindTabByFile(path);
             }
@@ -2764,7 +2807,7 @@ ContinueOpenWindow:
     }
 
     // only hide newly missing files when showing the start page on startup
-    if (showStartPage && gFileHistory.Get(0)) {
+    if (showStartPage && FileHistoryGet(0)) {
         RemoveNonExistentFilesAsync();
     }
     // call this once it's clear whether Perm::SavePreferences has been granted
@@ -2799,9 +2842,21 @@ ContinueOpenWindow:
     // https://github.com/sumatrapdfreader/sumatrapdf/issues/5456
     uitask::Post(MkFunc0(LayoutAndFocusOnStartup, win), "LayoutAndFocusOnStartup");
 
+    // home-page bottom bar if we lost default-app status for registered extensions
+    if (showStartPage) {
+        uitask::Post(MkFunc0(MaybeShowDefaultAppNotification, win), "MaybeShowDefaultAppNotification");
+    }
+
     StartSumatraControl(flags.controlPipeName);
 
+    // on by default in debug builds; release builds can opt in by calling
+    // StartUiHangDetector() themselves
+    if (gIsDebugBuild) {
+        StartUiHangDetector();
+    }
+
     exitCode = RunMessageLoop();
+    StopUiHangDetector();
     SafeCloseHandle(&hMutex);
     CleanUpThumbnailCache();
 
@@ -2812,8 +2867,8 @@ Exit:
     HandleRedirectedConsoleOnShutdown();
     DeleteManualBrowserWindow();
 
-    LogArenaStats("temp allocator", GetTempArena());
-    LogArenaStats("perm arena", gPermArena);
+    LogArenaStats(StrL("temp arena"), GetTempArena());
+    LogArenaStats(StrL("perm arena"), gPermArena);
 
     // don't shell-open the log for -for-testing automation runs: it spawns a
     // stray editor window per run (and, depending on the .txt association,
@@ -2857,6 +2912,7 @@ Exit:
     }
 
     DeleteCachedCursors();
+    DeleteLaserPointerCursor();
     DeleteCreatedFonts();
     DeleteBitmap(gBitmapReloadingCue);
     // all frame/canvas windows are destroyed by now
@@ -2876,7 +2932,11 @@ Exit:
     }
 #endif
 
-    mui::Destroy();
+    // must run before uitask::Destroy() (these deletes are queued as ui tasks)
+    // and before gRenderCache goes away (the waiting threads use it)
+    WaitForPendingControllerDeletes();
+
+    PlatformFontDestroy();
     uitask::Destroy();
     trans::Destroy();
 
@@ -2889,7 +2949,7 @@ Exit:
 
     // must be after uitask::Destroy() because we might have queued ReloadSettings()
     // which crashes if gGlobalPrefs is freed
-    gFileHistory.UpdateStatesSource(nullptr);
+    FileHistorySetStates(nullptr);
     CleanUpSettings();
 
     FreeAllMenuDrawInfos();

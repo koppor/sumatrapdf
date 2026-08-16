@@ -9,11 +9,12 @@
 #include "base/CmdLineArgsIter.h"
 #include "base/File.h"
 #include "base/GdiPlusUtil.h"
-#include "mui/Mui.h"
+#include "gui/PlatformFont.h"
+#include "gui/PlatformText.h"
 #include "base/Win.h"
 #include "base/Zip.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "DocProperties.h"
 #include "DocController.h"
@@ -76,7 +77,6 @@ int TesterMain() {
 
     // InitAllCommonControls();
     // ScopedGdiPlus gdi;
-    // mui::Initialize();
 
     int i = 2; // skip program name and "/tester"
     while (i < nArgs) {
@@ -103,7 +103,6 @@ int TesterMain() {
         return Usage();
     }
 
-    mui::Destroy();
     system("pause");
     return 0;
 }

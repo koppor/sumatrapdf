@@ -39,6 +39,52 @@ static void Func1Test() {
     utassert(d1.p == -8);
 }
 
+static int gFn0VoidCalls = 0;
+
+static void testFn0Void() {
+    gFn0VoidCalls++;
+}
+
+// a Func0 can stand in for a Func1: Call() drops the argument. The conversion
+// stores a void(void*) in a void(void*, T) slot, so this checks the dispatch
+// actually lands in the right function rather than merely compiling.
+static void Func1FromFunc0Test() {
+    TestFn0Data d0;
+    TestFn1Data d1{.p = 7};
+
+    // the drops-argument flag lives in userData's low bit, so Func1 is still
+    // two words - a bool member would have cost 8 more after padding
+    utassert(sizeof(Func1<TestFn1Data*>) == 2 * sizeof(void*));
+
+    Func1<TestFn1Data*> fn = MkFunc0(testFn0, &d0);
+    utassert(fn.IsValid());
+    fn.Call(&d1);
+    utassert(d0.n == 1); // the Func0 ran
+    utassert(d1.p == 7); // and never saw the argument
+
+    fn.Call(nullptr); // dropped, so a null argument is harmless
+    utassert(d0.n == 2);
+
+    // the no-user-data flavour, where Func0 holds a void()
+    gFn0VoidCalls = 0;
+    Func1<TestFn1Data*> fnv = MkFunc0Void(testFn0Void);
+    fnv.Call(&d1);
+    utassert(gFn0VoidCalls == 1);
+    utassert(d1.p == 7);
+
+    // copies keep dropping the argument
+    Func1<TestFn1Data*> copy = fn;
+    copy.Call(&d1);
+    utassert(d0.n == 3);
+    utassert(d1.p == 7);
+
+    // a real Func1 still gets its argument
+    Func1<TestFn1Data*> real = MkFunc1<TestFn0Data, TestFn1Data*>(testFn1, &d0);
+    real.Call(&d1);
+    utassert(d0.n == 5);
+    utassert(d1.p == -8);
+}
+
 static void GeomTest() {
     PointF ptD(12.4f, -13.6f);
     utassert(ptD.x == 12.4f && ptD.y == -13.6f);
@@ -159,12 +205,12 @@ static void ColorTest() {
     ParsedColor parsed;
     ParseColor(parsed, "#f2f2f2");
     utassert(parsed.parsedOk);
-    utassert(parsed.col == MkColor(0xf2, 0xf2, 0xf2));
+    utassert(parsed.col == MkRgb(0xf2, 0xf2, 0xf2));
 
     parsed = {};
     ParseColor(parsed, "#80f2f2f2");
     utassert(parsed.parsedOk);
-    utassert(parsed.col == MkColor(0xf2, 0xf2, 0xf2, 0x80));
+    utassert(parsed.col == MkRgba(0xf2, 0xf2, 0xf2, 0x80));
 
     parsed = {};
     ParseColor(parsed, "#f2f2f");
@@ -181,7 +227,7 @@ static void ArenaPtrCompressTest() {
         p[1] = 22;
         u32 c = ArenaPtrCompress(a, p);
         utassert(c != 0);
-        utassert(c >= (u32)ARENA_HEADER_SIZE);
+        utassert(c >= (u32)kArenaHeaderSize);
         utassert(ArenaPtrUncompress(a, c) == p);
         utassert(ArenaPtrUncompress<int>(a, c) == p);
         utassert(ArenaPtrUncompress<int>(a, c)[1] == 22);
@@ -193,30 +239,35 @@ static void ArenaPtrCompressTest() {
     // Multi-block chain: tiny reserve so a second Push allocates a new block
     {
         ArenaParams params = ArenaDefaultParams();
-        params.reserve_size = 4 * 1024;
-        params.commit_size = 4 * 1024;
+        params.reserveSize = 4 * 1024;
+        params.commitSize = 4 * 1024;
         Arena* a = ArenaNew(params);
         utassert(a != nullptr);
         utassert(a->current == a);
-        utassert(a->base_pos == 0);
+        utassert(a->basePos == 0);
 
-        // Fill most of the first block (header is ARENA_HEADER_SIZE)
-        void* p1 = a->Push(3 * 1024, 8, true);
+        // ArenaNew rounds the reserve up to a page, and a page is 16K on arm64
+        // macOS, not 4K - so size the pushes from the block we actually got.
+        // Two of these plus kArenaHeaderSize can't fit in one block.
+        u64 half = a->reserved / 2;
+
+        // Fill most of the first block (header is kArenaHeaderSize)
+        void* p1 = a->Push(half, 8, true);
         utassert(p1 != nullptr);
         utassert(a->current == a);
 
         // Force a second arena block in the chain
-        void* p2 = a->Push(3 * 1024, 8, true);
+        void* p2 = a->Push(half, 8, true);
         utassert(p2 != nullptr);
         utassert(a->current != a);
         utassert(a->current->prev == a);
-        utassert(a->current->base_pos == a->res);
+        utassert(a->current->basePos == a->reserved);
 
         u32 c1 = ArenaPtrCompress(a, p1);
         u32 c2 = ArenaPtrCompress(a, p2);
         utassert(c1 != 0 && c2 != 0);
-        utassert(c1 < a->res);  // still in the first block's range
-        utassert(c2 >= a->res); // past the first block
+        utassert(c1 < a->reserved);  // still in the first block's range
+        utassert(c2 >= a->reserved); // past the first block
         utassert(c2 > c1);
 
         utassert(ArenaPtrUncompress(a, c1) == p1);
@@ -243,6 +294,7 @@ void BaseUtilTest() {
     ListTest();
     Func0Test();
     Func1Test();
+    Func1FromFunc0Test();
     ColorTest();
     ArenaPtrCompressTest();
 

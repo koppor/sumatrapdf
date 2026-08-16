@@ -32,10 +32,10 @@ bool gDestroyedLogging = false;
 
 // if true, doesn't log if the same text has already been logged
 // reduces logging but also can be confusing i.e. log lines are not showing up
-bool gSkipDuplicateLines = false;
+static bool gSkipDuplicateLines = false;
 
 bool gLogToPipe = true;
-HANDLE hLogPipe = INVALID_HANDLE_VALUE;
+static HANDLE hLogPipe = INVALID_HANDLE_VALUE;
 static Mutex gPipeMutex;
 
 Str gLogFilePath;
@@ -130,7 +130,8 @@ static void log2(Str s, bool always) {
 
     if (!gLogBuf) {
         gLogAllocator = ArenaNew();
-        gLogBuf = new str::Builder(32 * 1024, gLogAllocator);
+        gLogBuf = new str::Builder(32 * 1024);
+        gLogBuf->a = gLogAllocator;
     } else {
         if (len(*gLogBuf) > kMaxLogBuf) {
             // TODO: use gLogBuf->Clear(), which doesn't free the allocated space
@@ -151,7 +152,7 @@ static void log2(Str s, bool always) {
     }
 
     if (gLogFilePath) {
-        auto f = fopen(gLogFilePath.s, "a");
+        auto* f = fopen(gLogFilePath.s, "a");
         if (f != nullptr) {
             fwrite(s.s, 1, n, f);
             fflush(f);
@@ -311,7 +312,7 @@ static TempStr GetProcessCommandLineTemp(DWORD pid) {
     }* us = (decltype(us))buf;
     TempStr out{};
     if (us->Buffer && us->Length >= sizeof(WCHAR)) {
-        int nChars = us->Length / sizeof(WCHAR);
+        int nChars = (int)(us->Length / sizeof(WCHAR));
         out = ToUtf8Temp(WStr(us->Buffer, nChars));
     }
     free(buf);
@@ -319,6 +320,7 @@ static TempStr GetProcessCommandLineTemp(DWORD pid) {
 }
 
 // Log parent → grandparent → … (path + command line when readable).
+// Walk parent PIDs and log path + command line for each (startup diagnostics).
 void LogParentProcessChain() {
     log("Parent process chain:\n");
     DWORD pid = GetCurrentProcessId();

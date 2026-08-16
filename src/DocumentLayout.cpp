@@ -19,7 +19,7 @@ static int ColumnsFromDisplayMode(DisplayMode displayMode) {
 void DocumentLayout::Reset(int pageCount) {
     pages.Reset();
     if (pageCount > 0) {
-        pages.SetSize(pageCount);
+        VecResize(pages, pageCount);
     }
     canvasSize = {};
     viewPort = {};
@@ -101,9 +101,7 @@ static void CalcZoomReal(DocumentLayout& layout, float zoomVirtual) {
             if (!page->isShown) {
                 continue;
             }
-            if (minZoom > page->zoomReal) {
-                minZoom = page->zoomReal;
-            }
+            minZoom = std::min(minZoom, page->zoomReal);
         }
         layout.zoomReal = minZoom == (float)HUGE_VAL ? 1 : minZoom;
         return;
@@ -118,9 +116,7 @@ static void CalcZoomReal(DocumentLayout& layout, float zoomVirtual) {
             }
             float zoom = ZoomRealFromVirtualForPage(layout, zoomVirtual, pageNo);
             page->zoomReal = zoom;
-            if (minZoom > zoom) {
-                minZoom = zoom;
-            }
+            minZoom = std::min(minZoom, zoom);
         }
         layout.zoomReal = minZoom == (float)HUGE_VAL ? 1 : minZoom;
     } else {
@@ -139,18 +135,19 @@ void DocumentLayout::Relayout(const DocumentLayoutParams& newParams) {
 
     params = newParams;
     params.rotation = NormalizeRotation(params.rotation);
-    if (params.startPage < 1) {
-        params.startPage = 1;
-    }
-    if (params.startPage > pages.len) {
-        params.startPage = pages.len;
-    }
+    params.startPage = limitValue(params.startPage, 1, pages.len);
     if (params.dpiFactor <= 0) {
         params.dpiFactor = 1;
     }
     if (params.zoomVirtual == kZoomFitByOrientation) {
         params.zoomVirtual = params.viewPortSize.dx > params.viewPortSize.dy ? kZoomFitWidth : kZoomFitPage;
     }
+    // Fit Content lays out like Fit Page - the layout is built from media boxes
+    // either way, the content fit lives in the per-page zoom - but it must not
+    // take Fit Page's canvas clamp below: it zooms past the page fit and relies
+    // on DisplayModel::GoToPage() scrolling the margins off-screen.
+    // ShrinkToFit never zooms past the page fit, so the clamp is a no-op there.
+    bool isFitContent = (params.zoomVirtual == kZoomFitContent);
     if (params.zoomVirtual == kZoomFitContent || params.zoomVirtual == kZoomShrinkToFit) {
         params.zoomVirtual = kZoomFitPage;
     }
@@ -275,7 +272,12 @@ void DocumentLayout::Relayout(const DocumentLayoutParams& newParams) {
         }
     }
 
-    if (params.zoomVirtual == kZoomFitPage && !IsContinuous(params.displayMode)) {
+    // Fit Page never needs to scroll, so pin the canvas to the window and no
+    // scrollbars appear. Not for Fit Content: clamping leaves it no scroll range,
+    // so limitValue() in GoToPage() would drop the scroll to the content start
+    // and the page would show its top/left margin with the content cut off at
+    // the other end (it looked right only in continuous modes).
+    if (params.zoomVirtual == kZoomFitPage && !isFitContent && !IsContinuous(params.displayMode)) {
         canvasDy = std::min(canvasDy, viewPort.dy);
         canvasDx = std::min(canvasDx, viewPort.dx);
     }
@@ -296,9 +298,7 @@ void DocumentLayout::Relayout(const DocumentLayoutParams& newParams) {
         }
         if (lastPageTop >= 0) {
             int minCanvasDy = lastPageTop + viewPort.dy;
-            if (canvasDy < minCanvasDy) {
-                canvasDy = minCanvasDy;
-            }
+            canvasDy = std::max(canvasDy, minCanvasDy);
         }
     }
 
@@ -341,10 +341,32 @@ int DocumentLayout::CurrentPageNo() const {
         }
     }
     if (ratio <= 0 && pages.len > 0) {
-        const DocumentLayoutPage* first = GetPage(1);
-        mostVisiblePage = (first && viewPort.y > first->pos.y + first->pos.dy) ? pages.len : 1;
+        // No page overlaps the viewport at all. That is not only "before the
+        // first page / after the last one": when one page is much wider than
+        // the others the canvas is as wide as it and the narrow pages sit
+        // centered in that canvas, so scrolled fully left the viewport misses
+        // every page horizontally. Answering "the last page" there sent a
+        // restored view to the end of the document (issue #1438), so go by the
+        // vertical band the viewport is in, which is what "current page" means
+        // in continuous mode
+        mostVisiblePage = PageNoAtViewPortTop();
     }
     return mostVisiblePage;
+}
+
+// the page whose vertical band contains the top of the viewport (the last page
+// when the viewport is past the end); ignores horizontal position
+int DocumentLayout::PageNoAtViewPortTop() const {
+    if (pages.len <= 0) {
+        return 1;
+    }
+    for (int pageNo = 1; pageNo <= pages.len; pageNo++) {
+        const DocumentLayoutPage* page = GetPage(pageNo);
+        if (page && viewPort.y < page->pos.y + page->pos.dy) {
+            return pageNo;
+        }
+    }
+    return pages.len;
 }
 
 int DocumentLayout::FirstVisiblePageNo() const {

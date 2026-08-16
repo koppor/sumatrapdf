@@ -3,11 +3,11 @@
 
 #include "base/Base.h"
 #include "base/Win.h"
-#include "base/Dpi.h"
+#include "gui/Dpi.h"
 
 #include <mupdf/pdf.h>
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "Settings.h"
 #include "DocController.h"
@@ -36,10 +36,13 @@ static ActiveFormEdit gEdit;
 static WNDPROC gDefCtrlProc = nullptr;
 static bool gCommitting = false;
 
+// True while a form field is being edited in place.
 bool IsFormFieldEditActive() {
     return gEdit.hwnd != nullptr;
 }
 
+// Cancel the active form edit if it is for this widget (no save). Safe no-op
+// when no edit is active or the widget does not match.
 void CancelFormFieldEditIfWidget(Annotation* widget) {
     if (!widget || !gEdit.hwnd || gEdit.widget != widget) {
         return;
@@ -47,6 +50,7 @@ void CancelFormFieldEditIfWidget(Annotation* widget) {
     CommitFormFieldEdit(false);
 }
 
+// Commit (save=true) or cancel (save=false) the active form-field edit, if any.
 void CommitFormFieldEdit(bool save) {
     if (!gEdit.hwnd || gCommitting) {
         return;
@@ -184,7 +188,7 @@ static bool StartTextEdit(MainWindow* win, Annotation* widget, Rect rc, int flag
     }
     HFONT font = MakeFieldFont(FieldFontPx(widget, rc));
     SetWindowFont(hEdit, font, TRUE);
-    int margin = DpiScale(win->hwndCanvas, 2);
+    int margin = DpiScale(2);
     SendMessageW(hEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(margin, margin));
     int maxLen = GetWidgetMaxLen(widget); // comb / limited fields (e.g. SSN)
     if (maxLen > 0) {
@@ -215,10 +219,10 @@ static bool StartChoiceEdit(MainWindow* win, Annotation* widget, Rect rc) {
         return false;
     }
     int fontPx = FieldFontPx(widget, rc);
-    int itemDy = fontPx + DpiScale(win->hwndCanvas, 6);
+    int itemDy = fontPx + DpiScale(6);
     int visN = std::min(n, 8);
-    int listDy = (visN * itemDy) + DpiScale(win->hwndCanvas, 4);
-    int listDx = std::max(rc.dx, DpiScale(win->hwndCanvas, 120));
+    int listDy = (visN * itemDy) + DpiScale(4);
+    int listDx = std::max(rc.dx, DpiScale(120));
     // drop down just below the field, or above if it would fall off the canvas
     Rect canvasRc = HwndClientRect(win->hwndCanvas);
     int x = rc.x;
@@ -262,6 +266,8 @@ static bool StartChoiceEdit(MainWindow* win, Annotation* widget, Rect rc) {
     return true;
 }
 
+// Start editing a text form field in place (floats an edit box over the field).
+// Returns false if `widget` isn't an editable (non-read-only) text widget.
 bool StartFormFieldEdit(MainWindow* win, Annotation* widget) {
     if (!win || !AnnotationIsLive(widget)) {
         return false;

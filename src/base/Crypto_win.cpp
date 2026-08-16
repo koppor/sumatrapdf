@@ -108,8 +108,9 @@ bool VerifySHA1Signature(Str data, Str hexSignature, Str pubkey) {
     BOOL ok = false;
     ScopedMem<BYTE> signature;
     size_t signatureLen;
-    const BYTE* dataPtr = (const BYTE*)data.s;
-    size_t dataLen = (size_t)data.len;
+    // set after ExtractSignature below, which shortens data
+    const BYTE* dataPtr = nullptr;
+    size_t dataLen = 0;
 
 #define Check(val)                     \
     do {                               \
@@ -142,6 +143,7 @@ CleanUp:
     return ok;
 }
 
+// extracts the content (e.g. PDF) from a PKCS#7 / .p7m wrapper using Win32 crypto APIs
 Str ExtractP7m(Str d) {
     if (len(d) == 0) {
         return {};
@@ -177,37 +179,37 @@ Str ExtractP7m(Str d) {
     return Str((char*)(content), (int)(cbContent));
 }
 
+// Authenticode / PE signature helpers (Windows only; stubs return false/null on POSIX)
 bool IsPEFileSigned(Str filePath) {
     WCHAR* ws = CWStrTemp(filePath);
     WINTRUST_FILE_INFO fileInfo = {};
     fileInfo.cbStruct = sizeof(WINTRUST_FILE_INFO);
     fileInfo.pcwszFilePath = ws;
-    fileInfo.hFile = NULL;
-    fileInfo.pgKnownSubject = NULL;
+    fileInfo.hFile = nullptr;
+    fileInfo.pgKnownSubject = nullptr;
 
     GUID actionGUID = WINTRUST_ACTION_GENERIC_VERIFY_V2;
     WINTRUST_DATA trustData = {};
 
     trustData.cbStruct = sizeof(WINTRUST_DATA);
-    trustData.pPolicyCallbackData = NULL;
-    trustData.pSIPClientData = NULL;
+    trustData.pPolicyCallbackData = nullptr;
+    trustData.pSIPClientData = nullptr;
     trustData.dwUIChoice = WTD_UI_NONE;
     trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
     trustData.dwUnionChoice = WTD_CHOICE_FILE;
     trustData.dwStateAction = WTD_STATEACTION_IGNORE;
-    trustData.hWVTStateData = NULL;
-    trustData.pwszURLReference = NULL;
+    trustData.hWVTStateData = nullptr;
+    trustData.pwszURLReference = nullptr;
     trustData.dwProvFlags = WTD_SAFER_FLAG;
     trustData.dwUIContext = 0;
     trustData.pFile = &fileInfo;
 
-    LONG status = WinVerifyTrust(NULL, &actionGUID, &trustData);
+    LONG status = WinVerifyTrust(nullptr, &actionGUID, &trustData);
 
     if (status == ERROR_SUCCESS) {
         return true; // File is signed and signature is valid
-    } else {
-        return false; // File is not signed or signature is not valid
     }
+    return false; // File is not signed or signature is not valid
 }
 
 TempStr GetExecutableSignerTemp(Str exePath) {
@@ -229,7 +231,7 @@ TempStr GetExecutableSignerTemp(Str exePath) {
         return {};
     }
 
-    auto signerInfo = (CMSG_SIGNER_INFO*)AllocZero(GetTempArena(), signerInfoSize);
+    auto* signerInfo = (CMSG_SIGNER_INFO*)AllocZero(GetTempArena(), signerInfoSize);
     ok = CryptMsgGetParam(hMsg, CMSG_SIGNER_INFO_PARAM, 0, signerInfo, &signerInfoSize);
     if (!ok) {
         CryptMsgClose(hMsg);

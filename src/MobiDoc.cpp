@@ -5,7 +5,7 @@
 #include "base/ByteReaderWriter.h"
 #include "base/GuessFileType.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "GumboHelpers.h"
 
@@ -345,11 +345,11 @@ bool HuffDicDecompressor::SetHuffData(u8* huffData, int huffDataLen) {
         return false;
     }
     // we conservatively use the big-endian version of the data,
-    for (int i = 0; i < kCacheItemCount; i++) {
-        cacheTable[i] = d.UInt32BE();
+    for (u32& v : cacheTable) {
+        v = d.UInt32BE();
     }
-    for (int i = 0; i < kBaseTableItemCount; i++) {
-        baseTable[i] = d.UInt32BE();
+    for (u32& v : baseTable) {
+        v = d.UInt32BE();
     }
     ReportIf(d.Offset() != kHuffRecordMinLen);
     return true;
@@ -661,7 +661,7 @@ bool MobiDoc::DecodeExthHeader(const u8* data, int dataLen) {
             case 201:
                 if (length == 12 && imageFirstRec) {
                     d.Unskip(4);
-                    coverImageRec = (int)imageFirstRec + (int)d.UInt32BE();
+                    coverImageRec = imageFirstRec + (int)d.UInt32BE();
                 }
                 continue;
             case 503:
@@ -865,7 +865,7 @@ bool MobiDoc::LoadForPdbReader(PdbReader* pdbReader) {
 
     ReportIf(len(doc) != 0);
     doc.Reset();
-    doc.cap = (u32)docUncompressedSize; // capacity hint, same trick as ByteWriter ctor
+    doc.cap = docUncompressedSize; // capacity hint, same trick as ByteWriter ctor
     int nFailed = 0;
     for (int i = 1; i <= docRecCount; i++) {
         if (!LoadDocRecordIntoBuffer(i, doc)) {

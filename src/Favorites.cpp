@@ -6,10 +6,12 @@
 #include "base/UITask.h"
 #include "base/Win.h"
 
-#include "wingui/UIModels.h"
-#include "wingui/Layout.h"
-#include "wingui/WinGui.h"
-#include "wingui/LabelWithCloseWnd.h"
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
+#include "gui/PlatformFont.h"
+#include "gui/Gfx.h"
+#include "gui/VirtCtrl.h"
 
 #include "Settings.h"
 #include "DocController.h"
@@ -23,14 +25,14 @@
 #include "Commands.h"
 #include "AppSettings.h"
 #include "Menu.h"
-#include "SumatraDialogs.h"
+#include "AddFavoriteDialog.h"
 #include "Translations.h"
 #include "Accelerators.h"
 #include "Tabs.h"
 #include "Theme.h"
 #include "FilterHighlightDraw.h"
 
-void RememberFavTreeExpansionStateForAllWindows();
+static void RememberFavTreeExpansionStateForAllWindows();
 void LayoutFavoritesContainer(MainWindow* win);
 void PopulateFavTreeIfNeeded(MainWindow* win);
 void UpdateFavoritesTreeForAllWindows();
@@ -59,14 +61,14 @@ struct FavTreeModel : TreeModel {
 
     TreeItem Root() override;
 
-    Str Text(TreeItem) override;
-    TreeItem Parent(TreeItem) override;
-    int ChildCount(TreeItem) override;
-    TreeItem ChildAt(TreeItem, int idx) override;
-    bool IsExpanded(TreeItem) override;
-    bool IsChecked(TreeItem) override;
-    void SetHandle(TreeItem, HTREEITEM) override;
-    HTREEITEM GetHandle(TreeItem) override;
+    Str Text(TreeItem ti) override;
+    TreeItem Parent(TreeItem ti) override;
+    int ChildCount(TreeItem ti) override;
+    TreeItem ChildAt(TreeItem ti, int idx) override;
+    bool IsExpanded(TreeItem ti) override;
+    bool IsChecked(TreeItem ti) override;
+    void SetHandle(TreeItem ti, HTREEITEM hItem) override;
+    HTREEITEM GetHandle(TreeItem ti) override;
 
     FavTreeItem* root = nullptr;
 };
@@ -80,17 +82,17 @@ TreeItem FavTreeModel::Root() {
 }
 
 Str FavTreeModel::Text(TreeItem ti) {
-    auto fti = (FavTreeItem*)ti;
+    auto* fti = (FavTreeItem*)ti;
     return fti->text;
 }
 
 TreeItem FavTreeModel::Parent(TreeItem ti) {
-    auto fti = (FavTreeItem*)ti;
+    auto* fti = (FavTreeItem*)ti;
     return (TreeItem)fti->parent;
 }
 
 int FavTreeModel::ChildCount(TreeItem ti) {
-    auto fti = (FavTreeItem*)ti;
+    auto* fti = (FavTreeItem*)ti;
     if (!fti) {
         return 0;
     }
@@ -99,17 +101,17 @@ int FavTreeModel::ChildCount(TreeItem ti) {
 }
 
 TreeItem FavTreeModel::ChildAt(TreeItem ti, int idx) {
-    auto fti = (FavTreeItem*)ti;
-    auto res = fti->children[idx];
+    auto* fti = (FavTreeItem*)ti;
+    auto* res = fti->children[idx];
     return (TreeItem)res;
 }
 
 bool FavTreeModel::IsExpanded(TreeItem ti) {
-    auto fti = (FavTreeItem*)ti;
+    auto* fti = (FavTreeItem*)ti;
     return fti->isExpanded;
 }
 
-bool FavTreeModel::IsChecked(TreeItem) {
+bool FavTreeModel::IsChecked(TreeItem /*ti*/) {
     return false;
 }
 
@@ -127,7 +129,7 @@ HTREEITEM FavTreeModel::GetHandle(TreeItem ti) {
 
 static Favorite* GetFavByMenuId(int menuId, FileState** dsOut) {
     FileState* ds;
-    for (int i = 0; (ds = gFileHistory.Get(i)) != nullptr; i++) {
+    for (int i = 0; (ds = FileHistoryGet(i)) != nullptr; i++) {
         for (int j = 0; j < len(*ds->favorites); j++) {
             if (menuId == (*ds->favorites)[j]->menuId) {
                 if (dsOut) {
@@ -142,7 +144,7 @@ static Favorite* GetFavByMenuId(int menuId, FileState** dsOut) {
 
 static FileState* GetByFavorite(Favorite* fn) {
     FileState* ds;
-    for (int i = 0; (ds = gFileHistory.Get(i)) != nullptr; i++) {
+    for (int i = 0; (ds = FileHistoryGet(i)) != nullptr; i++) {
         if (ds->favorites->Contains(fn)) {
             return ds;
         }
@@ -152,7 +154,7 @@ static FileState* GetByFavorite(Favorite* fn) {
 
 static void ResetFavMenuIds() {
     FileState* ds;
-    for (int i = 0; (ds = gFileHistory.Get(i)) != nullptr; i++) {
+    for (int i = 0; (ds = FileHistoryGet(i)) != nullptr; i++) {
         for (int j = 0; j < len(*ds->favorites); j++) {
             (*ds->favorites)[j]->menuId = 0;
         }
@@ -164,18 +166,18 @@ static int idxCache = -1;
 static FileState* GetFavByFilePath(Str filePath) {
     // it's likely that we'll ask about the info for the same
     // file as in previous call, so use one element cache
-    FileState* fs = gFileHistory.Get(idxCache);
+    FileState* fs = FileHistoryGet(idxCache);
     if (fs && str::Eq(fs->filePath, filePath)) {
         return fs;
     }
     // Full paths only: FindByPath avoids basename collisions (two files named
     // the same in different folders must not share favorites).
-    fs = gFileHistory.FindByPath(filePath);
+    fs = FileHistoryFindByPath(filePath);
     idxCache = -1;
-    if (fs && gFileHistory.states) {
-        int n = len(*gFileHistory.states);
+    if (fs && FileHistoryStates()) {
+        int n = len(*FileHistoryStates());
         for (int i = 0; i < n; i++) {
-            if ((*gFileHistory.states)[i] == fs) {
+            if ((*FileHistoryStates())[i] == fs) {
                 idxCache = i;
                 break;
             }
@@ -197,6 +199,8 @@ bool IsPageInFavorites(Str filePath, int pageNo) {
     return false;
 }
 
+// navigate to the nearest favorite (bookmark) page after / before the current
+// page in the open document (issue #3744)
 void GoToNextFavorite(MainWindow* win, bool forward) {
     if (!win || !win->IsDocLoaded()) {
         return;
@@ -231,18 +235,18 @@ static Favorite* FindByPage(FileState* ds, int pageNo, Str pageLabel = {}) {
     if (!ds || !ds->favorites) {
         return nullptr;
     }
-    auto favs = ds->favorites;
+    auto* favs = ds->favorites;
     int n = len(*favs);
     if (pageLabel) {
         for (int i = 0; i < n; i++) {
-            auto fav = (*favs)[i];
+            auto* fav = (*favs)[i];
             if (str::Eq(fav->pageLabel, pageLabel)) {
                 return fav;
             }
         }
     }
     for (int i = 0; i < n; i++) {
-        auto fav = (*favs)[i];
+        auto* fav = (*favs)[i];
         if (pageNo == fav->pageNo) {
             return fav;
         }
@@ -250,18 +254,18 @@ static Favorite* FindByPage(FileState* ds, int pageNo, Str pageLabel = {}) {
     return nullptr;
 }
 
-static int SortByPageNo(const void* a, const void* b) {
-    Favorite* na = *(Favorite**)a;
-    Favorite* nb = *(Favorite**)b;
+static int SortByPageNo(Favorite* const* a, Favorite* const* b) {
+    Favorite* na = *a;
+    Favorite* nb = *b;
     // sort lower page numbers first
     return na->pageNo - nb->pageNo;
 }
 
 // Sort by user name if set, else page label; page number breaks ties and is
 // the only key when neither favorite has a name/label (issue #2277).
-static int SortByName(const void* a, const void* b) {
-    Favorite* na = *(Favorite**)a;
-    Favorite* nb = *(Favorite**)b;
+static int SortByName(Favorite* const* a, Favorite* const* b) {
+    Favorite* na = *a;
+    Favorite* nb = *b;
     Str sa = na->name;
     if (!sa) {
         sa = na->pageLabel;
@@ -290,19 +294,20 @@ static void SortFileFavorites(FileState* fs) {
         return;
     }
     if (gGlobalPrefs->sortFavoritesByName) {
-        fs->favorites->Sort(SortByName);
+        VecSort(*fs->favorites, SortByName);
     } else {
-        fs->favorites->Sort(SortByPageNo);
+        VecSort(*fs->favorites, SortByPageNo);
     }
 }
 
 static void SortAllFavorites() {
     FileState* fs;
-    for (int i = 0; (fs = gFileHistory.Get(i)) != nullptr; i++) {
+    for (int i = 0; (fs = FileHistoryGet(i)) != nullptr; i++) {
         SortFileFavorites(fs);
     }
 }
 
+// toggle SortFavoritesByName, re-sort, refresh trees, and save settings
 void ToggleSortFavoritesByName() {
     gGlobalPrefs->sortFavoritesByName = !gGlobalPrefs->sortFavoritesByName;
     SortAllFavorites();
@@ -317,7 +322,7 @@ static void AddOrReplaceFav(Str filePath, int pageNo, Str name, Str pageLabel) {
         // we were asked to add a favorite for current file but couldn't find
         // history for this file
         fav = NewFileState(filePath);
-        gFileHistory.Append(fav);
+        FileHistoryAppend(fav);
     }
 
     Favorite* fn = FindByPage(fav, pageNo, pageLabel);
@@ -378,7 +383,7 @@ void SetSearchStartFavorite(MainWindow* win) {
     FileState* fs = GetFavByFilePath(path);
     if (!fs) {
         fs = NewFileState(path);
-        gFileHistory.Append(fs);
+        FileHistoryAppend(fs);
     }
 
     Str markName = SearchStartFavName();
@@ -415,7 +420,7 @@ static void RemoveFav(Str filePath, int pageNo) {
     DeleteFavorite(fn);
 
     if (!SettingsRememberOpenedFiles() && 0 == len(*fav->favorites)) {
-        gFileHistory.Remove(fav);
+        FileHistoryRemove(fav);
         DeleteFileState(fav);
     }
 }
@@ -432,7 +437,7 @@ static void RemoveAllFavForFile(Str filePath) {
     fav->favorites->Reset();
 
     if (!SettingsRememberOpenedFiles()) {
-        gFileHistory.Remove(fav);
+        FileHistoryRemove(fav);
         DeleteFileState(fav);
     }
 }
@@ -443,7 +448,7 @@ static void RemoveAllFavForFile(Str filePath) {
 
 bool HasFavorites() {
     FileState* ds;
-    for (int i = 0; (ds = gFileHistory.Get(i)) != nullptr; i++) {
+    for (int i = 0; (ds = FileHistoryGet(i)) != nullptr; i++) {
         if (len(*ds->favorites) > 0) {
             return true;
         }
@@ -452,6 +457,7 @@ bool HasFavorites() {
 }
 
 // caller has to free() the result
+// shared with CommandPalette.cpp (favorites mode)
 TempStr FavReadableNameTemp(Favorite* fn) {
     Str label = fn->pageLabel;
     if (!label) {
@@ -518,7 +524,7 @@ static bool SortByBaseFileName(Str s1, Str s2) {
 
 static void GetSortedFilePaths(StrVec& filePathsSortedOut, FileState* toIgnore = nullptr) {
     FileState* fs;
-    for (int i = 0; (fs = gFileHistory.Get(i)) != nullptr; i++) {
+    for (int i = 0; (fs = FileHistoryGet(i)) != nullptr; i++) {
         if (len(*fs->favorites) > 0 && fs != toIgnore) {
             filePathsSortedOut.Append(fs->filePath);
         }
@@ -565,9 +571,7 @@ static void AppendFavMenus(HMENU m, Str currFilePath) {
     int menuId = CmdFavoriteFirst;
 
     int menusCount = len(filePathsSorted);
-    if (menusCount > MAX_FAV_MENUS) {
-        menusCount = MAX_FAV_MENUS;
-    }
+    menusCount = std::min(menusCount, MAX_FAV_MENUS);
 
     for (int i = 0; i < menusCount; i++) {
         Str filePath = filePathsSorted[i];
@@ -622,6 +626,7 @@ void RebuildFavMenu(MainWindow* win, HMENU menu) {
     MenuSetEnabled(menu, CmdFavoriteToggle, HasFavorites());
 }
 
+// find the Favorites tab in this window, or nullptr
 WindowTab* FindFavoritesTab(MainWindow* win) {
     if (!win) {
         return nullptr;
@@ -669,7 +674,7 @@ void GoToFavorite(MainWindow* win, FileState* fs, Favorite* fav) {
     Str fp = fs->filePath;
     MainWindow* existingWin = FindMainWindowByFile(fp, true);
     if (existingWin) {
-        auto data = new GoToFavoritePageData;
+        auto* data = new GoToFavoritePageData;
         data->pageNo = fav->pageNo;
         data->win = existingWin;
         auto fn = MkFunc0<GoToFavoritePageData>(GoToFavoritePage, data);
@@ -686,7 +691,7 @@ void GoToFavorite(MainWindow* win, FileState* fs, Favorite* fav) {
     // A hacky solution because I don't want to add even more parameters to
     // LoadDocument() and LoadDocumentInto()
     int pageNo = fav->pageNo;
-    FileState* ds = gFileHistory.FindByPath(fs->filePath);
+    FileState* ds = FileHistoryFindByPath(fs->filePath);
     if (ds && !ds->useDefaultState && gGlobalPrefs->rememberStatePerDocument) {
         ds->pageNo = fav->pageNo;
         ds->scrollPos = PointF(-1, -1); // don't scroll the page
@@ -696,7 +701,7 @@ void GoToFavorite(MainWindow* win, FileState* fs, Favorite* fav) {
     LoadArgs args(fs->filePath, win);
     win = LoadDocument(&args);
     if (win) {
-        auto data = new GoToFavoritePageData;
+        auto* data = new GoToFavoritePageData;
         data->pageNo = pageNo;
         data->win = win;
         auto fn = MkFunc0<GoToFavoritePageData>(GoToFavoritePage, data);
@@ -998,6 +1003,7 @@ void ToggleFavorites(MainWindow* win) {
     }
 }
 
+// open/select full-window Favorites tab (can use with sidebar Favorites)
 void ToggleFavoritesTab(MainWindow* win) {
     // Full-window Favorites tab (independent of the sidebar Favorites panel).
     // Always switches to / creates the tab (close with the tab's ✕).
@@ -1084,32 +1090,36 @@ static TocItem* TocItemForPageNo(TocItem* item, int pageNo) {
     return currItem;
 }
 
-void AddFavoriteWithLabelAndName(MainWindow* win, int pageNo, Str pageLabel, Str nameIn) {
-    Str name = str::Dup(nameIn);
-    bool shouldAdd = Dialog_AddFavorite(win->hwndFrame, pageLabel, name);
-    if (shouldAdd) {
-        TempStr plainLabel = fmt("%d", pageNo);
-        bool needsLabel = !str::Eq(plainLabel, pageLabel);
-
-        RememberFavTreeExpansionStateForAllWindows();
-        Str pl = needsLabel ? pageLabel : Str{};
-        WindowTab* tab = win->CurrentTab();
-        Str path = tab->filePath;
-        AddOrReplaceFav(path, pageNo, name, pl);
-        // expand newly added favorites by default
-        FileState* fav = GetFavByFilePath(path);
-        if (fav && len(*fav->favorites) == 2) {
-            win->expandedFavorites.Append(fav);
-        }
-        UpdateFavoritesTreeForAllWindows();
-        SaveSettings();
+// Persist a favorite after the Add Favorite dialog's OK (name may be empty).
+void ApplyAddFavorite(MainWindow* win, Str filePath, int pageNo, Str pageLabel, Str name) {
+    if (!filePath || !IsMainWindowValid(win)) {
+        return;
     }
-    str::Free(name);
+    TempStr plainLabel = fmt("%d", pageNo);
+    bool needsLabel = !str::Eq(plainLabel, pageLabel);
+
+    RememberFavTreeExpansionStateForAllWindows();
+    Str pl = needsLabel ? pageLabel : Str{};
+    AddOrReplaceFav(filePath, pageNo, name, pl);
+    // expand newly added favorites by default
+    FileState* fav = GetFavByFilePath(filePath);
+    if (fav && len(*fav->favorites) == 2) {
+        win->expandedFavorites.Append(fav);
+    }
+    UpdateFavoritesTreeForAllWindows();
+    SaveSettings();
+}
+
+void AddFavoriteWithLabelAndName(MainWindow* win, int pageNo, Str pageLabel, Str nameIn) {
+    if (!IsMainWindowValid(win) || !win->CurrentTab()) {
+        return;
+    }
+    ShowAddFavoriteDialog(win, win->CurrentTab()->filePath, pageNo, pageLabel, nameIn);
 }
 
 void AddFavoriteForPage(MainWindow* win, int pageNo) {
     Str name;
-    auto tab = win->CurrentTab();
+    auto* tab = win->CurrentTab();
     auto* ctrl = tab->ctrl;
     if (ctrl->HasToc()) {
         // use the current ToC heading as default name
@@ -1215,10 +1225,10 @@ static void DrawFavItemHighlight(TreeView::CustomDrawEvent* ev, MainWindow* win)
         isSelected = hSel && hItem && hSel == hItem;
     }
     bool hasFocus = (GetFocus() == tv->hwnd);
-    COLORREF bgCol, txtCol;
+    Color bgCol, txtCol;
     ResolveTreeFilterItemColors(hdc, itemRect, tv->bgColor, tv->textColor, isSelected, hasFocus, &bgCol, &txtCol);
-    HFONT font = (HFONT)SendMessageW(tv->hwnd, WM_GETFONT, 0, 0);
-    DrawTreeItemFilterHighlight(hdc, labelRect, fti->text, words, bgCol, txtCol, font);
+    GfxHdc gfx(hdc);
+    DrawTreeItemFilterHighlight(&gfx, labelRect, fti->text, words, bgCol, txtCol, tv->GetFont());
 }
 
 static void OnFavCustomDraw(TreeView::CustomDrawEvent* ev) {
@@ -1399,6 +1409,7 @@ static void FavTreeContextMenu(ContextMenuEvent* ev) {
 static WNDPROC gWndProcFavBox = nullptr;
 // Position label, filter edit and tree within favorites container using the
 // wingui layout engine (VBox built in CreateFavorites).
+// layout label + tree inside hwndFavBox (call after resizing the box)
 void LayoutFavoritesContainer(MainWindow* win) {
     if (!win || !win->favLayout || !win->hwndFavBox) {
         return;
@@ -1408,8 +1419,7 @@ void LayoutFavoritesContainer(MainWindow* win) {
     if (rc.IsEmpty()) {
         return;
     }
-    win->favLayout->Layout(Tight(Size{rc.dx, rc.dy}));
-    win->favLayout->SetBounds(Rect{0, 0, rc.dx, rc.dy});
+    LayoutTreeToSize(win->hwndFavBox, win->favLayout, {rc.dx, rc.dy}, &win->favRoot);
 }
 
 static LRESULT CALLBACK WndProcFavBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1423,46 +1433,41 @@ static LRESULT CALLBACK WndProcFavBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return res;
     }
 
+    // the panel header (label + close button) is a virtual control tree, so
+    // this window paints it and hands it its input
+    if (VirtHostOnMessage(hwnd, win->favRoot, msg, wp, lp, res, ThemeControlBackgroundColor())) {
+        return res;
+    }
+
     switch (msg) {
         case WM_SIZE:
             LayoutFavoritesContainer(win);
             break;
-
-        case WM_COMMAND:
-            if (LOWORD(wp) == IDC_FAV_LABEL_WITH_CLOSE) {
-                // Full-window Favorites tab: close the tab. Sidebar panel: hide it.
-                if (WindowTab* favTab = FindFavoritesTab(win); favTab && win->CurrentTab() == favTab) {
-                    CloseTab(favTab, false);
-                } else {
-                    ToggleFavorites(win);
-                }
-            }
-            break;
     }
     return CallWindowProc(gWndProcFavBox, hwnd, msg, wp, lp);
+}
+
+// Full-window Favorites tab: close the tab. Sidebar panel: hide it.
+static void FavCloseClicked(MainWindow* win, VirtMouseEvent*) {
+    if (WindowTab* favTab = FindFavoritesTab(win); favTab && win->CurrentTab() == favTab) {
+        CloseTab(favTab, false);
+    } else {
+        ToggleFavorites(win);
+    }
 }
 
 void CreateFavorites(MainWindow* win) {
     HMODULE h = GetModuleHandleW(nullptr);
     int dx = gGlobalPrefs->sidebarDx;
     DWORD dwStyle = WS_CHILD | WS_CLIPCHILDREN;
-    win->hwndFavBox = CreateWindowW(WC_STATIC, L"", dwStyle, 0, 0, dx, 0, win->hwndFrame, (HMENU) nullptr, h, nullptr);
+    win->hwndFavBox = CreateWindowW(WC_STATICW, L"", dwStyle, 0, 0, dx, 0, win->hwndFrame, (HMENU) nullptr, h, nullptr);
 
-    auto l = new LabelWithCloseWnd();
-    {
-        LabelWithCloseWnd::CreateArgs args;
-        args.parent = win->hwndFavBox;
-        args.cmdId = IDC_FAV_LABEL_WITH_CLOSE;
-        args.font = GetAppSidebarLabelFont(win->hwndFrame);
-        args.isRtl = IsUIRtl();
-        l->Create(args);
-    }
+    PlatformFont* labelFont = GetAppSidebarLabelFont();
+    auto header = NewLabelWithClose(win->hwndFavBox, labelFont, MkFunc1(FavCloseClicked, win));
+    win->favLabel = header.label;
+    // label text is set in UpdateToolbarSidebarText()
 
-    win->favLabelWithClose = l;
-    l->SetPaddingXY(2, 2);
-    // label is set in UpdateToolbarSidebarText()
-
-    auto filterEdit = new Edit();
+    auto* filterEdit = new Edit();
     {
         Edit::CreateArgs eargs;
         eargs.parent = win->hwndFavBox;
@@ -1470,17 +1475,17 @@ void CreateFavorites(MainWindow* win) {
         // underline so the filter field is visible on flat sidebar/tab backgrounds
         eargs.withBottomBorder = true;
         eargs.cueText = _TRA("Search Favorites");
-        eargs.font = GetAppFont(win->hwndFrame);
+        eargs.font = GetAppFont();
         filterEdit->Create(eargs);
     }
     win->favFilterEdit = filterEdit;
     filterEdit->onTextChanged = MkFunc0(OnFavFilterTextChanged, win);
     SetWindowSubclass(filterEdit->hwnd, WndProcFavFilterEdit, NextSubclassId(), (DWORD_PTR)win);
 
-    auto treeView = new TreeView();
+    auto* treeView = new TreeView();
     TreeView::CreateArgs args;
     args.parent = win->hwndFavBox;
-    args.font = GetAppTreeFont(win->hwndFrame);
+    args.font = GetAppTreeFont();
     args.fullRowSelect = true;
     args.exStyle = 0;
     args.isRtl = IsUIRtl();
@@ -1499,10 +1504,10 @@ void CreateFavorites(MainWindow* win) {
 
     // stack label, filter edit and tree vertically; the tree flexes to fill
     // the remaining height. The VBox owns these controls/spacer (freed in ~MainWindow).
-    auto vbox = new VBox();
+    auto* vbox = new VBox();
     vbox->alignMain = MainAxisAlign::MainStart;
     vbox->alignCross = CrossAxisAlign::Stretch;
-    vbox->AddChild(l);
+    vbox->AddChild(header.box);
     vbox->AddChild(filterEdit);
     vbox->AddChild(new Spacer(0, 2)); // gap under the search field
     vbox->AddChild(treeView, 1);

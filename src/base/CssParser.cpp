@@ -77,6 +77,8 @@ static bool SkipBlock(Str data, int& off) {
     return false;
 }
 
+// call NextRule first for parsing a style element and
+// NextProperty only for parsing a single style attribute
 bool CssPullParser::NextRule() {
     if (inProps) {
         while (NextProperty()) {
@@ -167,10 +169,11 @@ const CssSelector* CssPullParser::NextSelector() {
     for (; c > selStart && (isalnum((u8)src.s[c - 1]) || src.s[c - 1] == '-'); c--) {
         ;
     }
-    if (sel.clazz && sel.clazz.s == src.s + selStart + 1) {
-        sel.tag = Tag_Any;
-    } else if (c == (sel.clazz ? (int)(sel.clazz.s - src.s - 1) : sEnd) && c == selStart + 1 &&
-               src.s[selStart] == '*') {
+    // either the selector is just a class (".c"), or it starts with the universal selector ("*")
+    bool isAnyTag =
+        (sel.clazz && sel.clazz.s == src.s + selStart + 1) ||
+        (c == (sel.clazz ? (int)(sel.clazz.s - src.s - 1) : sEnd) && c == selStart + 1 && src.s[selStart] == '*');
+    if (isAnyTag) {
         sel.tag = Tag_Any;
     } else if (c == selStart) {
         size_t tagLen = sel.clazz ? (size_t)(sel.clazz.s - src.s - selStart - 1) : (size_t)sel.s.len;

@@ -9,13 +9,11 @@ struct FileArgs;
 struct AnnotCreateArgs;
 struct PropValue;
 
-/* EngineDjvuDec.cpp: DjVu engine built on ext/djvudec */
 bool IsEngineDjVuSupportedFileType(FileType kind);
 EngineBase* CreateEngineDjvuDecFromFile(Str path);
 EngineBase* CreateEngineDjvuDecFromData(Str data);
 extern bool gMemoryMapLargeFiles;
 
-/* EngineEbook.cpp */
 EngineBase* CreateEngineEpubFromFile(Str fileName);
 EngineBase* CreateEngineEpubFromData(Str data);
 EngineBase* CreateEngineFb2FromFile(Str fileName);
@@ -28,9 +26,49 @@ EngineBase* CreateEngineHtmlFromFile(Str fileName);
 EngineBase* CreateEngineTxtFromFile(Str fileName);
 
 void SetDefaultEbookFont(Str name, float size);
+void SetDefaultChmFont(Str name);
+// Reject characters that would break out of a quoted CSS font-family value.
+inline bool IsSafeEbookFontName(Str name) {
+    if (!name) {
+        return false;
+    }
+    for (int i = 0; i < len(name); i++) {
+        unsigned char c = (unsigned char)name.s[i];
+        if (c < 32 || c == '"' || c == '\'' || c == ';' || c == '{' || c == '}' || c == '\\') {
+            return false;
+        }
+    }
+    return true;
+}
+// Drop one matching pair of wrapping ' or " quotes, then check IsSafeEbookFontName.
+inline Str EbookFontNameFromSetting(Str name) {
+    int n = len(name);
+    if (n >= 2) {
+        char q = name.s[0];
+        if ((q == '"' || q == '\'') && name.s[n - 1] == q) {
+            name = Str(name.s + 1, n - 2);
+        }
+    }
+    if (!IsSafeEbookFontName(name)) {
+        return {};
+    }
+    return name;
+}
 void EngineEbookCleanup();
 
+// the ebook font this reflowable document asked for and we couldn't load, so
+// the text came out in the default font; null if that didn't happen (#4600)
+Str EngineEbookFontUnavailable(EngineBase* engine);
+
+// the user CSS generated from ebook settings (font family + line height), so
+// the Ebook Settings dialog can show exactly what the engine will apply
+TempStr EbookGeneratedCssTemp(Str fontName, const Vec<float>* margin, float lineSpacing, int displayDPI);
+
 /* EngineImages.cpp */
+
+// how many leading bytes of an image file are enough, in practice, to parse the
+// image size out of its header (JPEG SOF can sit past EXIF / ICC segments)
+constexpr int kImageSizeFromDataPartialSize = 64 * 1024;
 
 bool IsEngineImageSupportedFileType(FileType);
 EngineBase* CreateEngineImageFromFile(Str fileName);
@@ -46,9 +84,10 @@ EngineBase* CreateEngineCbxFromData(Str data);
 
 bool IsEngineImages(EngineBase*);
 void EngineImagesGetImageProperties(EngineBase*, int pageNo, Vec<PropValue>& propsOut);
-// Image base name and uncompressed size for page-info tip; does not decode.
-// Returns false when engine is not an image collection or pageNo is invalid.
 bool EngineImagesGetPageFileInfo(EngineBase*, int pageNo, TempStr* nameOut, i64* sizeOut);
+// Non-owning raw image bytes for a page (valid until engine is destroyed). Empty if
+// not an image-collection engine or the page has no extractable file data.
+Str EngineImagesGetImageData(EngineBase*, int pageNo);
 
 /* EngineMupdf.cpp */
 
@@ -63,35 +102,28 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase*, int pageNo, PointF pos, Ann
 void EngineMupdfGetAnnotations(EngineBase*, Vec<Annotation*>&);
 bool EngineMupdfHasUnsavedAnnotations(EngineBase*);
 bool EngineMupdfSupportsAnnotations(EngineBase*);
+bool EngineMupdfIsPdf(EngineBase* engine);
 bool EngineMupdfIsEncrypted(EngineBase* engine);
 Str EngineMupdfGetPassword(EngineBase* engine);
 bool EngineMupdfSaveUpdated(EngineBase* engine, Str path, const ShowErrorCb& showErrorFunc);
 Annotation* EngineMupdfGetAnnotationAtPos(EngineBase*, int pageNo, PointF pos, Annotation*);
 Annotation* EngineMupdfGetWidgetAtPos(EngineBase*, int pageNo, PointF pos);
 Annotation* EngineMupdfGetAdjacentWidget(EngineBase*, Annotation* cur, bool forward);
-// disable mupdf's JavaScript engine for PDFs loaded after this call
 void EngineMupdfSetDisableJavaScript(bool disable);
-// allow PDFs to load images from an external sibling file (#3731), for PDFs
-// loaded after this call; set from gGlobalPrefs->allowExternalImages
+void EngineMupdfSetEbookLayoutAspect(float dyOverDx);
 void EngineMupdfSetAllowExternalImages(bool allow);
-// toggle CAD/engineering-drawing line enhancement for this document
 void EngineMupdfToggleCadEnhance(EngineBase* engine);
-// drop cached dark-mode analyses/images (call when dark-mode options change)
+bool EngineMupdfCadEnhanceActive(EngineBase* engine);
 void EngineMupdfInvalidateDarkMode(EngineBase* engine);
-// PDF documents support the object-level smart dark renderer
 bool EngineSupportsSmartDarkMode(EngineBase* engine);
 Str EngineMupdfLoadAttachment(EngineBase*, int attachmentNo);
 Str EngineMupdfLoadAnnotAttachment(EngineBase*, int objNum);
 TempStr EngineMupdfGetPdfInfo(Str path);
 TempStr EngineMupdfGetPdfOutline(Str path);
 
-/* EnginePs.cpp */
-
 bool IsEnginePsAvailable();
 bool IsEnginePsSupportedFileType(FileType);
 EngineBase* CreateEnginePsFromFile(Str fileName);
-
-/* EngineCreate.cpp */
 
 bool IsSupportedFileType(FileType kind, bool enableEngineEbooks);
 

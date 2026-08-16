@@ -10,7 +10,9 @@
 #include "base/Win.h"
 #include "base/StrQueue.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
 
 #include "Settings.h"
 #include "DocProperties.h"
@@ -686,7 +688,9 @@ static bool OpenFile(StressTest* st, Str fileName) {
     // search immediately in single page documents
     if (1 == st->pageForSearchStart) {
         // use text that is unlikely to be found, so that we search all pages
-        HwndSetText(st->win->hwndFindEdit, "!z_yt");
+        if (st->win->findEdit) {
+            st->win->findEdit->SetText(StrL("!z_yt"));
+        }
         FindTextOnThread(st->win, TextSearch::Direction::Forward, true);
     }
 
@@ -830,7 +834,9 @@ static bool GoToNextPage(StressTest* st) {
     // current API doesn't make it easy
     if (st->currPageNo == st->pageForSearchStart) {
         // use text that is unlikely to be found, so that we search all pages
-        HwndSetText(st->win->hwndFindEdit, "!z_yt");
+        if (st->win->findEdit) {
+            st->win->findEdit->SetText(StrL("!z_yt"));
+        }
         FindTextOnThread(st->win, TextSearch::Direction::Forward, true);
     }
 

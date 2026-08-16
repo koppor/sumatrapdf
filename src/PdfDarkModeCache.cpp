@@ -36,7 +36,7 @@ static DarkModeProcessCache* PdfDarkModeEnsureProcessCache(DarkModePageAnalysis*
     }
     int n = len(analysis->images);
     if (len(cache->processedImages) != n) {
-        cache->processedImages.SetSize(n);
+        VecResize(cache->processedImages, n);
         for (int i = 0; i < n; i++) {
             cache->processedImages[i] = nullptr;
         }
@@ -95,13 +95,8 @@ static void dm_transform_pixmap_rgb(fz_context* ctx, fz_pixmap* pix, const DarkM
             float back[FZ_MAX_COLORS] = {};
             fz_convert_color(ctx, rgb, out, cs, back, cs, fz_default_color_params);
             for (int c = 0; c < components && c < FZ_MAX_COLORS; c++) {
-                int v = (int)((back[c] * 255.f) + 0.5f);
-                if (v < 0) {
-                    v = 0;
-                }
-                if (v > 255) {
-                    v = 255;
-                }
+                int v = (int)lroundf(back[c] * 255.f);
+                v = limitValue(v, 0, 255);
                 px[c] = (unsigned char)v;
             }
         }
@@ -261,6 +256,7 @@ static fz_image* dm_build_processed_shade(fz_context* ctx, fz_shade* shade, fz_m
     return result;
 }
 
+// Returns a kept fz_image for fill_image, or nullptr to use the source image.
 fz_image* PdfDarkModeGetCachedImage(fz_context* ctx, DarkModeEngineCache* engineCache, DarkModePageAnalysis* analysis,
                                     int occurrenceIndex, fz_image* srcImage, DarkImagePolicy policy,
                                     const DarkModePalette& palette, u32 profileHash) {
@@ -306,6 +302,7 @@ fz_image* PdfDarkModeGetCachedImage(fz_context* ctx, DarkModeEngineCache* engine
     return fz_keep_image(ctx, built);
 }
 
+// Returns a kept fz_image covering bounds, or nullptr to fall back to direct shade fill.
 fz_image* PdfDarkModeGetCachedShade(fz_context* ctx, DarkModePageAnalysis* analysis, fz_shade* shade, fz_matrix ctm,
                                     float alpha, fz_irect bounds, const DarkModePalette& palette) {
     if (!analysis || !shade) {

@@ -4,6 +4,8 @@
 #include "base/Base.h"
 #include "base/Archive.h"
 #include "base/HtmlTags.h"
+
+#include "GumboHelpers.h"
 #include "GumboHtmlParser.h"
 
 #include "DocProperties.h"
@@ -12,6 +14,8 @@
 #include "EbookDoc.h"
 #include "PalmDbReader.h"
 #include "MobiDoc.h"
+#include "gui/PlatformFont.h"
+#include "gui/PlatformText.h"
 #include "HtmlFormatter.h"
 #include "EbookFormatter.h"
 
@@ -146,8 +150,7 @@ void EpubFormatter::HandleTagImg(HtmlToken* t) {
     bool needAlt = true;
     AttrInfo* attr = t->GetAttrByName(StrL("src"));
     if (attr) {
-        TempStr src = str::DupTemp(attr->val);
-        url::DecodeInPlace(src);
+        TempStr src = url::DecodeTemp(attr->val);
         Str img = epubDoc->GetImageData(src, pagePath);
         needAlt = !img || !EmitImage(img);
     }
@@ -193,8 +196,7 @@ void EpubFormatter::HandleTagLink(HtmlToken* t) {
         return;
     }
 
-    TempStr src = str::DupTemp(attr->val);
-    url::DecodeInPlace(src);
+    TempStr src = url::DecodeTemp(attr->val);
     Str data = epubDoc->GetFileData(src, pagePath);
     if (data) {
         ParseStyleSheet(data);
@@ -214,8 +216,7 @@ void EpubFormatter::HandleTagSvgImage(HtmlToken* t) {
     if (!attr) {
         return;
     }
-    TempStr src = str::DupTemp(attr->val);
-    url::DecodeInPlace(src);
+    TempStr src = url::DecodeTemp(attr->val);
     Str img = epubDoc->GetImageData(src, pagePath);
     if (img) {
         EmitImage(img);
@@ -276,8 +277,7 @@ void Fb2Formatter::HandleTagImg(HtmlToken* t) {
     Str img;
     AttrInfo* attr = t->GetAttrByNameNS(StrL("href"), StrL("http://www.w3.org/1999/xlink"));
     if (attr) {
-        TempStr src = str::DupTemp(attr->val);
-        url::DecodeInPlace(src);
+        TempStr src = url::DecodeTemp(attr->val);
         img = fb2Doc->GetImageData(src);
     }
     if (img) {
@@ -350,8 +350,7 @@ void HtmlFileFormatter::HandleTagImg(HtmlToken* t) {
     bool needAlt = true;
     AttrInfo* attr = t->GetAttrByName(StrL("src"));
     if (attr) {
-        TempStr src = str::DupTemp(attr->val);
-        url::DecodeInPlace(src);
+        TempStr src = url::DecodeTemp(attr->val);
         Str img = htmlDoc->GetImageData(src);
         needAlt = !img || !EmitImage(img);
     }
@@ -381,8 +380,7 @@ void HtmlFileFormatter::HandleTagLink(HtmlToken* t) {
         return;
     }
 
-    TempStr src = str::DupTemp(attr->val);
-    url::DecodeInPlace(src);
+    TempStr src = url::DecodeTemp(attr->val);
     Str data = htmlDoc->GetFileData(src);
     if (data) {
         ParseStyleSheet(data);

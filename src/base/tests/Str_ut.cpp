@@ -157,86 +157,279 @@ static void StrUrlExtractTest() {
     utassert(str::Eq(fileName, StrL("na/me.ext")));
     fileName = url::GetFileNameTemp("http://example.net/%E2%82%AC");
     utassert(str::Eq(fileName, StrL("\xE2\x82\xaC")));
-    char wikiUrl[] =
+    TempStr wiki = url::DecodeTemp(
         "https://ru.wikipedia.org/wiki/"
-        "%D0%AD%D0%BD%D0%B5%D1%80%D0%B3%D0%B8%D1%8F_%E2%80%94_%D0%91%D1%83%D1%80%D0%B0%D0%BD";
-    url::DecodeInPlace(wikiUrl);
-    utassert(str::Eq(wikiUrl, StrL("https://ru.wikipedia.org/wiki/"
-                                   "\xD0\xAD\xD0\xBD\xD0\xB5\xD1\x80\xD0\xB3\xD0\xB8\xD1\x8F_\xE2\x80\x94_"
-                                   "\xD0\x91\xD1\x83\xD1\x80\xD0\xB0\xD0\xBD")));
+        "%D0%AD%D0%BD%D0%B5%D1%80%D0%B3%D0%B8%D1%8F_%E2%80%94_%D0%91%D1%83%D1%80%D0%B0%D0%BD");
+    utassert(str::Eq(wiki, StrL("https://ru.wikipedia.org/wiki/"
+                                "\xD0\xAD\xD0\xBD\xD0\xB5\xD1\x80\xD0\xB3\xD0\xB8\xD1\x8F_\xE2\x80\x94_"
+                                "\xD0\x91\xD1\x83\xD1\x80\xD0\xB0\xD0\xBD")));
+    utassert(!url::DecodeTemp({}));
+    utassert(str::Eq(url::DecodeTemp("nothing to decode"), StrL("nothing to decode")));
+    // a stray or truncated escape is left alone
+    utassert(str::Eq(url::DecodeTemp("100%"), StrL("100%")));
+    utassert(str::Eq(url::DecodeTemp("%zz%41"), StrL("%zzA")));
+
+    // decoding shrinks the string, so the result's len must match its bytes, or
+    // the bytes past the NUL travel with it into anything that copies by len
+    // (issue #5926). str::Eq stops at the NUL and can't see that, so compare
+    // the lengths directly.
+    TempStr decoded = url::DecodeTemp("umlaut_test_%C3%A4.html");
+    utassert(len(decoded) == LenL("umlaut_test_\xC3\xA4.html"));
+    TempStr joined = str::JoinTemp(StrL("dir\\"), decoded);
+    utassert(str::Eq(joined, StrL("dir\\umlaut_test_\xC3\xA4.html")));
+    utassert(len(joined) == LenL("dir\\umlaut_test_\xC3\xA4.html"));
+    utassert(len(url::GetFullPathTemp("na%2Fme.ext?q=1")) == LenL("na/me.ext"));
+    utassert(len(url::GetFileNameTemp("http://example.net/na%2Fme.ext")) == LenL("na/me.ext"));
+}
+
+// Run fn once with no external buf, once with a stack buf of random size 1..128.
+static void StrBuilderRunTwice(void (*fn)(str::Builder&)) {
+    {
+        str::Builder b;
+        fn(b);
+    }
+    {
+        char stack[128];
+        int n = 1 + (rand() % 128); // 1..128
+        str::Builder b(Str(stack, n));
+        fn(b);
+    }
+}
+
+static void StrBuilderContainsAppend(str::Builder& str) {
+    utassert(str.IsEmpty());
+    str.Append("blah");
+    utassert(str.begin() != nullptr);
+    utassert(str::Contains(str, StrL("blah")));
+    utassert(str::Contains(str, StrL("ah")));
+    utassert(str::Contains(str, StrL("h")));
+    utassert(!str::Contains(str, StrL("lahd")));
+    utassert(!str::Contains(str, StrL("blahd")));
+    utassert(!str::Contains(str, StrL("blas")));
+    utassert(str::Eq(ToStr(str), StrL("blah")));
+    str.Append("lost");
+    utassert(str::Eq(ToStr(str), StrL("blahlost")));
+    utassert(str::Contains(str, StrL("blahlost")));
+    utassert(str::Contains(str, StrL("ahlo")));
+}
+
+static void StrBuilderGrowPastExternal(str::Builder& str) {
+    str.Append("blah");
+    utassert(str::Eq(ToStr(str), StrL("blah")));
+    str.Append("lost");
+    utassert(str::Eq(ToStr(str), StrL("blahlost")));
+    str.Reset();
+    // 200 chars always exceeds external scratch of at most 128
+    for (int i = 0; i < 200; i++) {
+        str.AppendChar((char)i);
+    }
+    utassert(!str.UsesExternalBuf());
+    for (int i = 0; i < 200; i++) {
+        utassert(str[i] == (char)i);
+    }
+}
+
+static void StrBuilderRemoveAtStaysOnHeap(str::Builder& str) {
+    // Grow past any external buf (max 128) so storage is on the heap.
+    for (int i = 0; i < 200; i++) {
+        str.AppendChar((char)('a' + (i % 26)));
+    }
+    uintptr_t heap = (uintptr_t)str.begin();
+    utassert(!str.UsesExternalBuf());
+    // RemoveAt shrinks len; further appends must not switch back to external
+    // (that would lose data and leak the heap allocation).
+    str.RemoveAt(0, 190);
+    utassert(len(str) == 10);
+    utassert((uintptr_t)str.begin() == heap);
+    str.Append("xyz");
+    utassert((uintptr_t)str.begin() == heap);
+    // last 10 of 200 chars (i=190..199): i%26 => 8..17 => "ijklmnopqr"
+    utassert(str::Eq(ToStr(str), StrL("ijklmnopqrxyz")));
+}
+
+static void StrBuilderManyAppends(str::Builder& str) {
+    for (int i = 0; i < 50; i++) {
+        str.Append("01234567890123456789");
+    }
+    utassert(len(str) == 1000);
+    utassert(str::StartsWith(ToStr(str), StrL("01234567890123456789")));
+    utassert(str::EndsWith(ToStr(str), StrL("01234567890123456789")));
+}
+
+static void StrBuilderTakeStr(str::Builder& str) {
+    str.Append("hello");
+    char* before = str.begin();
+    bool wasExternal = str.UsesExternalBuf();
+    Str taken = str.TakeStr();
+    utassert(str::Eq(taken, StrL("hello")));
+    if (wasExternal) {
+        // data was in the external buffer; TakeStr must copy
+        utassert(taken.s != before);
+    }
+    str::Free(taken);
+    utassert(str.IsEmpty());
+}
+
+// capHint is independent of external buf: large hint should avoid realloc while
+// content stays under the hint (and ignore a small external scratch once heap
+// is allocated with that hint).
+static void StrBuilderCapHint() {
+    str::Builder str(1024);
+    uintptr_t heap = 0;
+    for (int i = 0; i < 50; i++) {
+        str.Append("01234567890123456789");
+        if (i == 0) {
+            heap = (uintptr_t)str.begin();
+            utassert(heap != 0);
+        }
+    }
+    // 50*20 = 1000 chars < 1024, so no further realloc
+    utassert((uintptr_t)str.begin() == heap);
+    utassert(str.nReallocs == 1);
+
+    // same with a small external buf: once content needs heap, capHint applies
+    // (set .cap after construct — preferred capacity while still on external storage)
+    char stack[16];
+    str::Builder str2(Str(stack, sizeofi(stack)));
+    str2.cap = 1024 + 1; // +1 NUL padding, same as Builder(1024)
+    heap = 0;
+    int reallocsAtHeap = -1;
+    for (int i = 0; i < 50; i++) {
+        str2.Append("01234567890123456789");
+        if (!str2.UsesExternalBuf() && reallocsAtHeap < 0) {
+            heap = (uintptr_t)str2.begin();
+            reallocsAtHeap = str2.nReallocs;
+        }
+    }
+    utassert(heap != 0);
+    utassert((uintptr_t)str2.begin() == heap);
+    // only the grow-from-external realloc, no further ones for 1000 chars
+    utassert(str2.nReallocs == reallocsAtHeap);
 }
 
 void strStrTest() {
-    {
-        // verify that we use buf for initial allocations
-        str::Builder str;
-        uintptr_t buf = (uintptr_t)str.begin();
-        str.Append("blah");
-        utassert(str::Contains(str, StrL("blah")));
-        utassert(str::Contains(str, StrL("ah")));
-        utassert(str::Contains(str, StrL("h")));
-        utassert(!str::Contains(str, StrL("lahd")));
-        utassert(!str::Contains(str, StrL("blahd")));
-        utassert(!str::Contains(str, StrL("blas")));
+    StrBuilderRunTwice(StrBuilderContainsAppend);
+    StrBuilderRunTwice(StrBuilderGrowPastExternal);
+    StrBuilderRunTwice(StrBuilderRemoveAtStaysOnHeap);
+    StrBuilderRunTwice(StrBuilderManyAppends);
+    StrBuilderRunTwice(StrBuilderTakeStr);
+    StrBuilderCapHint();
+}
 
-        uintptr_t buf2 = (uintptr_t)str.begin();
-        utassert(buf == buf2);
-        utassert(str::Eq(ToStr(str), StrL("blah")));
-        str.Append("lost");
-        buf2 = (uintptr_t)str.begin();
-        utassert(str::Eq(ToStr(str), StrL("blahlost")));
-        utassert(str::Contains(str, StrL("blahlost")));
-        utassert(str::Contains(str, StrL("ahlo")));
-        utassert(buf == buf2);
-        str.Reset();
-        for (int i = 0; i < str::Builder::kBufChars + 4; i++) {
-            str.AppendChar((char)i);
-        }
-        buf2 = (uintptr_t)str.begin();
-        // we should have allocated buf on the heap
-        utassert(buf != buf2);
-        for (int i = 0; i < str::Builder::kBufChars + 4; i++) {
-            char c = str[i];
-            utassert(c == (char)i);
+// --- wstr::Builder (same external-buf contract as str::Builder) ---
+
+static void WStrBuilderRunTwice(void (*fn)(wstr::Builder&)) {
+    {
+        wstr::Builder b;
+        fn(b);
+    }
+    {
+        WCHAR stack[128];
+        int n = 1 + (rand() % 128); // 1..128
+        wstr::Builder b(WStr(stack, n));
+        fn(b);
+    }
+}
+
+static void WStrBuilderContainsAppend(wstr::Builder& str) {
+    utassert(str.IsEmpty());
+    str.Append(L"blah");
+    utassert(str.begin() != nullptr);
+    utassert(wstr::Eq(ToWStr(str), WStrL(L"blah")));
+    str.Append(L"lost");
+    utassert(wstr::Eq(ToWStr(str), WStrL(L"blahlost")));
+    utassert(wstr::ContainsChar(str, L'a'));
+    utassert(!wstr::ContainsChar(str, L'z'));
+}
+
+static void WStrBuilderGrowPastExternal(wstr::Builder& str) {
+    str.Append(L"blah");
+    utassert(wstr::Eq(ToWStr(str), WStrL(L"blah")));
+    str.Append(L"lost");
+    utassert(wstr::Eq(ToWStr(str), WStrL(L"blahlost")));
+    str.Reset();
+    for (int i = 0; i < 200; i++) {
+        str.AppendChar((WCHAR)i);
+    }
+    utassert(!str.UsesExternalBuf());
+    for (int i = 0; i < 200; i++) {
+        utassert(str[i] == (WCHAR)i);
+    }
+}
+
+static void WStrBuilderRemoveAtStaysOnHeap(wstr::Builder& str) {
+    for (int i = 0; i < 200; i++) {
+        str.AppendChar((WCHAR)(L'a' + (i % 26)));
+    }
+    uintptr_t heap = (uintptr_t)str.begin();
+    utassert(!str.UsesExternalBuf());
+    str.RemoveAt(0, 190);
+    utassert(len(str) == 10);
+    utassert((uintptr_t)str.begin() == heap);
+    str.Append(L"xyz");
+    utassert((uintptr_t)str.begin() == heap);
+    utassert(wstr::Eq(ToWStr(str), WStrL(L"ijklmnopqrxyz")));
+}
+
+static void WStrBuilderManyAppends(wstr::Builder& str) {
+    for (int i = 0; i < 50; i++) {
+        str.Append(L"01234567890123456789");
+    }
+    utassert(len(str) == 1000);
+    utassert(wstr::StartsWith(ToWStr(str), WStrL(L"01234567890123456789")));
+    utassert(wstr::EndsWith(ToWStr(str), WStrL(L"01234567890123456789")));
+}
+
+static void WStrBuilderTakeWStr(wstr::Builder& str) {
+    str.Append(L"hello");
+    WCHAR* before = str.begin();
+    bool wasExternal = str.UsesExternalBuf();
+    WStr taken = str.TakeWStr();
+    utassert(wstr::Eq(taken, WStrL(L"hello")));
+    if (wasExternal) {
+        utassert(taken.s != before);
+    }
+    wstr::Free(taken);
+    utassert(str.IsEmpty());
+}
+
+static void WStrBuilderCapHint() {
+    wstr::Builder str(1024);
+    uintptr_t heap = 0;
+    for (int i = 0; i < 50; i++) {
+        str.Append(L"01234567890123456789");
+        if (i == 0) {
+            heap = (uintptr_t)str.begin();
+            utassert(heap != 0);
         }
     }
+    utassert((uintptr_t)str.begin() == heap);
+    utassert(str.nReallocs == 1);
 
-    {
-        // RemoveAt() shrinks len; appending after that must not switch
-        // back to the inline buf (which would lose data and leak the heap alloc)
-        str::Builder str;
-        uintptr_t buf = (uintptr_t)str.begin();
-        for (int i = 0; i < 40; i++) {
-            str.AppendChar((char)('a' + (i % 26)));
+    WCHAR stack[16];
+    wstr::Builder str2(WStr(stack, dimofi(stack)));
+    str2.cap = 1024 + 1; // +1 NUL padding, same as Builder(1024)
+    heap = 0;
+    int reallocsAtHeap = -1;
+    for (int i = 0; i < 50; i++) {
+        str2.Append(L"01234567890123456789");
+        if (!str2.UsesExternalBuf() && reallocsAtHeap < 0) {
+            heap = (uintptr_t)str2.begin();
+            reallocsAtHeap = str2.nReallocs;
         }
-        uintptr_t heap = (uintptr_t)str.begin();
-        utassert(buf != heap);
-        str.RemoveAt(0, 30);
-        utassert(len(str) == 10);
-        utassert((uintptr_t)str.begin() == heap);
-        str.Append("xyz");
-        utassert((uintptr_t)str.begin() == heap);
-        utassert(str::Eq(ToStr(str), StrL("efghijklmnxyz")));
     }
+    utassert(heap != 0);
+    utassert((uintptr_t)str2.begin() == heap);
+    utassert(str2.nReallocs == reallocsAtHeap);
+}
 
-    {
-        // verify that initialCapacity hint works
-        str::Builder str(1024);
-        uintptr_t buf = 0;
-
-        for (int i = 0; i < 50; i++) {
-            str.Append("01234567890123456789");
-            if (i == 2) {
-                // we filled Str::buf (32 bytes) by putting 20 bytes
-                // and allocated heap for 1024 bytes. Remember the
-                buf = (uintptr_t)str.begin();
-            }
-        }
-        // we've appended 100*10 = 1000 chars, which is less than 1024
-        // so Str::buf should be the same as buf
-        uintptr_t buf2 = (uintptr_t)str.begin();
-        utassert(buf == buf2);
-    }
+static void wstrBuilderTest() {
+    WStrBuilderRunTwice(WStrBuilderContainsAppend);
+    WStrBuilderRunTwice(WStrBuilderGrowPastExternal);
+    WStrBuilderRunTwice(WStrBuilderRemoveAtStaysOnHeap);
+    WStrBuilderRunTwice(WStrBuilderManyAppends);
+    WStrBuilderRunTwice(WStrBuilderTakeWStr);
+    WStrBuilderCapHint();
 }
 
 // case-insensitive Find/Contains must work for non-Latin scripts, not just
@@ -391,19 +584,23 @@ static void StrArenaTest() {
     // multi-block arena: force a second chain block, then store a string there
     {
         ArenaParams params = ArenaDefaultParams();
-        params.reserve_size = 4 * 1024;
-        params.commit_size = 4 * 1024;
+        params.reserveSize = 4 * 1024;
+        params.commitSize = 4 * 1024;
         Arena* a2 = ArenaNew(params);
         utassert(a2 != nullptr);
-        void* filler = a2->Push(3 * 1024, 8, true);
+        // ArenaNew rounds the reserve up to a page, and a page is 16K on arm64
+        // macOS, not 4K - so size the pushes from the block we actually got
+        u64 half = a2->reserved / 2;
+        void* filler = a2->Push(half, 8, true);
         utassert(filler != nullptr);
-        // second large push forces a chained block (first block is ~4KB)
-        void* filler2 = a2->Push(3 * 1024, 8, true);
+        // second large push forces a chained block (two halves + the header
+        // don't fit in one)
+        void* filler2 = a2->Push(half, 8, true);
         utassert(filler2 != nullptr);
         utassert(a2->current != a2);
         StrArena sa2 = StrArenaDupStr(a2, StrL("second-block"));
         utassert(sa2 != 0);
-        utassert(sa2 >= (u32)a2->res); // compressed offset past first block
+        utassert(sa2 >= (u32)a2->reserved); // compressed offset past first block
         utassert(str::Eq(StrArenaToStr(a2, sa2), StrL("second-block")));
         ArenaDelete(a2);
     }
@@ -436,6 +633,11 @@ void StrTest() {
     utassert(str::IndexOfChar(str, 'g') == 7);
     utassert(!str::ContainsChar(str, 'x'));
     utassert(!str::ContainsChar(Str{}, 'a'));
+    utassert(str::ContainsCharAny(str, StrL("xyz g")));  // matches the space and 'g'
+    utassert(str::ContainsCharAny(str, StrL("s")));      // single candidate
+    utassert(!str::ContainsCharAny(str, StrL("XYZ")));   // none present (case-sensitive)
+    utassert(!str::ContainsCharAny(str, Str{}));         // no candidates
+    utassert(!str::ContainsCharAny(Str{}, StrL("abc"))); // empty subject
     int n = str::BufSet(Str(buf, dimof(buf)), str);
     utassert(n == len(buf) && str::Eq(buf, str));
     n = str::BufSet(Str(buf, 6), str);
@@ -861,6 +1063,7 @@ void StrTest() {
     }
 
     strStrTest();
+    wstrBuilderTest();
     StrIsDigitTest();
     StrReplaceTest();
     StrSeqTest();

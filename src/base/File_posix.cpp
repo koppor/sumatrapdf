@@ -88,6 +88,11 @@ bool IsDirectory(Str path) {
 }
 
 // No cache on non-Windows — same as an uncached attribute query.
+// Like GetFileAttributesW: returns attributes or INVALID_FILE_ATTRIBUTES.
+// On Windows, network-drive path results are cached for 1 hour (shared with
+// GetCachedAttributesEx). Offline non-fixed drives (mapped/UNC/removable) are
+// also remembered for ~4 minutes so later queries fail fast.
+// Non-Windows: no cache (same as an uncached attribute query).
 DWORD GetCachedAttributes(Str path) {
     struct stat st;
     if (!StatPath(path, st)) {
@@ -131,23 +136,23 @@ bool IsSame(Str path1, Str path2) {
     return npath1 && str::Eq(npath1, npath2);
 }
 
-bool HasVariableDriveLetter(Str) {
+bool HasVariableDriveLetter(Str /*path*/) {
     return false;
 }
 
-bool IsOnNetworkDrive(Str) {
+bool IsOnNetworkDrive(Str /*path*/) {
     return false;
 }
 
-bool IsCloudPlaceholder(Str) {
+bool IsCloudPlaceholder(Str /*path*/) {
     return false;
 }
 
-bool IsOnFixedDrive(Str) {
+bool IsOnFixedDrive(Str /*path*/) {
     return true;
 }
 
-bool SupportsChangeNotifications(Str) {
+bool SupportsChangeNotifications(Str /*path*/) {
     return false;
 }
 
@@ -181,6 +186,7 @@ TempStr GetTempFilePathTemp(Str filePrefix) {
     return Str(pathZ);
 }
 
+// Path of this process image (exe or DLL that contains this code).
 TempStr GetSelfExePathTemp() {
 #if OS_DARWIN
     char buf[PATH_MAX];
@@ -204,6 +210,7 @@ TempStr GetSelfExePathTemp() {
 #endif
 }
 
+// Directory containing GetSelfExePathTemp().
 TempStr GetSelfExeDirTemp() {
     TempStr path = GetSelfExePathTemp();
     if (!path) {
@@ -255,6 +262,9 @@ i64 GetSize(FileHandle h) {
 }
 
 i64 GetSize(Str path) {
+    if (!path) {
+        return -1;
+    }
     struct stat st;
     if (!StatPath(path, st) || S_ISDIR(st.st_mode)) {
         return -1;
@@ -385,7 +395,7 @@ bool Copy(Str dst, Str src, bool dontOverwrite, const CopyProgressCb& cbProgress
         }
 
         copied += nRead;
-        if (!cbProgress.IsEmpty()) {
+        if (cbProgress.IsValid()) {
             CopyProgress progress{copied, total < 0 ? 0 : total};
             cbProgress.Call(&progress);
         }
@@ -442,15 +452,15 @@ bool SetAttributes(Str path, DWORD attrs) {
     return chmod(PathZTemp(path), (mode_t)(attrs & 07777)) == 0;
 }
 
-int GetZoneIdentifier(Str) {
+int GetZoneIdentifier(Str /*path*/) {
     return URLZONE_INVALID;
 }
 
-bool SetZoneIdentifier(Str, int) {
+bool SetZoneIdentifier(Str /*path*/, int /*zoneId*/) {
     return true;
 }
 
-bool DeleteZoneIdentifier(Str) {
+bool DeleteZoneIdentifier(Str /*path*/) {
     return true;
 }
 
@@ -482,9 +492,7 @@ bool OverwriteAtomicRetry(Str dst, Str src, int retryCount, int retrySleepMs) {
         return false;
     }
 
-    if (retryCount < 1) {
-        retryCount = 1;
-    }
+    retryCount = std::max(retryCount, 1);
     for (int i = 0; i < retryCount; i++) {
         if (rename(PathZTemp(tempPath), PathZTemp(dst)) == 0) {
             return true;
@@ -525,7 +533,10 @@ bool Create(Str dir) {
 }
 
 // Create dir and all missing parents (like mkdir -p).
-bool CreateAll(Str dir) {
+bool CreateAll(Str dir, int* errOut) {
+    if (errOut) {
+        *errOut = 0;
+    }
     if (!dir) {
         return false;
     }
@@ -534,14 +545,22 @@ bool CreateAll(Str dir) {
     }
     TempStr parent = path::GetDirTemp(dir);
     if (!str::Eq(parent, dir) && parent && !str::Eq(parent, StrL("."))) {
-        if (!Exists(parent) && !CreateAll(parent)) {
+        if (!Exists(parent) && !CreateAll(parent, errOut)) {
             return false;
         }
     }
-    return Create(dir);
+    if (Create(dir)) {
+        return true;
+    }
+    if (errOut) {
+        *errOut = errno;
+    }
+    return false;
 }
 
-static bool RemoveAllZ(const char* dir) {
+// deletes everything inside dir; also removes dir itself when removeDir.
+// a missing dir counts as success, matching the previous RemoveAll behavior.
+static bool RemoveDirContentsZ(const char* dir, bool removeDir) {
     DIR* d = opendir(dir);
     if (!d) {
         return errno == ENOENT;
@@ -564,7 +583,7 @@ static bool RemoveAllZ(const char* dir) {
             return false;
         }
         if (S_ISDIR(st.st_mode)) {
-            if (!RemoveAllZ(child.s)) {
+            if (!RemoveDirContentsZ(child.s, true)) {
                 return false;
             }
         } else if (unlink(child.s) != 0) {
@@ -574,11 +593,20 @@ static bool RemoveAllZ(const char* dir) {
     if (errno != 0) {
         return false;
     }
+    if (!removeDir) {
+        return true;
+    }
     return rmdir(dir) == 0;
 }
 
 bool RemoveAll(Str dir) {
-    return RemoveAllZ(PathZTemp(dir));
+    return RemoveDirContentsZ(PathZTemp(dir), true);
+}
+
+// Delete everything inside dir but keep dir itself, so code that races with us
+// still finds the directory there (see SaveThumbnail / dir::CreateAll).
+bool Empty(Str dir) {
+    return RemoveDirContentsZ(PathZTemp(dir), false);
 }
 
 bool HasWriteAccess(Str dir) {

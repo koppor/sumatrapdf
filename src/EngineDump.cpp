@@ -8,7 +8,7 @@
 #include "base/TgaReader.h"
 #include "base/Win.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "Settings.h"
 #include "Flags.h"
@@ -23,17 +23,7 @@ static void Out1(Str msg) {
 }
 
 static bool NeedsEscape(Str s) {
-    // TODO: optimize to do a single loop over s
-    if (str::ContainsChar(s, '<')) {
-        return true;
-    }
-    if (str::ContainsChar(s, '&')) {
-        return true;
-    }
-    if (str::ContainsChar(s, '"')) {
-        return true;
-    }
-    return false;
+    return str::ContainsCharAny(s, StrL("<&\""));
 }
 
 static TempStr EscapeTemp(Str str) {
@@ -71,7 +61,7 @@ static TempStr EscapeTemp(Str str) {
     return ToStrTemp(escaped);
 }
 
-void DumpProperties(EngineBase* engine, bool fullDump) {
+static void DumpProperties(EngineBase* engine, bool fullDump) {
     Out1("\t<Properties\n");
     TempStr str = EscapeTemp(engine->FilePath());
     Out("\t\tFilePath=\"%s\"\n", str.s);
@@ -174,7 +164,7 @@ static TempStr DestRectToStrTemp(EngineBase* engine, IPageDestination* dest) {
     return nullptr;
 }
 
-void DumpTocItem(EngineBase* engine, TocItem* item, int level, int& idCounter) {
+static void DumpTocItem(EngineBase* engine, TocItem* item, int level, int& idCounter) {
     for (; item; item = item->next) {
         TempStr title = EscapeTemp(item->title);
         for (int i = 0; i < level; i++) {
@@ -217,7 +207,7 @@ void DumpTocItem(EngineBase* engine, TocItem* item, int level, int& idCounter) {
     }
 }
 
-void DumpToc(EngineBase* engine) {
+static void DumpToc(EngineBase* engine) {
     TocTree* tree = engine->GetToc();
     if (!tree) {
         return;
@@ -233,19 +223,19 @@ void DumpToc(EngineBase* engine) {
     }
 }
 
-Str ElementTypeToStr(IPageElement* el) {
+static Str ElementTypeToStr(IPageElement* el) {
     Kind kind = el->GetKind();
     if (kind) {
-        return Str(kind);
+        return {kind};
     }
     return StrL("unknown");
 }
 
-Str PageDestToStr(Kind kind) {
-    return Str(kind);
+__unused static Str PageDestToStr(Kind kind) {
+    return {kind};
 }
 
-void DumpPageContent(EngineBase* engine, int pageNo, bool fullDump) {
+static void DumpPageContent(EngineBase* engine, int pageNo, bool fullDump) {
     // ensure that the page is loaded
     engine->BenchLoadPage(pageNo);
 
@@ -312,14 +302,14 @@ void DumpPageContent(EngineBase* engine, int pageNo, bool fullDump) {
     Out1("\t</Page>\n");
 }
 
-void DumpThumbnail(EngineBase* engine) {
+static void DumpThumbnail(EngineBase* engine) {
     RectF rect = engine->Transform(engine->PageMediabox(1), 1, 1.0, 0);
     if (rect.IsEmpty()) {
         Out1("\t<Thumbnail />\n");
         return;
     }
 
-    float zoom = std::min(128 / (float)rect.dx, 128 / (float)rect.dy) - 0.001f;
+    float zoom = std::min(128 / rect.dx, 128 / rect.dy) - 0.001f;
     Rect thumb = RectF(0, 0, rect.dx * zoom, rect.dy * zoom).Round();
     rect = engine->Transform(ToRectF(thumb), 1, zoom, 0, true);
     RenderPageArgs args(1, zoom, 0, &rect);
@@ -340,7 +330,7 @@ void DumpThumbnail(EngineBase* engine) {
     FreePixmap(bmp);
 }
 
-void DumpData(EngineBase* engine, bool fullDump) {
+__unused static void DumpData(EngineBase* engine, bool fullDump) {
     Out1(UTF8_BOM);
     Out1("<?xml version=\"1.0\"?>\n");
     Out1("<EngineDump>\n");
@@ -390,7 +380,7 @@ static bool CheckRenderPath(Str path) {
 }
 
 // static
-bool RenderDocument(EngineBase* engine, Str renderPath, float zoom = 1.f, bool silent = false) {
+__unused static bool RenderDocument(EngineBase* engine, Str renderPath, float zoom = 1.f, bool silent = false) {
     if (!CheckRenderPath(renderPath)) {
         return false;
     }
@@ -456,7 +446,9 @@ class PasswordHolder : public PasswordUI {
 
   public:
     explicit PasswordHolder(Str password) : password(password) {}
-    Str GetPassword(Str, u8*, __unused u8 decryptionKeyOut[32], bool*) override { return str::Dup(password); }
+    Str GetPassword(Str /*path*/, u8* /*fileDigest*/, __unused u8 decryptionKeyOut[32], bool* /*saveKey*/) override {
+        return str::Dup(password);
+    }
 };
 
 void EngineDump(const Flags& flags) {
@@ -520,18 +512,14 @@ void EngineDump(const Flags& flags) {
 
 #if 0
     ScopedGdiPlus gdiPlus;
-    ScopedMui miniMui;
 
-    WIN32_FIND_DATA fdata;
-    WCHAR* pathW = CWStrTemp(filePath);
-    HANDLE hfind = FindFirstFileW(pathW, &fdata);
-    // embedded documents are referred to by an invalid path
-    // containing more information after a colon (e.g. "C:\file.pdf:3:0")
-    if (INVALID_HANDLE_VALUE != hfind) {
-        TempStr dir = path::GetDirTemp(filePath);
-        TempStr name = ToUtf8Temp(fdata.cFileName);
-        filePath = path::JoinTemp(dir, name);
-        FindClose(hfind);
+    // Normalize casing / short names when the path exists (embedded docs may use
+    // "C:\file.pdf:3:0" which does not exist as a real file path).
+    if (file::Exists(filePath)) {
+        TempStr norm = path::NormalizeTemp(filePath);
+        if (norm) {
+            filePath = norm;
+        }
     }
 
     PasswordHolder pwdUI(password);

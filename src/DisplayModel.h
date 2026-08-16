@@ -10,25 +10,37 @@ struct Annotation;
 struct PageRenderRequest;
 enum class AnnotationType;
 
+// a media box we haven't measured yet. Measuring a page of an image collection
+// means reading the image's header off disk, which is slow on network drives,
+// so continuous layout estimates the size of un-measured pages instead
+// (see DisplayModel::PageMediaBoxForLayout)
+inline bool IsMediaBoxKnown(const RectF& r) {
+    return r.dx >= 0 && r.dy >= 0;
+}
+
 /* Describes many attributes of one page in one, convenient place */
 struct PageInfo {
-    /* data that is constant for a given page. page size in document units */
-    RectF _mediaBox{};
+    /* data that is constant for a given page. page size in document units.
+       {-1, -1} size means "not measured yet" (see IsMediaBoxKnown) */
+    RectF mediaBox{0, 0, -1, -1};
     PageInfoState state = PageInfoState::Unknown;
+    /* set by Relayout() when this page was laid out with the estimated media
+       box because its own wasn't measured yet */
+    bool usedEstimatedMediaBox = false;
 
     /* data that is calculated when needed. actual content size within a page (View target) */
-    RectF contentBox{};
+    RectF contentBox;
 
     /* data that changes when zoom and rotation changes */
     /* position and size within total area after applying zoom and rotation.
        Represents display rectangle for a given page.
        Calculated in DisplayModel::Relayout() */
-    Rect pos{};
+    Rect pos;
 
     /* data that changes due to scrolling. Calculated in DisplayModel::RecalcVisibleParts() */
     float visibleRatio; /* (0.0 = invisible, 1.0 = fully visible) */
     /* position of page relative to visible view port: pos.Offset(-viewPort.x, -viewPort.y) */
-    Rect pageOnScreen{};
+    Rect pageOnScreen;
 
     // when zoomVirtual in DisplayMode is kZoomFitPage, kZoomFitWidth
     // or kZoomFitContent, this is per-page zoom level
@@ -51,6 +63,10 @@ struct ScrollState {
     double x = 0;
     double y = 0;
     int page = 0;
+    // zoom to restore along with the position, 0 for "leave the zoom alone".
+    // Only navigation history sets it (AddNavPoint(rememberZoom)), so restoring
+    // a scroll state for any other reason doesn't touch the zoom.
+    float zoom = 0;
 };
 
 struct TextSelection;
@@ -89,6 +105,7 @@ struct DisplayModel : DocController {
     void SetDisplayMode(DisplayMode mode, bool keepContinuous = false) override;
     DisplayMode GetDisplayMode() const override;
     void SetInPresentation(bool enable) override;
+    void ApplyFullscreenDisplayMode(bool enable);
     void SetZoomVirtual(float zoom, Point* fixPt) override;
     float GetZoomVirtual(bool absolute = false) const override;
     float GetNextZoomStep(float towards) const override;
@@ -104,22 +121,17 @@ struct DisplayModel : DocController {
     // asynchronously calls saveThumbnail (fails silently)
     void CreateThumbnail(Size size, const OnBitmapRendered* saveThumbnail) override;
 
-    // page labels (optional)
     bool HasPageLabels() const override;
     TempStr GetPageLabeTemp(int pageNo) const override;
     int GetPageByLabel(Str label) const override;
 
-    // common shortcuts
     bool ValidPageNo(int pageNo) const override;
     bool GoToNextPage() override;
     bool GoToPrevPage(bool toBottom = false) override;
     bool GoToFirstPage() override;
     bool GoToLastPage() override;
 
-    // for quick type determination and type-safe casting
     DisplayModel* AsFixed() override;
-
-    // the following is specific to DisplayModel
 
     EngineBase* GetEngine() const;
     Kind GetEngineType() const;
@@ -135,10 +147,14 @@ struct DisplayModel : DocController {
 
     PageInfo* GetPageInfo(int pageNo) const;
     RectF PageMediaBox(int pageNo) const;
+    RectF PageMediaBoxForLayout(int pageNo) const;
+    void UpdateEstimatedMediaBox();
+    bool EnsureMediaBoxesForVisiblePages();
+    void RelayoutKeepingView();
 
-    /* current rotation selected by user */
     int GetRotation() const;
     float GetZoomReal(int pageNo) const;
+    float MaxZoomForDocument() const;
     void Relayout(float zoomVirtual, int rotation);
 
     Rect GetViewPort() const;
@@ -150,7 +166,6 @@ struct DisplayModel : DocController {
     bool CanScrollLeft() const;
     bool CanScrollDown() const;
     bool CanScrollUp() const;
-    // true when the view is at the bottom and GoToNextPage would fail
     bool IsAtDocumentEnd() const;
     Size GetCanvasSize() const;
 
@@ -168,9 +183,6 @@ struct DisplayModel : DocController {
 
     int yOffset();
 
-    /* a "virtual" zoom level. Can be either a real zoom level in percent
-       (i.e. 100.0 is original size) or one of virtual values kZoomFitPage,
-       kZoomFitWidth or kZoomFitContent, whose real value depends on draw area size */
     void RotateBy(int rotation);
 
     Str GetTextInRegion(int pageNo, RectF region) const;
@@ -194,12 +206,12 @@ struct DisplayModel : DocController {
     void CopyNavHistory(DisplayModel& orig);
 
     void SetInitialViewSettings(DisplayMode displayMode, int newStartPage, Size viewPort, int screenDPI);
+    void SetUiDpi(int dpi);
     void SetDisplayR2L(bool r2l);
     bool GetDisplayR2L() const;
     bool GoToPageHorizontal(bool toRight);
 
     bool ShouldCacheRendering(int pageNo) const;
-    // called when we decide that the display needs to be redrawn
     void RepaintDisplay();
 
     bool InPresentation() const;
@@ -211,7 +223,7 @@ struct DisplayModel : DocController {
     Point GetContentStart(int pageNo) const;
     void RecalcVisibleParts() const;
     void RenderVisibleParts();
-    void AddNavPoint();
+    void AddNavPoint(bool rememberZoom = false);
     RectF GetContentBox(int pageNo) const;
     void CalcZoomReal(float zoomVirtual);
     void GoToPage(int pageNo, int scrollY, bool addNavPt = false, int scrollX = -1);
@@ -222,6 +234,15 @@ struct DisplayModel : DocController {
 
     /* an array of PageInfo, len of array is pageCount */
     PageInfo* pagesInfo = nullptr;
+
+    /* Lazy media boxes: don't measure every page up-front, lay out un-measured
+       pages with estimatedMediaBox and fix them up as they scroll into view.
+       See DisplayModel::PageMediaBoxForLayout / EnsureMediaBoxesForVisiblePages */
+    bool useLazyMediaBoxes = false;
+    RectF estimatedMediaBox;
+    // guards against re-entering EnsureMediaBoxesForVisiblePages() from the
+    // relayout it triggers
+    bool inMediaBoxUpdate = false;
 
     DisplayMode displayMode{DisplayMode::Automatic};
     /* In non-continuous mode is the first page from a file that we're
@@ -238,20 +259,27 @@ struct DisplayModel : DocController {
     /* total size of view port (draw area), including scroll bars */
     Size totalViewPortSize;
 
+    // WindowMargin / PageSpacing settings scaled to uiDpi (see SetUiDpi)
     WindowMargin windowMargin;
     Size pageSpacing;
+    int uiDpi = 96;
 
     /* real zoom value calculated from zoomVirtual. Same as
        zoomVirtual * 0.01 * dpiFactor
        except for kZoomFitPage, kZoomFitWidth and kZoomFitContent */
     float zoomReal{kInvalidZoom};
     float zoomVirtual{kInvalidZoom};
+    // set while SetZoomVirtual() applies an explicit Fit Content request, to skip
+    // the zoom-in damping in CalcZoomReal() (see the comment there)
+    bool exactFitContent = false;
     int rotation = 0;
     /* dpi correction factor by which _zoomVirtual has to be multiplied in
        order to get _zoomReal */
     float dpiFactor{1.0f};
     float presZoomVirtual{kInvalidZoom};
     DisplayMode presDisplayMode{DisplayMode::Automatic};
+    DisplayMode fsSavedDisplayMode{DisplayMode::Automatic};
+    bool fsDisplayModeSaved = false;
 
     Vec<ScrollState> navHistory;
     /* index of the "current" history entry (to be updated on navigation),

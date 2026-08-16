@@ -15,7 +15,7 @@
 #define OS_LINUX 0
 #endif
 
-#if defined(WIN32) || defined(_WIN32)
+#if defined(_WIN32)
 #define OS_WIN 1
 #else
 #define OS_WIN 0
@@ -77,9 +77,6 @@
 #define _CRT_SECURE_NO_WARNINGS
 #endif
 
-// Windows headers use _unused
-#define __unused [[maybe_unused]]
-
 // C/C++ standard headers  we use often
 #include <cctype>
 #include <climits>
@@ -95,9 +92,13 @@
 #include <algorithm> // for std::min, std::max
 #include <utility>   // for std::forward
 #if OS_POSIX
+// pthread.h first: glibc mutex structs have a field named __unused
 #include <pthread.h>
 #include <strings.h>
 #endif
+
+// after system headers so we don't rewrite pthread's __unused field
+#define __unused [[maybe_unused]]
 
 #define _USE_MATH_DEFINES
 #include <math.h>
@@ -153,7 +154,7 @@ using BOOL = int;
 using WCHAR = wchar_t;
 using WPARAM = uintptr_t;
 using LPARAM = intptr_t;
-using COLORREF = uint32_t;
+using LRESULT = intptr_t;
 using LCID = uint32_t;
 
 struct HWND__;
@@ -166,6 +167,10 @@ struct HIMAGELIST__;
 using HIMAGELIST = HIMAGELIST__*;
 struct HTREEITEM__;
 using HTREEITEM = HTREEITEM__*;
+struct HBITMAP__;
+using HBITMAP = HBITMAP__*;
+struct HBRUSH__;
+using HBRUSH = HBRUSH__*;
 using LPWSTR = WCHAR*;
 
 struct EXCEPTION_POINTERS;
@@ -185,7 +190,6 @@ struct FILETIME {
 constexpr int MAX_PATH = 4096;
 constexpr int URLZONE_INVALID = -1;
 constexpr int URLZONE_INTERNET = 3;
-} // namespace Gdiplus
 
 #define ZeroMemory(Destination, Length) memset((Destination), 0, (Length))
 #endif
@@ -204,10 +208,12 @@ using uint = unsigned int;
 using AtomicBool = volatile LONG;
 using AtomicInt = volatile LONG;
 using AtomicRefCount = volatile LONG;
+using AtomicPtr = void* volatile;
 #else
 using AtomicBool = volatile int;
 using AtomicInt = volatile int;
 using AtomicRefCount = volatile int;
+using AtomicPtr = void* volatile;
 #endif
 
 bool AtomicBoolGet(AtomicBool* p);
@@ -219,10 +225,11 @@ int AtomicIntInc(AtomicInt* p);
 int AtomicIntDec(AtomicInt* p);
 int AtomicRefCountAdd(AtomicRefCount* v);
 int AtomicRefCountDec(AtomicRefCount* v);
+void* AtomicPtrGet(AtomicPtr* p);
+void AtomicPtrSet(AtomicPtr* p, void* v);
+void* AtomicPtrExchange(AtomicPtr* p, void* v);
 
 #if !OS_WIN
-// milliseconds since some unspecified epoch, monotonic; a portable stand-in for
-// the Win32 GetTickCount64() (which <windows.h> already declares on Windows).
 u64 GetTickCount64();
 #endif
 
@@ -307,6 +314,7 @@ template <typename T, size_t N>
 char (&DimofSizeHelper(T (&array)[N]))[N];
 #define dimof(array) (sizeof(DimofSizeHelper(array)))
 #define dimofi(array) (int)(sizeof(DimofSizeHelper(array)))
+#define sizeofi(x) ((int)sizeof(x))
 
 #if COMPILER_MSVC
 // https://msdn.microsoft.com/en-us/library/4dt9kyhy.aspx
@@ -380,8 +388,20 @@ extern void _uploadDebugReport(Str, Str, bool, bool);
 #if defined(DEBUG)
 #define ReportDebugIf(cond) ReportIfCond(cond, #cond, FILE_LINE, false, true)
 #else
-#define ReportDebugIf(cond)
+// In release the check is gone, but the condition must still be *read*, or a
+// variable whose only consumer is a ReportDebugIf looks unused: the compiler
+// warns and clang-analyzer-deadcode.DeadStores reports a dead store, tempting
+// someone to "clean up" the variable and delete the debug assert with it.
+// Passing it to an empty inline function is a real read that costs nothing --
+// the call and the (side-effect-free) condition both optimize away.
+inline void ReportDebugIfNoOp(bool) {}
+#define ReportDebugIf(cond) ReportDebugIfNoOp(!!(cond))
 #endif
+
+// ugly hack: logf() is our logging macro so we must provide a way to call logf() from math library
+inline float math_logf(float f) {
+    return logf(f);
+}
 
 /* Logging macros are defined here but must be implemented by the app because different apps have different logging
  * needs. */
@@ -403,12 +423,12 @@ void* AllocZero(int count, int size);
 
 template <typename T>
 FORCEINLINE T* AllocArray(int n) {
-    return (T*)AllocZero(n, (int)sizeof(T));
+    return (T*)AllocZero(n, sizeofi(T));
 }
 
 template <typename T>
 FORCEINLINE T* AllocStruct() {
-    return (T*)AllocZero(1, (int)sizeof(T));
+    return (T*)AllocZero(1, sizeofi(T));
 }
 
 template <typename T>
@@ -633,7 +653,9 @@ class ExitScopeHelp {
 using func0Ptr = void (*)(void*);
 using funcVoidPtr = void (*)();
 
-#define kFuncNoArg ((void*)(-1))
+// Func1 keeps a flag in userData's lowest bit, so every value stored there
+// has to be even - including this sentinel, which is why it is ~1 and not -1
+#define kFuncNoArg ((void*)~(uintptr_t)1)
 
 // the simplest possible function that ties a function and a single argument to it
 // we get type safety and convenience with mkFunc()
@@ -697,10 +719,21 @@ Func0 MkMethod0(T* obj) {
 
 template <typename T>
 struct Func1 {
+    // bit 0 of userData says fn takes no T, so Call() drops the argument -
+    // that's how a Func0 can stand in for a Func1. Everything we store is at
+    // least 2-byte aligned (and kFuncNoArg is even), so the bit is free and the
+    // struct stays two words
+    static constexpr uintptr_t kDropsArgBit = 1;
+
     void (*fn)(void*, T) = nullptr;
-    void* userData = nullptr;
+    uintptr_t userData = 0;
 
     Func1() = default;
+    // a Func0 is a Func1 that doesn't look at its argument
+    Func1(const Func0& that) {
+        this->fn = (void (*)(void*, T))that.fn;
+        this->SetData(that.userData, true);
+    }
     // copy constructor
     Func1(const Func1& that) {
         this->fn = that.fn;
@@ -716,19 +749,36 @@ struct Func1 {
     }
     ~Func1() = default;
 
+    void SetData(void* d, bool dropsArg) {
+        // an odd pointer would collide with the flag. Nothing we take the
+        // address of is 1-byte aligned, so this means the caller handed us
+        // something that isn't a real pointer
+        ReportIf(((uintptr_t)d & kDropsArgBit) != 0);
+        userData = (uintptr_t)d | (dropsArg ? kDropsArgBit : 0);
+    }
     bool IsValid() const { return fn != nullptr; }
-    bool IsEmpty() const { return fn == nullptr; }
     void Call(T arg) const {
         if (!fn) {
             return;
         }
-        if (userData == kFuncNoArg) {
+        void* d = (void*)(userData & ~kDropsArgBit);
+        if (userData & kDropsArgBit) {
+            if (d == kFuncNoArg) {
+                auto func = (funcVoidPtr)fn;
+                func();
+            } else {
+                auto func = (func0Ptr)fn;
+                func(d);
+            }
+            return;
+        }
+        if (d == kFuncNoArg) {
             using fptr = void (*)(T);
             auto func = (fptr)fn;
             func(arg);
             return;
         }
-        fn(userData, arg);
+        fn(d, arg);
     }
 };
 
@@ -742,7 +792,7 @@ Func1<TArg> MkMethod1(T* obj) {
     auto res = Func1<TArg>{};
     using fptr = void (*)(void*, TArg);
     res.fn = (fptr)&MethodTrampoline1<T, TArg, Method>;
-    res.userData = (void*)obj;
+    res.SetData((void*)obj, false);
     return res;
 }
 
@@ -751,7 +801,7 @@ Func1<T2> MkFunc1(void (*fn)(T1*, T2), T1* d) {
     auto res = Func1<T2>{};
     using fptr = void (*)(void*, T2);
     res.fn = (fptr)fn;
-    res.userData = (void*)d;
+    res.SetData((void*)d, false);
     return res;
 }
 
@@ -760,7 +810,7 @@ Func1<T2> MkFunc1Void(void (*fn)(T2)) {
     auto res = Func1<T2>{};
     using fptr = void (*)(void*, T2);
     res.fn = (fptr)fn;
-    res.userData = kFuncNoArg;
+    res.SetData(kFuncNoArg, false);
     return res;
 }
 
@@ -769,7 +819,7 @@ Func1<T2>* NewFunc1(void (*fn)(T1*, T2), T1* d) {
     auto res = new Func1<T2>{};
     using fptr = void (*)(void*, T2);
     res->fn = (fptr)fn;
-    res->userData = (void*)d;
+    res->SetData((void*)d, false);
     return res;
 }
 
@@ -781,14 +831,16 @@ int setMinMax(int& v, int minVal, int maxVal);
 extern AtomicInt gAllowAllocFailure;
 
 #include "base/Geom.h"
+// Thread (Mutex) then Arena before Vec: Vec templates call Alloc/Free/Realloc;
+// GCC two-phase lookup needs those names declared at the template definition site.
+#include "base/Thread.h"
+#include "base/Arena.h"
 #include "base/Vec.h"
 #include "base/Str.h"
 #include "base/StrUtf8.h"
 #include "base/StrFormatParse.h"
 #include "base/StrVec.h"
 #include "base/Strconv.h"
-#include "base/Thread.h"
-#include "base/Arena.h"
 #include "base/Scoped.h"
 #include "base/Color.h"
 

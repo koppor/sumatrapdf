@@ -7,7 +7,7 @@
 #include "base/File.h"
 #include "base/Zip.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "DocController.h"
 #include "EngineBase.h"
@@ -86,10 +86,29 @@ static i64 GetSyncFileTimestamp(Str path) {
     return (i64)uli.QuadPart;
 }
 
+// Modification time of whichever of the two files the index can be built from is
+// newer. SyncTex::RebuildIndexIfNeeded() reads either <base>.synctex or, when only the
+// compressed form exists, <base>.synctex.gz -- but Create() stores the .synctex
+// path either way (synctex_parser.c insists on it). Stat'ing only the stored
+// path meant that with a gzipped synctex -- what -synctex=1 produces, the
+// MiKTeX/TeX Live default -- the timestamp was always 0 for a file that never
+// exists, so "has it changed?" was never true and a recompile's new synctex was
+// never picked up: forward search kept answering from the first compile's
+// mapping for the rest of the session (issue #5040). Only a reload of the PDF
+// itself, which builds a new Synchronizer, escaped it.
+i64 Synchronizer::SyncFileTimestamp() const {
+    i64 stamp = GetSyncFileTimestamp(syncFilePath);
+    if (str::EndsWithI(syncFilePath, StrL(".synctex"))) {
+        i64 gzStamp = GetSyncFileTimestamp(str::JoinTemp(syncFilePath, StrL(".gz")));
+        stamp = std::max(stamp, gzStamp);
+    }
+    return stamp;
+}
+
 Synchronizer::Synchronizer(Str syncFilePathIn, Str pdffilename) {
     syncFilePath = str::Dup(syncFilePathIn);
     pdfPath = str::Dup(pdffilename);
-    syncfileTimestamp = GetSyncFileTimestamp(syncFilePath);
+    syncfileTimestamp = SyncFileTimestamp();
 }
 
 Synchronizer::~Synchronizer() {
@@ -103,9 +122,11 @@ bool Synchronizer::NeedsToRebuildIndex() {
         return true;
     }
 
-    // has the synchronization file been changed on disk?
-    i64 newstamp = GetSyncFileTimestamp(syncFilePath);
-    if (newstamp > syncfileTimestamp) {
+    // has the synchronization file been changed on disk? != rather than >: a
+    // rewrite can also move the timestamp backwards (a toolchain restoring an
+    // older file, a copy that preserves mtime), and that's a change too
+    i64 newstamp = SyncFileTimestamp();
+    if (newstamp != syncfileTimestamp) {
         // update time stamp
         syncfileTimestamp = newstamp;
         return true; // the file has changed!
@@ -116,7 +137,7 @@ bool Synchronizer::NeedsToRebuildIndex() {
 
 int Synchronizer::MarkIndexWasRebuilt() {
     needsToRebuildIndex = false;
-    syncfileTimestamp = GetSyncFileTimestamp(syncFilePath);
+    syncfileTimestamp = SyncFileTimestamp();
     return PDFSYNCERR_SUCCESS;
 }
 
@@ -272,9 +293,8 @@ int Pdfsync::RebuildIndexIfNeeded() {
                 pspoint.page = page;
                 if (0 == page || page > maxPageNo) {
                     /* ignore point for invalid page number */;
-                } else if (!str::IsNull(str::Parse(line, "p %u %u %u", &pspoint.record, &pspoint.x, &pspoint.y))) {
-                    points.Append(pspoint);
-                } else if (!str::IsNull(str::Parse(line, "p* %u %u %u", &pspoint.record, &pspoint.x, &pspoint.y))) {
+                } else if (!str::IsNull(str::Parse(line, "p %u %u %u", &pspoint.record, &pspoint.x, &pspoint.y)) ||
+                           !str::IsNull(str::Parse(line, "p* %u %u %u", &pspoint.record, &pspoint.x, &pspoint.y))) {
                     points.Append(pspoint);
                 }
                 // else dbg("Bad 'p' line in the pdfsync file");
@@ -409,9 +429,7 @@ int Pdfsync::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
 
     *line = (int)found->line;
     *col = (int)found->column;
-    if (*col < 0) {
-        *col = 0;
-    }
+    *col = std::max(*col, 0);
 
     return PDFSYNCERR_SUCCESS;
 }
@@ -426,7 +444,7 @@ int Pdfsync::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
 // (within a range of EPSILON_LINE)
 //
 // The function returns PDFSYNCERR_SUCCESS if a matching record was found.
-UINT Pdfsync::SourceToRecord(Str srcfilename, int line, int, Vec<int>& records) {
+UINT Pdfsync::SourceToRecord(Str srcfilename, int line, int /*col*/, Vec<int>& records) {
     if (!srcfilename) {
         return PDFSYNCERR_INVALID_ARGUMENT;
     }
@@ -547,7 +565,7 @@ static Str ConvertLocalToUTF8(Str localStr) {
         return {};
     }
     UINT acp = GetACP();
-    int wLen = MultiByteToWideChar(acp, MB_ERR_INVALID_CHARS, localStr.s, -1, NULL, 0);
+    int wLen = MultiByteToWideChar(acp, MB_ERR_INVALID_CHARS, localStr.s, -1, nullptr, 0);
     if (wLen == 0) {
         return {};
     }
@@ -558,7 +576,7 @@ static Str ConvertLocalToUTF8(Str localStr) {
     if (MultiByteToWideChar(acp, MB_ERR_INVALID_CHARS, localStr.s, -1, wBuf, wLen) == 0) {
         return {};
     }
-    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wBuf, -1, NULL, 0, NULL, NULL);
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wBuf, -1, nullptr, 0, nullptr, nullptr);
     if (utf8Len == 0) {
         return {};
     }
@@ -566,14 +584,14 @@ static Str ConvertLocalToUTF8(Str localStr) {
     if (!utf8Buf) {
         return {};
     }
-    if (WideCharToMultiByte(CP_UTF8, 0, wBuf, -1, utf8Buf, utf8Len, NULL, NULL) == 0) {
+    if (WideCharToMultiByte(CP_UTF8, 0, wBuf, -1, utf8Buf, utf8Len, nullptr, nullptr) == 0) {
         free(utf8Buf);
         return {};
     }
     return Str(utf8Buf, utf8Len - 1);
 }
 
-TempStr CopyPlainSyncToTempFile(TempStr pathSync) {
+static TempStr CopyPlainSyncToTempFile(TempStr pathSync) {
     if (!pathSync) {
         return {};
     }
@@ -608,7 +626,7 @@ TempStr CopyPlainSyncToTempFile(TempStr pathSync) {
     return tempPathSync;
 }
 
-TempStr DealPlainSync(TempStr pathSync) {
+static TempStr DealPlainSync(TempStr pathSync) {
     if (!pathSync) {
         return {};
     }
@@ -618,7 +636,7 @@ TempStr DealPlainSync(TempStr pathSync) {
         return {};
     }
     TempStr srcZ = str::DupTemp(src);
-    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, srcZ.s, -1, NULL, 0);
+    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, srcZ.s, -1, nullptr, 0);
     if (wlen != 0) {
         logf("DealPlainSync: '%s' is utf-8 (created by lualatex)\n", pathSync);
         return pathSync;
@@ -668,7 +686,7 @@ static bool IsGzipFile(Str path) {
 }
 
 // returns path of ungzipped file
-TempStr ungzipToTempSync(Str gzPath) {
+static TempStr ungzipToTempSync(Str gzPath) {
     if (!gzPath) {
         return {};
     }
@@ -830,6 +848,19 @@ int SyncTex::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
         return PDFSYNCERR_UNKNOWN_SOURCEFILE;
     }
 
+    // The name comes verbatim from the .synctex file, which travels with the PDF
+    // and is entirely attacker-controlled. It ends up on the command line of the
+    // configured inverse-search editor (BuildOpenFileCmdTemp), so a name like
+    //   foo.tex" --install-extension evil.vsix --
+    // breaks out of the editor template's quotes and injects arguments
+    // (GHSA-jf4v-rw66-j4w2). None of these characters can occur in a real
+    // Windows path, so a name that has one is not a source file we should act
+    // on. A '*' is legitimate here - SyncTeX encodes spaces as '*'.
+    if (str::ContainsCharAny(name, StrL("\"<>|\r\n\t"))) {
+        logf("SyncTex::DocToSource: rejecting source name with an illegal char: '%s'\n", name);
+        return PDFSYNCERR_UNKNOWN_SOURCEFILE;
+    }
+
     filename = str::Dup(name);
     if (!filename) {
         return PDFSYNCERR_OUTOFMEMORY;
@@ -865,9 +896,7 @@ int SyncTex::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
 
     *line = synctex_node_line(node);
     *col = synctex_node_column(node);
-    if (*col < 0) {
-        *col = 0;
-    }
+    *col = std::max(*col, 0);
 
     return PDFSYNCERR_SUCCESS;
 }

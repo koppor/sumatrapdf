@@ -18,18 +18,24 @@
 #include "SumatraConfig.h"
 #include "Flags.h"
 #include "Version.h"
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
+#include "gui/PlatformFont.h"
+#include "gui/Gfx.h"
+#include "gui/VirtCtrl.h"
+
 #include "Installer.h"
 
 // set to true to enable shadow effect
 constexpr bool kDrawTextShadow = true;
 constexpr bool kDrawMsgTextShadow = false;
 
-constexpr COLORREF kInstallerWinBgColor = RGB(0xff, 0xf2, 0); // yellow
+constexpr Color kInstallerWinBgColor = MkRgb(0xff, 0xf2, 0); // yellow
 
 constexpr DWORD kTenSecondsInMs = 10 * 1000;
 
 using Gdiplus::Bitmap;
-using Gdiplus::Color;
 using Gdiplus::CompositingQualityHighQuality;
 using Gdiplus::Font;
 using Gdiplus::FontStyleRegular;
@@ -42,25 +48,25 @@ using Gdiplus::StringAlignmentCenter;
 using Gdiplus::StringFormat;
 using Gdiplus::StringFormatFlagsDirectionRightToLeft;
 
-Color gCol1(196, 64, 50);
-Color gCol1Shadow(134, 48, 39);
-Color gCol2(227, 107, 35);
-Color gCol2Shadow(155, 77, 31);
-Color gCol3(93, 160, 40);
-Color gCol3Shadow(51, 87, 39);
-Color gCol4(69, 132, 190);
-Color gCol4Shadow(47, 89, 127);
-Color gCol5(112, 115, 207);
-Color gCol5Shadow(66, 71, 118);
+Gdiplus::Color gCol1(196, 64, 50);
+Gdiplus::Color gCol1Shadow(134, 48, 39);
+Gdiplus::Color gCol2(227, 107, 35);
+Gdiplus::Color gCol2Shadow(155, 77, 31);
+Gdiplus::Color gCol3(93, 160, 40);
+Gdiplus::Color gCol3Shadow(51, 87, 39);
+Gdiplus::Color gCol4(69, 132, 190);
+Gdiplus::Color gCol4Shadow(47, 89, 127);
+Gdiplus::Color gCol5(112, 115, 207);
+Gdiplus::Color gCol5Shadow(66, 71, 118);
 
-Color COLOR_MSG_WELCOME(gCol5);
-Color COLOR_MSG_OK(gCol5);
-Color COLOR_MSG_INSTALLATION(gCol5);
-Color COLOR_MSG_FAILED(gCol1);
+Gdiplus::Color COLOR_MSG_WELCOME(gCol5);
+Gdiplus::Color COLOR_MSG_OK(gCol5);
+Gdiplus::Color COLOR_MSG_INSTALLATION(gCol5);
+Gdiplus::Color COLOR_MSG_FAILED(gCol1);
 
 HWND gHwndFrame = nullptr;
 Str gFirstError;
-bool gForceCrash = false;
+__unused static bool gForceCrash = false;
 Str gMsgError;
 int gBottomPartDy = 0;
 int gButtonDy = 0;
@@ -72,6 +78,7 @@ Str gDefaultMsg; // Note: translation, not freeing
 // case-insensitive check whether dir is a ';'-delimited component of path.
 // substring matching would wrongly match a longer sibling entry (e.g.
 // "...\SumatraPDFViewer" contains "...\SumatraPDF"), so compare whole entries.
+// case-insensitive check whether dir is a ';'-delimited component of a PATH-like string
 bool IsDirInPath(Str path, Str dir) {
     StrVec parts;
     Split(&parts, path, ";");
@@ -106,7 +113,7 @@ bool WriteRegExpandSz(HKEY root, Str keyName, Str valueName, Str value) {
 }
 
 static Str gMsg;
-static Color gMsgColor;
+static Gdiplus::Color gMsgColor;
 
 static StrVec gProcessesToClose;
 
@@ -128,7 +135,7 @@ void NotifyFailed(Str msg) {
     logf("NotifyFailed: %s\n", msg);
 }
 
-void SetMsg(Str msg, Color color) {
+void SetMsg(Str msg, Gdiplus::Color color) {
     gMsg = str::Dup(GetPermArena(), msg);
     gMsgColor = color;
 }
@@ -185,6 +192,7 @@ static bool IsPathUnderOrEqualDir(Str path, Str dir) {
     return false;
 }
 
+// true if path is under Program Files / Program Files (x86)
 bool IsPathUnderProgramFiles(Str path) {
     if (!path) {
         return false;
@@ -227,6 +235,7 @@ static bool CanWriteToDirectory(Str dir) {
     return true;
 }
 
+// true if install needs a UAC elevation (all-users, Program Files, or not writable)
 bool InstallNeedsElevation(Str installDir, bool allUsers) {
     if (allUsers) {
         return true;
@@ -717,7 +726,7 @@ void SetDefaultMsg() {
     SetMsg(gDefaultMsg, COLOR_MSG_WELCOME);
 }
 
-void InvalidateFrame() {
+static void InvalidateFrame() {
     HwndRepaintNow(gHwndFrame);
 }
 
@@ -750,7 +759,7 @@ bool CheckInstallUninstallPossible(HWND hwnd, bool silent) {
 typedef struct {
     // part that doesn't change
     char c;
-    Color col, colShadow;
+    Gdiplus::Color col, colShadow;
     float rotation;
     float dyOff; // displacement
 
@@ -760,7 +769,7 @@ typedef struct {
 } LetterInfo;
 
 // clang-format off
-LetterInfo gLetters[] = {
+static LetterInfo gLetters[] = {
     {'S', gCol1, gCol1Shadow, -3.f, 0, 0, 0},
     {'U', gCol2, gCol2Shadow, 0.f, 0, 0, 0},
     {'M', gCol3, gCol3Shadow, 2.f, -2.f, 0, 0},
@@ -817,7 +826,7 @@ static void SetLettersSumatra() {
 
 static FrameTimeoutCalculator* gRevealingLettersAnim = nullptr;
 
-int gRevealingLettersAnimLettersToShow;
+static int gRevealingLettersAnimLettersToShow;
 
 static void RevealingLettersAnimStart() {
     int framesPerSec = (int)(double(kSumatraLettersCount) / REVEALING_ANIM_DUR);
@@ -859,35 +868,32 @@ static void CalcLettersLayout(Graphics& g, Font* f, int dx) {
         return;
     }
 
-    LetterInfo* li;
     StringFormat sfmt;
     const float letterSpacing = -12.f;
     float totalDx = -letterSpacing; // counter last iteration of the loop
     WCHAR s[2]{};
     Gdiplus::PointF origin(0.f, 0.f);
     Gdiplus::RectF bbox;
-    for (int i = 0; i < dimofi(gLetters); i++) {
-        li = &gLetters[i];
-        s[0] = li->c;
+    for (LetterInfo& li : gLetters) {
+        s[0] = li.c;
         g.MeasureString(s, 1, f, origin, &sfmt, &bbox);
-        li->dx = bbox.Width;
-        li->dy = bbox.Height;
-        totalDx += li->dx;
+        li.dx = bbox.Width;
+        li.dy = bbox.Height;
+        totalDx += li.dx;
         totalDx += letterSpacing;
     }
 
     float x = ((float)dx - totalDx) / 2.f;
-    for (int i = 0; i < dimofi(gLetters); i++) {
-        li = &gLetters[i];
-        li->x = x;
-        x += li->dx;
+    for (LetterInfo& li : gLetters) {
+        li.x = x;
+        x += li.dx;
         x += letterSpacing;
     }
     RevealingLettersAnimStart();
     didLayout = TRUE;
 }
 
-static float DrawMessage(Graphics& g, Str msg, float y, float dx, Color color) {
+static float DrawMessage(Graphics& g, Str msg, float y, float dx, Gdiplus::Color color) {
     WCHAR* s = CWStrTemp(msg);
 
     Font f(L"Impact", 16, FontStyleRegular);
@@ -905,7 +911,7 @@ static float DrawMessage(Graphics& g, Str msg, float y, float dx, Color color) {
     if (kDrawMsgTextShadow) {
         bbox.X--;
         bbox.Y++;
-        SolidBrush b(Color(0xff, 0xff, 0xff));
+        SolidBrush b(Gdiplus::Color(0xff, 0xff, 0xff));
         g.DrawString(s, -1, &f, bbox, &sft, &b);
         bbox.X++;
         bbox.Y--;
@@ -918,27 +924,25 @@ static float DrawMessage(Graphics& g, Str msg, float y, float dx, Color color) {
 }
 
 static void DrawSumatraLetters(Graphics& g, Font* f, Font* fVer, float y) {
-    LetterInfo* li;
     WCHAR s[2]{};
-    for (int i = 0; i < dimofi(gLetters); i++) {
-        li = &gLetters[i];
-        s[0] = li->c;
+    for (const LetterInfo& li : gLetters) {
+        s[0] = li.c;
         if (s[0] == ' ') {
             return;
         }
 
-        g.RotateTransform(li->rotation, MatrixOrderAppend);
+        g.RotateTransform(li.rotation, MatrixOrderAppend);
         if (kDrawTextShadow) {
             // draw shadow first
-            SolidBrush b2(li->colShadow);
-            Gdiplus::PointF o2(li->x - 3.f, y + 4.f + li->dyOff);
+            SolidBrush b2(li.colShadow);
+            Gdiplus::PointF o2(li.x - 3.f, y + 4.f + li.dyOff);
             g.DrawString(s, 1, f, o2, &b2);
         }
 
-        SolidBrush b1(li->col);
-        Gdiplus::PointF o1(li->x, y + li->dyOff);
+        SolidBrush b1(li.col);
+        Gdiplus::PointF o1(li.x, y + li.dyOff);
         g.DrawString(s, 1, f, o1, &b1);
-        g.RotateTransform(li->rotation, MatrixOrderAppend);
+        g.RotateTransform(li.rotation, MatrixOrderAppend);
         g.ResetTransform();
     }
 
@@ -951,10 +955,10 @@ static void DrawSumatraLetters(Graphics& g, Font* f, Font* fVer, float y) {
 
     const WCHAR* ver_s = L"v" CURR_VERSION_STR;
     if (kDrawTextShadow) {
-        SolidBrush b1(Color(0, 0, 0));
+        SolidBrush b1(Gdiplus::Color(0, 0, 0));
         g.DrawString(ver_s, -1, fVer, Gdiplus::PointF(x2 - 2, y2 - 1), &b1);
     }
-    SolidBrush b2(Color(0xff, 0xff, 0xff));
+    SolidBrush b2(Gdiplus::Color(0xff, 0xff, 0xff));
     g.DrawString(ver_s, -1, fVer, Gdiplus::PointF(x2, y2), &b2);
     g.ResetTransform();
 }
@@ -990,7 +994,7 @@ static void DrawFrame2(Graphics& g, Rect r, bool skipMessage) {
     }
 }
 
-static void DrawFrame(HWND hwnd, HDC dc, PAINTSTRUCT*, bool skipMessage) {
+static void DrawFrame(HWND hwnd, HDC dc, PAINTSTRUCT* /*ps*/, bool skipMessage) {
     // TODO: cache bmp object?
     Graphics g(dc);
     Rect rc = HwndClientRect(hwnd);
@@ -1000,9 +1004,16 @@ static void DrawFrame(HWND hwnd, HDC dc, PAINTSTRUCT*, bool skipMessage) {
     g.DrawImage(&bmp, 0, 0);
 }
 
-void OnPaintFrame(HWND hwnd, bool skipMessage) {
+void OnPaintFrame(HWND hwnd, bool skipMessage, VirtRoot* virt) {
     PAINTSTRUCT ps;
     HDC dc = BeginPaint(hwnd, &ps);
     DrawFrame(hwnd, dc, &ps, skipMessage);
+    if (virt) {
+        // DrawFrame() has just painted the background for us, so the virtual
+        // controls only draw themselves on top of it
+        SetBkMode(dc, TRANSPARENT);
+        GfxHdc gfx(dc);
+        virt->Paint(&gfx, HwndClientRect(hwnd));
+    }
     EndPaint(hwnd, &ps);
 }

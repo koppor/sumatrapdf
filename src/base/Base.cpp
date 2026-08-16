@@ -51,11 +51,11 @@ void* RoundUp(void* d, int rounding) {
 int RoundToPowerOf2(int size) {
     int n = 1;
     while (n < size) {
-        n *= 2;
-        if (n <= 0) {
-            // overflow: no power of 2 fits in an int
+        // Check before doubling so signed overflow is never UB.
+        if (n > (INT_MAX / 2)) {
             return -1;
         }
+        n *= 2;
     }
     return n;
 }
@@ -126,13 +126,13 @@ u32 MurmurHash2(Str s) {
 }
 
 u32 MurmurHash2(WStr s) {
-    return MurmurHash2(s.s, s.len * (int)sizeof(wchar_t));
+    return MurmurHash2(s.s, s.len * sizeofi(wchar_t));
 }
 
 // variation of MurmurHash2 which deals with strings that are
 // mostly ASCII and should be treated case independently
 u32 MurmurHashWStrI(WStr str) {
-    auto a = GetTempArena();
+    auto* a = GetTempArena();
     u8* data = (u8*)a->Alloc(str.len);
     u8* dst = data;
     for (int i = 0; i < str.len; i++) {
@@ -223,11 +223,7 @@ Func0 MkMethod0Void(funcVoidPtr fn, T* self) {
 #endif
 
 int setMinMax(int& v, int minVal, int maxVal) {
-    if (v < minVal) {
-        v = minVal;
-    }
-    if (v > maxVal) {
-        v = maxVal;
-    }
+    v = std::max(v, minVal);
+    v = std::min(v, maxVal);
     return v;
 }

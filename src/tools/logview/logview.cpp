@@ -24,6 +24,16 @@
 
 #include "base/Base.h"
 #include "base/Win.h"
+#include "gui/Dpi.h"
+#include "base/ScopedWin.h"
+
+#include "gui/UIModels.h"
+#include "gui/Layout.h"
+#include "gui/win/WinGui.h"
+#include "gui/PlatformFont.h"
+#include "gui/Gfx.h"
+#include "gui/GuiColors.h"
+#include "gui/VirtCtrl.h"
 
 // ---- logging required by the base library (we don't link SumatraLog.cpp) ----
 
@@ -59,13 +69,13 @@ constexpr int WM_APP_NEW_LOGS = WM_APP + 1;
 constexpr UINT_PTR kFilterTimerId = 1;
 constexpr UINT kFilterDebounceMs = 300;
 
-constexpr COLORREF kColLogBg = RGB(0xff, 0xff, 0xff);
-constexpr COLORREF kColLogText = RGB(0, 0, 0);
-constexpr COLORREF kColHili = RGB(0xff, 0xff, 0x00);
-constexpr COLORREF kColTabBar = RGB(0xd8, 0xd8, 0xd8);
-constexpr COLORREF kColTabSel = RGB(0xff, 0xff, 0xff);
-constexpr COLORREF kColKbd = RGB(0x80, 0x80, 0x80);
-constexpr COLORREF kColValBg = RGB(0xf3, 0xf3, 0xf3);
+constexpr Color kColLogBg = kColWhite;
+constexpr Color kColLogText = kColBlack;
+constexpr Color kColHili = kColYellow;
+constexpr Color kColTabBar = MkRgb(0xd8, 0xd8, 0xd8);
+constexpr Color kColTabSel = kColWhite;
+constexpr Color kColKbd = MkRgb(0x80, 0x80, 0x80);
+constexpr Color kColValBg = MkRgb(0xf3, 0xf3, 0xf3);
 
 enum {
     IdcClear = 100, // 'c' button
@@ -108,20 +118,20 @@ static Vec<Str> gTerms; // views into gFilter, one per space-separated term
 static Mutex gQueueMutex;
 static Vec<PendingLine> gQueue;
 
+struct LogViewWnd;
+struct LogLinesWnd;
+struct TabBarCtrl;
+
 // windows / gdi
+static LogViewWnd* gWnd = nullptr;
 static HWND gHwndMain = nullptr;
-static HWND gHwndFilter = nullptr;
-static HWND gHwndCount = nullptr;
-static HWND gHwndClear = nullptr;
-static HWND gHwndAbout = nullptr;
-static HWND gHwndTabs = nullptr;
 static HWND gHwndLog = nullptr;
 static int gWheelAccum = 0; // accumulated mouse-wheel delta (for hi-res wheels)
-static HFONT gUiFont = nullptr;
-static HFONT gMonoFont = nullptr;
+static PlatformFont* gUiFont = nullptr;
+static PlatformFont* gMonoFont = nullptr;
 static int gLineDy = 16; // height of one log row, in pixels
 
-// tab hit-testing rects, rebuilt on each tab-bar paint
+// tab hit-testing rects, rebuilt on each tab-bar paint (in window coords)
 struct TabHit {
     RECT rc;      // whole tab
     RECT rcClose; // the 'x' close area
@@ -134,6 +144,8 @@ static int DpiScale(int x) {
 }
 
 // ------------------------------------------------------------------ helpers
+
+static void InvalidateTabBar();
 
 static Tab* SelTab() {
     if (gSel < 0 || gSel >= len(gTabs)) {
@@ -262,6 +274,8 @@ static void ScrollToBottom(Tab* tab) {
     tab->follow = true;
 }
 
+static void SetCountText(Str s);
+
 static void UpdateCountLabel() {
     Tab* tab = SelTab();
     WCHAR buf[128];
@@ -278,7 +292,7 @@ static void UpdateCountLabel() {
             wsprintfW(buf, L"%d of %d lines · %s", n, total, sizeBuf);
         }
     }
-    SetWindowTextW(gHwndCount, buf);
+    SetCountText(ToUtf8Temp(WStr(buf, (int)wcslen(buf))));
 }
 
 // ------------------------------------------------------- ingesting log lines
@@ -295,7 +309,7 @@ static Tab* FindOrCreateTab(int connNo) {
     tab->name = str::Dup(StrL("logs"));
     gTabs.Append(tab);
     gSel = len(gTabs) - 1; // select the newest client, like the web ui
-    InvalidateRect(gHwndTabs, nullptr, TRUE);
+    InvalidateTabBar();
     return tab;
 }
 
@@ -365,7 +379,7 @@ static void IngestLine(HDC measureDC, int connNo, Str raw) {
     if (str::StartsWith(line, kAppPrefix)) {
         str::Free(tab->name);
         tab->name = str::Dup(Str(line.s + kAppPrefix.len, line.len - kAppPrefix.len));
-        InvalidateRect(gHwndTabs, nullptr, TRUE);
+        InvalidateTabBar();
     }
 
     int w = MeasureLineWidth(measureDC, stored);
@@ -393,13 +407,14 @@ static void DrainQueue() {
     }
 
     HDC hdc = GetDC(gHwndLog);
-    HFONT old = (HFONT)SelectObject(hdc, gMonoFont);
-    for (int i = 0; i < n; i++) {
-        PendingLine& pl = local[i];
-        IngestLine(hdc, pl.connNo, Str(pl.text));
-        free(pl.text);
+    {
+        ScopedSelectFont selectFont(hdc, gMonoFont->GetHFont());
+        for (int i = 0; i < n; i++) {
+            PendingLine& pl = local[i];
+            IngestLine(hdc, pl.connNo, Str(pl.text));
+            free(pl.text);
+        }
     }
-    SelectObject(hdc, old);
     ReleaseDC(gHwndLog, hdc);
 
     // pause is automatic: follow the tail only while the tab is in follow mode
@@ -651,49 +666,49 @@ static void PaintLog(HWND hwnd) {
     HDC hdc = CreateCompatibleDC(hdcWin);
     HBITMAP bmp = CreateCompatibleBitmap(hdcWin, clientW, clientH);
     HBITMAP oldBmp = (HBITMAP)SelectObject(hdc, bmp);
-    HFONT oldFont = (HFONT)SelectObject(hdc, gMonoFont);
+    {
+        ScopedSelectFont selectFont(hdc, gMonoFont->GetHFont());
 
-    HBRUSH bgBrush = CreateSolidBrush(kColLogBg);
-    FillRect(hdc, &client, bgBrush);
-    DeleteObject(bgBrush);
+        HBRUSH bgBrush = CreateSolidBrush(kColLogBg);
+        FillRect(hdc, &client, bgBrush);
+        DeleteObject(bgBrush);
 
-    Tab* tab = SelTab();
-    if (tab && len(tab->filtered) > 0) {
-        int rows = clientH / gLineDy + 1;
-        int top = tab->scrollTop;
-        int nFiltered = len(tab->filtered);
-        int x = -tab->scrollX;
-        for (int row = 0; row < rows; row++) {
-            int fi = top + row;
-            if (fi >= nFiltered) {
-                break;
+        Tab* tab = SelTab();
+        if (tab && len(tab->filtered) > 0) {
+            int rows = clientH / gLineDy + 1;
+            int top = tab->scrollTop;
+            int nFiltered = len(tab->filtered);
+            int x = -tab->scrollX;
+            for (int row = 0; row < rows; row++) {
+                int fi = top + row;
+                if (fi >= nFiltered) {
+                    break;
+                }
+                int lineIdx = tab->filtered[fi];
+                Str line = tab->logs[lineIdx];
+                DrawLogLine(hdc, x, row * gLineDy, line);
             }
-            int lineIdx = tab->filtered[fi];
-            Str line = tab->logs[lineIdx];
-            DrawLogLine(hdc, x, row * gLineDy, line);
+            DrawValuesOverlay(hdc, client, tab);
+        } else {
+            // empty state
+            const WCHAR* msg = L"No logs yet";
+            WCHAR buf[256];
+            if (tab && len(tab->logs) > 0 && gFilter.len > 0) {
+                WStr wf = ToWStrTemp(gFilter);
+                wsprintfW(buf, L"No results matching '%s'", wf.s);
+                msg = buf;
+            }
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, MkRgb(0x80, 0x80, 0x80));
+            RECT rc = client;
+            rc.top = clientH / 4;
+            ScopedSelectFont selectUiFont(hdc, gUiFont->GetHFont());
+            DrawTextW(hdc, msg, -1, &rc, DT_CENTER | DT_SINGLELINE);
         }
-        DrawValuesOverlay(hdc, client, tab);
-    } else {
-        // empty state
-        const WCHAR* msg = L"No logs yet";
-        WCHAR buf[256];
-        if (tab && len(tab->logs) > 0 && gFilter.len > 0) {
-            WStr wf = ToWStrTemp(gFilter);
-            wsprintfW(buf, L"No results matching '%s'", wf.s);
-            msg = buf;
-        }
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RGB(0x80, 0x80, 0x80));
-        RECT rc = client;
-        rc.top = clientH / 4;
-        HFONT oldF = (HFONT)SelectObject(hdc, gUiFont);
-        DrawTextW(hdc, msg, -1, &rc, DT_CENTER | DT_SINGLELINE);
-        SelectObject(hdc, oldF);
+
+        BitBlt(hdcWin, 0, 0, clientW, clientH, hdc, 0, 0, SRCCOPY);
     }
 
-    BitBlt(hdcWin, 0, 0, clientW, clientH, hdc, 0, 0, SRCCOPY);
-
-    SelectObject(hdc, oldFont);
     SelectObject(hdc, oldBmp);
     DeleteObject(bmp);
     DeleteDC(hdc);
@@ -830,27 +845,56 @@ static void LogHScroll(HWND hwnd, int code) {
     }
 }
 
-static LRESULT CALLBACK LogWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+// The log lines keep an HWND of their own: they are virtualized and scrolled
+// with the system scrollbars, which a virtual control has no use for. As a
+// ControlBase it is placed by the layout like everything else
+struct LogLinesWnd : ControlBase {
+    LogLinesWnd() { kind = "logLines"; }
+    HWND Create(HWND parent);
+    void WndProc(ControlBase::WndProcEvent* ev);
+};
+
+HWND LogLinesWnd::Create(HWND parent) {
+    shouldEraseBackground = false;
+    onWndProc = MkMethod1<LogLinesWnd, ControlBase::WndProcEvent*, &LogLinesWnd::WndProc>(this);
+    CreateCustomArgs args;
+    args.parent = parent;
+    args.className = L"LogViewLines";
+    args.style = WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL;
+    CreateCustom(args);
+    return hwnd;
+}
+
+void LogLinesWnd::WndProc(ControlBase::WndProcEvent* ev) {
+    HWND hwnd = ev->hwnd;
+    UINT msg = ev->msg;
+    WPARAM wp = ev->wparam;
     switch (msg) {
         case WM_PAINT:
             PaintLog(hwnd);
-            return 0;
-        case WM_ERASEBKGND:
-            return 1; // handled in WM_PAINT (double buffered)
+            ev->result = 0;
+            ev->didHandle = true;
+            return;
         case WM_SIZE: {
             Tab* tab = SelTab();
             if (tab && tab->follow) {
                 ScrollToBottom(tab); // fewer/more visible rows: stay pinned to the tail
             }
             UpdateLogScrollbars();
-            return 0;
+            ev->result = 0;
+            ev->didHandle = true;
+            return;
         }
         case WM_VSCROLL:
             LogVScroll(hwnd, LOWORD(wp));
-            return 0;
+            ev->result = 0;
+            ev->didHandle = true;
+            return;
         case WM_HSCROLL:
             LogHScroll(hwnd, LOWORD(wp));
-            return 0;
+            ev->result = 0;
+            ev->didHandle = true;
+            return;
         case WM_MOUSEWHEEL: {
             // accumulate so hi-resolution wheels (delta < WHEEL_DELTA) also scroll,
             // and scroll by whole notches (3 lines each). wheel up (positive delta)
@@ -861,101 +905,94 @@ static LRESULT CALLBACK LogWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 gWheelAccum -= notches * WHEEL_DELTA;
                 ScrollByLines(hwnd, -notches * 3);
             }
-            return 0;
+            ev->result = 0;
+            ev->didHandle = true;
+            return;
         }
         case WM_LBUTTONDOWN:
-            SetFocus(hwnd); // so subsequent wheel messages target the log view
-            return 0;
+            SetFocus(); // so subsequent wheel messages target the log view
+            ev->result = 0;
+            ev->didHandle = true;
+            return;
     }
-    return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 // ------------------------------------------------------------- tabs window
 
-static void PaintTabs(HWND hwnd) {
-    PAINTSTRUCT ps;
-    HDC hdc = BeginPaint(hwnd, &ps);
-    RECT client;
-    GetClientRect(hwnd, &client);
-
-    HBRUSH bg = CreateSolidBrush(kColTabBar);
-    FillRect(hdc, &client, bg);
-    DeleteObject(bg);
-
-    HFONT oldFont = (HFONT)SelectObject(hdc, gUiFont);
-    SetBkMode(hdc, TRANSPARENT);
-
-    gTabHits.Reset();
-    int pad = DpiScale(8);
-    int x = 0;
-    int n = len(gTabs);
-    for (int i = 0; i < n; i++) {
-        Tab* tab = gTabs[i];
-        WStr name = ToWStrTemp(tab->name);
-        WCHAR kbd[16];
-        wsprintfW(kbd, L" [%d]", i + 1);
-
-        SIZE szName{}, szKbd{}, szClose{};
-        GetTextExtentPoint32W(hdc, name.s, name.len, &szName);
-        GetTextExtentPoint32W(hdc, kbd, (int)wcslen(kbd), &szKbd);
-        GetTextExtentPoint32W(hdc, L" x", 2, &szClose);
-
-        int tabW = pad + szName.cx + szKbd.cx + DpiScale(6) + szClose.cx + pad;
-        RECT rc{x, 0, x + tabW, client.bottom};
-
-        if (i == gSel) {
-            HBRUSH sel = CreateSolidBrush(kColTabSel);
-            FillRect(hdc, &rc, sel);
-            DeleteObject(sel);
-        }
-
-        int tx = x + pad;
-        int ty = (client.bottom - szName.cy) / 2;
-        SetTextColor(hdc, kColLogText);
-        ExtTextOutW(hdc, tx, ty, 0, nullptr, name.s, name.len, nullptr);
-        tx += szName.cx;
-        SetTextColor(hdc, kColKbd);
-        ExtTextOutW(hdc, tx, ty, 0, nullptr, kbd, (int)wcslen(kbd), nullptr);
-        tx += szKbd.cx + DpiScale(6);
-
-        RECT rcClose{tx, ty, tx + szClose.cx, ty + szClose.cy};
-        SetTextColor(hdc, RGB(0x60, 0x60, 0x60));
-        ExtTextOutW(hdc, tx, ty, 0, nullptr, L" x", 2, nullptr);
-
-        gTabHits.Append(TabHit{rc, rcClose});
-        x += tabW;
-    }
-
-    SelectObject(hdc, oldFont);
-    EndPaint(hwnd, &ps);
-    ResetTempArena();
-}
-
 static void SelectTab(int idx);
 static void CloseTab(int idx);
 
-static LRESULT CALLBACK TabsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-        case WM_PAINT:
-            PaintTabs(hwnd);
-            return 0;
-        case WM_LBUTTONDOWN: {
-            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-            int n = len(gTabHits);
-            for (int i = 0; i < n; i++) {
-                if (PtInRect(&gTabHits[i].rcClose, pt)) {
-                    CloseTab(i);
-                    return 0;
-                }
-                if (PtInRect(&gTabHits[i].rc, pt)) {
-                    SelectTab(i);
-                    return 0;
-                }
-            }
-            return 0;
+// the tab bar is a virtual control: the main window paints it and gives it its
+// input, so it needs no HWND / window class of its own
+struct TabBarCtrl : VirtCtrl {
+    TabBarCtrl() {
+        kind = "logViewTabs";
+        onMouseDown = MkMethod1<TabBarCtrl, VirtMouseEvent*, &TabBarCtrl::OnMouseDown>(this);
+    }
+    Size GetIdealSize() override { return {0, DpiScale(26)}; }
+    void Paint(VirtPaintCtx&) override;
+    void OnMouseDown(VirtMouseEvent*);
+};
+
+void TabBarCtrl::Paint(VirtPaintCtx& ctx) {
+    Gfx* gfx = ctx.gfx;
+    Rect client = ctx.bounds;
+    gfx->FillRect(client, kColTabBar);
+
+    gTabHits.Reset();
+    int pad = DpiScale(8);
+    int x = client.x;
+    int n = len(gTabs);
+    Str closeStr = StrL(" x");
+    for (int i = 0; i < n; i++) {
+        Tab* tab = gTabs[i];
+        TempStr kbd = fmt(" [%d]", i + 1);
+
+        Size szName = gfx->MeasureText(tab->name, gUiFont);
+        Size szKbd = gfx->MeasureText(kbd, gUiFont);
+        Size szClose = gfx->MeasureText(closeStr, gUiFont);
+
+        int tabW = pad + szName.dx + szKbd.dx + DpiScale(6) + szClose.dx + pad;
+        Rect rc{x, client.y, tabW, client.dy};
+
+        if (i == gSel) {
+            gfx->FillRect(rc, kColTabSel);
+        }
+
+        int tx = x + pad;
+        int ty = client.y + ((client.dy - szName.dy) / 2);
+        u32 fmtTxt = gfxTextSingleLine | gfxTextNoClip;
+        gfx->DrawTextAt(tab->name, {tx, ty}, fmtTxt, gUiFont, kColLogText);
+        tx += szName.dx;
+        gfx->DrawTextAt(kbd, {tx, ty}, fmtTxt, gUiFont, kColKbd);
+        tx += szKbd.dx + DpiScale(6);
+
+        Rect rcClose{tx, ty, szClose.dx, szClose.dy};
+        gfx->DrawTextAt(closeStr, {tx, ty}, fmtTxt, gUiFont, MkRgb(0x60, 0x60, 0x60));
+
+        gTabHits.Append(TabHit{ToRECT(rc), ToRECT(rcClose)});
+        x += tabW;
+    }
+
+    ResetTempArena();
+}
+
+void TabBarCtrl::OnMouseDown(VirtMouseEvent* ev) {
+    POINT pt{ev->ptWindow.x, ev->ptWindow.y};
+    int n = len(gTabHits);
+    for (int i = 0; i < n; i++) {
+        if (PtInRect(&gTabHits[i].rcClose, pt)) {
+            CloseTab(i);
+            ev->didHandle = true;
+            return;
+        }
+        if (PtInRect(&gTabHits[i].rc, pt)) {
+            SelectTab(i);
+            ev->didHandle = true;
+            return;
         }
     }
-    return DefWindowProcW(hwnd, msg, wp, lp);
+    ev->didHandle = true;
 }
 
 static void SelectTab(int idx) {
@@ -967,7 +1004,7 @@ static void SelectTab(int idx) {
     RebuildFiltered(tab);
     UpdateCountLabel();
     UpdateLogScrollbars();
-    InvalidateRect(gHwndTabs, nullptr, TRUE);
+    InvalidateTabBar();
     InvalidateRect(gHwndLog, nullptr, TRUE);
 }
 
@@ -997,14 +1034,48 @@ static void CloseTab(int idx) {
     }
     UpdateCountLabel();
     UpdateLogScrollbars();
-    InvalidateRect(gHwndTabs, nullptr, TRUE);
+    InvalidateTabBar();
     InvalidateRect(gHwndLog, nullptr, TRUE);
 }
 
 // ------------------------------------------------------------- main window
 
+// the whole ui: a filter row, the tab bar and the log lines, laid out in a VBox
+struct LogViewWnd : WindowBase {
+    Edit* filterEdit = nullptr;
+    VirtText* countText = nullptr;
+    VirtButton* btnClear = nullptr;
+    VirtButton* btnAbout = nullptr;
+    TabBarCtrl* tabBar = nullptr;
+    LogLinesWnd* logLines = nullptr;
+
+    bool Create();
+    void WndProc(WindowBase::WndProcEvent* ev);
+    void OnTimer(WindowBase::TimerEvent* ev);
+    void OnDestroy(WindowBase::DestroyEvent* ev);
+};
+
+static void InvalidateTabBar() {
+    if (gWnd && gWnd->tabBar) {
+        gWnd->tabBar->Invalidate();
+    }
+}
+
+static void SetCountText(Str s) {
+    if (!gWnd || !gWnd->countText) {
+        return;
+    }
+    if (str::Eq(gWnd->countText->s, s)) {
+        return;
+    }
+    gWnd->countText->SetText(s);
+    // the label is as wide as its text, so the row has to be laid out again
+    gWnd->DoLayout();
+    HwndInvalidate(gWnd->hwnd);
+}
+
 static void OnFilterChanged() {
-    TempStr utf8 = HwndGetTextTemp(gHwndFilter);
+    TempStr utf8 = gWnd->filterEdit->GetTextTemp();
 
     str::Free(gFilter);
     gFilter = str::Dup(utf8);
@@ -1037,66 +1108,113 @@ static void ClearSelectedTab() {
     InvalidateRect(gHwndLog, nullptr, TRUE);
 }
 
-static void LayoutMain(int clientW, int clientH) {
-    int m = DpiScale(4);
-    int editH = DpiScale(24);
-    int countW = DpiScale(200); // "N of M lines · 12.3 KB"
-    int gap = DpiScale(16);     // 1rem between the size readout and the 'c' button
-    int btnW = DpiScale(24);
-    int tabsH = DpiScale(26);
-
-    int y = m;
-    int aboutX = clientW - m - btnW;
-    int clearX = aboutX - m - btnW;
-    int countX = clearX - gap - countW;
-    int editW = countX - m - m;
-    MoveWindow(gHwndFilter, m, y, editW, editH, TRUE);
-    MoveWindow(gHwndCount, countX, y + DpiScale(3), countW, editH, TRUE);
-    MoveWindow(gHwndClear, clearX, y, btnW, editH, TRUE);
-    MoveWindow(gHwndAbout, aboutX, y, btnW, editH, TRUE);
-
-    y += editH + m;
-    MoveWindow(gHwndTabs, 0, y, clientW, tabsH, TRUE);
-    y += tabsH;
-    MoveWindow(gHwndLog, 0, y, clientW, clientH - y, TRUE);
-}
-
 static bool IsFilterFocused() {
-    return GetFocus() == gHwndFilter;
+    return gWnd && gWnd->filterEdit && GetFocus() == gWnd->filterEdit->hwnd;
 }
 
-static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-        case WM_APP_NEW_LOGS:
-            DrainQueue();
-            return 0;
-        case WM_TIMER:
-            if (wp == kFilterTimerId) {
-                KillTimer(hwnd, kFilterTimerId);
-                OnFilterChanged();
-            }
-            return 0;
-        case WM_SIZE:
-            LayoutMain(LOWORD(lp), HIWORD(lp));
-            return 0;
-        case WM_COMMAND: {
-            int id = LOWORD(wp);
-            int code = HIWORD(wp);
-            if (id == IdcClear && code == BN_CLICKED) {
-                ClearSelectedTab();
-            } else if (id == IdcAbout && code == BN_CLICKED) {
-                ShellExecuteW(hwnd, L"open", kAboutURL, nullptr, nullptr, SW_SHOWNORMAL);
-            } else if ((HWND)lp == gHwndFilter && code == EN_CHANGE) {
-                // debounce: (re)start the timer; the filter is applied when it fires
-                SetTimer(hwnd, kFilterTimerId, kFilterDebounceMs, nullptr);
-            }
-            return 0;
-        }
-        case WM_DESTROY:
-            PostQuitMessage(0);
-            return 0;
+// the filter is applied kFilterDebounceMs after the last keystroke
+static void FilterTextChanged() {
+    SetTimer(gHwndMain, kFilterTimerId, kFilterDebounceMs, nullptr);
+}
+
+static void AboutClicked(VirtMouseEvent*) {
+    ShellExecuteW(gHwndMain, L"open", kAboutURL, nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+static VirtButton* NewToolButton(Str text, const VirtMouseHandler& onClick) {
+    auto* b = new VirtButton(text, gUiFont);
+    b->SetColor(kColBtnText, kColLogText);
+    b->SetColor(kColBtnBg, MkRgb(0xe6, 0xe6, 0xe6));
+    b->SetColor(kColBtnBgHover, MkRgb(0xd0, 0xd0, 0xd0));
+    b->SetColor(kColBtnBorder, MkRgb(0xa0, 0xa0, 0xa0));
+    b->textPadding = {DpiScale(3), DpiScale(8), DpiScale(3), DpiScale(8)};
+    b->onClick = onClick;
+    return b;
+}
+
+bool LogViewWnd::Create() {
+    onWndProc = MkMethod1<LogViewWnd, WindowBase::WndProcEvent*, &LogViewWnd::WndProc>(this);
+    onTimer = MkMethod1<LogViewWnd, WindowBase::TimerEvent*, &LogViewWnd::OnTimer>(this);
+    onDestroy = MkMethod1<LogViewWnd, WindowBase::DestroyEvent*, &LogViewWnd::OnDestroy>(this);
+    {
+        CreateCustomArgs args;
+        args.className = L"LogViewMain";
+        args.title = "Logview - SumatraPDF";
+        args.pos = {CW_USEDEFAULT, CW_USEDEFAULT, DpiScale(1000), DpiScale(700)};
+        args.bgColor = GetSysColor(COLOR_BTNFACE);
+        args.icon = LoadIconW(nullptr, IDI_APPLICATION);
+        args.visible = false;
+        CreateCustom(args);
     }
-    return DefWindowProcW(hwnd, msg, wp, lp);
+    if (!hwnd) {
+        return false;
+    }
+    gHwndMain = hwnd;
+
+    int m = DpiScale(4);
+
+    {
+        Edit::CreateArgs args;
+        args.parent = hwnd;
+        args.font = gUiFont;
+        args.withBorder = true;
+        args.cueText = "filter '/'";
+        filterEdit = new Edit();
+        filterEdit->Create(args);
+        filterEdit->onTextChanged = MkFunc0Void(FilterTextChanged);
+    }
+
+    countText = NewVirtText({
+        .s = "",
+        .font = gUiFont,
+        .textColor = kColLogText,
+        .align = VirtTextAlign::Right,
+    });
+    btnClear = NewToolButton("c", MkFunc0Void(ClearSelectedTab));
+    btnAbout = NewToolButton("?", MkFunc1Void<VirtMouseEvent*>(AboutClicked));
+
+    tabBar = new TabBarCtrl();
+
+    logLines = new LogLinesWnd();
+    logLines->Create(hwnd);
+    gHwndLog = logLines->hwnd;
+
+    auto* filterRow = new HBox();
+    filterRow->alignCross = CrossAxisAlign::CrossCenter;
+    filterRow->AddChild(filterEdit, 1);
+    // 1rem between the size readout and the 'c' button
+    filterRow->AddChild(new Padding(countText, Insets{0, DpiScale(16), 0, DpiScale(8)}));
+    filterRow->AddChild(btnClear);
+    filterRow->AddChild(new Padding(btnAbout, Insets{0, 0, 0, m}));
+
+    auto* vbox = new VBox();
+    vbox->alignMain = MainAxisAlign::MainStart;
+    vbox->alignCross = CrossAxisAlign::Stretch;
+    vbox->AddChild(new Padding(filterRow, Insets{m, m, m, m}));
+    vbox->AddChild(tabBar);
+    vbox->AddChild(logLines, 1);
+    layout = vbox;
+    return true;
+}
+
+void LogViewWnd::OnTimer(WindowBase::TimerEvent* ev) {
+    if (ev->timerId == kFilterTimerId) {
+        KillTimer(hwnd, kFilterTimerId);
+        OnFilterChanged();
+    }
+}
+
+void LogViewWnd::OnDestroy(WindowBase::DestroyEvent*) {
+    PostQuitMessage(0);
+}
+
+// custom app message for the log drain queue
+void LogViewWnd::WndProc(WindowBase::WndProcEvent* ev) {
+    if (ev->msg == WM_APP_NEW_LOGS) {
+        DrainQueue();
+        ev->result = 0;
+        ev->didHandle = true;
+    }
 }
 
 // -------------------------------------------------------------------- setup
@@ -1108,70 +1226,17 @@ static void CreateFonts() {
     NONCLIENTMETRICSW ncm{};
     ncm.cbSize = sizeof(ncm);
     SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
-    gUiFont = CreateFontIndirectW(&ncm.lfMessageFont);
+    gUiFont = GetPlatformFont(CreateFontIndirectW(&ncm.lfMessageFont));
 
-    LOGFONTW lf{};
-    lf.lfHeight = -MulDiv(10, gDpi, 72);
-    lf.lfWeight = FW_NORMAL;
-    lf.lfCharSet = DEFAULT_CHARSET;
-    wcscpy_s(lf.lfFaceName, L"Consolas");
-    gMonoFont = CreateFontIndirectW(&lf);
+    gMonoFont = GetPlatformFont("Consolas", 10, PlatformFontStyle::Regular);
 
-    HFONT old = (HFONT)SelectObject(hdc, gMonoFont);
-    TEXTMETRICW tm{};
-    GetTextMetricsW(hdc, &tm);
-    gLineDy = tm.tmHeight + DpiScale(2);
-    SelectObject(hdc, old);
+    {
+        ScopedSelectFont selectFont(hdc, gMonoFont->GetHFont());
+        TEXTMETRICW tm{};
+        GetTextMetricsW(hdc, &tm);
+        gLineDy = tm.tmHeight + DpiScale(2);
+    }
     ReleaseDC(nullptr, hdc);
-}
-
-static void RegisterClasses(HINSTANCE hinst) {
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
-    wc.hInstance = hinst;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-
-    wc.lpfnWndProc = MainWndProc;
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.lpszClassName = L"LogViewMain";
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    RegisterClassExW(&wc);
-
-    wc.lpfnWndProc = TabsWndProc;
-    wc.hbrBackground = nullptr;
-    wc.lpszClassName = L"LogViewTabs";
-    wc.hIcon = nullptr;
-    RegisterClassExW(&wc);
-
-    wc.lpfnWndProc = LogWndProc;
-    wc.hbrBackground = nullptr;
-    wc.lpszClassName = L"LogViewLines";
-    RegisterClassExW(&wc);
-}
-
-static void CreateChildren(HINSTANCE hinst) {
-    gHwndFilter = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 10, 10,
-                                  gHwndMain, nullptr, hinst, nullptr);
-    SendMessageW(gHwndFilter, WM_SETFONT, (WPARAM)gUiFont, TRUE);
-    SendMessageW(gHwndFilter, EM_SETCUEBANNER, TRUE, (LPARAM)L"filter '/'");
-
-    gHwndCount = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_RIGHT, 0, 0, 10, 10, gHwndMain, nullptr,
-                                 hinst, nullptr);
-    SendMessageW(gHwndCount, WM_SETFONT, (WPARAM)gUiFont, TRUE);
-
-    gHwndClear = CreateWindowExW(0, L"BUTTON", L"c", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 10, 10, gHwndMain,
-                                 (HMENU)IdcClear, hinst, nullptr);
-    SendMessageW(gHwndClear, WM_SETFONT, (WPARAM)gUiFont, TRUE);
-
-    gHwndAbout = CreateWindowExW(0, L"BUTTON", L"?", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 10, 10, gHwndMain,
-                                 (HMENU)IdcAbout, hinst, nullptr);
-    SendMessageW(gHwndAbout, WM_SETFONT, (WPARAM)gUiFont, TRUE);
-
-    gHwndTabs = CreateWindowExW(0, L"LogViewTabs", nullptr, WS_CHILD | WS_VISIBLE, 0, 0, 10, 10, gHwndMain, nullptr,
-                                hinst, nullptr);
-
-    gHwndLog = CreateWindowExW(0, L"LogViewLines", nullptr, WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL, 0, 0, 10,
-                               10, gHwndMain, nullptr, hinst, nullptr);
 }
 
 // handle app-level keys in the message loop, mirroring the web ui's shortcuts.
@@ -1208,7 +1273,7 @@ static bool HandleKey(MSG* msg) {
 
     if (filterFocused) {
         if (key == VK_ESCAPE) {
-            SetWindowTextW(gHwndFilter, L"");
+            gWnd->filterEdit->SetText("");
             SetFocus(gHwndLog);
             return true;
         }
@@ -1216,8 +1281,8 @@ static bool HandleKey(MSG* msg) {
     }
 
     if (key == VK_OEM_2) { // '/' key
-        SetFocus(gHwndFilter);
-        SendMessageW(gHwndFilter, EM_SETSEL, 0, -1);
+        SetFocus(gWnd->filterEdit->hwnd);
+        gWnd->filterEdit->SelectAll();
         return true;
     }
     if (key >= '1' && key <= '9') {
@@ -1230,7 +1295,7 @@ static bool HandleKey(MSG* msg) {
     return false;
 }
 
-int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR, int nCmdShow) {
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int nCmdShow) {
     SetProcessDPIAware();
 
     // register the v6 common controls so the edit box / buttons pick up the
@@ -1240,17 +1305,16 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, LPWSTR, int nCmdShow) {
     icc.dwICC = ICC_STANDARD_CLASSES | ICC_BAR_CLASSES;
     InitCommonControlsEx(&icc);
 
+    // the virtual controls measure and draw text with gdiplus
+    ScopedGdiPlus gdiPlus(true);
+
     CreateFonts();
-    RegisterClasses(hinst);
 
-    gHwndMain = CreateWindowExW(0, L"LogViewMain", L"Logview - SumatraPDF", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
-                                CW_USEDEFAULT, DpiScale(1000), DpiScale(700), nullptr, nullptr, hinst, nullptr);
-    CreateChildren(hinst);
-
-    RECT rc;
-    GetClientRect(gHwndMain, &rc);
-    LayoutMain(rc.right, rc.bottom);
-
+    gWnd = new LogViewWnd();
+    if (!gWnd->Create()) {
+        return 1;
+    }
+    gWnd->DoLayout();
     ShowWindow(gHwndMain, nCmdShow);
     UpdateWindow(gHwndMain);
 

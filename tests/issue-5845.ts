@@ -7,17 +7,12 @@
 import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { cmdId, tmpPath } from "./util.ts";
-import { launchSumatra, sendCommand, waitForFrame } from "./win-automation.ts";
+import { launchSumatra, sendCommand, waitForFrame, killAndWait } from "./win-automation.ts";
 import { getWindowText, sleep } from "./winapi.ts";
 
 const SRC_PDF = join(import.meta.dir, "issue-3219.pdf");
 
-async function waitForState(
-  frame: number,
-  titlePart: string,
-  deletedPath: string,
-  timeoutMs = 5000,
-): Promise<void> {
+async function waitForState(frame: number, titlePart: string, deletedPath: string, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let title = "";
   while (Date.now() < deadline) {
@@ -56,12 +51,16 @@ export async function testit(): Promise<void> {
     await waitForState(frame, "ccc.pdf", bbb);
 
     sendCommand(frame, command);
-    await sleep(500);
-    if (!getWindowText(frame).includes("ccc.pdf") || !existsSync(ccc)) {
-      throw new Error("the last file was deleted even though no next file was available");
+    // the last file must stay put; watch a short window for a late delete
+    const until = Date.now() + 200;
+    while (Date.now() < until) {
+      if (!getWindowText(frame).includes("ccc.pdf") || !existsSync(ccc)) {
+        throw new Error("the last file was deleted even though no next file was available");
+      }
+      await sleep(30);
     }
   } finally {
-    proc.kill();
+    await killAndWait(proc);
     rmSync(dir, { recursive: true, force: true });
   }
 }

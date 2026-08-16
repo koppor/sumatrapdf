@@ -8,7 +8,7 @@
 #include "base/GuessFileType.h"
 #include "base/Win.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "DocProperties.h"
 #include "DocController.h"
@@ -366,6 +366,7 @@ EngineBase* CreateEnginePsFromFile(Str fileName) {
     return engine;
 }
 
+/* EnginePs.cpp */
 bool IsEnginePsAvailable() {
     TempStr gswin32c = GetGhostscriptPathTemp();
     return len(gswin32c) > 0;

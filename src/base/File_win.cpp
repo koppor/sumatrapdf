@@ -6,6 +6,11 @@
 
 #include "base/File.h"
 
+// we pad data read with 3 zeros for convenience. That way returned
+// data is a valid null-terminated string or WCHAR*.
+// 3 is for absolute worst case of WCHAR* where last char was partially written
+#define ZERO_PADDING_COUNT 3
+
 // Defined in Win.cpp; avoid pulling all of Win.h into this file.
 void LogLastError(DWORD err = 0);
 
@@ -117,6 +122,161 @@ static void StoreAttrsCache(Str path, u64 now, bool ok, const WIN32_FILE_ATTRIBU
     e.tickMs = now;
 }
 
+// Non-fixed drive availability (network / removable / …). When a mapped or UNC
+// drive is offline, GetFileAttributesEx is very slow; after the first failure
+// we cache "unavailable" and fail subsequent paths on that drive for a few
+// minutes without touching the network again.
+struct DriveAvailEntry {
+    DriveAvailEntry* next = nullptr;
+    char driveName[128]; // "X" or "\\server\share"
+    bool isAvailable = false;
+    u64 lastCheckMs = 0;
+};
+
+static DriveAvailEntry* gDriveAvailHead = nullptr;
+constexpr u64 kDriveAvailTtlMs = 4ull * 60ull * 1000ull; // 4 minutes
+
+// Fill keyOut with a non-fixed drive key ("X" or "\\server\share"). Returns
+// false for fixed drives, relative paths, and paths we do not guard.
+static bool GetNonFixedDriveKey(Str path, char* keyOut, int keyCap) {
+    if (!path || !keyOut || keyCap < 2) {
+        return false;
+    }
+    keyOut[0] = 0;
+    int n = len(path);
+    if (n < 2) {
+        return false;
+    }
+    const char* s = path.s;
+
+    bool sep0 = s[0] == '\\' || s[0] == '/';
+    bool sep1 = s[1] == '\\' || s[1] == '/';
+    if (sep0 && sep1) {
+        // \\?\UNC\server\share\... or \\?\C:\... or \\server\share\...
+        int start = 2;
+        if (n >= 4 && (s[2] == '?' || s[2] == '.') && (s[3] == '\\' || s[3] == '/')) {
+            if (s[2] == '.') {
+                return false; // \\.\device
+            }
+            Str rest((char*)s + 4, n - 4);
+            if (str::StartsWithI(rest, StrL("UNC\\")) || str::StartsWithI(rest, StrL("UNC/"))) {
+                // skip "UNC\"
+                start = 4 + 4;
+            } else {
+                // \\?\C:\... → treat rest as the real path
+                return GetNonFixedDriveKey(rest, keyOut, keyCap);
+            }
+        }
+        // Parse \\server\share from s[start..]
+        if (start >= n) {
+            return false;
+        }
+        int i = start;
+        while (i < n && s[i] != '\\' && s[i] != '/') {
+            i++;
+        }
+        if (i >= n || i == start) {
+            return false; // no server or no share
+        }
+        int shareStart = i + 1;
+        int j = shareStart;
+        while (j < n && s[j] != '\\' && s[j] != '/') {
+            j++;
+        }
+        if (j == shareStart) {
+            return false;
+        }
+        // key = "\\server\share" (normalize seps to '\')
+        int need = 2 + (i - start) + 1 + (j - shareStart) + 1;
+        if (need > keyCap) {
+            return false;
+        }
+        int p = 0;
+        keyOut[p++] = '\\';
+        keyOut[p++] = '\\';
+        for (int k = start; k < i; k++) {
+            keyOut[p++] = s[k];
+        }
+        keyOut[p++] = '\\';
+        for (int k = shareStart; k < j; k++) {
+            keyOut[p++] = s[k];
+        }
+        keyOut[p] = 0;
+        return true;
+    }
+
+    if (s[1] != ':') {
+        return false; // relative
+    }
+    char drive = (char)toupper((u8)s[0]);
+    if (drive < 'A' || drive > 'Z') {
+        return false;
+    }
+    WCHAR root[] = LR"(?:\)";
+    root[0] = (WCHAR)drive;
+    UINT type = GetDriveTypeW(root);
+    // Guard everything that is not a local fixed disk. DRIVE_NO_ROOT_DIR is a
+    // disconnected mapping — still use the availability cache.
+    if (type == DRIVE_FIXED || type == DRIVE_UNKNOWN) {
+        return false;
+    }
+    keyOut[0] = drive;
+    keyOut[1] = 0;
+    return true;
+}
+
+// Caller holds gAttrsCacheMutex. Drops expired nodes while scanning.
+static DriveAvailEntry* FindDriveAvailLocked(Str driveName, u64 now) {
+    DriveAvailEntry** pp = &gDriveAvailHead;
+    while (*pp) {
+        DriveAvailEntry* e = *pp;
+        if (now - e->lastCheckMs > kDriveAvailTtlMs) {
+            *pp = e->next;
+            free(e);
+            continue;
+        }
+        if (str::EqI(Str(e->driveName), driveName)) {
+            return e;
+        }
+        pp = &e->next;
+    }
+    return nullptr;
+}
+
+// Caller holds gAttrsCacheMutex.
+static void StoreDriveAvailLocked(Str driveName, bool isAvailable, u64 now) {
+    DriveAvailEntry* e = FindDriveAvailLocked(driveName, now);
+    if (e) {
+        e->isAvailable = isAvailable;
+        e->lastCheckMs = now;
+        return;
+    }
+    e = AllocStruct<DriveAvailEntry>();
+    if (!e) {
+        return;
+    }
+    str::BufSet(Str(e->driveName, dimof(e->driveName)), driveName);
+    e->isAvailable = isAvailable;
+    e->lastCheckMs = now;
+    e->next = gDriveAvailHead;
+    gDriveAvailHead = e;
+}
+
+// Probe the drive root ("X:\" or "\\server\share\") without holding the mutex.
+static bool ProbeDriveRootAccessible(Str driveKey) {
+    TempStr root;
+    if (len(driveKey) == 1) {
+        root = fmt("%c:\\", driveKey.s[0]);
+    } else {
+        root = str::JoinTemp(driveKey, StrL("\\"));
+    }
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    return GetFileAttributesExW(CWStrTemp(root), GetFileExInfoStandard, &data) != 0;
+}
+
+// Like GetFileAttributesExW(..., GetFileExInfoStandard, ...). Network paths
+// share the same 1-hour path cache as GetCachedAttributes; unavailable
+// non-fixed drives use a short drive-level availability cache.
 bool GetCachedAttributesEx(Str path, WIN32_FILE_ATTRIBUTE_DATA* out) {
     if (out) {
         *out = {};
@@ -126,6 +286,40 @@ bool GetCachedAttributesEx(Str path, WIN32_FILE_ATTRIBUTE_DATA* out) {
     }
 
     const bool network = IsOnNetworkDrive(path);
+
+    char driveKeyBuf[128];
+    const bool hasDriveKey = GetNonFixedDriveKey(path, driveKeyBuf, dimof(driveKeyBuf));
+    Str driveKey = hasDriveKey ? Str(driveKeyBuf) : Str();
+
+    // Non-fixed drive availability. Network paths check this first (before the
+    // per-path attrs cache and GetFileAttributesEx): an offline share would
+    // otherwise hang on every history/menu path. On cache miss for network we
+    // probe the drive root once and remember the result for ~4 minutes.
+    if (hasDriveKey) {
+        const u64 now = GetTickCount64();
+        bool needProbe = false;
+        {
+            ScopedMutex lock(&gAttrsCacheMutex);
+            DriveAvailEntry* e = FindDriveAvailLocked(driveKey, now);
+            if (e) {
+                if (!e->isAvailable) {
+                    return false; // known offline — fail fast
+                }
+                // known available: continue to path cache / attribute query
+            } else if (network) {
+                needProbe = true;
+            }
+        }
+        if (needProbe) {
+            bool avail = ProbeDriveRootAccessible(driveKey);
+            ScopedMutex lock(&gAttrsCacheMutex);
+            StoreDriveAvailLocked(driveKey, avail, GetTickCount64());
+            if (!avail) {
+                return false;
+            }
+        }
+    }
+
     if (network) {
         const u64 now = GetTickCount64();
         bool ok = false;
@@ -133,8 +327,8 @@ bool GetCachedAttributesEx(Str path, WIN32_FILE_ATTRIBUTE_DATA* out) {
         {
             ScopedMutex lock(&gAttrsCacheMutex);
             if (LookupAttrsCache(path, now, &ok, &data)) {
-                logf("path::GetCachedAttributesEx: network path='%s' ok=%d attrs=0x%x cache=hit\n", path, (int)ok,
-                     data.dwFileAttributes);
+                // logf("path::GetCachedAttributesEx: network path='%s' ok=%d attrs=0x%x cache=hit\n", path, (int)ok,
+                //      data.dwFileAttributes);
                 if (ok) {
                     *out = data;
                 }
@@ -149,20 +343,53 @@ bool GetCachedAttributesEx(Str path, WIN32_FILE_ATTRIBUTE_DATA* out) {
         data = {};
     }
 
-    if (network) {
-        logf("path::GetCachedAttributesEx: network path='%s' ok=%d attrs=0x%x cache=miss\n", path, (int)(ok != 0),
-             data.dwFileAttributes);
-        ScopedMutex lock(&gAttrsCacheMutex);
-        StoreAttrsCache(path, GetTickCount64(), ok != 0, data);
-    }
-
     if (ok) {
+        if (hasDriveKey) {
+            ScopedMutex lock(&gAttrsCacheMutex);
+            StoreDriveAvailLocked(driveKey, true, GetTickCount64());
+        }
+        if (network) {
+            ScopedMutex lock(&gAttrsCacheMutex);
+            StoreAttrsCache(path, GetTickCount64(), true, data);
+        }
         *out = data;
         return true;
+    }
+
+    // Attribute query failed. For non-network non-fixed drives (e.g. removable
+    // with no media), learn availability after the first failure. Network was
+    // already probed above on miss.
+    if (hasDriveKey && !network) {
+        const u64 now = GetTickCount64();
+        bool needProbe = false;
+        {
+            ScopedMutex lock(&gAttrsCacheMutex);
+            DriveAvailEntry* e = FindDriveAvailLocked(driveKey, now);
+            if (!e) {
+                needProbe = true;
+            }
+        }
+        if (needProbe) {
+            bool avail = ProbeDriveRootAccessible(driveKey);
+            ScopedMutex lock(&gAttrsCacheMutex);
+            StoreDriveAvailLocked(driveKey, avail, GetTickCount64());
+        }
+    }
+
+    if (network) {
+        // logf("path::GetCachedAttributesEx: network path='%s' ok=%d attrs=0x%x cache=miss\n", path, (int)(ok != 0),
+        //      data.dwFileAttributes);
+        ScopedMutex lock(&gAttrsCacheMutex);
+        StoreAttrsCache(path, GetTickCount64(), false, data);
     }
     return false;
 }
 
+// Like GetFileAttributesW: returns attributes or INVALID_FILE_ATTRIBUTES.
+// On Windows, network-drive path results are cached for 1 hour (shared with
+// GetCachedAttributesEx). Offline non-fixed drives (mapped/UNC/removable) are
+// also remembered for ~4 minutes so later queries fail fast.
+// Non-Windows: no cache (same as an uncached attribute query).
 DWORD GetCachedAttributes(Str path) {
     WIN32_FILE_ATTRIBUTE_DATA data{};
     if (!GetCachedAttributesEx(path, &data)) {
@@ -342,8 +569,72 @@ bool HasVariableDriveLetter(Str path) {
     return false;
 }
 
+// Drive-letter -> is-network cache. Mappings change rarely and
+// IsOnNetworkDrive() runs in front of every cached attribute query, so keep a
+// short TTL rather than querying the drive for each call.
+constexpr u64 kDriveIsNetCacheTtlMs = 60ull * 1000ull;
+static Mutex gDriveIsNetMutex;
+static u64 gDriveIsNetTick[26];
+static bool gDriveIsNet[26];
+
+// drive is an upper-case letter 'A'..'Z'
+static bool IsNetworkDriveLetter(char drive) {
+    int idx = drive - 'A';
+    u64 now = GetTickCount64();
+    {
+        ScopedMutex lock(&gDriveIsNetMutex);
+        u64 tick = gDriveIsNetTick[idx];
+        if (tick != 0 && (now - tick) <= kDriveIsNetCacheTtlMs) {
+            return gDriveIsNet[idx];
+        }
+    }
+    WCHAR root[] = LR"(?:\)";
+    root[0] = (WCHAR)drive;
+    // resolved locally from the mount point, unlike WNetGetConnection
+    bool isNet = GetDriveTypeW(root) == DRIVE_REMOTE;
+    ScopedMutex lock(&gDriveIsNetMutex);
+    gDriveIsNetTick[idx] = now;
+    gDriveIsNet[idx] = isNet;
+    return isNet;
+}
+
+// PathIsNetworkPathW() answers this for a drive-letter path by going through
+// WNetGetConnection -> NetWkstaGetInfo, i.e. a synchronous RPC to the
+// LanmanWorkstation service: ~0.3 ms per call on a mapped drive here, and it
+// can block for seconds when the server behind a mapping is unreachable.
+// Decide from the path shape (UNC is a pure string question) plus a cached
+// GetDriveType (local) instead.
 bool IsOnNetworkDrive(Str path) {
-    return PathIsNetworkPathW(CWStrTemp(path));
+    int n = len(path);
+    if (n < 2) {
+        return false;
+    }
+    const char* s = path.s;
+    bool sep0 = s[0] == '\\' || s[0] == '/';
+    bool sep1 = s[1] == '\\' || s[1] == '/';
+    if (sep0 && sep1) {
+        // \\?\UNC\server\share is UNC; \\?\C:\... is a drive-letter path;
+        // \\.\ names a device and is never a network path
+        if (n >= 4 && (s[2] == '?' || s[2] == '.') && (s[3] == '\\' || s[3] == '/')) {
+            if (s[2] == '.') {
+                return false;
+            }
+            Str rest((char*)s + 4, n - 4);
+            if (str::StartsWithI(rest, StrL("UNC\\")) || str::StartsWithI(rest, StrL("UNC/"))) {
+                return true;
+            }
+            return IsOnNetworkDrive(rest);
+        }
+        return true; // \\server\share
+    }
+    if (s[1] != ':') {
+        return false; // relative path
+    }
+    char drive = (char)toupper((u8)s[0]);
+    if (drive < 'A' || drive > 'Z') {
+        return false;
+    }
+    return IsNetworkDriveLetter(drive);
 }
 
 bool IsCloudPlaceholder(Str path) {
@@ -441,6 +732,7 @@ TempWStr GetSelfExePathW() {
     return wstr::Dup(buf);
 }
 
+// Path of this process image (exe or DLL that contains this code).
 TempStr GetSelfExePathTemp() {
     WCHAR buf[MAX_PATH + 2]{};
     DWORD nChars = dimof(buf) - 1;
@@ -449,6 +741,7 @@ TempStr GetSelfExePathTemp() {
     return ToUtf8Temp(buf);
 }
 
+// Directory containing GetSelfExePathTemp().
 TempStr GetSelfExeDirTemp() {
     TempStr path = GetSelfExePathTemp();
     return path::GetDirTemp(path);
@@ -502,6 +795,104 @@ FileHandle OpenReadOnly(Str path) {
                        nullptr);
 }
 
+// Reads up to toRead bytes from the front of the file, zero-filling the rest of
+// buf. Returns the number of bytes read or -1 on failure.
+//
+// Goes to CreateFileW directly instead of the portable fopen()/fread() version:
+// the CRT allocates a FILE and its buffer, takes the lowio handle-table lock and
+// copies through that buffer before calling CreateFileW anyway. This runs once
+// per page when opening an image directory, so that overhead is worth skipping.
+int ReadN(Str path, u8* buf, size_t toRead) {
+    ReportIf(!path);
+    if (!path || !buf || toRead > (size_t)UINT32_MAX) {
+        return -1;
+    }
+    // share flags match what the CRT's "rb" mode uses, plus DELETE so we don't
+    // block someone else from replacing the file while we peek at its header
+    DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    DWORD flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
+    HANDLE h = CreateFileW(CWStrTemp(path), GENERIC_READ, share, nullptr, OPEN_EXISTING, flags, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+    AutoCloseHandle hf(h);
+    ZeroMemory(buf, toRead);
+    DWORD nRead = 0;
+    // a short read at end of file is not an error, same as fread()
+    if (!::ReadFile(h, buf, (DWORD)toRead, &nRead, nullptr)) {
+        return -1;
+    }
+    return (int)nRead;
+}
+
+static i64 GetSizeFromHandle(FileHandle h) {
+    if (h == nullptr || h == kInvalidFileHandle) {
+        return -1;
+    }
+    LARGE_INTEGER size{};
+    BOOL ok = GetFileSizeEx(h, &size);
+    if (!ok) {
+        return -1;
+    }
+    return size.QuadPart;
+}
+
+// Reads the whole file into memory allocated from a (heap if a is nullptr),
+// followed by ZERO_PADDING_COUNT zero bytes so the result is also a valid
+// NUL-terminated char* / WCHAR*.
+//
+// Skips the CRT for the same reason ReadN() does, plus two wins that matter
+// more here because this is used for whole (potentially large) files:
+//  - the portable version sizes the file with fseek(END)/ftell(), which is a
+//    32-bit long on Windows, so it can't read files >= 2GB at all
+//  - we allocate without zeroing: the buffer is immediately overwritten with
+//    file data, so pre-zeroing it is a second full-size memset per file
+Str ReadFileWithArena(Str filePath, Arena* a) {
+    ReportIf(!filePath);
+    if (!filePath) {
+        return {};
+    }
+    DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    DWORD flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
+    HANDLE h = CreateFileW(CWStrTemp(filePath), GENERIC_READ, share, nullptr, OPEN_EXISTING, flags, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    AutoCloseHandle hf(h);
+
+    i64 fileSize = GetSizeFromHandle(h);
+    if (fileSize < 0 || fileSize > (i64)(INT_MAX - ZERO_PADDING_COUNT)) {
+        return {};
+    }
+    int size = (int)fileSize;
+    char* d = (char*)Alloc(a, (size_t)size + ZERO_PADDING_COUNT);
+    if (!d) {
+        return {};
+    }
+    memset(d + size, 0, ZERO_PADDING_COUNT);
+
+    int nTotal = 0;
+    while (nTotal < size) {
+        DWORD nRead = 0;
+        // ::ReadFile is allowed to return less than asked for; loop until done
+        if (!::ReadFile(h, d + nTotal, (DWORD)(size - nTotal), &nRead, nullptr)) {
+            DWORD err = GetLastError();
+            logf("ReadFileWithArena: ReadFile() failed, path: '%s', size: %d, nRead: %d, lastError: %u\n", filePath,
+                 size, nTotal, err);
+            Free(a, (void*)d);
+            return {};
+        }
+        if (nRead == 0) {
+            // unexpected end of file (someone truncated it while we were reading)
+            logf("ReadFileWithArena: unexpected eof, path: '%s', size: %d, nRead: %d\n", filePath, size, nTotal);
+            Free(a, (void*)d);
+            return {};
+        }
+        nTotal += (int)nRead;
+    }
+    return Str(d, size);
+}
+
 bool Exists(Str path) {
     if (!path) {
         return false;
@@ -513,18 +904,6 @@ bool Exists(Str path) {
         return false;
     }
     return (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
-}
-
-i64 GetSize(FileHandle h) {
-    if (h == nullptr || h == kInvalidFileHandle) {
-        return -1;
-    }
-    LARGE_INTEGER size{};
-    BOOL ok = GetFileSizeEx(h, &size);
-    if (!ok) {
-        return -1;
-    }
-    return size.QuadPart;
 }
 
 // Maps the whole file at path into memory as a read-only view backed by the
@@ -540,7 +919,7 @@ bool MemoryMap(Str path, Mapping* res) {
     if (hFile == kInvalidFileHandle) {
         return false;
     }
-    i64 size = GetSize(hFile);
+    i64 size = GetSizeFromHandle(hFile);
     if (size <= 0) {
         CloseHandle(hFile);
         return false;
@@ -584,9 +963,20 @@ static bool GetInfo(Str path, WIN32_FILE_ATTRIBUTE_DATA& fileInfo) {
 
 i64 GetSize(Str path) {
     ReportIf(!path);
-    WIN32_FILE_ATTRIBUTE_DATA fileInfo;
-    if (!GetInfo(path, fileInfo)) {
+    if (!path) {
         return -1;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA fileInfo{};
+    if (!GetInfo(path, fileInfo)) {
+        // Cache can fail (e.g. "drive offline" short-circuit or a cached
+        // negative attrs result). Probe directly and recover when the path is fine.
+        WIN32_FILE_ATTRIBUTE_DATA direct{};
+        BOOL ok = GetFileAttributesExW(CWStrTemp(path), GetFileExInfoStandard, &direct);
+        if (!ok || (direct.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            return -1;
+        }
+        u64 sz = ((u64)direct.nFileSizeHigh << 32) | (u64)direct.nFileSizeLow;
+        return (i64)sz;
     }
     if (fileInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
         return -1;
@@ -632,8 +1022,10 @@ bool Copy(Str dst, Str src, bool dontOverwrite) {
 }
 
 static DWORD CALLBACK CopyProgressRoutine(LARGE_INTEGER TotalFileSize, LARGE_INTEGER TotalBytesTransferred,
-                                          LARGE_INTEGER, LARGE_INTEGER, DWORD, DWORD, HANDLE, HANDLE, LPVOID lpData) {
-    auto* cb = (const CopyProgressCb*)lpData;
+                                          LARGE_INTEGER /*StreamSize*/, LARGE_INTEGER /*StreamBytesTransferred*/,
+                                          DWORD /*dwStreamNumber*/, DWORD /*dwCallbackReason*/, HANDLE /*hSourceFile*/,
+                                          HANDLE /*hDestinationFile*/, LPVOID lpData) {
+    const auto* cb = (const CopyProgressCb*)lpData;
     CopyProgress p;
     p.bytesCopied = TotalBytesTransferred.QuadPart;
     p.bytesTotal = TotalFileSize.QuadPart;
@@ -642,7 +1034,7 @@ static DWORD CALLBACK CopyProgressRoutine(LARGE_INTEGER TotalFileSize, LARGE_INT
 }
 
 bool Copy(Str dst, Str src, bool dontOverwrite, const CopyProgressCb& cbProgress) {
-    if (cbProgress.IsEmpty()) {
+    if (!cbProgress.IsValid()) {
         return Copy(dst, src, dontOverwrite);
     }
     BOOL cancel = FALSE;
@@ -738,9 +1130,7 @@ bool OverwriteAtomicRetry(Str dst, Str src, int retryCount, int retrySleepMs) {
     WCHAR* prefixW = CWStrTemp(dstName);
     WCHAR prefix[4] = L"tmp";
     int prefixLen = (int)wcslen(prefixW);
-    if (prefixLen > 3) {
-        prefixLen = 3;
-    }
+    prefixLen = std::min(prefixLen, 3);
     for (int i = 0; i < prefixLen; i++) {
         prefix[i] = prefixW[i];
     }
@@ -760,9 +1150,7 @@ bool OverwriteAtomicRetry(Str dst, Str src, int retryCount, int retrySleepMs) {
         return false;
     }
 
-    if (retryCount < 1) {
-        retryCount = 1;
-    }
+    retryCount = std::max(retryCount, 1);
     for (int i = 0; i < retryCount; i++) {
         BOOL ok = MoveFileExW(CWStrTemp(tempPath), CWStrTemp(dst), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
         if (ok) {
@@ -825,31 +1213,54 @@ bool Create(Str dir) {
 
 // Create dir and all missing parents (like mkdir -p). Uses SHCreateDirectoryExW
 // so intermediates are created in one call instead of recursive CreateDirectory.
-bool CreateAll(Str dir) {
+bool CreateAll(Str dir, int* errOut) {
+    if (errOut) {
+        *errOut = 0;
+    }
     if (!dir) {
         return false;
     }
     if (Exists(dir)) {
         return true;
     }
-    int err = (int)SHCreateDirectoryExW(nullptr, CWStrTemp(dir), nullptr);
+    int err = SHCreateDirectoryExW(nullptr, CWStrTemp(dir), nullptr);
+    if (errOut) {
+        *errOut = err;
+    }
     // ALREADY_EXISTS / FILE_EXISTS can mean a file is in the way; require a directory.
+    // A false here with err == ERROR_SUCCESS means the create reported success but the
+    // directory was gone by the time we looked (e.g. removed by another thread).
     if (err == ERROR_SUCCESS || err == ERROR_ALREADY_EXISTS || err == ERROR_FILE_EXISTS) {
         return Exists(dir);
     }
     return false;
 }
 
-bool RemoveAll(Str dir) {
-    TempWStr dirW = ToWStrTemp(dir);
-    int n = len(dirW) + 2;
-    TempWStr dirDoubleTerminated = WStr(AllocArrayTemp<WCHAR>(n), n);
-    wstr::BufSet(dirDoubleTerminated, dirW);
+// SHFileOperation wants a double-NUL-terminated path list
+static bool ShDelete(Str path) {
+    TempWStr pathW = ToWStrTemp(path);
+    int n = len(pathW) + 2;
+    TempWStr doubleTerminated = WStr(AllocArrayTemp<WCHAR>(n), n);
+    wstr::BufSet(doubleTerminated, pathW);
     FILEOP_FLAGS flags = FOF_NO_UI;
     uint op = FO_DELETE;
-    SHFILEOPSTRUCTW shfo = {nullptr, op, dirDoubleTerminated.s, nullptr, flags, FALSE, nullptr, nullptr};
+    SHFILEOPSTRUCTW shfo = {nullptr, op, doubleTerminated.s, nullptr, flags, FALSE, nullptr, nullptr};
     int res = SHFileOperationW(&shfo);
     return res == 0;
+}
+
+bool RemoveAll(Str dir) {
+    return ShDelete(dir);
+}
+
+// Delete everything inside dir but keep dir itself, so code that races with us
+// still finds the directory there (see SaveThumbnail / dir::CreateAll).
+// A "dir\*" wildcard is how SHFileOperation spells "contents but not the dir".
+bool Empty(Str dir) {
+    if (!Exists(dir)) {
+        return false;
+    }
+    return ShDelete(path::JoinTemp(dir, StrL("*")));
 }
 
 bool HasWriteAccess(Str dir) {

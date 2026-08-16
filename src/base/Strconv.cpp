@@ -185,17 +185,18 @@ TempStr UnknownToUtf8Temp(Str s) {
     }
 
     if (str::TrimPrefix(s, Str(UTF16_BOM))) {
-        int cch = s.len / 2;
-        return ToUtf8Temp(WStr((wchar_t*)s.s, cch));
+        WStr ws = str::CastStrToWStr(s);
+        return ToUtf8Temp(ws);
     }
 
     if (str::TrimPrefix(s, Str(UTF16BE_BOM))) {
         // convert from utf16 big endian to utf16
-        int n = s.len / 2;
-        TempWStr tmpW = str::DupTemp(WStr((wchar_t*)s.s, n));
+        WStr ws = str::CastStrToWStr(s);
+        TempWStr tmpW = str::DupTemp(ws);
+        int n = ws.len;
         u8* bytes = (u8*)tmpW.s;
         for (int i = 0; i < n; i++) {
-            int idx = i * (int)sizeof(WCHAR);
+            int idx = i * sizeofi(WCHAR);
             std::swap(bytes[idx], bytes[idx + 1]);
         }
         return ToUtf8Temp(WStr(tmpW.s, n));
@@ -241,6 +242,8 @@ Str Utf8ToAnsi(Str s) {
 } // namespace strconv
 
 // short names because frequently used
+// shorter names
+// TODO: eventually we want to migrate all strconv:: to them
 Str ToUtf8(WStr s, Arena* a) {
     return strconv::WStrToUtf8(s, a);
 }

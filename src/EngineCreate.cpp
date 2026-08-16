@@ -5,10 +5,10 @@
 #include "base/Crypto.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
-#include "base/Dpi.h"
+#include "gui/Dpi.h"
 #include "base/Timer.h"
 
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 #include "Settings.h"
 #include "SumatraPDF.h"
@@ -114,6 +114,7 @@ static TempStr MaybeCopyCbxToLocalCache(Str path) {
     return cachePath;
 }
 
+/* EngineCreate.cpp */
 bool IsSupportedFileType(FileType kind, bool enableEngineEbooks) {
     if (kind == FileType::Unknown) {
         return false;
@@ -171,7 +172,7 @@ static EngineBase* CreateEngineForKind(FileType kind, FileType contentHintKind, 
     if (kind == FileType::Unknown) {
         return nullptr;
     }
-    int dpi = DpiGet(nullptr);
+    int dpi = DpiGet();
     EngineBase* engine = nullptr;
     // markdown has no native SumatraPDF engine; always use mupdf (cmark-gfm),
     // regardless of gEnableEpubWithPdfEngine.

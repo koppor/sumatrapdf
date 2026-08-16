@@ -5,12 +5,22 @@
 #include "base/UITask.h"
 #include "base/Win.h"
 
+#include "gui/UIModels.h"
+
 #include "Settings.h"
+#include "DisplayMode.h"
+#include "DocumentLayout.h"
+#include "DocController.h"
+#include "DocProperties.h"
+#include "EngineBase.h"
+#include "DisplayModel.h"
+#include "RenderCache.h"
+#include "Commands.h"
+#include "CommandAvailability.h"
 #include "GlobalPrefs.h"
 #include "Flags.h"
 #include "SumatraTest.h"
 #include "SumatraPDF.h"
-#include "DocController.h"
 #include "MainWindow.h"
 #include "WindowTab.h"
 #include "FileHistory.h"
@@ -19,8 +29,15 @@
 #include "ImageSaveCropResize.h"
 #include "base/GuessFileType.h"
 #include "FindWindow.h"
+#include "Toolbar.h"
+#include "LinkFollow.h"
+#include "SelectTextKeyboard.h"
+#include "HomePage.h"
+#include "AIChatCommon.h"
+#include "AdvancedSettingsDialog.h"
+#include "EditAnnotations.h"
 
-extern Flags* gCli;
+extern bool gIsStartup;
 
 // Silent add for -dbg-control tests (no name dialog, no settings flush).
 static void AddFavoriteSilent(MainWindow* win, int pageNo) {
@@ -32,10 +49,10 @@ static void AddFavoriteSilent(MainWindow* win, int pageNo) {
         return;
     }
     Str path = tab->filePath;
-    FileState* fs = gFileHistory.FindByPath(path);
+    FileState* fs = FileHistoryFindByPath(path);
     if (!fs) {
         fs = NewFileState(path);
-        gFileHistory.Append(fs);
+        FileHistoryAppend(fs);
     }
     if (!fs->favorites) {
         return;
@@ -65,7 +82,7 @@ static TempStr FavoriteNavResultTemp(Str action, int pageNo, int* exitCodeOut) {
         return ToStrTemp(out);
     };
 
-    if (gWindows.IsEmpty()) {
+    if (len(gWindows) == 0) {
         return finish(StrL("NOTREADY no-window"), 2);
     }
     MainWindow* win = gWindows[0];
@@ -97,6 +114,120 @@ static TempStr FavoriteNavResultTemp(Str action, int pageNo, int* exitCodeOut) {
     return finish(fmt("OK page=%d", cur), 0);
 }
 
+// action: "get" | "r2l" | "presentation" | "fullscreen"
+// Reports the current page layout and whether presentation / windowed
+// fullscreen is on. presentation/fullscreen toggle that mode first.
+static TempStr DisplayModeResultTemp(Str action, int* exitCodeOut) {
+    str::Builder out;
+    auto finish = [&](Str msg, int code) -> TempStr {
+        out.Append(msg);
+        out.AppendChar('\n');
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        return ToStrTemp(out);
+    };
+
+    if (len(gWindows) == 0) {
+        return finish(StrL("NOTREADY no-window"), 2);
+    }
+    MainWindow* win = gWindows[0];
+    if (!win || !win->IsDocLoaded() || !win->ctrl) {
+        return finish(StrL("NOTREADY no-doc"), 2);
+    }
+
+    bool reportR2L = str::EqI(action, StrL("r2l"));
+    if (!action || str::EqI(action, StrL("get")) || reportR2L) {
+        // report only
+    } else if (str::EqI(action, StrL("presentation"))) {
+        ToggleFullScreen(win, win->AsFixed() != nullptr);
+    } else if (str::EqI(action, StrL("fullscreen"))) {
+        ToggleFullScreen(win, false);
+    } else {
+        return finish(fmt("ERROR unknown-action action=%s", action), 1);
+    }
+
+    if (reportR2L) {
+        DisplayModel* dm = win->AsFixed();
+        if (!dm) {
+            return finish(StrL("ERROR not-fixed-page"), 1);
+        }
+        AppCommandCtx ctx = NewAppCommandCtx(win);
+        bool available =
+            GetCommandVisibility(CmdToggleMangaMode, ctx, CommandSurface::Palette) == CommandVisibility::Show;
+        return finish(fmt("OK r2l=%d available=%d", dm->GetDisplayR2L() ? 1 : 0, available ? 1 : 0), 0);
+    }
+
+    Str mode = DisplayModeToString(win->ctrl->GetDisplayMode());
+    Str zoomLabel;
+    ZoomToString(&zoomLabel, win->ctrl->GetZoomVirtual(false), nullptr);
+    TempStr res = fmt("OK mode=%s presentation=%d fullscreen=%d zoom=%s", mode, win->InPresentation() ? 1 : 0,
+                      win->isFullScreen ? 1 : 0, zoomLabel);
+    str::Free(zoomLabel);
+    return finish(res, 0);
+}
+
+// Reports sidebar vs canvas client x positions so tests can check SidebarOnRight.
+static TempStr SidebarLayoutResultTemp(int* exitCodeOut) {
+    str::Builder out;
+    auto finish = [&](Str msg, int code) -> TempStr {
+        out.Append(msg);
+        out.AppendChar('\n');
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        return ToStrTemp(out);
+    };
+
+    if (len(gWindows) == 0) {
+        return finish(StrL("NOTREADY no-window"), 2);
+    }
+    MainWindow* win = gWindows[0];
+    if (!win || !win->hwndFrame) {
+        return finish(StrL("NOTREADY no-window"), 2);
+    }
+
+    auto clientX = [&](HWND hwnd) -> int {
+        if (!hwnd || !HwndIsVisible(hwnd)) {
+            return -1;
+        }
+        return HwndScreenToClient(win->hwndFrame, HwndWindowRect(hwnd).TL()).x;
+    };
+
+    bool pref = gGlobalPrefs && gGlobalPrefs->sidebarOnRight;
+    bool tocVis = win->hwndTocBox && HwndIsVisible(win->hwndTocBox);
+    bool favVis = win->hwndFavBox && HwndIsVisible(win->hwndFavBox);
+    int tocX = clientX(win->hwndTocBox);
+    int favX = clientX(win->hwndFavBox);
+    int canvasX = clientX(win->hwndCanvas);
+    return finish(fmt("OK pref=%d tocVis=%d favVis=%d tocX=%d favX=%d canvasX=%d", pref ? 1 : 0, tocVis ? 1 : 0,
+                      favVis ? 1 : 0, tocX, favX, canvasX),
+                  0);
+}
+
+static TempStr DocumentFontListResultTemp(int* exitCodeOut) {
+    auto finish = [exitCodeOut](Str result, int code) -> TempStr {
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        return str::DupTemp(result);
+    };
+    if (len(gWindows) == 0) {
+        return finish(StrL("NOTREADY no-window"), 2);
+    }
+    MainWindow* win = gWindows[0];
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+    if (!engine) {
+        return finish(StrL("NOTREADY no-fixed-document"), 2);
+    }
+    TempStr fonts = engine->GetPropertyTemp(DocProp::FontList);
+    if (!fonts) {
+        return finish(StrL("ERROR no-fonts"), 1);
+    }
+    return finish(fmt("OK fonts=%s", fonts), 0);
+}
+
 enum class ControlCmd : u16 {
     Ping = 1,
     Quit = 2,
@@ -124,6 +255,26 @@ enum class ControlCmd : u16 {
     TestTocNavigate = 32,
     TestMarkdownTocNavigate = 33,
     TestFavoriteNav = 34,
+    TestToolbarButtons = 35,
+    TestKeyboardLinkFollow = 36,
+    TestFindResultsOrder = 37,
+    TestClickClearsSelection = 38,
+    TestRectSelectionDrag = 39,
+    TestSelectTextKeyboard = 40,
+    TestAIChat = 41,
+    TestAIChatReplay = 42,
+    TestMarkdownFollowLink = 43,
+    TestHomeListRows = 44,
+    TestPageComments = 45,
+    TestAdvSettingsRows = 46,
+    TestDestZoomNav = 47,
+    TestAnnotEditorLayout = 48,
+    TestDisplayMode = 49,
+    TestSidebarLayout = 50,
+    TestCadEnhanceColors = 51,
+    TestFindPageRange = 52,
+    TestDocumentFontList = 53,
+    WaitRenderIdle = 54,
 };
 
 enum class ControlArgType : u16 {
@@ -158,12 +309,20 @@ static void DeleteControlArg(ControlArg* arg) {
     delete arg;
 }
 
+enum class RenderIdleState : u8 {
+    NotReady = 0,
+    Busy = 1,
+    Idle = 2,
+};
+
 struct ControlRequest {
     u16 cmd = 0;
     u16 reqId = 0;
     Vec<ControlArg*> args;
     str::Builder results;
     HANDLE done = nullptr;
+    RenderIdleState idleState = RenderIdleState::NotReady;
+    char idleInfo[160]{};
 };
 
 static void DeleteControlRequest(ControlRequest* req) {
@@ -516,6 +675,44 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestClickClearsSelection: {
+            Str word = StringArg(req, 0);
+            if (!word) {
+                AppendError(req, "TestClickClearsSelection expects string word");
+                break;
+            }
+            int exitCode = 0;
+            Str res = ClickClearsSelectionResultTemp(word, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestRectSelectionDrag: {
+            Str word = StringArg(req, 0);
+            if (!word) {
+                AppendError(req, "TestRectSelectionDrag expects string word");
+                break;
+            }
+            int exitCode = 0;
+            Str res = RectSelectionDragResultTemp(word, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestFindResultsOrder: {
+            Str term = StringArg(req, 0);
+            if (!term) {
+                AppendError(req, "TestFindResultsOrder expects string term, int startPage");
+                break;
+            }
+            i32 startPage = 0;
+            IntArg(req, 1, startPage);
+            int exitCode = 0;
+            Str res = FindResultsOrderResultTemp(term, startPage, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestFindResultPageColumnClip: {
             int exitCode = 0;
             Str res = FindResultPageColumnClipResultTemp(&exitCode);
@@ -590,6 +787,34 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestCadEnhanceColors: {
+            Str path = StringArg(req, 0);
+            i32 pageNo = 1;
+            i32 zoomPercent = 25;
+            if (!path || !IntArg(req, 1, pageNo)) {
+                AppendError(req, "TestCadEnhanceColors expects string path, int pageNo [, int zoomPercent]");
+                break;
+            }
+            IntArg(req, 2, zoomPercent); // optional
+            int exitCode = 0;
+            Str res = CadEnhanceColorsResultTemp(path, pageNo, zoomPercent, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestPageComments: {
+            Str path = StringArg(req, 0);
+            i32 pageNo = 1;
+            if (!path || !IntArg(req, 1, pageNo)) {
+                AppendError(req, "TestPageComments expects string path, int pageNo");
+                break;
+            }
+            int exitCode = 0;
+            Str res = PageCommentsResultTemp(path, pageNo, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestWindowStateDuringLoad: {
             int exitCode = 0;
             Str res = WindowStateDuringLoadResultTemp(&exitCode);
@@ -609,6 +834,72 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestDestZoomNav: {
+            i32 destNo = 1;
+            i32 startZoomPerc = 0;
+            if (!IntArg(req, 0, destNo)) {
+                AppendError(req, "TestDestZoomNav expects int destNo (1-based) [, int startZoomPerc]");
+                break;
+            }
+            IntArg(req, 1, startZoomPerc); // optional
+            int exitCode = 0;
+            Str res = DestZoomNavResultTemp(destNo, startZoomPerc, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestAnnotEditorLayout: {
+            i32 clientDy = 0;
+            i32 selectItem = 0;
+            IntArg(req, 0, clientDy);   // optional
+            IntArg(req, 1, selectItem); // optional, 1-based
+            int exitCode = 0;
+            Str res = AnnotEditorLayoutResultTemp(clientDy, selectItem, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestDisplayMode: {
+            Str action = StringArg(req, 0);
+            int exitCode = 0;
+            Str res = DisplayModeResultTemp(action, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestDocumentFontList: {
+            int exitCode = 0;
+            Str res = DocumentFontListResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestFindPageRange: {
+            Str pdf = StringArg(req, 0);
+            Str needle = StringArg(req, 1);
+            i32 first = 0;
+            i32 last = 0;
+            IntArg(req, 2, first);
+            IntArg(req, 3, last);
+            Str spec = StringArg(req, 4); // optional "3,4-6,18-"
+            if (!pdf || !needle) {
+                AppendError(
+                    req, "TestFindPageRange expects string pdf, string needle [, int first, int last [, string spec]]");
+                break;
+            }
+            int exitCode = 0;
+            Str res = FindPageRangeResultTemp(pdf, needle, first, last, spec, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestSidebarLayout: {
+            int exitCode = 0;
+            Str res = SidebarLayoutResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestMarkdownTocNavigate: {
             i32 destNo = 0;
             i32 minScrollY = 1;
@@ -618,6 +909,40 @@ static void ExecuteControlRequest(ControlRequest* req) {
             }
             int exitCode = 0;
             Str res = MarkdownTocNavigateResultTemp(destNo, minScrollY, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestMarkdownFollowLink: {
+            Str href = StringArg(req, 0);
+            i32 follow = 0;
+            if (!IntArg(req, 1, follow)) {
+                AppendError(req, "TestMarkdownFollowLink expects string href, int follow");
+                break;
+            }
+            int exitCode = 0;
+            Str res = MarkdownFollowLinkResultTemp(href, follow != 0, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestHomeListRows: {
+            int exitCode = 0;
+            Str res = HomeListRowsResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestAdvSettingsRows: {
+            Str action = StringArg(req, 0);
+            i32 arg = 0;
+            IntArg(req, 1, arg); // optional; only "scroll" uses it
+            if (!action) {
+                AppendError(req, "TestAdvSettingsRows expects string action [, int rows]");
+                break;
+            }
+            int exitCode = 0;
+            Str res = AdvSettingsRowsResultTemp(action, arg, &exitCode);
             AppendTestResult(req, exitCode, res);
             break;
         }
@@ -636,11 +961,146 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestToolbarButtons: {
+            int exitCode = 0;
+            Str res = ToolbarButtonsResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestKeyboardLinkFollow: {
+            int exitCode = 0;
+            Str res = KeyboardLinkFollowResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestSelectTextKeyboard: {
+            int exitCode = 0;
+            Str res = SelectTextKeyboardResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestAIChat: {
+            i32 backend = 0;
+            Str filePath = StringArg(req, 1);
+            Str message = StringArg(req, 2);
+            if (!IntArg(req, 0, backend) || !filePath || !message) {
+                AppendError(req, "TestAIChat expects int backend, string filePath, string message");
+                break;
+            }
+            int exitCode = 0;
+            Str res = AIChatTestResultTemp(backend, filePath, message, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestAIChatReplay: {
+            Str userMsg = StringArg(req, 0);
+            Str response = StringArg(req, 1);
+            if (!userMsg || !response) {
+                AppendError(req, "TestAIChatReplay expects string userMsg, string response");
+                break;
+            }
+            int exitCode = 0;
+            Str res = AIChatTestReplayResultTemp(userMsg, response, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         default:
             AppendError(req, "unknown control command");
             break;
     }
     SetEvent(req->done);
+}
+
+// Snapshot for WaitRenderIdle. Must run on the UI thread: window/doc state
+// and the cache walk both belong there. Does not block; the control thread
+// polls so WM_PAINT can still request missing tiles.
+static void SnapshotRenderIdle(ControlRequest* req) {
+    req->idleState = RenderIdleState::NotReady;
+    req->idleInfo[0] = 0;
+    if (gIsStartup) {
+        // LoadOnStartup applies -zoom after the first paint; a snapshot
+        // during that window would see the default-zoom tiles as "done"
+        str::BufSet(Str(req->idleInfo, dimof(req->idleInfo)), StrL("startup"));
+        SetEvent(req->done);
+        return;
+    }
+    if (len(gWindows) == 0) {
+        str::BufSet(Str(req->idleInfo, dimof(req->idleInfo)), StrL("no-window"));
+        SetEvent(req->done);
+        return;
+    }
+    MainWindow* win = gWindows[0];
+    if (!win || !win->IsDocLoaded()) {
+        str::BufSet(Str(req->idleInfo, dimof(req->idleInfo)), StrL("no-doc"));
+        SetEvent(req->done);
+        return;
+    }
+    DisplayModel* dm = win->AsFixed();
+    if (!dm) {
+        // ebook / CHM / etc.: nothing in RenderCache to wait for
+        req->idleState = RenderIdleState::Idle;
+        str::BufSet(Str(req->idleInfo, dimof(req->idleInfo)), StrL("no-fixed"));
+        SetEvent(req->done);
+        return;
+    }
+    // Paint first: that's what queues missing target tiles. Checking the
+    // cache before this paint sees a leftover preview and no in-flight work.
+    // DrainQueue runs RenderFinished from tiles that completed during the
+    // paint; that posts another repaint which may request the next resolution.
+    if (win->hwndCanvas) {
+        InvalidateRect(win->hwndCanvas, nullptr, FALSE);
+        UpdateWindow(win->hwndCanvas);
+    }
+    uitask::DrainQueue();
+    if (win->hwndCanvas) {
+        InvalidateRect(win->hwndCanvas, nullptr, FALSE);
+        UpdateWindow(win->hwndCanvas);
+    }
+    float zoomV = dm->GetZoomVirtual(true);
+    int pageNo = dm->FirstVisiblePageNo();
+    if (pageNo < 1) {
+        pageNo = 1;
+    }
+    float zoomR = dm->GetZoomReal(pageNo);
+    USHORT res = gRenderCache ? gRenderCache->GetTileRes(dm, pageNo) : (USHORT)0;
+    Size vp = dm->GetViewPort().Size();
+    bool ready = gRenderCache && !gRenderCache->IsBusyFor(dm) && gRenderCache->VisibleTargetTilesReady(dm);
+    int nQ = gRenderCache ? gRenderCache->requestCount : -1;
+    str::BufSet(Str(req->idleInfo, dimof(req->idleInfo)), fmt("zoomV=%.1f zoomR=%.3f res=%d vp=%dx%d ready=%d q=%d",
+                                                              zoomV, zoomR, (int)res, vp.dx, vp.dy, ready ? 1 : 0, nQ));
+    req->idleState = ready ? RenderIdleState::Idle : (gRenderCache ? RenderIdleState::Busy : RenderIdleState::NotReady);
+    SetEvent(req->done);
+}
+
+// Block on the control thread until visible tiles are cached at target
+// resolution, or until timeoutMs. Optional first int arg is the timeout.
+static void RunWaitRenderIdle(ControlRequest* req) {
+    i32 timeoutMs = 15000;
+    IntArg(req, 0, timeoutMs);
+    if (timeoutMs < 1) {
+        timeoutMs = 1;
+    }
+    u64 deadline = GetTickCount64() + (u64)timeoutMs;
+    for (;;) {
+        ResetEvent(req->done);
+        uitask::Post(MkFunc0<ControlRequest>(SnapshotRenderIdle, req), "WaitRenderIdle");
+        WaitForSingleObject(req->done, INFINITE);
+        if (req->idleState == RenderIdleState::Idle) {
+            AppendTestResult(req, 0, req->idleInfo[0] ? Str(req->idleInfo) : StrL("idle"));
+            return;
+        }
+        if (GetTickCount64() >= deadline) {
+            Str kind = req->idleState == RenderIdleState::NotReady ? StrL("timeout-notready") : StrL("timeout-busy");
+            AppendTestResult(req, 1, req->idleInfo[0] ? fmt("%s %s", kind, Str(req->idleInfo)) : kind);
+            return;
+        }
+        Sleep(20);
+    }
 }
 
 static bool ReadExact(HANDLE h, void* data, DWORD n) {
@@ -712,8 +1172,14 @@ static void ProcessControlConnection(HANDLE h) {
         if (!req) {
             return;
         }
-        uitask::Post(MkFunc0<ControlRequest>(ExecuteControlRequest, req), "SumatraControl");
-        WaitForSingleObject(req->done, INFINITE);
+        // WaitRenderIdle polls on this thread so the UI thread stays free to
+        // paint (and thereby request the tiles we are waiting for)
+        if ((ControlCmd)req->cmd == ControlCmd::WaitRenderIdle) {
+            RunWaitRenderIdle(req);
+        } else {
+            uitask::Post(MkFunc0<ControlRequest>(ExecuteControlRequest, req), "SumatraControl");
+            WaitForSingleObject(req->done, INFINITE);
+        }
         bool ok = WriteControlResponse(h, req);
         DeleteControlRequest(req);
         if (!ok) {

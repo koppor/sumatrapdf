@@ -2,8 +2,7 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/Win.h"
-#include "wingui/UIModels.h"
+#include "gui/UIModels.h"
 
 extern "C" {
 #include <mupdf/fitz.h>
@@ -78,9 +77,7 @@ static void dm_analysis_record_image(fz_context* ctx, fz_device* dev, fz_image* 
 
     float pageArea = dm_rectf_area(d->analysis->pageBounds);
     float coverage = pageArea > 0.f ? dm_rect_area(bbox) / pageArea : 0.f;
-    if (coverage > d->maxImageCoverage) {
-        d->maxImageCoverage = coverage;
-    }
+    d->maxImageCoverage = std::max(coverage, d->maxImageCoverage);
 
     ImageOccurrenceInfo info;
     info.occurrenceIndex = len(d->analysis->images);
@@ -378,10 +375,10 @@ static void PdfDarkModeAssignPolicies(DarkModePageAnalysis* analysis, const Dark
                 img.analysis.kind = DarkImageKind::Photo;
                 img.policy = DarkImagePolicy::Preserve;
             }
-            if (!PdfDarkModeImageMeetsPreserveMinSize(img) ||
-                PdfDarkModeIsDecorativeStripImage(img.pageBounds, analysis->pageBounds)) {
-                img.policy = DarkImagePolicy::AdaptiveDocument;
-            } else if (img.pageCoverage >= kMaxPreserveImagePageCoverage && !preserveArt) {
+            bool tooSmallOrDominant = !PdfDarkModeImageMeetsPreserveMinSize(img) ||
+                                      PdfDarkModeIsDecorativeStripImage(img.pageBounds, analysis->pageBounds) ||
+                                      (img.pageCoverage >= kMaxPreserveImagePageCoverage && !preserveArt);
+            if (tooSmallOrDominant) {
                 img.policy = DarkImagePolicy::AdaptiveDocument;
             }
             if (isPureScan && img.pageCoverage >= options.minScanDominantCoverage && !preserveArt) {

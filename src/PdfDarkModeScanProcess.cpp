@@ -122,10 +122,11 @@ static PixelColor EstimatePaperFromPixmap(fz_context* ctx, fz_pixmap* pix, const
     return paper;
 }
 
+// Phase 5: full-page scan remapping (Smart path only).
 void PdfDarkModeRemapScanPixel(float r, float g, float b, const DarkImageAnalysis& analysis,
                                const DarkModePalette& palette, float* outR, float* outG, float* outB) {
-    float maxC = r > g ? (r > b ? r : b) : (g > b ? g : b);
-    float minC = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    float maxC = std::max({r, g, b});
+    float minC = std::min({r, g, b});
     float lum = (0.2126f * r) + (0.7152f * g) + (0.0722f * b);
     float chroma = maxC - minC;
 
@@ -135,7 +136,6 @@ void PdfDarkModeRemapScanPixel(float r, float g, float b, const DarkImageAnalysi
     float paperLum = (0.2126f * paperR) + (0.7152f * paperG) + (0.0722f * paperB);
     if (paperLum < 0.35f) {
         paperLum = 0.72f;
-        paperR = paperG = paperB = paperLum;
     }
 
     const float lowChroma = 0.10f;
@@ -199,17 +199,13 @@ static void WritePixmapRgb(fz_context* ctx, fz_pixmap* pix, int x, int y, float 
     float back[FZ_MAX_COLORS] = {};
     fz_convert_color(ctx, rgb, out, cs, back, cs, fz_default_color_params);
     for (int c = 0; c < components && c < FZ_MAX_COLORS; c++) {
-        int v = (int)((back[c] * 255.f) + 0.5f);
-        if (v < 0) {
-            v = 0;
-        }
-        if (v > 255) {
-            v = 255;
-        }
+        int v = (int)lroundf(back[c] * 255.f);
+        v = limitValue(v, 0, 255);
         px[c] = (unsigned char)v;
     }
 }
 
+// Phase 5: returns processed pixmap for FullPageScan, or nullptr to fall back.
 fz_pixmap* PdfDarkModeProcessScanPixmap(fz_context* ctx, fz_pixmap* src, const DarkImageAnalysis& analysis,
                                         const DarkModePalette& palette) {
     if (!ctx || !src || !src->samples || src->w <= 0 || src->h <= 0) {

@@ -13,8 +13,8 @@
 #include "DocProperties.h"
 #include "DocController.h"
 #include "EbookBase.h"
-#include "GumboHtmlParser.h"
 #include "GumboHelpers.h"
+#include "GumboHtmlParser.h"
 #include "EbookDoc.h"
 #include "PalmDbReader.h"
 #include "MobiDoc.h"
@@ -103,9 +103,9 @@ static uint GetCodepageFromPI(Str xmlPI) {
         {"1251", 1251},
         // TODO: any other commonly used codepages?
     };
-    for (int i = 0; i < dimof(encodings); i++) {
-        if (str::Contains(encoding, encodings[i].namePart)) {
-            return encodings[i].codePage;
+    for (auto& enc : encodings) {
+        if (str::Contains(encoding, enc.namePart)) {
+            return enc.codePage;
         }
     }
     return CP_ACP;
@@ -117,7 +117,7 @@ static bool IsValidUtf8(Str string) {
         int skip;
         if (c < 0x80) {
             skip = 0;
-        } else if (c < 0xC0) {
+        } else if (c < 0xC0) { // NOLINT(bugprone-branch-clone): continuation byte, distinct from the >= 0xF5 case
             return false;
         } else if (c < 0xE0) {
             skip = 1;
@@ -143,17 +143,17 @@ static TempStr DecodeTextToUtf8Temp(Str s, bool isXML = false) {
         return str::DupTemp(s);
     }
     if (str::TrimPrefix(s, UTF16_BOM)) {
-        WStr ws = str::CastToWCHAR(s);
+        WStr ws = str::CastStrToWStr(s);
         return ToUtf8Temp(ws);
     }
     if (str::TrimPrefix(s, UTF16BE_BOM)) {
         // convert from utf16 big endian to utf16
-        int n = str::CastToWCHAR(s).len;
+        int n = str::CastStrToWStr(s).len;
         for (int i = 0; i < n; i++) {
             int idx = i * 2;
             std::swap(s.s[idx], s.s[idx + 1]);
         }
-        WStr ws = str::CastToWCHAR(s);
+        WStr ws = str::CastStrToWStr(s);
         return ToUtf8Temp(ws);
     }
     uint codePage = isXML ? GetCodepageFromPI(s) : CP_ACP;
@@ -167,7 +167,11 @@ static TempStr DecodeTextToUtf8Temp(Str s, bool isXML = false) {
 }
 
 TempStr NormalizeURLTemp(Str url, Str base) {
-    ReportIf(!url || !base);
+    if (!url || !base) {
+        // nothing to resolve against; url is already as normalized as it gets
+        ReportIf(true);
+        return str::DupTemp(url);
+    }
     if (url.s[0] == '/' || str::ContainsChar(url, ':')) {
         return str::DupTemp(url);
     }
@@ -223,7 +227,7 @@ TempStr NormalizeURLTemp(Str url, Str base) {
     return norm;
 }
 
-inline char decode64(char c) {
+static inline char decode64(char c) {
     if ('A' <= c && c <= 'Z') {
         return (char)(c - 'A');
     }
@@ -416,7 +420,7 @@ static void CollectEncryptedEpubPaths(const GumboNode* root, StrVec& encList) {
         if (GumboTagNameIsNS(node, StrL("CipherReference"), EPUB_ENC_NS())) {
             TempStr uri = GumboAttributeValueTemp(node, "URI");
             if (uri) {
-                url::DecodeInPlace(uri);
+                uri = url::DecodeTemp(uri);
                 encList.Append(uri);
             }
         }
@@ -454,7 +458,7 @@ bool EpubDoc::Load() {
     if (!contentPath) {
         return false;
     }
-    url::DecodeInPlace(contentPath);
+    contentPath = url::DecodeTemp(contentPath);
 
     // encrypted files will be ignored (TODO: support decryption)
     StrVec encList;
@@ -503,7 +507,7 @@ bool EpubDoc::Load() {
             if (!imgPath) {
                 continue;
             }
-            url::DecodeInPlace(imgPath);
+            imgPath = url::DecodeTemp(imgPath);
             imgPath = str::JoinTemp(contentPath, imgPath);
             if (encList.Contains(imgPath)) {
                 continue;
@@ -518,7 +522,7 @@ bool EpubDoc::Load() {
             if (!htmlPath) {
                 continue;
             }
-            url::DecodeInPlace(htmlPath);
+            htmlPath = url::DecodeTemp(htmlPath);
             TempStr htmlId = GumboAttributeValueTemp(node, "id");
             // EPUB 3 ToC
             TempStr properties = GumboAttributeValueTemp(node, "properties");
@@ -555,6 +559,7 @@ bool EpubDoc::Load() {
     }
     TempStr readingDir = GumboAttributeValueTemp(node, "page-progression-direction");
     if (readingDir) {
+        hasReadingDir = true;
         isRtlDoc = str::EqI(readingDir, StrL("rtl"));
     }
 
@@ -760,6 +765,10 @@ bool EpubDoc::IsRTL() const {
     return isRtlDoc;
 }
 
+bool EpubDoc::HasReadingDirection() const {
+    return hasReadingDir;
+}
+
 bool EpubDoc::HasToc() const {
     return len(tocPath) > 0;
 }
@@ -899,6 +908,20 @@ bool EpubDoc::IsSupportedFileType(FileType kind) {
     return kind == FileType::Epub;
 }
 
+// Only the spine's page-progression-direction. Loading the whole book to read
+// one attribute would mean parsing every chapter.
+EpubReadingDirection EpubGetReadingDirection(Str path) {
+    EpubReadingDirection res;
+    EpubDoc* doc = EpubDoc::CreateFromFile(path);
+    if (!doc) {
+        return res;
+    }
+    res.declared = doc->HasReadingDirection();
+    res.rtl = doc->IsRTL();
+    delete doc;
+    return res;
+}
+
 EpubDoc* EpubDoc::CreateFromFile(Str path) {
     EpubDoc* doc = new EpubDoc(path);
     if (!doc || !doc->Load()) {
@@ -959,7 +982,7 @@ static Str loadFromFile(Fb2Doc* doc) {
 
     // we have archive with more than 1 file
     doc->isZipped = true;
-    auto& fileInfos = archive->GetFileInfos();
+    const auto& fileInfos = archive->GetFileInfos();
     int nFiles = len(fileInfos);
 
     if (nFiles == 0) {
@@ -987,7 +1010,26 @@ static Str loadFromFile(Fb2Doc* doc) {
     return data;
 }
 
+static bool LooksLikeZipOrRar(Str data) {
+    if (len(data) < 4) {
+        return false;
+    }
+    // PK\x03\x04 (zip) or Rar!
+    if (data.s[0] == 'P' && data.s[1] == 'K') {
+        return true;
+    }
+    if (str::StartsWith(data, StrL("Rar!"))) {
+        return true;
+    }
+    return false;
+}
+
 static Str loadFromData(Fb2Doc* doc, Str srcData) {
+    // Only try the archive path for data that looks like a container; plain
+    // FictionBook XML must not go through libarchive (issue #1677).
+    if (!LooksLikeZipOrRar(srcData)) {
+        return str::Dup(srcData);
+    }
     Archive* archive = OpenArchiveFromData(srcData);
     if (!archive) {
         return str::Dup(srcData);
@@ -995,7 +1037,7 @@ static Str loadFromData(Fb2Doc* doc, Str srcData) {
 
     AutoDelete delArchive(archive);
     doc->isZipped = true;
-    auto& fileInfos = archive->GetFileInfos();
+    const auto& fileInfos = archive->GetFileInfos();
     int nFiles = len(fileInfos);
     if (nFiles == 0) {
         return {};
@@ -1057,7 +1099,7 @@ bool Fb2Doc::Load(Str srcData) {
             }
         } else if (inBody && tok->IsStartTag() && Tag_Title == tok->tag) {
             hasToc = true;
-        } else if (inBody) {
+        } else if (inBody) { // NOLINT(bugprone-branch-clone): skipping body content is its own case
             continue;
         } else if (inTitleInfo && tok->IsEndTag() && tok->NameIsNS(StrL("title-info"), FB2_MAIN_NS())) {
             inTitleInfo--;
@@ -1164,9 +1206,7 @@ void Fb2Doc::ExtractImage(GumboHtmlParser* parser, HtmlToken* tok) {
     TempStr id;
     AttrInfo* attrInfo = tok->GetAttrByNameNS(StrL("id"), FB2_MAIN_NS());
     if (attrInfo) {
-        id = str::DupTemp(attrInfo->val);
-        url::DecodeInPlace(id);
-        id = Str(id.s); // DecodeInPlace shortens the buffer in place; re-read its length
+        id = url::DecodeTemp(attrInfo->val);
     }
 
     tok = parser->Next();
@@ -1296,7 +1336,7 @@ PalmDoc::~PalmDoc() {
 #define PDB_TOC_ENTRY_MARK "ToC!Entry!"
 
 // http://wiki.mobileread.com/wiki/TealDoc
-static Str HandleTealDocTag(str::Builder& builder, StrVec& tocEntries, Str text, int n, uint) {
+static Str HandleTealDocTag(str::Builder& builder, StrVec& tocEntries, Str text, int n, uint /*codePage*/) {
     if (n < 9) {
     Fallback:
         builder.Append("&lt;");
@@ -1327,7 +1367,13 @@ static Str HandleTealDocTag(str::Builder& builder, StrVec& tocEntries, Str text,
         int hx = 2;
         AttrInfo* attr = tok->GetAttrByName(StrL("FONT"));
         if (attr && attr->val) {
-            hx = '0' == attr->val.s[0] ? 5 : '2' == attr->val.s[0] ? 1 : 3;
+            char font = attr->val.s[0];
+            hx = 3;
+            if (font == '0') {
+                hx = 5;
+            } else if (font == '2') {
+                hx = 1;
+            }
         }
         attr = tok->GetAttrByName(StrL("TEXT"));
         if (attr) {
@@ -1379,15 +1425,9 @@ bool PalmDoc::Load() {
         return false;
     }
     auto docType = mobiDoc->GetDocType();
-    switch (docType) {
-        case PdbDocType::PalmDoc:
-        case PdbDocType::TealDoc:
-        case PdbDocType::Plucker:
-            // no-op
-            break;
-        default:
-            delete mobiDoc;
-            return false;
+    if (docType != PdbDocType::PalmDoc && docType != PdbDocType::TealDoc && docType != PdbDocType::Plucker) {
+        delete mobiDoc;
+        return false;
     }
 
     Str text = mobiDoc->GetHtmlData();
@@ -1421,7 +1461,7 @@ Str PalmDoc::GetHtmlData() const {
     return ToStr(htmlData);
 }
 
-TempStr PalmDoc::GetPropertyTemp(DocProp) const {
+TempStr PalmDoc::GetPropertyTemp(DocProp /*prop*/) const {
     return {};
 }
 
@@ -1601,11 +1641,11 @@ static TempStr DecompressTcrTextTemp(Str data) {
     Str end = Str(data.s + data.len, 0);
 
     Str dict[256];
-    for (int n = 0; n < (int)dimof(dict); n++) {
+    for (Str& entry : dict) {
         if (!curr.len) {
             return str::DupTemp(data);
         }
-        dict[n] = curr;
+        entry = curr;
         int step = 1 + (u8)curr.s[0];
         if (step > curr.len) {
             return str::DupTemp(data);
@@ -1674,12 +1714,12 @@ static Str TextFindLinkEnd(str::Builder& htmlData, Str curr, char prevChar, bool
 }
 
 // cf. http://weblogs.mozillazine.org/gerv/archives/2011/05/html5_email_address_regexp.html
-inline bool IsEmailUsernameChar(char c) {
+static inline bool IsEmailUsernameChar(char c) {
     // explicitly excluding the '/' from the list, as it is more
     // often part of a URL or path than of an email address
     return isalnum((u8)c) || str::ContainsChar(StrL(".!#$%&'*+=?^_`{|}~-"), c);
 }
-inline bool IsEmailDomainChar(char c) {
+static inline bool IsEmailDomainChar(char c) {
     return isalnum((u8)c) || '-' == c;
 }
 
@@ -1791,7 +1831,7 @@ bool TxtDoc::Load() {
         if (linkEndPos == i) {
             htmlData.Append("</a>");
             linkEndPos = -1;
-        } else if (linkEndPos >= 0) {
+        } else if (linkEndPos >= 0) { // NOLINT(bugprone-branch-clone): each empty branch has its own reason
             /* don't check for hyperlinks inside a link */;
         } else if ('@' == c) {
             Str end = TextFindEmailEnd(htmlData, curr);
@@ -1865,7 +1905,7 @@ Str TxtDoc::GetHtmlData() const {
     return ToStr(htmlData);
 }
 
-TempStr TxtDoc::GetPropertyTemp(DocProp) const {
+TempStr TxtDoc::GetPropertyTemp(DocProp /*prop*/) const {
     return {};
 }
 

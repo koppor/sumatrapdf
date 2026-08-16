@@ -7,6 +7,11 @@
 #include "Settings.h"
 #include "DisplayMode.h"
 #include "Notifications.h"
+#if !defined(SUMATRA_TEST_UTIL)
+#include "ShortcutParse.h"
+#include "Accelerators.h"
+#include "GlobalPrefs.h"
+#endif
 
 // @gen-start cmd-c
 // clang-format off
@@ -142,6 +147,7 @@ static SeqStrings gCommandNames =
     "CmdHelpOpenManual\0"
     "CmdHelpOpenManualOnWebsite\0"
     "CmdHelpOpenKeyboardShortcuts\0"
+    "CmdToggleKeyboardHelp\0"
     "CmdHelpVisitWebsite\0"
     "CmdHelpAbout\0"
     "CmdMoveFrameFocus\0"
@@ -214,6 +220,7 @@ static SeqStrings gCommandNames =
     "CmdTabGroupSave\0"
     "CmdTabGroupRestore\0"
     "CmdChangeBackgroundColor\0"
+    "CmdChangeEbookSettings\0"
     "CmdSetTabColor\0"
     "CmdPdfCompress\0"
     "CmdPdfDecompress\0"
@@ -232,6 +239,7 @@ static SeqStrings gCommandNames =
     "CmdStopReadAloud\0"
     "CmdReadAloudFromTopPage\0"
     "CmdReadAloudSelection\0"
+    "CmdToggleToolbarShowReadAloud\0"
     "CmdRemoveDeletedFilesFromHistory\0"
     "CmdCommandPaletteTOC\0"
     "CmdDebugToggleRenderInfo\0"
@@ -268,6 +276,26 @@ static SeqStrings gCommandNames =
     "CmdDeleteFileAndOpenNext\0"
     "CmdShowGeneratedHTML\0"
     "CmdDeleteCachedFiles\0"
+    "CmdToggleKeyboardLinkFollowing\0"
+    "CmdDebugToggleDpiOverride\0"
+    "CmdToggleImages\0"
+    "CmdSelectTextViaKeyboard\0"
+    "CmdOpenFileWithOSFilePicker\0"
+    "CmdToggleFilePicker\0"
+    "CmdToggleBoolSetting\0"
+    "CmdFixDefaultApp\0"
+    "CmdAIChatWithAntiGravity\0"
+    "CmdTranslateSelectionWithAntiGravity\0"
+    "CmdConvertToPDF\0"
+    "CmdDebugShowFitContentArea\0"
+    "CmdExtendSelectionCharLeft\0"
+    "CmdExtendSelectionCharRight\0"
+    "CmdExtendSelectionWordLeft\0"
+    "CmdExtendSelectionWordRight\0"
+    "CmdToggleLaserPointer\0"
+    "CmdZoomToSelection\0"
+    "CmdToggleHoverPreview\0"
+    "CmdToggleDisableLinks\0"
     "CmdRefHoverPushToJabRef\0"
     "CmdNone\0"
     "\0";
@@ -404,6 +432,7 @@ static i32 gCommandIds[] = {
     CmdHelpOpenManual,
     CmdHelpOpenManualOnWebsite,
     CmdHelpOpenKeyboardShortcuts,
+    CmdToggleKeyboardHelp,
     CmdHelpVisitWebsite,
     CmdHelpAbout,
     CmdMoveFrameFocus,
@@ -476,6 +505,7 @@ static i32 gCommandIds[] = {
     CmdTabGroupSave,
     CmdTabGroupRestore,
     CmdChangeBackgroundColor,
+    CmdChangeEbookSettings,
     CmdSetTabColor,
     CmdPdfCompress,
     CmdPdfDecompress,
@@ -494,6 +524,7 @@ static i32 gCommandIds[] = {
     CmdStopReadAloud,
     CmdReadAloudFromTopPage,
     CmdReadAloudSelection,
+    CmdToggleToolbarShowReadAloud,
     CmdRemoveDeletedFilesFromHistory,
     CmdCommandPaletteTOC,
     CmdDebugToggleRenderInfo,
@@ -530,6 +561,26 @@ static i32 gCommandIds[] = {
     CmdDeleteFileAndOpenNext,
     CmdShowGeneratedHTML,
     CmdDeleteCachedFiles,
+    CmdToggleKeyboardLinkFollowing,
+    CmdDebugToggleDpiOverride,
+    CmdToggleImages,
+    CmdSelectTextViaKeyboard,
+    CmdOpenFileWithOSFilePicker,
+    CmdToggleFilePicker,
+    CmdToggleBoolSetting,
+    CmdFixDefaultApp,
+    CmdAIChatWithAntiGravity,
+    CmdTranslateSelectionWithAntiGravity,
+    CmdConvertToPDF,
+    CmdDebugShowFitContentArea,
+    CmdExtendSelectionCharLeft,
+    CmdExtendSelectionCharRight,
+    CmdExtendSelectionWordLeft,
+    CmdExtendSelectionWordRight,
+    CmdToggleLaserPointer,
+    CmdZoomToSelection,
+    CmdToggleHoverPreview,
+    CmdToggleDisableLinks,
     CmdRefHoverPushToJabRef,
     CmdNone,
 };
@@ -551,7 +602,7 @@ SeqStrings gCommandDescriptions =
     "Reload Document\0"
     "Create .lnk Shortcut\0"
     "Send Document By Email...\0"
-    "Show Document Properties...\0"
+    "Document Properties...\0"
     "Single Page View\0"
     "Facing View\0"
     "Book View\0"
@@ -576,7 +627,7 @@ SeqStrings gCommandDescriptions =
     "Search Selection with Wikipedia\0"
     "Search Selection with Google Scholar\0"
     "Select All\0"
-    "Open New SumatraPDF Window\0"
+    "New Window\0"
     "Open Current Document In New Window\0"
     "Open Current Document In New Tab\0"
     "Copy Image\0"
@@ -666,6 +717,7 @@ SeqStrings gCommandDescriptions =
     "Help: Manual\0"
     "Help: Manual On Website\0"
     "Help: Keyboard Shortcuts\0"
+    "Show Keyboard Shortcuts\0"
     "Help: SumatraPDF Website\0"
     "Help: About SumatraPDF...\0"
     "Move Frame Focus\0"
@@ -738,6 +790,7 @@ SeqStrings gCommandDescriptions =
     "Save Tab Group...\0"
     "Restore Tab Group...\0"
     "Change Background Color...\0"
+    "Change eBook Settings...\0"
     "Change Tab Color...\0"
     "Compress PDF...\0"
     "Decompress PDF...\0"
@@ -756,6 +809,7 @@ SeqStrings gCommandDescriptions =
     "Stop Reading\0"
     "Start Reading From Top\0"
     "Start Reading Selection\0"
+    "Read Aloud: Show In Toolbar\0"
     "Remove Deleted Files From History\0"
     "Command Palette: Table Of Contents\0"
     "Debug: Toggle Render Queue Info\0"
@@ -792,6 +846,26 @@ SeqStrings gCommandDescriptions =
     "Delete File And Open Next\0"
     "Show Generated HTML\0"
     "Delete Cached Files\0"
+    "Follow Link With Keyboard\0"
+    "Debug: Toggle DPI Override\0"
+    "Toggle Show Images\0"
+    "Select Text With Keyboard\0"
+    "Open File With Windows File Picker...\0"
+    "SumatraPDF File Picker\0"
+    "Toggle Boolean Setting\0"
+    "Fix Default App For Extension\0"
+    "Antigravity chat...\0"
+    "Translate Selection with Antigravity...\0"
+    "Convert To PDF...\0"
+    "Debug: Show Fit Content Area\0"
+    "Extend Selection One Character Left\0"
+    "Extend Selection One Character Right\0"
+    "Extend Selection One Word Left\0"
+    "Extend Selection One Word Right\0"
+    "Toggle Laser Pointer\0"
+    "Zoom: To Selection\0"
+    "Toggle Hover Preview\0"
+    "Toggle Disable Links\0"
     "Push Reference to JabRef\0"
     "Do nothing\0"
     "\0";
@@ -809,6 +883,11 @@ struct ArgSpec {
 static const ArgSpec argSpecs[] = {
     {CmdSelectionHandler, kCmdArgURL, CommandArg::Type::String}, // default
     {CmdSelectionHandler, kCmdArgExe, CommandArg::Type::String},
+    {CmdSelectionHandler, kCmdArgMethod, CommandArg::Type::String},
+    {CmdSelectionHandler, kCmdArgBody, CommandArg::Type::String},
+    {CmdSelectionHandler, kCmdArgContentType, CommandArg::Type::String},
+    {CmdSelectionHandler, kCmdArgHeaders, CommandArg::Type::String},
+    {CmdSelectionHandler, kCmdArgSelectToolbar, CommandArg::Type::String},
 
     {CmdExec, kCmdArgExe, CommandArg::Type::String}, // default
     {CmdExec, kCmdArgFilter, CommandArg::Type::String},
@@ -822,6 +901,7 @@ static const ArgSpec argSpecs[] = {
     {CmdCreateAnnotText, kCmdArgSetContent, CommandArg::Type::Bool},
     {CmdCreateAnnotText, kCmdArgTextSize, CommandArg::Type::Int},
     {CmdCreateAnnotText, kCmdArgBorderWidth, CommandArg::Type::Int},
+    {CmdCreateAnnotText, kCmdArgAlignment, CommandArg::Type::String},
     {CmdCreateAnnotText, kCmdArgInteriorColor, CommandArg::Type::Color},
     {CmdCreateAnnotText, kCmdArgFocusEdit, CommandArg::Type::Bool},
     {CmdCreateAnnotText, kCmdArgFocusList, CommandArg::Type::Bool},
@@ -845,6 +925,12 @@ static const ArgSpec argSpecs[] = {
     {CmdToggleBookmarks, kCmdArgState, CommandArg::Type::Bool},        // default
     {CmdToggleTableOfContents, kCmdArgState, CommandArg::Type::Bool},  // default
 
+    // default string is the setting name, e.g. [CmdToggleBoolSetting Fullscreen.ShowMenubar]
+    {CmdToggleBoolSetting, kCmdArgName, CommandArg::Type::String}, // default
+
+    // extension including leading dot, e.g. [CmdFixDefaultApp .pdf]
+    {CmdFixDefaultApp, kCmdArgExt, CommandArg::Type::String}, // default
+
     {CmdNone, "", CommandArg::Type::None}, // sentinel
 };
 
@@ -856,13 +942,27 @@ static NO_INLINE int GetCommandIdByNameOrDesc(SeqStrings commands, Str s) {
     if (idx < 0) {
         return -1;
     }
+    // ReportIf only reports, it doesn't stop the release build, so bail for real
     ReportIf(idx >= dimofi(gCommandIds));
+    if (idx >= dimofi(gCommandIds)) {
+        return -1;
+    }
     int cmdId = gCommandIds[idx];
     return cmdId;
 }
 
 // cmdName is "CmdOpenFile" etc.
 // returns -1 if not found
+// Shared "tip" text: a small markup understood by the home page tips and by
+// notifications. Supports:
+//   [text](Cmd...)      a link that runs a command on click
+//   [text](Help/Page)   a link that opens a docs page in the browser
+//   [text](https://..)  a link that opens a url in the browser
+//   (Key/Cmd...)        expanded inline to the command's keyboard shortcut
+//   (Kbd/text)          drawn as a key-cap (same look as keyboard help);
+//                       nests, e.g. (Kbd/(Key/CmdOpenNextFileInFolder))
+//   **text**            bold text
+// note: include Base.h before this
 int GetCommandIdByName(Str cmdName) {
     int cmdId = GetCommandIdByNameOrDesc(gCommandNames, cmdName);
     if (cmdId >= 0) {
@@ -871,13 +971,6 @@ int GetCommandIdByName(Str cmdName) {
     // backwards compatibility for old names
     if (str::EqI(cmdName, StrL("CmdFindMatch"))) {
         return CmdFindToggleMatchCase;
-    }
-    auto curr = gFirstCustomCommand;
-    while (curr) {
-        if (curr->idStr && str::EqI(cmdName, curr->idStr)) {
-            return curr->id;
-        }
-        curr = curr->next;
     }
     return -1;
 }
@@ -888,7 +981,7 @@ int GetCommandIdByDesc(Str cmdDesc) {
     if (cmdId >= 0) {
         return cmdId;
     }
-    auto curr = gFirstCustomCommand;
+    auto* curr = gFirstCustomCommand;
     while (curr) {
         if (curr->name && str::EqI(cmdDesc, curr->name)) {
             return curr->id;
@@ -898,9 +991,19 @@ int GetCommandIdByDesc(Str cmdDesc) {
     return -1;
 }
 
-CommandArg::~CommandArg() {
-    str::Free(strVal);
-    str::Free(name);
+Str GetCommandDescription(int commandId) {
+    int off = 0;
+    int id = (int)CmdFirst + 1;
+    while (SeqStrAt(gCommandDescriptions, off)) {
+        Str description = SeqStrAt(gCommandDescriptions, off);
+        if (id == commandId) {
+            return description;
+        }
+        if (!SeqStrAdvance(gCommandDescriptions, off, &id)) {
+            break;
+        }
+    }
+    return {};
 }
 
 // arg names are case insensitive
@@ -918,6 +1021,34 @@ static bool IsArgName(Str name, Str argName) {
     return c == '=';
 }
 
+// One allocation: sizeofi(CommandArg) + name + NUL + strVal + NUL.
+// name.s / strVal.s point into the same block (do not free them separately).
+CommandArg* AllocCommandArg(Str name, Str strVal) {
+    int nameN = name.len;
+    nameN = std::max(nameN, 0);
+    int strN = strVal.len;
+    strN = std::max(strN, 0);
+    int cb = sizeofi(CommandArg) + nameN + 1 + strN + 1;
+    auto* arg = (CommandArg*)malloc((size_t)cb);
+    if (!arg) {
+        return nullptr;
+    }
+    memset(arg, 0, (size_t)cb);
+    char* dst = (char*)arg + sizeofi(CommandArg);
+    if (nameN > 0 && name.s) {
+        memcpy(dst, name.s, (size_t)nameN);
+    }
+    dst[nameN] = 0;
+    arg->name = Str(dst, nameN);
+    dst += nameN + 1;
+    if (strN > 0 && strVal.s) {
+        memcpy(dst, strVal.s, (size_t)strN);
+    }
+    dst[strN] = 0;
+    arg->strVal = Str(dst, strN);
+    return arg;
+}
+
 void InsertArg(CommandArg** firstPtr, CommandArg* arg) {
     // for ease of use by callers, we shift null check here
     if (!arg) {
@@ -932,12 +1063,12 @@ void FreeCommandArgs(CommandArg* first) {
     CommandArg* curr = first;
     while (curr) {
         next = curr->next;
-        delete curr;
+        free(curr);
         curr = next;
     }
 }
 
-CommandArg* FindArg(CommandArg* first, Str name, CommandArg::Type type) {
+__unused static CommandArg* FindArg(CommandArg* first, Str name, CommandArg::Type type) {
     CommandArg* curr = first;
     while (curr) {
         if (IsArgName(curr->name, name)) {
@@ -954,15 +1085,72 @@ CommandArg* FindArg(CommandArg* first, Str name, CommandArg::Type type) {
 
 static int gNextCustomCommandId = (int)CmdFirstCustom;
 
-CustomCommand::~CustomCommand() {
-    FreeCommandArgs(firstArg);
-    str::Free(name);
-    str::Free(key);
-    str::Free(idStr);
-    str::Free(definition);
+// One allocation: sizeofi(CustomCommand) + definition + NUL + name + NUL + key + NUL.
+// definition/name/key.s point into the same block (do not free them separately).
+CustomCommand* AllocCustomCommand(Str definition, Str name, Str key) {
+    int defN = definition.len;
+    defN = std::max(defN, 0);
+    int nameN = name.len;
+    nameN = std::max(nameN, 0);
+    int keyN = key.len;
+    keyN = std::max(keyN, 0);
+    int cb = sizeofi(CustomCommand) + defN + 1 + nameN + 1 + keyN + 1;
+    auto* cmd = (CustomCommand*)malloc((size_t)cb);
+    if (!cmd) {
+        return nullptr;
+    }
+    memset(cmd, 0, (size_t)cb);
+    char* dst = (char*)cmd + sizeofi(CustomCommand);
+    if (defN > 0 && definition.s) {
+        memcpy(dst, definition.s, (size_t)defN);
+    }
+    dst[defN] = 0;
+    cmd->definition = Str(dst, defN);
+    dst += defN + 1;
+    if (nameN > 0 && name.s) {
+        memcpy(dst, name.s, (size_t)nameN);
+    }
+    dst[nameN] = 0;
+    cmd->name = Str(dst, nameN);
+    dst += nameN + 1;
+    if (keyN > 0 && key.s) {
+        memcpy(dst, key.s, (size_t)keyN);
+    }
+    dst[keyN] = 0;
+    cmd->key = Str(dst, keyN);
+    return cmd;
 }
 
-CustomCommand* CreateCustomCommand(Str definition, int origCmdId, CommandArg* args) {
+void FreeCustomCommand(CustomCommand* cmd) {
+    if (!cmd) {
+        return;
+    }
+    FreeCommandArgs(cmd->firstArg);
+    free(cmd);
+}
+
+// Empty / whitespace name or key becomes empty. Invalid shortcut keys are
+// rejected with a warning and stored as empty (same as SetCommandNameAndShortcut).
+static void NormalizeCommandNameAndKey(Str definition, Str* name, Str* key) {
+    if (str::IsEmptyOrWhiteSpace(*name)) {
+        *name = {};
+    }
+    if (str::IsEmptyOrWhiteSpace(*key)) {
+        *key = {};
+        return;
+    }
+#if !defined(SUMATRA_TEST_UTIL)
+    if (!IsValidShortcutString(*key)) {
+        logf("CreateCustomCommand: '%s' is not a valid shortcut for '%s'\n", *key, definition);
+        MaybeDelayedWarningNotification(fmt("'%s' is not a valid shortcut for '%s'", *key, definition));
+        *key = {};
+    }
+#else
+    (void)definition;
+#endif
+}
+
+CustomCommand* CreateCustomCommand(Str definition, int origCmdId, CommandArg* args, Str name, Str key) {
     // if no args we retain original command id
     // only when we have unique args we have to create a new command id
     int id = origCmdId;
@@ -976,18 +1164,51 @@ CustomCommand* CreateCustomCommand(Str definition, int origCmdId, CommandArg* ar
         }
 #endif
     }
-    auto cmd = new CustomCommand();
+    NormalizeCommandNameAndKey(definition, &name, &key);
+    auto* cmd = AllocCustomCommand(definition, name, key);
     cmd->id = id;
     cmd->origId = origCmdId;
-    cmd->definition = str::Dup(definition);
     cmd->firstArg = args;
     cmd->next = gFirstCustomCommand;
     gFirstCustomCommand = cmd;
     return cmd;
 }
 
+static CommandArg* CopyCommandArgs(CommandArg* first) {
+    CommandArg* res = nullptr;
+    CommandArg** tail = &res;
+    for (CommandArg* curr = first; curr; curr = curr->next) {
+        auto* arg = AllocCommandArg(curr->name, curr->strVal);
+        arg->type = curr->type;
+        arg->boolVal = curr->boolVal;
+        arg->intVal = curr->intVal;
+        arg->floatVal = curr->floatVal;
+        arg->colorVal = curr->colorVal;
+        *tail = arg;
+        tail = &arg->next;
+    }
+    return res;
+}
+
+// A copy of cmd (same original command, same arguments) under a fresh, unique
+// command id. Two settings entries can resolve to the same command and yet have
+// to stay distinguishable (their own name, key, toolbar button); they can't
+// share a CustomCommand, and they can't share an id either because the toolbar
+// identifies buttons by command id (#5869). name / key come from the caller's
+// settings entry (not copied from cmd).
+CustomCommand* CloneCustomCommand(CustomCommand* cmd, Str name, Str key) {
+    NormalizeCommandNameAndKey(cmd->definition, &name, &key);
+    auto* res = AllocCustomCommand(cmd->definition, name, key);
+    res->id = gNextCustomCommandId++;
+    res->origId = cmd->origId;
+    res->firstArg = CopyCommandArgs(cmd->firstArg);
+    res->next = gFirstCustomCommand;
+    gFirstCustomCommand = res;
+    return res;
+}
+
 CustomCommand* FindCustomCommand(int cmdId) {
-    auto cmd = gFirstCustomCommand;
+    auto* cmd = gFirstCustomCommand;
     while (cmd) {
         if (cmd->id == cmdId) {
             return cmd;
@@ -1002,7 +1223,7 @@ void FreeCustomCommands() {
     CustomCommand* curr = gFirstCustomCommand;
     while (curr) {
         next = curr->next;
-        delete curr;
+        FreeCustomCommand(curr);
         curr = next;
     }
     gFirstCustomCommand = nullptr;
@@ -1017,28 +1238,24 @@ void GetCommandsWithOrigId(Vec<CustomCommand*>& commands, int origId) {
         curr = curr->next;
     }
     // reverse so that they are returned in the order they were inserted
-    commands.Reverse();
+    VecReverse(commands);
 }
 
 static CommandArg* NewArg(CommandArg::Type type, Str name) {
-    auto res = new CommandArg();
+    auto* res = AllocCommandArg(name, {});
     res->type = type;
-    res->name = str::Dup(name);
     return res;
 }
 
 CommandArg* NewStringArg(Str name, Str val) {
-    auto res = new CommandArg();
+    auto* res = AllocCommandArg(name, val);
     res->type = CommandArg::Type::String;
-    res->name = str::Dup(name);
-    res->strVal = str::Dup(val);
     return res;
 }
 
 CommandArg* NewFloatArg(Str name, float val) {
-    auto res = new CommandArg();
+    auto* res = AllocCommandArg(name, {});
     res->type = CommandArg::Type::Float;
-    res->name = str::Dup(name);
     res->floatVal = val;
     return res;
 }
@@ -1052,20 +1269,20 @@ static CommandArg* ParseArgOfType(Str argName, CommandArg::Type type, Str val) {
             logf("parseArgOfType: invalid color value '%s'\n", val);
             return nullptr;
         }
-        auto arg = NewArg(type, argName);
+        auto* arg = NewArg(type, argName);
         arg->colorVal = col;
         return arg;
     }
 
     if (type == CommandArg::Type::Int) {
-        auto arg = NewArg(type, argName);
+        auto* arg = NewArg(type, argName);
         arg->intVal = ParseInt(val);
         return arg;
     }
 
     if (type == CommandArg::Type::String) {
-        auto arg = NewArg(type, argName);
-        arg->strVal = str::Dup(val);
+        auto* arg = AllocCommandArg(argName, val);
+        arg->type = type;
         return arg;
     }
 
@@ -1075,7 +1292,7 @@ static CommandArg* ParseArgOfType(Str argName, CommandArg::Type type, Str val) {
 
 static int ParseBool(Str s);
 
-CommandArg* TryParseDefaultArg(int defaultArgIdx, Str* argsInOut) {
+static CommandArg* TryParseDefaultArg(int defaultArgIdx, Str* argsInOut) {
     // first is default value
     Str rest = *argsInOut;
     str::SkipChar(rest, ' ');
@@ -1099,7 +1316,7 @@ CommandArg* TryParseDefaultArg(int defaultArgIdx, Str* argsInOut) {
 
     if (type == CommandArg::Type::Bool) {
         // a default (positional) bool, e.g. [CmdToggleFullscreen on] (issue #5067)
-        auto arg = NewArg(type, argName);
+        auto* arg = NewArg(type, argName);
         arg->boolVal = ParseBool(val) != 0; // 1 -> true, 0 -> false, -1 (unrecognized) -> true
         return arg;
     }
@@ -1125,7 +1342,7 @@ static int ParseBool(Str s) {
 //   <name>: <value>
 //   <name>=<value>
 // for booleans only <name> works as well and represents true
-CommandArg* TryParseNamedArg(int firstArgIdx, Str* argsInOut) {
+static CommandArg* TryParseNamedArg(int firstArgIdx, Str* argsInOut) {
     Str valStart;
     Str argName;
     CommandArg::Type type = CommandArg::Type::None;
@@ -1148,7 +1365,7 @@ CommandArg* TryParseNamedArg(int firstArgIdx, Str* argsInOut) {
         if (type == CommandArg::Type::Bool) {
             // name of bool arg followed by nothing is true
             *argsInOut = {};
-            auto arg = NewArg(type, argName);
+            auto* arg = NewArg(type, argName);
             arg->boolVal = true;
             return arg;
         }
@@ -1157,7 +1374,7 @@ CommandArg* TryParseNamedArg(int firstArgIdx, Str* argsInOut) {
             // name of bool arg followed by nothing is true
             str::SkipChar(rest, ' ');
             *argsInOut = rest;
-            auto arg = NewArg(type, argName);
+            auto* arg = NewArg(type, argName);
             arg->boolVal = true;
             return arg;
         }
@@ -1199,7 +1416,7 @@ CommandArg* TryParseNamedArg(int firstArgIdx, Str* argsInOut) {
             b = true;
             *argsInOut = valStart;
         }
-        auto arg = NewArg(type, argName);
+        auto* arg = NewArg(type, argName);
         arg->boolVal = b;
         return arg;
     }
@@ -1228,7 +1445,7 @@ CustomCommand* CreateCommandFromDefinition(Str definition) {
 
     // the same command can be sent via DDE many times
     // we don't want to create duplicate CustomCommand
-    for (auto cmd = gFirstCustomCommand; cmd; cmd = cmd->next) {
+    for (auto* cmd = gFirstCustomCommand; cmd; cmd = cmd->next) {
         if (str::Eq(definition, cmd->definition)) {
             return cmd;
         }
@@ -1346,7 +1563,19 @@ CustomCommand* CreateCommandFromDefinition(Str definition) {
         firstArg->type = CommandArg::Type::Float;
         firstArg->floatVal = zoomVal;
     }
-    auto res = CreateCustomCommand(definition, cmdId, firstArg);
+#if !defined(SUMATRA_TEST_UTIL)
+    if (cmdId == CmdToggleBoolSetting && firstArg) {
+        // validate the named boolean setting exists (case-insensitive leaf or path)
+        Str settingName = firstArg->strVal;
+        if (len(settingName) == 0 || !FindGlobalPrefsBoolSetting(settingName)) {
+            MaybeDelayedWarningNotification(
+                fmt("Error parsing Shortcuts: unknown boolean setting '%s' in '%s'\n", settingName, defSafe));
+            // still create the command so the shortcut is registered; execute
+            // will warn again if the name is still wrong
+        }
+    }
+#endif
+    auto* res = CreateCustomCommand(definition, cmdId, firstArg);
     return res;
 }
 
@@ -1365,7 +1594,7 @@ CommandArg* GetCommandArg(CustomCommand* cmd, Str name) {
 }
 
 int GetCommandIntArg(CustomCommand* cmd, Str name, int defValue) {
-    auto arg = GetCommandArg(cmd, name);
+    auto* arg = GetCommandArg(cmd, name);
     if (arg) {
         return arg->intVal;
     }
@@ -1373,7 +1602,7 @@ int GetCommandIntArg(CustomCommand* cmd, Str name, int defValue) {
 }
 
 bool GetCommandBoolArg(CustomCommand* cmd, Str name, bool defValue) {
-    auto arg = GetCommandArg(cmd, name);
+    auto* arg = GetCommandArg(cmd, name);
     if (arg) {
         return arg->boolVal;
     }
@@ -1381,7 +1610,7 @@ bool GetCommandBoolArg(CustomCommand* cmd, Str name, bool defValue) {
 }
 
 Str GetCommandStringArg(CustomCommand* cmd, Str name, Str defValue) {
-    auto arg = GetCommandArg(cmd, name);
+    auto* arg = GetCommandArg(cmd, name);
     if (arg) {
         return arg->strVal;
     }

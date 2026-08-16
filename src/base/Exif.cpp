@@ -150,7 +150,7 @@ const TagDef kInteropTags[] = {
 Str LookupTagName(const TagDef* tags, int n, u16 id) {
     for (int i = 0; i < n; i++) {
         if (tags[i].id == id) {
-            return Str(tags[i].name);
+            return {tags[i].name};
         }
     }
     return {};
@@ -422,7 +422,9 @@ u16 ReadLE16(const u8* p) {
 }
 
 TempStr Utf16LeToUtf8Temp(Str data) {
-    str::Builder out;
+    // UTF-8 is at most 3x UTF-16 code units for BMP; EXIF strings are usually short.
+    char outScratch[512]{};
+    str::Builder out(Str(outScratch, sizeofi(outScratch)));
     int n = data.len & ~1;
     for (int i = 0; i + 1 < n; i += 2) {
         u32 c = ReadLE16((const u8*)data.s + i);
@@ -524,7 +526,9 @@ TempStr FormatRationalPair(u32 num, u32 den, bool asFraction) {
 
 TempStr FormatComponentsConfig(ByteReader r, int off, u32 count) {
     static SeqStrings compNames = "Y\0Cb\0Cr\0R\0G\0B\0";
-    str::Builder s;
+    // "Y, Cb, Cr" etc. — a few components.
+    char sScratch[64]{};
+    str::Builder s(Str(sScratch, sizeofi(sScratch)));
     for (u32 i = 0; i < count && off + (int)i < r.len; i++) {
         u8 c = r.UInt8(off + (int)i);
         if (c == 0) {
@@ -568,7 +572,9 @@ TempStr FormatUndefinedBytesTemp(ByteReader r, int off, u32 count, bool asList) 
     if (!asList) {
         return fmt("[%u bytes]", count);
     }
-    str::Builder s;
+    // At most 20 bytes as "255, " ~ 80 chars + brackets.
+    char sScratch[128]{};
+    str::Builder s(Str(sScratch, sizeofi(sScratch)));
     s.Append("[");
     u32 show = count > 20 ? 20 : count;
     for (u32 i = 0; i < show; i++) {
@@ -675,7 +681,9 @@ TempStr FormatValuesTemp(const ExifParser& parser, IfdGroup g, u16 tag, u16 type
     }
 
     if (type == TiffRational || type == TiffSRational) {
-        str::Builder s;
+        // Multi-rational lists (GPS DMS, lens) are usually a few short fractions.
+        char sScratch[256]{};
+        str::Builder s(Str(sScratch, sizeofi(sScratch)));
         bool sr = type == TiffSRational;
         for (u32 i = 0; i < count; i++) {
             int eoff = off + ((int)i * 8);
@@ -718,7 +726,8 @@ TempStr FormatValuesTemp(const ExifParser& parser, IfdGroup g, u16 tag, u16 type
     }
 
     if (type == TiffShort || type == TiffSShort) {
-        str::Builder s;
+        char sScratch[256]{};
+        str::Builder s(Str(sScratch, sizeofi(sScratch)));
         for (u32 i = 0; i < count; i++) {
             int eoff = off + ((int)i * 2);
             if (i > 0) {
@@ -744,7 +753,8 @@ TempStr FormatValuesTemp(const ExifParser& parser, IfdGroup g, u16 tag, u16 type
     }
 
     if (type == TiffLong || type == TiffSLong) {
-        str::Builder s;
+        char sScratch[256]{};
+        str::Builder s(Str(sScratch, sizeofi(sScratch)));
         for (u32 i = 0; i < count; i++) {
             int eoff = off + ((int)i * 4);
             if (i > 0) {
@@ -760,7 +770,8 @@ TempStr FormatValuesTemp(const ExifParser& parser, IfdGroup g, u16 tag, u16 type
     }
 
     if (type == TiffByte || type == TiffSByte) {
-        str::Builder s;
+        char sScratch[256]{};
+        str::Builder s(Str(sScratch, sizeofi(sScratch)));
         s.Append("[");
         for (u32 i = 0; i < count; i++) {
             if (i > 0) {
@@ -1008,9 +1019,7 @@ bool LooksLikeTiffExif(const u8* p, int n) {
 bool CopyTiffBlob(const u8* data, int n, int tiffOff, Str& out, u8** ownedOut) {
     int blobLen = n - tiffOff;
     constexpr int kMaxExifBytes = 256 * 1024;
-    if (blobLen > kMaxExifBytes) {
-        blobLen = kMaxExifBytes;
-    }
+    blobLen = std::min(blobLen, kMaxExifBytes);
     u8* copy = (u8*)malloc((size_t)blobLen);
     if (!copy) {
         return false;
@@ -1155,9 +1164,8 @@ TempStr ExifParser::GetStringProp(ExifProp prop, ExifProp altProp) const {
         return str::IsEmptyOrWhiteSpace(res) && altProp != ExifProp::None ? GetStringProp(altProp) : res;
     }
     TempStr res = nullptr;
-    if (entry->type == TiffAscii) {
-        res = TrimmedAsciiTemp(r, entry->dataOff, entry->count);
-    } else if (entry->type == TiffUndefined && IsAsciiUndefinedProp(prop)) {
+    bool isAsciiText = entry->type == TiffAscii || (entry->type == TiffUndefined && IsAsciiUndefinedProp(prop));
+    if (isAsciiText) {
         res = TrimmedAsciiTemp(r, entry->dataOff, entry->count);
     } else if (prop == ExifProp::UserComment && entry->type == TiffUndefined && EntryBoundsOk(*this, *entry, 8)) {
         Str bytes((char*)(r.d + entry->dataOff), (int)entry->count);

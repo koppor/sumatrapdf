@@ -6,7 +6,6 @@
 #include "base/ByteReaderWriter.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
-#include "base/Win.h"
 
 #include "GumboHelpers.h"
 
@@ -87,6 +86,8 @@ TempStr ChmFile::GetDataTemp(Str fileName) const {
     return Str((char*)(d), n);
 }
 
+// Strip a UTF-8 BOM if present; otherwise convert from `codepage` to UTF-8
+// (unless already UTF-8). Returns a TempStr owned by the temp allocator.
 TempStr SmartToUtf8Temp(Str s, uint codepage) {
     if (str::TrimPrefix(s, UTF8_BOM)) {
         return str::DupTemp(s);
@@ -352,7 +353,7 @@ bool ChmFile::Load(Str path) {
     uint fileCodepage = codepage;
     char header[24]{};
     int n = file::ReadN(path, (u8*)header, sizeof(header));
-    if (n < (int)sizeof(header)) {
+    if (n < sizeofi(header)) {
         ByteReader r(Str(header, sizeof(header)));
         DWORD lcid = r.UInt32LE(20);
         fileCodepage = LcidToCodepage(lcid);
@@ -370,9 +371,9 @@ bool ChmFile::Load(Str path) {
 
     if (!HasData(homePath)) {
         Str pathsToTest[] = {"/index.htm", "/index.html", "/default.htm", "/default.html"};
-        for (int i = 0; i < dimof(pathsToTest); i++) {
-            if (HasData(pathsToTest[i])) {
-                str::ReplaceWithCopy(&homePath, pathsToTest[i]);
+        for (Str testPath : pathsToTest) {
+            if (HasData(testPath)) {
+                str::ReplaceWithCopy(&homePath, testPath);
             }
         }
         if (!HasData(homePath)) {
