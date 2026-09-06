@@ -4,7 +4,7 @@
 // Grok Build provider for the AI chat sidebar (see AIChatPanel.cpp)
 
 #include "base/Base.h"
-#include "base/CmdLineArgsIter.h"
+#include "base/CmdLineArgs.h"
 #include "base/DirScan.h"
 #include "base/File.h"
 #include "base/Win.h"
@@ -14,21 +14,29 @@
 #include "gui/win/WinGui.h"
 
 #include "Settings.h"
-#include "GlobalPrefs.h"
 #include "AppSettings.h"
 #include "Translations.h"
 
 #include "AIChatCommon.h"
 #include "AIChatPanel.h"
 
+static bool gGrokExecutableSearched = false;
+static Str gGrokExecutablePath;
+
 static TempStr FindGrokExecutableTemp() {
+    if (gGrokExecutableSearched) {
+        return gGrokExecutablePath;
+    }
+    gGrokExecutableSearched = true;
+
     StrVec candidates;
     TempStr userProfile = GetSpecialFolderTemp(CSIDL_PROFILE);
     if (userProfile) {
         candidates.Append(fmt("%s\\.grok\\bin\\grok.exe", userProfile));
         candidates.Append(fmt("%s\\.local\\bin\\grok.exe", userProfile));
     }
-    return AIChatFindExecutableTemp(candidates, WStr(L"grok.exe"), WStr(L"grok"));
+    gGrokExecutablePath = str::Dup(AIChatFindExecutableTemp(candidates, WStr(L"grok.exe"), WStr(L"grok")));
+    return gGrokExecutablePath;
 }
 
 bool IsGrokBuildInstalled() {
@@ -40,7 +48,7 @@ TempStr GrokBuildExecutablePathTemp() {
 }
 
 static Mutex gGrokBuildLogMutex;
-static AIChatLogger gGrokBuildLogger = {&gGrokBuildLogMutex, "grok-build-log.txt", "grok-build"};
+static AIChatLogger gGrokBuildLogger = {&gGrokBuildLogMutex, StrL("grok-build-log.txt"), StrL("grok-build")};
 static bool gTriedGrokModels = false;
 static StrVec gGrokModels;
 
@@ -62,13 +70,8 @@ static bool ParseGrokModelsOutput(Str output, StrVec& models) {
         if (!inModels || !str::TrimPrefix(trimmed, StrL("* "))) {
             continue;
         }
-        Str model = trimmed;
-        for (int i = 0; i < model.len; i++) {
-            if (str::IsWs(model.s[i])) {
-                model.len = i;
-                break;
-            }
-        }
+        Str rest2 = trimmed;
+        Str model = str::NextWord(rest2);
         AIChatAppendModelUnique(models, model);
     }
     return len(models) > 0;
@@ -128,7 +131,7 @@ static TempStr EncodeGrokDirTemp(Str dir) {
 }
 
 static bool IsGrokSessionDirName(Str name) {
-    if (!name) {
+    if (len(name) == 0) {
         return false;
     }
     int n = len(name);
@@ -141,7 +144,7 @@ static bool IsGrokSessionDirName(Str name) {
             if (c != '-') {
                 return false;
             }
-        } else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+        } else if ((c < '0' || c > '9') && (c < 'a' || c > 'f')) {
             return false;
         }
     }
@@ -150,7 +153,7 @@ static bool IsGrokSessionDirName(Str name) {
 
 static TempStr GrokSessionsProjectDirTemp(Str dir) {
     TempStr userProfile = GetSpecialFolderTemp(CSIDL_PROFILE);
-    if (!userProfile) {
+    if (len(userProfile) == 0) {
         return {};
     }
     TempStr encodedDir = EncodeGrokDirTemp(dir);
@@ -158,11 +161,11 @@ static TempStr GrokSessionsProjectDirTemp(Str dir) {
 }
 
 static TempStr ExtractGrokPromptFromHistoryLineTemp(Str line, Str sessionId) {
-    TempStr sid = AIChatJsonStrTemp(line, "session_id");
-    if (!sid || !str::Eq(sid, sessionId)) {
+    TempStr sid = AIChatJsonStrTemp(line, StrL("session_id"));
+    if (len(sid) == 0 || !str::Eq(sid, sessionId)) {
         return {};
     }
-    return AIChatJsonStrTemp(line, "prompt");
+    return AIChatJsonStrTemp(line, StrL("prompt"));
 }
 
 static Str GetGrokSessionDescription(Str projectDir, Str sessionId) {
@@ -176,7 +179,7 @@ static Str GetGrokSessionDescription(Str projectDir, Str sessionId) {
     Str result;
     Str line;
 
-    while (!result && str::NextLine(rest, line, rest)) {
+    while (len(result) == 0 && str::NextLine(rest, line, rest)) {
         if (len(line) == 0) {
             continue;
         }
@@ -192,7 +195,7 @@ static Str GetGrokSessionDescription(Str projectDir, Str sessionId) {
 // Scan ~/.grok/sessions/<url-encoded-dir>/ for session subdirectories
 static void CollectGrokSessions(Str dir, Vec<AIChatSessionInfo>& sessions) {
     TempStr projectDir = GrokSessionsProjectDirTemp(dir);
-    if (!projectDir || !dir::Exists(projectDir)) {
+    if (len(projectDir) == 0 || !dir::Exists(projectDir)) {
         return;
     }
 
@@ -210,14 +213,14 @@ static void CollectGrokSessions(Str dir, Vec<AIChatSessionInfo>& sessions) {
         si.display = desc;
         si.project = str::Dup(dir);
         si.timestamp = AIChatFileTimeToMs(de->modificationTime);
-        sessions.Append(si);
+        VecAppend(sessions, si);
     }
 
     AIChatSortSessionsByTimestampDesc(sessions);
 }
 
 static TempStr StripGrokUserQueryWrapperTemp(Str text) {
-    if (!text) {
+    if (len(text) == 0) {
         return {};
     }
     Str contentStart;
@@ -230,7 +233,7 @@ static TempStr StripGrokUserQueryWrapperTemp(Str text) {
     }
     TempStr result = str::DupTemp(content);
     str::TrimWSInPlace(result, str::TrimOpt::Both);
-    return len(result) > 0 ? result : nullptr;
+    return len(result) > 0 ? result : TempStr();
 }
 
 static TempStr ExtractGrokChatUserTextTemp(Str line) {
@@ -238,10 +241,10 @@ static TempStr ExtractGrokChatUserTextTemp(Str line) {
         return {};
     }
     if (str::Contains(line, StrL("\"type\":\"text\",\"text\":\""))) {
-        TempStr text = AIChatJsonStrTemp(line, "text");
+        TempStr text = AIChatJsonStrTemp(line, StrL("text"));
         return StripGrokUserQueryWrapperTemp(text);
     }
-    TempStr content = AIChatJsonStrTemp(line, "content");
+    TempStr content = AIChatJsonStrTemp(line, StrL("content"));
     return StripGrokUserQueryWrapperTemp(content);
 }
 
@@ -292,7 +295,7 @@ static void AppendGrokHistoryTools(MainWindow* win, Str line) {
 // Load conversation history from Grok's chat_history.jsonl
 static void LoadGrokSessionHistory(MainWindow* win, Str sessionId, Str dir) {
     TempStr projectDir = GrokSessionsProjectDirTemp(dir);
-    if (!projectDir) {
+    if (len(projectDir) == 0) {
         return;
     }
     TempStr sessionPath = fmt("%s\\%s\\chat_history.jsonl", projectDir, sessionId);
@@ -316,7 +319,7 @@ static void LoadGrokSessionHistory(MainWindow* win, Str sessionId, Str dir) {
             if (userText) {
                 AIChatHistoryAddUser(win, userText);
             } else if (str::Contains(line, StrL("\"type\":\"assistant\""))) {
-                TempStr text = AIChatJsonStrTemp(line, "content");
+                TempStr text = AIChatJsonStrTemp(line, StrL("content"));
                 if (len(text) > 0) {
                     AIChatHistoryAppendText(win, text);
                 }
@@ -335,23 +338,23 @@ struct GrokBuildProvider : AIChatProvider {
     GrokBuildProvider() {
         backend = AIChatBackend::Grok;
         logger = &gGrokBuildLogger;
-        name = "Grok Build";
-        exeName = "grok";
-        virtualHost = "https://sumatrapdf.grok/";
+        name = StrL("Grok Build");
+        exeName = StrL("grok");
+        virtualHost = StrL("https://sumatrapdf.grok/");
         virtualHostW = L"https://sumatrapdf.grok/";
-        webViewDataDirPrefix = "GrokWebView";
-        docUri = "/AI-Chat-with-document#grok-build";
-        defaultModel = "grok-4.5";
+        webViewDataDirPrefix = StrL("GrokWebView");
+        docUri = StrL("/AI-Chat-with-document#grok-build");
+        defaultModel = StrL("grok-4.5");
         optionItems = "Low\0Medium\0High\0XHigh\0Max\0";
         optionCount = 5;
         optionDefault = 1;
-        checkboxLabel = "Always Approve";
+        checkboxLabel = StrL("Always Approve");
     }
 
-    TempStr TitleTemp() override { return str::DupTemp(_TRA("Grok chat")); }
+    TempStr TitleTemp() override { return str::DupTemp(Tr("Grok chat")); }
 
     TempStr NotInstalledInstructionTemp() override {
-        return str::DupTemp(_TRA("Install Grok Build to use this feature."));
+        return str::DupTemp(Tr("Install Grok Build to use this feature."));
     }
 
     TempStr FindExecutableTemp() override { return FindGrokExecutableTemp(); }
@@ -370,25 +373,25 @@ struct GrokBuildProvider : AIChatProvider {
                 AIChatAppendModelUnique(models, gGrokModels[i]);
             }
         } else {
-            AIChatAppendModelUnique(models, "grok-4.5");
+            AIChatAppendModelUnique(models, StrL("grok-4.5"));
         }
-        Str extra = gGlobalPrefs->grokBuild.models;
+        Str extra = gSettings->grokBuild.models;
         if (len(extra) > 0) {
             StrVec parts;
-            Split(&parts, extra, ",", true);
+            Split(&parts, extra, StrL(","), true);
             for (int i = 0; i < len(parts); i++) {
                 AIChatAppendModelUnique(models, parts[i]);
             }
         }
     }
 
-    Str GetModel() override { return gGlobalPrefs->grokBuild.model; }
-    void SetModel(Str model) override { str::ReplaceWithCopy(&gGlobalPrefs->grokBuild.model, model); }
-    int GetOption() override { return gGlobalPrefs->grokBuild.effort; }
-    void SetOption(int option) override { gGlobalPrefs->grokBuild.effort = option; }
-    bool GetFlag() override { return gGlobalPrefs->grokBuild.alwaysApprove; }
-    void SetFlag(bool flag) override { gGlobalPrefs->grokBuild.alwaysApprove = flag; }
-    Str GetBgColor() override { return gGlobalPrefs->grokBuild.bgColor.s; }
+    Str GetModel() override { return gSettings->grokBuild.model; }
+    void SetModel(Str model) override { str::ReplaceWithCopy(&gSettings->grokBuild.model, model); }
+    int GetOption() override { return gSettings->grokBuild.effort; }
+    void SetOption(int option) override { gSettings->grokBuild.effort = option; }
+    bool GetFlag() override { return gSettings->grokBuild.alwaysApprove; }
+    void SetFlag(bool flag) override { gSettings->grokBuild.alwaysApprove = flag; }
+    Str GetBgColor() override { return gSettings->grokBuild.bgColor.s; }
 
     void CollectSessions(Str dir, Vec<AIChatSessionInfo>& sessions) override { CollectGrokSessions(dir, sessions); }
 
@@ -413,29 +416,29 @@ struct GrokBuildProvider : AIChatProvider {
     }
 
     void ParseStreamLine(Str line, AIChatStreamCtx* ctx) override {
-        TempStr eventType = AIChatJsonStrTemp(line, "type");
+        TempStr eventType = AIChatJsonStrTemp(line, StrL("type"));
 
         if (eventType && str::Eq(eventType, StrL("thought"))) {
-            TempStr thought = AIChatJsonStrTemp(line, "data");
+            TempStr thought = AIChatJsonStrTemp(line, StrL("data"));
             if (len(thought) > 0) {
-                GrokBuildLog("<<< thought", thought);
+                GrokBuildLog(StrL("<<< thought"), thought);
             }
         } else if (eventType && str::Eq(eventType, StrL("text"))) {
-            TempStr text = AIChatJsonStrTemp(line, "data");
+            TempStr text = AIChatJsonStrTemp(line, StrL("data"));
             if (len(text) > 0) {
                 AIChatPostUpdate(ctx, AIChatUpdateType::Text, text);
             }
         } else if (eventType && str::Eq(eventType, StrL("error"))) {
-            TempStr err = AIChatJsonStrTemp(line, "data");
-            if (!err) {
-                err = AIChatJsonStrTemp(line, "message");
+            TempStr err = AIChatJsonStrTemp(line, StrL("data"));
+            if (len(err) == 0) {
+                err = AIChatJsonStrTemp(line, StrL("message"));
             }
             if (err) {
                 AIChatPostUpdate(ctx, AIChatUpdateType::Error, err);
             }
         } else if (eventType && str::Eq(eventType, StrL("end"))) {
-            GrokBuildLog("<<< end", line);
-            TempStr newSessionId = AIChatJsonStrTemp(line, "sessionId");
+            GrokBuildLog(StrL("<<< end"), line);
+            TempStr newSessionId = AIChatJsonStrTemp(line, StrL("sessionId"));
             if (newSessionId) {
                 AIChatStreamSetSessionId(ctx, newSessionId);
             }

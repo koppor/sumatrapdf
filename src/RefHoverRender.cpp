@@ -10,7 +10,7 @@
 
 #include "DocController.h"
 #include "EngineBase.h"
-#include "RefHoverInternal.h"
+#include "RefHover.h"
 
 struct RefHoverRenderJob {
     RefHoverState* s = nullptr;
@@ -89,6 +89,7 @@ static void RefHoverRenderDone(RefHoverRenderJob* job) {
         FreePixmap(s->bmp);
         s->bmp = job->bmp;
         if (job->req.showPopup) {
+            s->displayed.destPageRaw = job->req.destPageRaw;
             s->displayed.destPage = job->req.pageNo;
             s->displayed.destX = job->req.destXRaw;
             s->displayed.destY = job->req.destYRaw;
@@ -142,7 +143,7 @@ static void RefHoverRenderThread(RefHoverRenderJob* job) {
 static void RefHoverStartRenderJob(RefHoverRenderJob* job) {
     job->s->renderInFlight = true;
     auto fn = MkFunc0<RefHoverRenderJob>(RefHoverRenderThread, job);
-    RunAsync(fn, "RefHoverRender");
+    RunAsync(fn, StrL("RefHoverRender"));
 }
 
 void RefHoverRequestRender(RefHoverState* s, EngineBase* engine, RefHoverState::RenderRequest req) {

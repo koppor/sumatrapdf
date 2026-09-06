@@ -7,7 +7,6 @@
 #include "base/File.h"
 #include "base/WinDynCalls.h"
 #include "base/ScopedWin.h"
-#include "base/Win.h"
 
 #include <aclapi.h>
 #include <bitset>
@@ -16,6 +15,8 @@
 #endif
 #include <float.h> // for _clearfp / _controlfp_s in MaskFpExceptions
 #include <mlang.h>
+#include "base/Win.h"
+
 #ifdef __GNUC__
 // mingw needs explicit UUID declaration for IMultiLanguage2
 __CRT_UUID_DECL(IMultiLanguage2, 0xDCCFC164, 0x2B38, 0x11D2, 0xB7, 0xEC, 0x00, 0xC0, 0x4F, 0x8F, 0x5D, 0x9A)
@@ -92,11 +93,77 @@ void EditSelectAll(HWND hwnd) {
     Edit_SetSel(hwnd, 0, -1);
 }
 
-//--- list box
-
-void ListBox_AppendString_NoSort(HWND hwnd, WStr txt) {
-    LbInsertString(hwnd, -1, txt);
+void EditSelectText(HWND hwnd, int start, int end) {
+    Edit_SetSel(hwnd, start, end);
 }
+
+void EditGetSelection(HWND hwnd, int& start, int& end) {
+    start = 0;
+    end = 0;
+    if (!hwnd) {
+        return;
+    }
+    DWORD sel = (DWORD)Edit_GetSel(hwnd);
+    start = (int)LOWORD(sel);
+    end = (int)HIWORD(sel);
+}
+
+void EditSetCursorPos(HWND hwnd, int pos) {
+    if (!hwnd) {
+        return;
+    }
+    EditSelectText(hwnd, pos, pos);
+}
+
+void EditSetCursorPosAtEnd(HWND hwnd) {
+    EditSetCursorPos(hwnd, EditGetTextLen(hwnd));
+}
+
+int EditGetTextLen(HWND hwnd) {
+    return hwnd ? HwndGetTextLen(hwnd) : 0;
+}
+
+void EditSetModified(HWND hwnd, bool on) {
+    if (!hwnd) {
+        return;
+    }
+    Edit_SetModify(hwnd, on);
+}
+
+bool EditIsModified(HWND hwnd) {
+    return hwnd && Edit_GetModify(hwnd);
+}
+
+void EditSetCueText(HWND hwnd, Str s) {
+    if (!hwnd) {
+        return;
+    }
+    Edit_SetCueBannerText(hwnd, CWStrTemp(s));
+}
+
+void EditSetMargins(HWND hwnd, int left, int right) {
+    if (!hwnd) {
+        return;
+    }
+    SendMessageW(hwnd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(left, right));
+}
+
+void EditSetNumbersOnly(HWND hwnd, bool on) {
+    if (!hwnd) {
+        return;
+    }
+    HwndSetWindowStyle(hwnd, ES_NUMBER, on);
+}
+
+void EditSetPasswordVisible(HWND hwnd, bool show) {
+    if (!hwnd) {
+        return;
+    }
+    SendMessageW(hwnd, EM_SETPASSWORDCHAR, show ? 0 : (WPARAM)L'\x25CF', 0);
+    HwndInvalidate(hwnd, true);
+}
+
+//--- list box
 
 void LbResetContent(HWND hwnd) {
     SendMessageW(hwnd, LB_RESETCONTENT, 0, 0);
@@ -429,28 +496,28 @@ bool GetOsVersion(OSVERSIONINFOEX& ver) {
 
 TempStr OsNameFromVerTemp(const OSVERSIONINFOEX& ver) {
     if (VER_PLATFORM_WIN32_NT != ver.dwPlatformId) {
-        return str::DupTemp("9x");
+        return str::DupTemp(StrL("9x"));
     }
     if (ver.dwMajorVersion == 6 && ver.dwMinorVersion == 3) {
-        return str::DupTemp("8.1"); // or Server 2012 R2
+        return str::DupTemp(StrL("8.1")); // or Server 2012 R2
     }
     if (ver.dwMajorVersion == 6 && ver.dwMinorVersion == 2) {
-        return str::DupTemp("8"); // or Server 2012
+        return str::DupTemp(StrL("8")); // or Server 2012
     }
     if (ver.dwMajorVersion == 6 && ver.dwMinorVersion == 1) {
-        return str::DupTemp("7"); // or Server 2008 R2
+        return str::DupTemp(StrL("7")); // or Server 2008 R2
     }
     if (ver.dwMajorVersion == 6 && ver.dwMinorVersion == 0) {
-        return str::DupTemp("Vista"); // or Server 2008
+        return str::DupTemp(StrL("Vista")); // or Server 2008
     }
     if (ver.dwMajorVersion == 5 && ver.dwMinorVersion == 2) {
-        return str::DupTemp("Server 2003");
+        return str::DupTemp(StrL("Server 2003"));
     }
     if (ver.dwMajorVersion == 5 && ver.dwMinorVersion == 1) {
-        return str::DupTemp("XP");
+        return str::DupTemp(StrL("XP"));
     }
     if (ver.dwMajorVersion == 5 && ver.dwMinorVersion == 0) {
-        return str::DupTemp("2000");
+        return str::DupTemp(StrL("2000"));
     }
     if (ver.dwMajorVersion == 10) {
         // ver.dwMinorVersion seems to always be 0
@@ -474,7 +541,7 @@ TempStr GetWindowsVerTemp() {
     BOOL ok = GetVersionExW((OSVERSIONINFO*)&ver); // NOLINT
 #pragma warning(pop)
     if (!ok) {
-        return str::DupTemp("unknown");
+        return str::DupTemp(StrL("unknown"));
     }
     return OsNameFromVerTemp(ver);
 }
@@ -549,8 +616,8 @@ bool IsRunningOnWine() {
     // Fallback: Wine creates a Software\Wine registry key. Cheap, independent of
     // the graphics backend, available from process start, and present even when
     // the ntdll wine_* exports are hidden.
-    if (!isWine &&
-        (RegKeyExists(HKEY_CURRENT_USER, R"(Software\Wine)") || RegKeyExists(HKEY_LOCAL_MACHINE, R"(Software\Wine)"))) {
+    if (!isWine && (RegKeyExists(HKEY_CURRENT_USER, StrL(R"(Software\Wine)")) ||
+                    RegKeyExists(HKEY_LOCAL_MACHINE, StrL(R"(Software\Wine)")))) {
         isWine = true;
     }
     // Last resort: scan loaded modules for a Wine graphics driver. Covers the X11
@@ -649,6 +716,8 @@ void DbgOutLastError(DWORD err) {
 
 //--- registry
 
+bool gLogRegistryCalls = false;
+
 // return true if a given registry key (path) exists
 bool RegKeyExists(HKEY keySub, Str keyName) {
     HKEY hKey;
@@ -666,7 +735,7 @@ bool RegKeyExists(HKEY keySub, Str keyName) {
 
 TempStr ReadRegStrTemp(HKEY keySub, Str keyName, Str valName) {
     if (!keySub) {
-        return nullptr;
+        return {};
     }
     WCHAR* keyNameW = CWStrTemp(keyName);
     WCHAR* valNameW = CWStrTemp(valName);
@@ -704,13 +773,16 @@ TryAgainWOW64:
 
 TempStr LoggedReadRegStrTemp(HKEY keySub, Str keyName, Str valName) {
     auto res = ReadRegStrTemp(keySub, keyName, valName);
+    if (!gLogRegistryCalls) {
+        return res;
+    }
     logf("ReadRegStrTemp(%s, %s, %s) => '%s'\n", RegKeyNameTemp(keySub), keyName, valName, res);
     return res;
 }
 
 TempStr ReadRegStr2Temp(Str keyName, Str valName) {
     TempStr res = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, valName);
-    if (!res) {
+    if (len(res) == 0) {
         res = ReadRegStrTemp(HKEY_CURRENT_USER, keyName, valName);
     }
     return res;
@@ -718,7 +790,7 @@ TempStr ReadRegStr2Temp(Str keyName, Str valName) {
 
 TempStr LoggedReadRegStr2Temp(Str keyName, Str valName) {
     TempStr res = LoggedReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, valName);
-    if (!res) {
+    if (len(res) == 0) {
         res = LoggedReadRegStrTemp(HKEY_CURRENT_USER, keyName, valName);
     }
     return res;
@@ -735,6 +807,9 @@ bool WriteRegStr(HKEY keySub, Str keyName, Str valName, Str value) {
 }
 
 bool LoggedWriteRegStr(HKEY keySub, Str keyName, Str valName, Str value) {
+    if (!gLogRegistryCalls) {
+        return WriteRegStr(keySub, keyName, valName, value);
+    }
     WCHAR* keyNameW = CWStrTemp(keyName);
     WCHAR* valNameW = CWStrTemp(valName);
     int cch;
@@ -765,7 +840,17 @@ bool WriteRegDWORD(HKEY keySub, Str keyName, Str valName, DWORD value) {
     return ERROR_SUCCESS == res;
 }
 
+bool WriteRegNone(HKEY hkey, Str key, Str valName) {
+    WCHAR* keyW = CWStrTemp(key);
+    WCHAR* valNameW = CWStrTemp(valName);
+    LSTATUS res = SHSetValueW(hkey, keyW, valNameW, REG_NONE, nullptr, 0);
+    return ERROR_SUCCESS == res;
+}
+
 bool LoggedWriteRegDWORD(HKEY keySub, Str keyName, Str valName, DWORD value) {
+    if (!gLogRegistryCalls) {
+        return WriteRegDWORD(keySub, keyName, valName, value);
+    }
     WCHAR* keyNameW = CWStrTemp(keyName);
     WCHAR* valNameW = CWStrTemp(valName);
     LSTATUS res = SHSetValueW(keySub, keyNameW, valNameW, REG_DWORD, (const void*)&value, sizeof(DWORD));
@@ -780,6 +865,9 @@ bool LoggedWriteRegDWORD(HKEY keySub, Str keyName, Str valName, DWORD value) {
 }
 
 bool LoggedWriteRegNone(HKEY hkey, Str key, Str valName) {
+    if (!gLogRegistryCalls) {
+        return WriteRegNone(hkey, key, valName);
+    }
     WCHAR* keyW = CWStrTemp(key);
     WCHAR* valNameW = CWStrTemp(valName);
     LSTATUS res = SHSetValueW(hkey, keyW, valNameW, REG_NONE, nullptr, 0);
@@ -800,20 +888,19 @@ bool CreateRegKey(HKEY keySub, Str keyName) {
 
 TempStr RegKeyNameTemp(HKEY key) {
     if (key == HKEY_LOCAL_MACHINE) {
-        return "HKEY_LOCAL_MACHINE";
+        return StrL("HKEY_LOCAL_MACHINE");
     }
     if (key == HKEY_CURRENT_USER) {
-        return "HKEY_CURRENT_USER";
+        return StrL("HKEY_CURRENT_USER");
     }
     if (key == HKEY_CLASSES_ROOT) {
-        return "HKEY_CLASSES_ROOT";
+        return StrL("HKEY_CLASSES_ROOT");
     }
-    return "RegKeyName: unknown key";
+    return StrL("RegKeyName: unknown key");
 }
 
 static TempStr RegKeyNameWTemp(HKEY key) {
-    auto k = RegKeyNameTemp(key);
-    return str::Dup(k);
+    return RegKeyNameTemp(key);
 }
 
 // Open a registry key's DACL so we can delete protected uninstall/keys.
@@ -868,6 +955,9 @@ bool DeleteRegKey(HKEY keySub, Str keyName, bool resetACLFirst) {
 }
 
 bool LoggedDeleteRegKey(HKEY keySub, Str keyName, bool resetACLFirst) {
+    if (!gLogRegistryCalls) {
+        return DeleteRegKey(keySub, keyName, resetACLFirst);
+    }
     if (resetACLFirst) {
         ResetRegKeyAcl(keySub, keyName);
     }
@@ -890,6 +980,9 @@ bool DeleteRegValue(HKEY keySub, Str keyName, Str val) {
 }
 
 bool LoggedDeleteRegValue(HKEY keySub, Str keyName, Str val) {
+    if (!gLogRegistryCalls) {
+        return DeleteRegValue(keySub, keyName, val);
+    }
     WCHAR* keyNameW = CWStrTemp(keyName);
     WCHAR* valW = CWStrTemp(val);
 
@@ -1200,33 +1293,33 @@ static ULARGE_INTEGER FileTimeToLargeInteger(const FILETIME& ft) {
 TempStr ResolveLnkTemp(Str path) {
     TempWStr pathW = ToWStrTemp(path);
     if (!pathW.s) {
-        return nullptr;
+        return {};
     }
 
     ScopedComPtr<IShellLink> lnk;
     if (!lnk.Create(CLSID_ShellLink)) {
-        return nullptr;
+        return {};
     }
 
     ScopedComQIPtr<IPersistFile> file(lnk);
     if (!file) {
-        return nullptr;
+        return {};
     }
 
     HRESULT hRes = file->Load(pathW.s, STGM_READ);
     if (FAILED(hRes)) {
-        return nullptr;
+        return {};
     }
 
     hRes = lnk->Resolve(nullptr, SLR_UPDATE);
     if (FAILED(hRes)) {
-        return nullptr;
+        return {};
     }
 
     WCHAR newPath[MAX_PATH]{};
     hRes = lnk->GetPath(newPath, MAX_PATH, nullptr, 0);
     if (FAILED(hRes)) {
-        return nullptr;
+        return {};
     }
 
     return ToUtf8Temp(newPath);
@@ -1317,6 +1410,13 @@ bool IsAltPressed() {
 
 bool IsCtrlPressed() {
     return IsKeyPressed(VK_CONTROL);
+}
+
+// Some mouse drivers omit MK_RBUTTON on WM_MOUSEWHEEL, the same way they omit
+// MK_CONTROL. Use this alongside the message flags so hold-right + wheel still
+// zooms.
+bool IsRightButtonPressed() {
+    return IsKeyPressed(VK_RBUTTON);
 }
 
 #if 0
@@ -1436,8 +1536,8 @@ HANDLE LaunchProcessInDir(Str cmdLine, Str currDir, DWORD flags) {
 }
 
 bool CreateProcessHelper(Str exe, Str args) {
-    if (!args) {
-        args = "";
+    if (len(args) == 0) {
+        args = StrL("");
     }
     TempStr cmd = fmt("\"%s\" %s", exe, args);
     AutoCloseHandle process = LaunchProcessInDir(cmd);
@@ -1629,7 +1729,7 @@ DWORD GetOriginalAccountType() {
 }
 
 bool LaunchElevated(Str path, Str cmdline) {
-    return LaunchFileShell(path, cmdline, "runas");
+    return LaunchFileShell(path, cmdline, StrL("runas"));
 }
 
 /* Ensure that the rectangle is at least partially in the work area on a
@@ -1779,8 +1879,82 @@ HWND HwndSetFocus(HWND hwnd) {
     return SetFocus(hwnd);
 }
 
+// GetFocus() is null when this thread is not the foreground thread;
+// GUITHREADINFO still reports the window that would have focus.
+HWND HwndThreadFocus() {
+    HWND h = ::GetFocus();
+    if (h) {
+        return h;
+    }
+    GUITHREADINFO gti{};
+    gti.cbSize = sizeof(gti);
+    if (GetGUIThreadInfo(GetCurrentThreadId(), &gti)) {
+        return gti.hwndFocus;
+    }
+    return nullptr;
+}
+
+// SetFocus() does not move this thread's focused window when the thread is not
+// foreground. Attach to the foreground thread so Tab can leave a child HWND
+// for a virtual control (posted-key tests, a dialog that is not active).
+bool HwndSetFocusForce(HWND hwnd) {
+    if (!hwnd) {
+        return false;
+    }
+    if (HwndThreadFocus() == hwnd) {
+        return true;
+    }
+    ::SetFocus(hwnd);
+    if (HwndThreadFocus() == hwnd) {
+        return true;
+    }
+    HWND hwndFg = GetForegroundWindow();
+    DWORD fgTid = hwndFg ? GetWindowThreadProcessId(hwndFg, nullptr) : 0;
+    DWORD ourTid = GetCurrentThreadId();
+    if (!fgTid || fgTid == ourTid) {
+        return false;
+    }
+    if (!AttachThreadInput(ourTid, fgTid, TRUE)) {
+        return false;
+    }
+    ::SetFocus(hwnd);
+    AttachThreadInput(ourTid, fgTid, FALSE);
+    return HwndThreadFocus() == hwnd;
+}
+
 bool HwndIsFocused(HWND hwnd) {
     return GetFocus() == hwnd;
+}
+
+// TabTip / osk / TextInputHost. A Contents or in-place edit that closes on
+// WM_KILLFOCUS would vanish when the tablet keyboard takes focus.
+bool HwndIsOnScreenKeyboard(HWND hwnd) {
+    if (!hwnd) {
+        return false;
+    }
+    WCHAR clsW[64]{};
+    GetClassNameW(hwnd, clsW, dimof(clsW));
+    TempStr cls = ToUtf8Temp(clsW);
+    if (str::StartsWithI(cls, StrL("IPTip")) || str::EqI(cls, StrL("OSKMainClass"))) {
+        return true;
+    }
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == 0) {
+        return false;
+    }
+    AutoCloseHandle hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProc.IsValid()) {
+        return false;
+    }
+    WCHAR pathW[MAX_PATH]{};
+    DWORD pathLen = MAX_PATH;
+    if (!QueryFullProcessImageNameW(hProc, 0, pathW, &pathLen)) {
+        return false;
+    }
+    TempStr name = path::GetBaseNameTemp(ToUtf8Temp(pathW));
+    static SeqStrings kOskExes = "TabTip.exe\0osk.exe\0TextInputHost.exe\0";
+    return SeqStrIndexIS(kOskExes, name) >= 0;
 }
 
 bool HwndIsCursorOverWindow(HWND hwnd) {
@@ -1842,7 +2016,7 @@ TempStr GetDefaultPrinterNameTemp() {
     if (GetDefaultPrinter(buf, &bufSize)) {
         return ToUtf8Temp(buf);
     }
-    return nullptr;
+    return {};
 }
 
 static HWND gClipboardOwnerWnd = nullptr;
@@ -1869,16 +2043,23 @@ static HWND GetClipboardOwnerWnd() {
 
 //--- clipboard
 
+// OpenClipboard fails when another process still holds it (Explorer, a just-
+// exited Set-Clipboard). Retry briefly rather than silently dropping the copy.
 bool OpenClipboardForUpdate() {
     HWND owner = GetClipboardOwnerWnd();
-    if (!owner || !OpenClipboard(owner)) {
+    if (!owner) {
         return false;
     }
-    if (!EmptyClipboard()) {
-        CloseClipboard();
-        return false;
+    for (int i = 0; i < 10; i++) {
+        if (OpenClipboard(owner)) {
+            if (EmptyClipboard()) {
+                return true;
+            }
+            CloseClipboard();
+        }
+        Sleep(20);
     }
-    return true;
+    return false;
 }
 
 void CloseClipboardAfterUpdate() {
@@ -1886,7 +2067,7 @@ void CloseClipboardAfterUpdate() {
 }
 
 static bool CopyOrAppendTextToClipboard(WStr text, bool appendOnly) {
-    if (!text) {
+    if (len(text) == 0) {
         return false;
     }
 
@@ -2069,7 +2250,8 @@ DoubleBuffer::DoubleBuffer(HWND hwnd, Rect rect) : hTarget(hwnd), hdcCanvas(::Ge
         return;
     }
 
-    doubleBuffer = CreateCompatibleBitmap(hdcCanvas, rect.dx, rect.dy);
+    // 32-bit DIB so Direct2D can BindDC this memory DC (a 24-bit DDB fails)
+    doubleBuffer = CreateMemoryBitmap({rect.dx, rect.dy});
     if (!doubleBuffer) {
         return;
     }
@@ -2078,6 +2260,10 @@ DoubleBuffer::DoubleBuffer(HWND hwnd, Rect rect) : hTarget(hwnd), hdcCanvas(::Ge
     if (!hdcBuffer) {
         return;
     }
+    // CreateCompatibleDC copies LAYOUT_RTL from an RTL hwnd's DC. The document
+    // canvas must stay LTR (issue #5326); a mirrored buffer would flip the
+    // page and keep it flipped after the hwnd is set back to LTR.
+    SetLayout(hdcBuffer, 0);
 
     if (rect.x != 0 || rect.y != 0) {
         SetGraphicsMode(hdcBuffer, GM_ADVANCED);
@@ -2102,8 +2288,19 @@ HDC DoubleBuffer::GetDC() const {
 
 void DoubleBuffer::Flush(HDC hdc) const {
     ReportIf(hdc == hdcBuffer);
-    if (hdcBuffer) {
-        BitBlt(hdc, rect.x, rect.y, rect.dx, rect.dy, hdcBuffer, 0, 0, SRCCOPY);
+    if (!hdcBuffer) {
+        return;
+    }
+    // BitBlt onto a LAYOUT_RTL DC mirrors the whole bitmap (glyphs included).
+    // The buffer is painted in LTR; copy it verbatim, same as VirtHost.
+    DWORD layout = GetLayout(hdc);
+    bool mirrored = layout != GDI_ERROR && (layout & LAYOUT_RTL);
+    if (mirrored) {
+        SetLayout(hdc, 0);
+    }
+    BitBlt(hdc, rect.x, rect.y, rect.dx, rect.dy, hdcBuffer, 0, 0, SRCCOPY);
+    if (mirrored) {
+        SetLayout(hdc, layout);
     }
 }
 
@@ -2130,10 +2327,7 @@ void DeferWinPosHelper::SetWindowPos(HWND hwnd, const Rect rc) {
 }
 
 void DeferWinPosHelper::MoveWindow(HWND hWnd, int x, int y, int cx, int cy, BOOL bRepaint) {
-    // SWP_NOCOPYBITS: a sibling that grows into another's old screen rect
-    // (canvas into a shrinking TOC) otherwise inherits those pixels. WebView2
-    // is transparent, so that leftover TOC flash is visible until it composites.
-    uint uFlags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOCOPYBITS;
+    uint uFlags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER;
     if (!bRepaint) {
         uFlags |= SWP_NOREDRAW;
     }
@@ -2142,6 +2336,13 @@ void DeferWinPosHelper::MoveWindow(HWND hWnd, int x, int y, int cx, int cy, BOOL
 
 void DeferWinPosHelper::MoveWindow(HWND hWnd, Rect r) {
     this->MoveWindow(hWnd, r.x, r.y, r.dx, r.dy);
+}
+
+// A transparent WebView canvas growing into a sibling's old rectangle must
+// discard those screen bits or the sibling remains visible until composition.
+void DeferWinPosHelper::MoveWindowNoCopyBits(HWND hWnd, Rect r) {
+    uint flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER | SWP_NOCOPYBITS;
+    this->SetWindowPos(hWnd, nullptr, r.x, r.y, r.dx, r.dy, flags);
 }
 
 void MenuSetChecked(HMENU m, int id, bool isChecked) {
@@ -2188,12 +2389,24 @@ void MenuRemove(HMENU m, int id) {
     RemoveMenu(m, (UINT)id, MF_BYCOMMAND);
 }
 
-// TODO: this doesn't recognize enum Cmd, why?
-// void Remove(HMENU m, enum Cmd id);
 void MenuEmpty(HMENU m) {
     while (RemoveMenu(m, 0, MF_BYPOSITION)) {
         // no-op
     }
+}
+
+static bool MenuSetTextRec(HMENU m, int id, MENUITEMINFOW* mii) {
+    if (SetMenuItemInfoW(m, id, FALSE, mii)) {
+        return true;
+    }
+    int n = GetMenuItemCount(m);
+    for (int i = 0; i < n; i++) {
+        HMENU sub = GetSubMenu(m, i);
+        if (sub && MenuSetTextRec(sub, id, mii)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void MenuSetText(HMENU m, int id, WStr s) {
@@ -2204,14 +2417,14 @@ void MenuSetText(HMENU m, int id, WStr s) {
     mii.fType = MFT_STRING;
     mii.dwTypeData = s.s;
     mii.cch = (uint)s.len;
-    BOOL ok = SetMenuItemInfoW(m, id, FALSE, &mii);
-    if (!ok) {
-        // setting text on a menu item that isn't present is benign (e.g. the
-        // item was filtered out by command visibility): log it, don't assert
-        TempStr tmp = len(s) == 0 ? StrL("(null)") : ToUtf8Temp(s);
-        logf("MenuSetText(): id=%d, s='%s'\n", id, tmp);
-        LogLastError();
+    if (MenuSetTextRec(m, id, &mii)) {
+        return;
     }
+    // setting text on a menu item that isn't present is benign (e.g. the
+    // item was filtered out by command visibility): log it, don't assert
+    TempStr tmp = len(s) == 0 ? StrL("(null)") : ToUtf8Temp(s);
+    logf("MenuSetText(): id=%d, s='%s'\n", id, tmp);
+    LogLastError();
 }
 
 void MenuSetText(HMENU m, int id, Str s) {
@@ -2318,7 +2531,7 @@ TempStr NormalizeString(Str strA, int /* NORM_FORM */ form) {
     // ::NormalizeString is Win32 (normaliz.dll); this function is our UTF-8 wrapper
     int sizeEst = ::NormalizeString((NORM_FORM)form, str.s, str.len, nullptr, 0);
     if (sizeEst <= 0) {
-        return nullptr;
+        return {};
     }
     // according to MSDN the estimate may be off somewhat:
     // http://msdn.microsoft.com/en-us/library/windows/desktop/dd319093(v=vs.85).aspx
@@ -2326,7 +2539,7 @@ TempStr NormalizeString(Str strA, int /* NORM_FORM */ form) {
     WCHAR* res = AllocArrayTemp<WCHAR>(sizeEst);
     sizeEst = ::NormalizeString((NORM_FORM)form, str.s, str.len, res, sizeEst);
     if (sizeEst <= 0) {
-        return nullptr;
+        return {};
     }
     return ToUtf8Temp(WStr(res));
 }
@@ -2363,11 +2576,11 @@ bool RegisterOrUnregisterServerDLL(Str dllPath, bool install, Str args) {
             WCHAR* argsW = CWStrTemp(args);
             ok = SUCCEEDED(DllInstall(install, argsW));
         } else {
-            args = nullptr;
+            args = {};
         }
     }
 
-    if (!args) {
+    if (len(args) == 0) {
         Str func = install ? StrL("DllRegisterServer") : StrL("DllUnregisterServer");
         DllRegUnregProc DllRegUnreg = (DllRegUnregProc)GetProcAddress(lib, func.s);
         if (DllRegUnreg) {
@@ -2461,9 +2674,8 @@ static inline int mul255(int a, int b) {
 }
 
 // Recolor a rendered page bitmap: map black->textColor and white->bgColor
-// (proportionally in between). When linkColor is non-zero, pixels that look
-// like link text (blue-ish) are set to linkColor instead. Pixels inside
-// skipRects keep their original colors (dark-mode image preservation).
+// (proportionally in between). Blue-ish pixels map to linkColor using R/G as
+// coverage so anti-aliased edges stay smooth. skipRects keep original colors.
 void UpdateBitmapColors(HBITMAP hbmp, Color textColor, Color bgColor, Color linkColor, Vec<Rect>* skipRects) {
     if (!hbmp) {
         return;
@@ -2493,12 +2705,6 @@ void UpdateBitmapColors(HBITMAP hbmp, Color textColor, Color bgColor, Color link
         return true;
     };
 
-    auto setLinkPixel = [&](u8* px) {
-        px[0] = linkB;
-        px[1] = linkG;
-        px[2] = linkR;
-    };
-
     // color order in DIB is blue-green-red-alpha
     byte rt, gt, bt;
     UnpackColor(textColor, rt, gt, bt);
@@ -2506,6 +2712,13 @@ void UpdateBitmapColors(HBITMAP hbmp, Color textColor, Color bgColor, Color link
     byte rb, gb, bb;
     UnpackColor(bgColor, rb, gb, bb);
     int const diff[4] = {(int)bb - base[0], (int)gb - base[1], (int)rb - base[2], 255};
+
+    auto setLinkPixel = [&](u8* px) {
+        int rg = ((int)px[1] + px[2]) / 2;
+        px[0] = (u8)(linkB + mul255(rg, (int)bb - linkB));
+        px[1] = (u8)(linkG + mul255(rg, (int)gb - linkG));
+        px[2] = (u8)(linkR + mul255(rg, (int)rb - linkR));
+    };
 
     DIBSECTION info{};
     int ret = GetObject(hbmp, sizeof(info), &info);
@@ -2586,9 +2799,10 @@ void UpdateBitmapColors(HBITMAP hbmp, Color textColor, Color bgColor, Color link
             u8 g = palette[i].rgbGreen;
             u8 b = palette[i].rgbBlue;
             if (recolorLinks && isLikelyLinkPixel(r, g, b)) {
-                palette[i].rgbRed = linkR;
-                palette[i].rgbGreen = linkG;
-                palette[i].rgbBlue = linkB;
+                int rg = ((int)r + g) / 2;
+                palette[i].rgbRed = (u8)(linkR + mul255(rg, (int)rb - linkR));
+                palette[i].rgbGreen = (u8)(linkG + mul255(rg, (int)gb - linkG));
+                palette[i].rgbBlue = (u8)(linkB + mul255(rg, (int)bb - linkB));
                 continue;
             }
             palette[i].rgbRed = (u8)(base[2] + mul255(palette[i].rgbRed, diff[2]));
@@ -3058,15 +3272,128 @@ void HwndSetDlgItemText(HWND hDlg, int itemID, Str s) {
     SetDlgItemTextW(hDlg, itemID, ws);
 }
 
-// hwnd should be Combo Box control
+//--- combo box
+// hwnd should be a Combo Box control
+
+void CbResetContent(HWND hwnd) {
+    SendMessageW(hwnd, CB_RESETCONTENT, 0, 0);
+}
+
 void CbAddString(HWND hwnd, Str s) {
     WCHAR* ws = CWStrTemp(s);
     SendMessageW(hwnd, CB_ADDSTRING, 0, (LPARAM)ws);
 }
 
-// hwnd should be Combo Box control
+int CbGetItemsCount(HWND hwnd) {
+    if (!hwnd) {
+        return 0;
+    }
+    int n = (int)SendMessageW(hwnd, CB_GETCOUNT, 0, 0);
+    return n < 0 ? 0 : n;
+}
+
+// unlike CbResetContent() / CbAddString(), these leave an editable combo's
+// edit control untouched, so they can rebuild the list under a user who is
+// still typing
+void CbInsertString(HWND hwnd, int idx, Str s) {
+    WCHAR* ws = CWStrTemp(s);
+    SendMessageW(hwnd, CB_INSERTSTRING, (WPARAM)idx, (LPARAM)ws);
+}
+
+void CbDeleteString(HWND hwnd, int idx) {
+    SendMessageW(hwnd, CB_DELETESTRING, (WPARAM)idx, 0);
+}
+
+void CbSetCueBanner(HWND hwnd, Str s) {
+    if (!hwnd) {
+        return;
+    }
+    SendMessageW(hwnd, CB_SETCUEBANNER, 0, (LPARAM)CWStrTemp(s));
+}
+
+// how many items the drop-down list shows before it scrolls
+void CbSetMinVisible(HWND hwnd, int n) {
+    SendMessageW(hwnd, CB_SETMINVISIBLE, (WPARAM)n, 0);
+}
+
+// idx of -1 sets the height of the always-visible selection field
+void CbSetItemHeight(HWND hwnd, int idx, int dy) {
+    SendMessageW(hwnd, CB_SETITEMHEIGHT, (WPARAM)idx, (LPARAM)dy);
+}
+
+int CbGetTextLen(HWND hwnd) {
+    return hwnd ? HwndGetTextLen(hwnd) : 0;
+}
+
+// true while the drop-down list is showing
+bool CbIsDropped(HWND hwnd) {
+    return hwnd && SendMessageW(hwnd, CB_GETDROPPEDSTATE, 0, 0);
+}
+
+// which item of the drop-down list is selected. -1 means none, which is also
+// what a null hwnd reports
+int CbGetCurrentSelection(HWND hwnd) {
+    if (!hwnd) {
+        return -1;
+    }
+    return (int)SendMessageW(hwnd, CB_GETCURSEL, 0, 0);
+}
+
+// -1 : no selection
 void CbSetCurrentSelection(HWND hwnd, int selIdx) {
     SendMessageW(hwnd, CB_SETCURSEL, (WPARAM)selIdx, 0);
+}
+
+// the edit control an editable combo keeps the text and keyboard focus in,
+// null for a CBS_DROPDOWNLIST combo (which has no edit)
+HWND CbEditHwnd(HWND hwnd) {
+    if (!hwnd) {
+        return nullptr;
+    }
+    COMBOBOXINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetComboBoxInfo(hwnd, &info)) {
+        return nullptr;
+    }
+    return info.hwndItem;
+}
+
+void CbEditSelectAll(HWND hwnd) {
+    CbEditSelectText(hwnd, 0, -1);
+}
+
+// The text selection within the edit, not the selected drop-down list item.
+// Goes to the edit control rather than through the combo's CB_SETEDITSEL /
+// CB_GETEDITSEL: those are packed into a LPARAM's two WORDs (so they can't say
+// anything past 65535) and the combo drops CB_SETEDITSEL while it is itself
+// setting the edit's text, which loses the caret.
+void CbEditSelectText(HWND hwnd, int start, int end) {
+    HWND edit = CbEditHwnd(hwnd);
+    if (!edit) {
+        return;
+    }
+    SendMessageW(edit, EM_SETSEL, (WPARAM)start, (LPARAM)end);
+}
+
+void CbEditGetSelection(HWND hwnd, int& start, int& end) {
+    start = 0;
+    end = 0;
+    HWND edit = CbEditHwnd(hwnd);
+    if (!edit) {
+        return;
+    }
+    DWORD s = 0, e = 0;
+    SendMessageW(edit, EM_GETSEL, (WPARAM)&s, (LPARAM)&e);
+    start = (int)s;
+    end = (int)e;
+}
+
+void CbEditSetModified(HWND hwnd, bool on) {
+    EditSetModified(CbEditHwnd(hwnd), on);
+}
+
+bool CbEditIsModified(HWND hwnd) {
+    return EditIsModified(CbEditHwnd(hwnd));
 }
 
 // https://docs.microsoft.com/en-us/windows/win32/winmsg/wm-seticon
@@ -3384,7 +3711,7 @@ static void AddPathToRecentDocsOnThread(WCHAR* pathW) {
 }
 
 void AddPathToRecentDocs(Str path) {
-    if (!path) {
+    if (len(path) == 0) {
         return;
     }
     if (!path::IsOnNetworkDrive(path)) {
@@ -3591,7 +3918,7 @@ double TimeDiffSecs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
     LARGE_INTEGER freq;
     QueryPerformanceFrequency(&freq);
     auto diff = end.QuadPart - start.QuadPart;
-    double res = (double)(diff) / (double)(freq.QuadPart);
+    double res = (double)diff / (double)freq.QuadPart;
     return res;
 }
 
@@ -3599,7 +3926,7 @@ double TimeDiffMs(const LARGE_INTEGER& start, const LARGE_INTEGER& end) {
     LARGE_INTEGER freq;
     QueryPerformanceFrequency(&freq);
     auto diff = end.QuadPart - start.QuadPart;
-    double res = (double)(diff) / (double)(freq.QuadPart);
+    double res = (double)diff / (double)freq.QuadPart;
     return res * 1000;
 }
 
@@ -3675,7 +4002,7 @@ Str GetLastErrorAsStr(Arena* arena) {
     }
     auto ws = WStr(msgBuf);
     Str temp = ToUtf8(GetTempArena(), WStr(msgBuf));
-    temp = str::TrimSuffixWhitespace(temp);
+    str::TrimSuffixWhitespace(temp);
     Str result = fmt("0x%08lX '%s'", err, temp);
     LocalFree(msgBuf);
     return str::Dup(arena, result);

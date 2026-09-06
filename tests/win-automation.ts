@@ -12,13 +12,14 @@
 // These are for *ad-hoc* tests (not checked in). Put reusable helpers here, not
 // in the individual ad-hoc scripts.
 
-import { EXE } from "./util.ts";
+import { cmdId, EXE } from "./util.ts";
 import {
   testWindowPos,
   waitForWindowIdle,
   enumWindows,
   getClassName,
   findChildWindow,
+  findVisibleChildWindow,
   waitForTopWindow,
   packCoords,
   sleep,
@@ -39,24 +40,91 @@ import {
   VK_RETURN,
   VK_TAB,
   VK_ESCAPE,
+  VK_RBUTTON,
+  VK_SHIFT,
+  VK_CONTROL,
+  VK_MENU,
+  VK_LCONTROL,
+  VK_RCONTROL,
+  VK_LSHIFT,
+  VK_RSHIFT,
+  VK_LMENU,
+  VK_RMENU,
+  isKeyDownAsync,
+  injectKeyUp,
   getClientRect,
   clientToScreen,
+  setCursorPos,
+  sendCopyDataW,
   getPopupMenuHandle,
   readMenuTree,
   getWindowText,
   getFocusedHwnd,
-  killAndWait,
+  killAndWait as killAndWaitProcess,
   killProcessesNamed,
   type MenuItem,
 } from "./winapi.ts";
 import { ControlClient, uniquePipeName } from "./control.ts";
 
-export { captureWindowToPng, killAndWait, killProcessesNamed };
+export { captureWindowToPng, killProcessesNamed };
+
+type SharedControlledSession = {
+  proc: Bun.Subprocess;
+  pipe: string;
+  frame: number;
+};
+
+let sharedSessionRequested = false;
+let sharedSession: SharedControlledSession | null = null;
+
+// keep drain promises alive: `void new Response().text()` can be GC'd, the
+// pipe fills, ASan's next stderr write kills the process, tests see EPIPE
+const gStderrDrains = new Set<Promise<string>>();
+const gStderrByProc = new WeakMap<Bun.Subprocess, Promise<string>>();
+
+function drainStderr(proc: Bun.Subprocess): Promise<string> {
+  if (!proc.stderr) {
+    return Promise.resolve("");
+  }
+  const p = new Response(proc.stderr).text();
+  gStderrDrains.add(p);
+  gStderrByProc.set(proc, p);
+  void p.finally(() => gStderrDrains.delete(p));
+  return p;
+}
+
+export async function takeStderr(proc: Bun.Subprocess): Promise<string> {
+  const p = gStderrByProc.get(proc);
+  return p ? (await p).trim() : "";
+}
+
+export function beginSharedControlledSession(): void {
+  if (sharedSession || sharedSessionRequested) {
+    throw new Error("a shared controlled session is already active");
+  }
+  sharedSessionRequested = true;
+}
+
+export async function endSharedControlledSession(): Promise<void> {
+  sharedSessionRequested = false;
+  if (sharedSession) {
+    const session = sharedSession;
+    sharedSession = null;
+    await killAndWaitProcess(session.proc);
+  }
+}
+
+export async function killAndWait(proc: Bun.Subprocess): Promise<void> {
+  if (sharedSession?.proc === proc) {
+    return;
+  }
+  await killAndWaitProcess(proc);
+}
 
 export const FRAME_CLASS = "SUMATRA_PDF_FRAME";
 export const CANVAS_CLASS = "SUMATRA_PDF_CANVAS";
 
-// -window-pos for the upper-right quarter of the screen (see testWindowPos)
+// -window-pos for the right half of the screen (see testWindowPos)
 export function windowPosArgs(): string[] {
   const p = testWindowPos();
   return ["-window-pos", `${p.dx}x${p.dy}@${p.x}x${p.y}`];
@@ -67,8 +135,8 @@ export function windowPosArgs(): string[] {
 // (only opens files passed on the cmd-line) and doesn't save settings. Use
 // proc.pid with waitForFrame() to get the window.
 //
-// The window opens as a quarter of the screen, which is a good deal faster to
-// render and to capture. Pass { defaultWindowPos: true } in a test that is
+// The window opens on the right half of the screen, which is a good deal
+// faster to render and to capture than a full-screen one. Pass { defaultWindowPos: true } in a test that is
 // about the window's own size or state - fullscreen, maximized, minimized,
 // restoring a remembered position - so the app picks the position itself.
 export function launchSumatra(args: string[], opts?: { defaultWindowPos?: boolean }): Bun.Subprocess {
@@ -83,13 +151,33 @@ export async function launchControlled(
   args: string[],
   opts?: { defaultWindowPos?: boolean; saveSettings?: boolean },
 ): Promise<{ proc: Bun.Subprocess; client: ControlClient; frame: number }> {
+  // many tests post keys and clicks directly; a held modifier would chord them
+  await ensureModifierKeysUp();
+  if (sharedSession) {
+    const path = args[args.length - 1];
+    if (!path || path.startsWith("-")) {
+      throw new Error("shared controlled session needs a document path as its last argument");
+    }
+    sendMessage(sharedSession.frame, WM_COMMAND, cmdId("CmdDiscardChanges"), 0);
+    sendMessage(sharedSession.frame, WM_COMMAND, cmdId("CmdToggleEditPDF"), 0);
+    const command = `[Open("${path}", 0, 1, 0)]`;
+    if (!sendCopyDataW(sharedSession.frame, 0x44646557, command)) {
+      throw new Error("could not open the next document in the shared SumatraPDF process");
+    }
+    const client = await ControlClient.connect(sharedSession.pipe);
+    await client.waitForRenderIdle();
+    return { proc: sharedSession.proc, client, frame: sharedSession.frame };
+  }
   const pipe = uniquePipeName();
   const posArgs = opts?.defaultWindowPos || args.includes("-window-pos") ? [] : windowPosArgs();
   const testing = opts?.saveSettings ? [] : ["-for-testing"];
+  // drain stderr: ASan writes reports there, and with stderr:"ignore" those
+  // writes hit a closed pipe and kill the process (EPIPE in the test client)
   const proc = Bun.spawn([EXE, ...testing, ...posArgs, "-dbg-control", pipe, ...args], {
     stdout: "ignore",
-    stderr: "ignore",
+    stderr: "pipe",
   });
+  drainStderr(proc);
   try {
     const client = await ControlClient.connect(pipe);
     const frame = await waitForFrame(proc.pid!);
@@ -97,11 +185,58 @@ export async function launchControlled(
       client.close();
       throw new Error("SumatraPDF main window did not appear");
     }
+    if (sharedSessionRequested) {
+      sharedSession = { proc, pipe, frame };
+    }
     return { proc, client, frame };
   } catch (e) {
-    await killAndWait(proc);
+    await killAndWaitProcess(proc);
     throw e;
   }
+}
+
+// Wheel and key tests read the real modifier state: the app ORs GetKeyState
+// into its Ctrl/Shift/Alt/right-button checks, so a Ctrl the system thinks is
+// held (a key-up lost over RDP, a shortcut typed in another window) turns a
+// wheel notch into a zoom and the test fails as "did not scroll". Release
+// stuck keys with an injected key-up; fail naming the key if it stays down
+// (a physically held key, or the right mouse button, which this can't clear).
+const MODIFIER_KEYS: [string, number][] = [
+  ["Ctrl", VK_CONTROL],
+  ["Shift", VK_SHIFT],
+  ["Alt", VK_MENU],
+  ["right mouse button", VK_RBUTTON],
+];
+// left/right variants must be released too or the generic key stays down
+const KEY_VARIANTS: Record<number, number[]> = {
+  [VK_CONTROL]: [VK_CONTROL, VK_LCONTROL, VK_RCONTROL],
+  [VK_SHIFT]: [VK_SHIFT, VK_LSHIFT, VK_RSHIFT],
+  [VK_MENU]: [VK_MENU, VK_LMENU, VK_RMENU],
+};
+const MODIFIER_RELEASE_TRIES = 5;
+
+function heldModifierKeys(): [string, number][] {
+  return MODIFIER_KEYS.filter(([, vk]) => isKeyDownAsync(vk));
+}
+
+export async function ensureModifierKeysUp(): Promise<void> {
+  for (let attempt = 0; attempt < MODIFIER_RELEASE_TRIES; attempt++) {
+    const held = heldModifierKeys();
+    if (held.length === 0) {
+      return;
+    }
+    if (attempt === 0) {
+      console.log(`releasing stuck modifier keys: ${held.map(([name]) => name).join(", ")}`);
+    }
+    for (const [, vk] of held) {
+      for (const variant of KEY_VARIANTS[vk] ?? []) {
+        injectKeyUp(variant);
+      }
+    }
+    await sleep(100);
+  }
+  const names = heldModifierKeys().map(([name]) => name);
+  throw new Error(`modifier keys held down on this machine: ${names.join(", ")}`);
 }
 
 export function sendCommandSync(hwnd: number, id: number): void {
@@ -174,10 +309,12 @@ export function findChildByClass(parent: number, className: string): number {
   return findChildWindow(parent, className);
 }
 
-// the floating in-place form-field editor: a standard "Edit" child of the canvas
+// the floating in-place form-field editor: a visible "Edit" child of the canvas
 // that appears while editing a text/choice field. 0 if none is active.
+// Must skip hidden children: the home-page search box is an Edit under the
+// canvas even after a document is open.
 export function findFormEditor(canvas: number): number {
-  return findChildWindow(canvas, "Edit");
+  return findVisibleChildWindow(canvas, "Edit");
 }
 
 // poll until the form editor overlay appears (after clicking a text field)
@@ -195,17 +332,25 @@ export async function waitForFormEditor(canvas: number, timeoutMs = 1500): Promi
 
 // Left-click at client (x,y) of hwnd. Sent synchronously, so the click is fully
 // handled before returning, then we wait settleMs for any re-render.
-export async function clickAt(hwnd: number, x: number, y: number, settleMs = 350): Promise<void> {
+//
+// The cursor is moved to the click first: SetCapture (from a drag start) injects
+// WM_MOUSEMOVE at the real cursor, and if that is far from (x,y) the app treats
+// the click as a drag (ClickEdgeToTurnPage and similar then no-op).
+export async function clickAt(hwnd: number, x: number, y: number, settleMs = 350, extraMk = 0): Promise<void> {
+  const screen = clientToScreen(hwnd, x, y);
+  setCursorPos(screen.x, screen.y);
   const lp = packCoords(x, y);
-  sendMessage(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lp);
-  sendMessage(hwnd, WM_LBUTTONUP, 0, lp);
+  sendMessage(hwnd, WM_LBUTTONDOWN, MK_LBUTTON | extraMk, lp);
+  sendMessage(hwnd, WM_LBUTTONUP, extraMk, lp);
   await sleep(settleMs);
 }
 
 // Press a key (WM_KEYDOWN). Posted (not sent) so it flows through the app's
 // PreTranslateMessage like real key input would (needed for canvas shortcuts /
 // arrow keys; also fine for the form editor's Enter/Tab/Esc handling).
+// a held Ctrl/Shift/Alt on the machine would turn this into a chord
 export async function pressKey(hwnd: number, vk: number, settleMs = 250): Promise<void> {
+  await ensureModifierKeysUp();
   postMessage(hwnd, WM_KEYDOWN, vk, 0);
   await sleep(settleMs);
 }

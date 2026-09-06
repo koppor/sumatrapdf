@@ -12,13 +12,13 @@ extern "C" {
 
 // CAD/engineering-drawing enhancement mode. Set by the app from the
 // EngineeringDrawingEnhance pref; PdfPreview/PdfFilter and the macOS app don't
-// link GlobalPrefs, so they keep the default (Off), which also skips the
+// link Settings, so they keep the default (Off), which also skips the
 // per-document detection pass.
 static EngineeringDrawingEnhanceMode gCadEnhanceMode = EngineeringDrawingEnhanceMode::Off;
 
 // Parse the EngineeringDrawingEnhance pref ("off", "auto" or "on").
 void SetEngineeringDrawingEnhanceMode(Str mode) {
-    if (!mode || str::EqI(mode, StrL("auto"))) {
+    if (len(mode) == 0 || str::EqI(mode, StrL("auto"))) {
         gCadEnhanceMode = EngineeringDrawingEnhanceMode::Auto;
     } else if (str::EqI(mode, StrL("on"))) {
         gCadEnhanceMode = EngineeringDrawingEnhanceMode::On;
@@ -66,7 +66,7 @@ bool CadEnhanceEnabledForEngine(const CadDetectResult& detect, CadEnhanceOverrid
 }
 
 static bool ContainsAnyI(Str haystack, const char* const* needles, int count) {
-    if (!haystack) {
+    if (len(haystack) == 0) {
         return false;
     }
     for (int i = 0; i < count; i++) {
@@ -143,7 +143,7 @@ struct CadMetadataScore {
 };
 
 static void ScoreMetadataField(Str field, CadMetadataScore* acc) {
-    if (!field) {
+    if (len(field) == 0) {
         return;
     }
     if (ContainsAnyI(field, kMetadataBlacklist, dimof(kMetadataBlacklist))) {

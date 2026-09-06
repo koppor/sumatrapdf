@@ -33,20 +33,19 @@ static void RegisterHostClass(WStr className) {
     wc.hCursor = GetCachedCursor(IDC_ARROW);
     wc.lpszClassName = className.s;
     RegisterClassExW(&wc);
-    gRegisteredClasses.Append(className);
+    VecAppend(gRegisteredClasses, className);
 }
 
 static void PaintHost(VirtHost* host, HWND hwnd) {
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd, &ps);
     Rect rc = HwndClientRect(hwnd);
-    DoubleBuffer buffer(hwnd, rc);
-    HDC memDC = buffer.GetDC();
-    SetBkMode(memDC, TRANSPARENT);
-    // scoped: GfxDirect2D reaches the dc only when destroyed, so the gfx must
-    // die before the buffer is flushed
+    if (!host->gfxBuf) {
+        host->gfxBuf = new GfxDoubleBuffer();
+    }
+    // scoped: GfxDirect2D EndDraw and the blit run in ~Gfx
     {
-        Gfx* gfx = GfxCreate(memDC);
+        Gfx* gfx = GfxCreateWithDoubleBuffer(hwnd, hdc, host->gfxBuf);
         VirtHostPaintEvent ev;
         ev.host = host;
         ev.gfx = gfx;
@@ -64,7 +63,6 @@ static void PaintHost(VirtHost* host, HWND hwnd) {
         }
         delete gfx;
     }
-    buffer.Flush(hdc);
     EndPaint(hwnd, &ps);
 }
 
@@ -116,9 +114,15 @@ static LRESULT CALLBACK WndProcVirtHost(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             }
             break;
         case WM_MOUSEMOVE: {
-            TRACKMOUSEEVENT tme{sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0};
-            TrackMouseEvent(&tme);
-            host->onMouseMove.Call();
+            // posted moves (tests) are not the real cursor; TME_LEAVE would
+            // fire at once and cancel a hover the move just started
+            if (HwndWindowRect(hwnd).Contains(GetCursorPosition())) {
+                TRACKMOUSEEVENT tme{sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0};
+                TrackMouseEvent(&tme);
+            }
+            Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            UnmirrorRtl(hwnd, pt);
+            host->onMouseMove.Call(pt);
             break;
         }
         case WM_MOUSELEAVE:
@@ -191,6 +195,9 @@ VirtHost::~VirtHost() {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
     }
     native = nullptr;
+    GfxDestroyDoubleBuffer(gfxBuf);
+    delete gfxBuf;
+    gfxBuf = nullptr;
     delete layout;
     layout = nullptr;
     delete vroot;

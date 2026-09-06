@@ -24,9 +24,10 @@ CmdExit,Ctrl + Q,Exit Application,
 CmdMoveFrameFocus,F6,Move Frame Focus,
 CmdNewWindow,Ctrl + N,Open New SumatraPDF Window,
 CmdOpenFile,Ctrl + O,Open File...,"uses the Windows file picker or Navigate Files in Folder according to the `FilePicker` advanced setting (empty/os = Windows, sumatrapdf = in-app), ver 3.7+"
+CmdOpenFileNoHistory,,Open File Without History...,"same picker as Open File, but the document is not added to File History or Windows Recent Documents (fixes #6121), ver 3.7+"
 CmdOpenFileWithOSFilePicker,,Open File With Windows File Picker...,"always the standard Windows multi-select file open dialog, ver 3.7+"
 CmdToggleFilePicker,,SumatraPDF File Picker,"checkbox under File and Settings; toggles `FilePicker` empty/os ↔ sumatrapdf, ver 3.7+"
-CmdToggleBoolSetting,,Toggle Boolean Setting,"custom shortcuts: `CmdToggleBoolSetting <SettingName>` toggles a boolean advanced setting (case-insensitive leaf or dotted path), e.g. `Fullscreen.ShowMenubar` (fixes #5912), ver 3.7+"
+CmdToggleBoolSetting,,Toggle Boolean Setting,"in the Command Palette, lists boolean advanced settings; Enter or a click toggles one and closes. Custom shortcuts: `CmdToggleBoolSetting <SettingName>` (case-insensitive leaf or dotted path), e.g. `Fullscreen.ShowMenubar` (fixes #5912), ver 3.7+"
 CmdFixDefaultApp,,Fix Default App For Extension,"`CmdFixDefaultApp .pdf` opens the OS dialog to set the default app for that extension; used by the home-page bottom bar when Sumatra is no longer the default, ver 3.7+"
 CmdOpenNextFileInFolder,Shift + Ctrl + Right,Open Next File In Folder,
 CmdNavigateFilesInFolder,Shift + Ctrl + Up,Navigate Files in Folder,"directory browser for openable files in the current file's folder (stays open; Enter/double-click replaces the current tab, Ctrl+Enter/Ctrl+double-click switches to the tab already showing the file or opens a new tab, Alt+Up goes to the parent directory, Del moves the selected file to the recycle bin, F5 re-reads the directory); also used when `FilePicker = sumatrapdf`, ver 3.7+"
@@ -40,7 +41,7 @@ CmdRenameFile,F2,Rename File...,
 CmdReopenLastClosedFile,Shift + Ctrl + T,Reopen Last Closed,
 CmdSaveAs,Ctrl + S,Save File As...,
 CmdToggleCursorPosition,m,Toggle Cursor Position,
-CmdShowInFolder,,Show File In Folder...,
+CmdShowInFolder,,Show File In Folder...,"Explorer (selects the file), or Navigate Files in Folder when FilePicker = sumatrapdf, ver 3.7+"
 CmdToggleBookmarks,F12,Toggle Bookmarks,
 CmdToggleTableOfContents,,Toggle Table Of Contents,ver 3.6+
 CmdCollapseAll,,Collapse All,"Bookmarks: collapse the outline; if there is only one top-level entry with children, expand it one level (Word-style TOC), ver 3.7+"
@@ -59,9 +60,14 @@ CmdExtendSelectionCharRight,,Extend Selection One Character Right,"ver 3.7+, no 
 CmdExtendSelectionWordLeft,,Extend Selection One Word Left,"ver 3.7+, no default shortcut; grows or shrinks the existing text selection (see below)"
 CmdExtendSelectionWordRight,,Extend Selection One Word Right,"ver 3.7+, no default shortcut; grows or shrinks the existing text selection (see below)"
 CmdCopyComment,,Copy Comment,
+CmdShowAnnotationText,,Show Comment,"opens a read-only card with the annotation's whole text; also on a left click on the annotation, ver 3.7+"
 CmdCopyImage,,Copy Image,
 CmdCopyLinkTarget,,Copy Link Target,
-CmdCopySelection,"Ctrl + C, Ctrl + Insert",Copy Selection,
+CmdCopySelection,"Ctrl + C, Ctrl + Insert",Copy Selection,"in Edit PDF mode with an annotation selected, copies that annotation instead of text"
+CmdCopySelectionAsImage,,Copy Selection As Image,"copy a rectangular selection as an image, ver 3.7+"
+CmdSearchGoogleLens,,Search with Google Lens,"opens the selection, image under the cursor, or current page in Google Lens, ver 3.7+"
+CmdSearchGoogleLensPage,,Search Page with Google Lens,"current page (or the page under the cursor from the context menu), ver 3.7+"
+CmdSearchGoogleLensImage,,Search Image with Google Lens,"image under the cursor, ver 3.7+"
 CmdCopyFilePath,,Copy File Path,ver 3.5+
 CmdDeleteFile,,Delete Currently Opened File, ver 3.6+
 CmdDeleteFileAndOpenNext,,Delete File And Open Next,"moves the current file to the Recycle Bin after the next file opens successfully, ver 3.7+"
@@ -93,11 +99,13 @@ CmdRotateRight,"], Shift + Ctrl + Add",Rotate Right,
 CmdSinglePageView,"Ctrl + 6, Ctrl + Numpad 6",Single Page View,
 CmdToggleContinuousView,c,Toggle Continuous View,
 CmdSelectTextViaKeyboard,F7,Select Text With Keyboard,"ver 3.7+, caret browsing: puts a text caret in the page which the arrow keys move; Shift + arrows extend the selection, v toggles visual mode (arrows select without Shift), Home/End go to the line ends, Ctrl + Home/End to the document ends, Ctrl + arrows move by word, Ctrl + C or y copies, Esc or F7 leaves the mode. Not available for documents with no extractable text (fixes #4684, #4116)"
-CmdToggleKeyboardLinkFollowing,Shift + F,Follow Link With Keyboard,"ver 3.7+, numbers the links visible on screen 1..9; pressing a digit follows that link, Esc or Shift + F again leaves the mode. Not available for comic books, image folders and images (fixes #2629)"
+CmdToggleKeyboardLinkFollowing,Shift + F,Follow Link With Keyboard,"ver 3.7+, labels visible links with Vimium-style letter hints; type a hint to follow its link, Esc or Shift + F again leaves the mode. Multi-letter hints are used when needed. Not available for comic books, image folders and images (fixes #2629)"
 CmdToggleFullscreen,"f, Shift + Ctrl + L, F11",Toggle Fullscreen,
 CmdToggleMangaMode,,Toggle Manga Mode,"Right-to-left facing/book layout for fixed-page documents; before 3.7 this was limited to comic books"
+CmdToggleUniformPageWidth,,Toggle Uniform Page Width,"At percentage zoom levels, scales every page to the width page 1 has at that zoom; remembered per document (fixes #5512)"
 CmdToggleMenuBar,F9,Toggle Menu Bar,
 CmdTogglePageInfo,i,Show / Hide Current Page Number,was Shift + i before 3.6
+CmdTogglePageBoxes,,Toggle Page Boxes,"ver 3.7+, outlines the PDF MediaBox, CropBox, BleedBox, TrimBox and ArtBox on each page (only boxes that page actually has) and labels them. Palette and Debug menu. No default shortcut (fixes #814)"
 CmdChangeScrollbar,,Change Scrollbar,"Opens dialog to choose scrollbar mode (windows/smart/overlay/hidden)"
 CmdChangeBackgroundColor,,Change Background Color,"Opens color picker to change document background color"
 CmdChangeEbookSettings,,Change eBook Settings,"ver 3.7+, opens a dialog for the font, size, line spacing and CSS of a reflowable document (EPUB, MOBI, FB2, ...), for that document only or for all ebooks. Not shown for fixed-page documents. See Customize-eBook-UI.md"
@@ -107,14 +115,19 @@ CmdAIChatWithGrokBuild,,AI Chat with document using Grok Build,"Toggle Grok Buil
 CmdAIChatWithOpenAICodex,,AI Chat with document using OpenAI Codex,"Toggle OpenAI Codex chat sidebar, ver 3.7+. See AI-Chat-with-document.md#openai-codex"
 CmdAIChatWithAntiGravity,,AI Chat with document using Antigravity,"Toggle Antigravity chat sidebar, ver 3.7+. See AI-Chat-with-document.md#antigravity"
 CmdTranslateSelectionWithAntiGravity,,Translate Selection with Antigravity,"Translate selected text with Antigravity CLI, ver 3.7+"
-CmdChangeTheme,,Change Theme...,"ver 3.7+, opens a dialog to pick a UI theme and optionally how document colors follow the theme (`DocumentColorsFollowTheme`)"
+CmdChangeTheme,,Change Theme...,"ver 3.7+, opens a dialog to pick a UI theme (including **Follow Windows**, which automatically tracks Windows light/dark app mode) and optionally how document colors follow the theme (`DocumentColorsFollowTheme`)"
+CmdNavigateThumbnail,,Navigate Thumbnails,"opens a thumbnail grid for the current document; arrow keys and the mouse select a page, Enter or double-click opens it, and Esc closes the grid"
 CmdToggleLightDarkTheme,,Toggle Light/Dark Theme,"ver 3.7+, switches between the last used light and dark themes (see `LastLightTheme` / `LastDarkTheme` advanced settings)"
 CmdToggleEngineeringDrawingEnhance,,Toggle Engineering Drawing Enhancement,"ver 3.7+, toggles CAD/engineering-drawing line enhancement for the current PDF (see the `EngineeringDrawingEnhance` advanced setting)"
 CmdSetDocumentColorsFollowTheme,,Set Document Colors Follow Theme,"ver 3.7+, opens a dialog to pick how MuPDF-rendered documents follow the UI theme (`DocumentColorsFollowTheme`: off, smart, legacy)"
 CmdTogglePreservePdfImages,,Toggle Preserve PDF Image Colors in Dark Mode,"ver 3.7+, session-only toggle of image preservation on inverted pages"
 CmdToggleLinks,,Toggle Show Links,"Toggle drawing blue rectangle around links, ver 3.6+"
+CmdToggleHighlightFormFields,,Toggle Highlight Form Fields,"ver 3.7+, toggles pale-blue highlight of empty fillable PDF form fields (`HighlightFormFields`; default on) (fixes #5966)"
+CmdToggleTransparencyGrid,,Toggle Transparency Grid,"ver 3.7+, checkerboard under the page so transparent PDFs (white art on a hole) are visible, like Acrobat's Transparency Grid. Session-only, not saved (fixes #1809)"
+CmdTogglePageGrid,,Toggle Page Grid,"ver 3.7+, dotted major/minor graph paper on PDF, EPUB, and other paginated document pages; not comics. Session-only visibility; spacing, origin, color and style are `FixedPageUI.PageGrid` (fixes #4398)"
+CmdConfigurePageGrid,,Configure Page Grid...,"ver 3.7+, dialog to set page-grid units, spacing, subdivisions, origin, color and line style (dots / dotted / solid), like PDF-XChange Measurement. Reset to defaults restores the shipped appearance settings; Show Grid is the session toggle"
 CmdToggleDisableLinks,,Toggle Disable Links,"ver 3.7+, palette-only; toggles `DisableLinks` so clicks, hover and keyboard following ignore document links (fixes #5939)"
-CmdToggleHoverPreview,,Toggle Hover Preview,"ver 3.7+, palette-only; toggles the citation/reference hover popup (`CitationHoverDelay`: 300 ms when on, -1 when off)"
+CmdToggleHoverPreview,,Toggle Citation Hover Preview,"ver 3.7+, palette-only; toggles the citation/reference hover popup (`CitationHoverDelay`: 300 ms when on, -1 when off)"
 ```
 
 ## Tabs
@@ -186,18 +199,22 @@ CmdToggleLaserPointer,,Toggle Laser Pointer,"ver 3.7+, replaces the mouse cursor
 
 ```commands
 Command IDs,Keyboard shortcuts,Command Palette,Notes
+CmdInsertImage,,Insert Image...,"Pick an image and stamp it onto the current page as a stamp annotation - a signature, say (fixes #1744), ver 3.7+"
 CmdCreateAnnotCaret,,Create Caret Annotation,
 CmdCreateAnnotCircle,,Create Circle Annotation,
-CmdCreateAnnotFileAttachment,,Create File Attachment Annotation,
+CmdFindAnnotation,,Find Annotation,"opens the floating annotation list, where you can filter the document's annotations and jump to one, ver 3.7+"
+CmdCreateAnnotFileAttachment,,Create File Attachment Annotation,"click to place, like Stamp/Caret; Esc cancels, ver 3.7+"
 CmdCreateAnnotFreeText,,Create Free Text Annotation,
 CmdCreateAnnotHighlight,"a, A",Create Highlight Annotation,
-CmdCreateAnnotInk,,Create Ink Annotation,
+CmdAnnotationHighlightBrush,,Highlight with Brush,"a freehand highlighter: drag to paint a marker stroke anywhere on the page, no text selection needed. Release finishes, Esc cancels. Saved as an ink annotation in HighlightColor, ver 3.7+"
+CmdCreateAnnotInk,,Create Ink Annotation,"drag to paint; release commits the stroke and leaves the tool on. Esc or closing the hint leaves the tool, ver 3.7+"
 CmdCreateAnnotLine,,Create Line Annotation,
 CmdCreateAnnotLink,,Create Link Annotation,
 CmdCreateAnnotPolygon,,Create Polygon Annotation,
 CmdCreateAnnotPolyLine,,Create Poly Line Annotation,
 CmdCreateAnnotPopup,,Create Popup Annotation,
-CmdCreateAnnotRedact,,Create Redact Annotation,
+CmdCreateAnnotRedact,,Create Redact Annotation,"marks selected text, or a dragged rectangle, for removal; content is not deleted until Apply Redactions, ver 3.7+"
+CmdApplyRedactions,,Apply Redactions,"permanently deletes content marked with the Redact tool, after a confirmation; save a copy afterwards, ver 3.7+"
 CmdCreateAnnotSquare,,Create Square Annotation,
 CmdCreateAnnotSquiggly,,Create Squiggly Annotation,
 CmdCreateAnnotStamp,,Create Stamp Annotation,
@@ -205,14 +222,20 @@ CmdCreateAnnotImageFromClipboard,,Create Image Annotation From Clipboard,
 CmdCreateAnnotStrikeOut,,Create Strike Out Annotation,
 CmdCreateAnnotText,,Create Text Annotation,
 CmdCreateAnnotUnderline,"u, U",Create Underline Annotation,
+CmdUndo,Ctrl + Z,Undo,"ver 3.7+, takes back the last change to the PDF (annotations, form fields, applied redactions). One gesture is one step: creating, pasting or resizing an annotation comes back in a single Undo. Disabled when there is nothing to undo; in a text box Ctrl + Z is the text box's undo"
+CmdRedo,Shift + Ctrl + Z,Redo,"ver 3.7+, re-applies the change Undo took back. Disabled when there is nothing to redo"
+CmdCutAnnotation,Ctrl + X,Cut Annotation,"ver 3.7+, copies the annotation under the cursor (or the selected one) and deletes it when the copy is pasted; in a text box Ctrl + X is the text box's cut"
+CmdCopyAnnotation,Ctrl + C,Copy Annotation,"ver 3.7+, copies the selected annotation in Edit PDF mode; Ctrl + C is CmdCopySelection and copies the annotation when one is selected. Only annotations that can be moved can be copied, so text markup (highlight, underline, squiggly, strike-out) and file attachments are excluded"
+CmdPasteAnnotation,Ctrl + V,Paste Annotation,"ver 3.7+, pastes the copied annotation with its top-left at the mouse and deletes the original if it was cut; Ctrl + V is CmdPasteClipboardImage and pastes the annotation when Edit PDF is on and one has been copied"
 CmdDeleteAnnotation,Delete,Delete Annotation,
-CmdEditAnnotations,,Edit Annotations,
 CmdSaveAnnotations,Shift + Ctrl + S,Save Annotations to existing PDF,
 CmdSaveAnnotationsNewFile,,Save Annotations to new PDF,ver 3.6+
+CmdSignDocument,,Sign Document...,"digitally sign a PDF with a certificate from the Windows store or a .pfx / .p12 file; choose which name/date/labels to draw and optionally a PNG/JPEG; a new signature is placed by clicking or dragging on the page, ver 3.7+"
 CmdDiscardChanges,,Discard Changes,"reloads the document from disk, discarding unsaved annotations and form changes; also on the tab context menu when there are unsaved changes, ver 3.7+ (renamed from `CmdDiscardAnnotations`)"
 CmdShowAnnotations,,Show Annotations,"ver 3.6+, for current document"
 CmdHideAnnotations,,Hide Annotations,"ver 3.6+, for current document"
 CmdToggleShowAnnotations,,Toggle Showing Annotations,"ver 3.6+, for current document"
+CmdToggleEditPDF,,Toggle Edit PDF,"shows or hides Edit PDF mode (the annotation-tools row), ver 3.7+ (renamed from `CmdTogglePdfAnnotationsToolbar`)"
 ```
 
 ## Zoom
@@ -306,13 +329,14 @@ CmdForgetSelectedDocument,,Remove Selected Document From History,
 CmdListPrinters,,List Printers,ver 3.7+
 CmdOptions,,Options...,
 CmdSetInverseSearch,,Set Inverse Search Command Line,"ver 3.7+, opens a dialog to set the SyncTeX inverse-search command and enables TeX enhancements"
-CmdScreenshot,,Take Screenshot,"ver 3.7+, requires Shortcuts entry (e.g. Key = PrtSc) to register global hotkey"
+CmdScreenshot,,Take Screenshot,"ver 3.7+, can be registered as a global hotkey via Shortcuts entry (e.g. Key = Global PrtSc) or through the Settings menu"
 CmdCropImage,,Crop Image,ver 3.7+
 CmdResizeImage,,Resize Image,ver 3.7+
 CmdSaveImage,,Save Image,"Save image from context menu, ver 3.7+"
 CmdConvertImageToPdf,,Convert Page To PDF,"Save the image under the cursor (or the current image document page) as a new PDF via the image editor, ver 3.7+"
 CmdConvertToPDF,,Convert To PDF,"Convert a comic book, image folder, or single image to a multi-page PDF (dialog picks a unique .pdf path), ver 3.7+ (fixes #4118, #5532). Docs: Convert-to-PDF.md"
-CmdPasteClipboardImage,,Paste Image From Clipboard,"Paste image from clipboard and open it, ver 3.7+"
+CmdConvertPdfToImages,,Convert PDF to Images...,"Render PDF pages to PNG, JPEG or BMP (format drop-down updates the extension). Destination path is a template: <N> is replaced by the page number. Pages: current, all, or a custom range. PNGs are optimized in the background, ver 3.7+ (fixes #5991). Docs: Convert-PDF-to-images.md"
+CmdPasteClipboardImage,Ctrl + V,Paste Image From Clipboard,"Paste image from clipboard and open it, ver 3.7+. In Edit PDF mode, pastes a copied annotation at the mouse instead"
 CmdShowErrors,,Show Errors,"Show mupdf warnings/errors in right-click context menu, ver 3.7+"
 CmdShowLog,,Show Logs,
 ```
@@ -323,6 +347,7 @@ CmdShowLog,,Show Logs,
 Command IDs,Keyboard shortcuts,Command Palette,Notes
 CmdHelpOpenManual,F1,Help: Manual,
 CmdHelpOpenKeyboardShortcuts,,Help: Keyboard Shortcuts,
+CmdToggleKeyboardHelp,?,Show Keyboard Shortcuts,"Overlay listing the most useful commands by section, each row showing the key it is currently bound to. Press again (or Esc) to close it, ver 3.7+"
 CmdHelpAbout,,Help: About SumatraPDF,
 CmdHelpOpenManualOnWebsite,,Help: Manual On Website,
 CmdHelpVisitWebsite,,Help: SumatraPDF Website,
@@ -346,9 +371,10 @@ CmdSetScreenshotHotkey,,Set Screenshot Hotkey,"Open dialog to set or remove a gl
 CmdReadAloud,,Read Aloud,"Read selected text (or from the viewport if no selection) through the end of the document using Windows text-to-speech. Invoking again pauses reading. Voice is chosen in the Read Aloud Voice submenu and remembered in ReadAloudVoiceId, ver 3.7+"
 CmdPauseReadAloud,,Pause Reading,"Pause reading text aloud; resume with CmdContinueReadAloud, ver 3.7+"
 CmdContinueReadAloud,,Continue Reading,"Continue reading text aloud from where it was paused, ver 3.7+"
-CmdStopReadAloud,,Stop Reading,"Stop reading text aloud and clear the resume position, ver 3.7+"
+CmdStopReadAloud,,Stop Reading,"Stop reading text aloud and clear the resume position. Always in the Read Aloud menu (disabled when nothing is being read) and in the command palette while a session is active, even when the playback bar is not visible, ver 3.7+"
 CmdReadAloudFromTopPage,,Start Reading From Top,"Read from the first visible text in the viewport through the end of the document, ver 3.7+"
 CmdReadAloudSelection,,Start Reading Selection,"Read the current text selection aloud, ver 3.7+"
+CmdToggleToolbarShowReadAloud,,Read Aloud: Show In Toolbar,"Show or hide the Read Aloud buttons in the toolbar; remembered in the `ToolbarShowReadAloud` setting, ver 3.7+"
 ```
 
 ## Debug
@@ -364,6 +390,7 @@ CmdDebugTogglePredictiveRender,,Debug: Toggle Predictive Rendering,
 CmdDebugToggleRenderInfo,,Debug: Toggle Render Queue Info,
 CmdDebugToggleCacheInfo,,Debug: Toggle Cache Info,
 CmdDebugToggleRtl,,Debug: Toggle Rtl,
+CmdToggleImages,,Toggle Show Images,"Outline the images on the page, like the link outlines. A debug aid: it lasts for the session and is not saved in the settings, ver 3.7+"
 CmdDebugShowFitContentArea,,Debug: Show Fit Content Area,"outlines in red the area Fit Content zoom would fit to (whole page if no content box was detected), without changing the zoom, ver 3.7+"
 CmdNone,,Do nothing,
 ```
@@ -372,7 +399,7 @@ CmdNone,,Do nothing,
 
 ```commands
 Command IDs,Keyboard shortcuts,Command Palette,Notes
-CmdInstallPrereleaseUpdate,,internal,"used by the pre-release update notification link (Download and install latest version); not for user shortcuts or DDE"
+CmdInstallPrereleaseUpdate,,internal,"used by the pre-release update notification link (Update); not for user shortcuts or DDE"
 CmdTogglePdfPreviewLogging,,internal,"toggles PDF shell-preview logging for debugging the Windows preview handler; not for normal use"
 CmdDebugCorruptMemory,,don't use,
 CmdOpenWithKnownExternalViewerFirst,,don't use,
@@ -383,48 +410,51 @@ CmdViewWithExternalViewer,,don't use,
 CmdSaveAttachment,,don't use,
 CmdOpenAttachment,,don't use,
 CmdExec,,internal,"runs an external program with optional filter; used internally (e.g. selection handlers), not for normal shortcuts or DDE"
+CmdDebugToggleDpiOverride,,internal,"debug builds only: cycles a pretend DPI (125, 150, 75, off) to check how the UI reacts to a DPI change; does nothing in a release build"
 ```
 
 `CmdFindMatch` is an old name for `CmdFindToggleMatchCase`. It is not a generated command ID, but SumatraPDF still accepts it in old shortcut settings for compatibility.
 
+`CmdTogglePdfAnnotationsToolbar` is an old name for `CmdToggleEditPDF`. SumatraPDF still accepts it in old shortcut and `ToolbarCustomLayout` settings.
+
 # Commands with arguments
 
-**Ver 3.6+:** some commands accept arguments which provides more capabilities when creating [custom keyboard shortcut](Customize-keyboard-shortcuts.md).
+**Ver 3.6+:** some commands accept arguments that provide more options when creating [custom keyboard shortcuts](Customize-keyboard-shortcuts.md).
 
 For example:
 
 ```
 Shortcuts [
     [
-        Cmd = CmdCreateAnnotHighlight #00ff00 openedit
+        Cmd = CmdCreateAnnotHighlight #00ff00
         Key = a
     ]
 ]
 ```
 
-By default `a` invokes `CmdCreateAnnotHighlight` with default yellow color.
+By default, `a` invokes `CmdCreateAnnotHighlight` with the default yellow color.
 
-You can over-ride `a` shortcut to create green (`#00ff00`) highlight annotation instead and automatically open annotations edit window (`openedit` boolean argument).
+You can override the `a` shortcut to create a green (`#00ff00`) highlight annotation.
 
 You can create multiple keyboard shortcuts for multiple colors.
 
-Arguments can be: strings, numbers, booleans, colors (`#rrggbb` or `#aarrggbb` format).
+Arguments can be strings, numbers, Booleans, or colors (`#rrggbb` or `#aarrggbb` format).
 
-Arguments have names. For example `CmdCreateAnnotHighlight` has `color` argument of type color and optional `openedit` boolean argument.
+Arguments have names. For example, `CmdCreateAnnotHighlight` has a `color` argument of type color and an optional `copytoclipboard` Boolean argument.
 
-The format of providing arguments is: `CmdCreateAnnotHighlight color: #fafafa openedit: true`.
+The format for providing arguments is `CmdCreateAnnotHighlight color: #fafafa copytoclipboard: true`.
 
-For boolean arguments name is the same as `true` value i.e. `openedit` is the same as `openedit: true`.
+For Boolean arguments, using the name alone is the same as setting the value to `true`, i.e. `copytoclipboard` is the same as `copytoclipboard: true`.
 
-For default arguments you can skip the name. For example: `color` is a default `CmdCreateAnnotHighlight` argument so `CmdCreateAnnotHighlight #fafafa` is the same as `CmdCreateAnnotHighlight color: #fafafa`
+For default arguments, you can skip the name. For example, `color` is the default `CmdCreateAnnotHighlight` argument, so `CmdCreateAnnotHighlight #fafafa` is the same as `CmdCreateAnnotHighlight color: #fafafa`.
 
-You can combine those rules: `CmdCreateAnnotHighlight #fafafa openedit` is the same as `CmdCreateAnnotHighlight color: #fafafa openedit: true`.
+You can combine those rules: `CmdCreateAnnotHighlight #fafafa copytoclipboard` is the same as `CmdCreateAnnotHighlight color: #fafafa copytoclipboard: true`.
 
 ## `CmdExtendSelectionCharLeft` and other `CmdExtendSelection*`
 
 **Ver 3.7+**
 
-`CmdExtendSelectionCharLeft`, `CmdExtendSelectionCharRight`, `CmdExtendSelectionWordLeft` and `CmdExtendSelectionWordRight` move the free end of the current text selection by one character or one word, the way `Shift + Left/Right` and `Ctrl + Shift + Left/Right` do in a text editor. Moving toward the selection's anchor shrinks it, moving away grows it, and the selection continues across page boundaries.
+`CmdExtendSelectionCharLeft`, `CmdExtendSelectionCharRight`, `CmdExtendSelectionWordLeft`, and `CmdExtendSelectionWordRight` move the free end of the current text selection by one character or one word, the way `Shift + Left/Right` and `Ctrl + Shift + Left/Right` do in a text editor. Moving toward the selection's anchor shrinks it, moving away grows it, and the selection continues across page boundaries.
 
 They have no default shortcut because the obvious keys are already taken (`Ctrl + Shift + Left/Right` navigate between files), so assign your own:
 
@@ -441,7 +471,7 @@ Shortcuts [
 ]
 ```
 
-The selection can come from anywhere: dragging with the mouse, double-clicking a word, `Ctrl + A` or keyboard selection (`F7`). While `F7` keyboard selection is active these commands move the caret, so it stays at the end of the selection. Without a selection they do nothing, and they're not available for documents with no extractable text.
+The selection can come from anywhere: dragging with the mouse, double-clicking a word, pressing `Ctrl + A`, or using keyboard selection (`F7`). While `F7` keyboard selection is active, these commands move the caret, so it stays at the end of the selection. Without a selection, they do nothing, and they're not available for documents with no extractable text.
 
 ## `CmdScrollUp`, `CmdScrollDown`
 
@@ -451,7 +481,7 @@ Arguments:
 
 - `n` : default, integer, how many lines to scroll up or down (default: 1)
 
-Use case: if you want to speed up scrolling with `j`, `k` keys, you can re-assign them:
+Use case: if you want to speed up scrolling with the `j` and `k` keys, you can reassign them:
 
 ```
 Shortcuts [
@@ -474,28 +504,28 @@ Arguments:
 
 - `n` : default, integer, how many pages to advance by (default: 1)
 
-Use case: if you want to go forward, back by more than 1 page
+Use case: if you want to go forward or back by more than one page.
 
 ## `CmdCreateAnnotHighlight` and other `CmdCreateAnnot*`
 
 Arguments:
 
 - `color` : default, color
-- `openedit` : boolean, `false` if not given
-- `copytoclipboard` : boolean, `false` if not given. For highlight/underline/squiggly/strikeout annotations, copies the selection (text of annotation) to clipboard. This used to be default behavior for built-in `a` etc. keyboard shortcuts but now it has to be explicitly chosen.
-- `setcontent` : boolean, false if not given. For highlight/underline/squiggly/strikeout sets content of annotation to the selection (text of annotation)
+- `openedit` : Boolean, `false` if not given. Opens the Contents editor on the property row after creating the annotation (the old annotations window is gone). Creating an annotation always turns on Edit PDF mode.
+- `copytoclipboard` : Boolean, `false` if not given. For highlight/underline/squiggly/strikeout annotations, copies the selection (the annotation's text) to the clipboard. This used to be the default behavior for built-in keyboard shortcuts such as `a`, but now it has to be chosen explicitly.
+- `setcontent` : Boolean, `false` if not given. For highlight/underline/squiggly/strikeout annotations, sets the annotation's content to the selection (the annotation's text)
 
 Use cases:
 
 - change default color for annotations
 - create multiple shortcuts for different colors
 
-Example: change `a` to create green highlight annotation:
+Example: change `a` to create a green highlight annotation:
 
 ```
 Shortcuts [
     [
-        Cmd = CmdCreateAnnotHighlight #00ff00 openedit
+        Cmd = CmdCreateAnnotHighlight #00ff00
         Key = a
     ]
 ]
@@ -511,11 +541,9 @@ Arguments for `CmdCreateAnnotHighlight` plus:
 - `bgcolor` : background color of annotation, fully transparent if not given
 - `textsize` : size of annotation text, 12 if not given
 - `borderwidth` : border width, 1 if not given
-- `alignment` : **ver 3.7+**, how free text is aligned in its box: `left`, `center` or `right`. Left if not given
-- `opacity` : opacity of annotation, 0 - fully transparent (i.e. invisible), 100 - fully opaque (default if not given)
-- `interiorcolor` : interior color for circle, square etc. annotations, fully transparent if not given
-- `focusedit` : boolean, when annotation edit window opens, focus the contents edit control
-- `focuslist` : boolean, when annotation edit window opens, focus the annotations list
+- `alignment` : **ver 3.7+**, how free text is aligned in its box: `left`, `center`, or `right`. Left if not given
+- `opacity` : opacity of annotation, 0 = fully transparent (i.e. invisible), 100 = fully opaque (default if not given)
+- `interiorcolor` : interior color for circle, square, etc. annotations, fully transparent if not given
 
 ## `CmdToggleBoolSetting`
 
@@ -526,6 +554,8 @@ Arguments:
 - `name` : default, string — name of a boolean advanced setting (case-insensitive leaf name or dotted path, e.g. `Fullscreen.ShowMenubar`)
 
 Toggles that setting between `true` and `false`. Useful for custom shortcuts or toolbar buttons. Unknown setting names show a warning when the shortcut is defined and when the command runs.
+
+Without a `name` argument, the Command Palette lists every non-internal boolean setting (`=` prefix). Enter or a click toggles the selected setting and closes the palette.
 
 Example: toggle fullscreen menubar with `t`:
 
@@ -539,6 +569,21 @@ Shortcuts [
 ]
 ```
 
+Add `ToolbarText` to the same entry to also get a toolbar button for it. Example: turn the reading mode of [`MouseWheelTurnsPage`](Advanced-options-settings.md) on and off with `w` or from the toolbar:
+
+```
+Shortcuts [
+	[
+		Cmd = CmdToggleBoolSetting MouseWheelTurnsPage
+		Key = w
+		Name = Wheel Turns Page
+		ToolbarText = Wheel Turns Page
+	]
+]
+```
+
+The same works for any other boolean advanced setting, e.g. `CmdToggleBoolSetting RememberViewOffsetOnPageTurn` or `CmdToggleBoolSetting ClickEdgeToTurnPage`.
+
 ## `CmdZoomCustom`
 
 **Ver 3.6+**
@@ -549,7 +594,7 @@ Arguments:
 
 `level` can be:
 
-- a number describing zoom level in percent e.g.:
+- a number describing the zoom level as a percentage, e.g.:
   - `50` or `50%` means 50% zoom
   - `125` means 125% zoom
 - a virtual zoom level:
@@ -575,12 +620,15 @@ Shortcuts [
 
 Argument:
 
-- `mode` : default, optional string, Values:
-  - `@` for opened files (tabs)
+- `mode` : default, optional string. Values:
+  - `@` for open files (tabs)
   - `#` for history of files
   - `>` for commands
-  - `*` for table of contents (`CmdCommandPaletteTOC`, `Shift + F12`)
+  - `&` for page thumbnails
+  - `%` for table of contents (`CmdCommandPaletteTOC`, `Shift + F12`)
   - `$` for favorites (`CmdCommandPaletteFavorites`)
+  - `*` for annotations in the current PDF
+  - `=` for boolean advanced settings (`CmdToggleBoolSetting`)
 
 Without an argument it defaults to `>`.
 
@@ -632,6 +680,6 @@ Examples (DDE):
 
 # Debugging
 
-If a custom shortcut defined in `Shortcuts` doesn't work it could be caused by invalid command name or invalid command arguments.
+If a custom shortcut defined in `Shortcuts` doesn't work, it could be caused by an invalid command name or invalid command arguments.
 
-We log information about unsuccessful parsing of a shortcut so [check the logs](Debugging-Sumatra.md#getting-logs) if things don't work as expected.
+We log information about unsuccessful shortcut parsing, so [check the logs](Debugging-Sumatra.md#getting-logs) if things don't work as expected.

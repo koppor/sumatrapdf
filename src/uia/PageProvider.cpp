@@ -12,10 +12,10 @@
 #include "DocController.h"
 #include "EngineBase.h"
 #include "DisplayModel.h"
-#include "uia/PageProvider.h"
 #include "uia/Constants.h"
 #include "uia/DocumentProvider.h"
 #include "uia/Provider.h"
+#include "uia/PageProvider.h"
 
 SumatraUIAutomationPageProvider::SumatraUIAutomationPageProvider(int pageNum, HWND canvasHwnd, DisplayModel* dm,
                                                                  SumatraUIAutomationDocumentProvider* root)
@@ -106,7 +106,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::GetRuntimeId(SAFEARRA
     }
 
     // RuntimeID magic, use hwnd to differentiate providers of different windows
-    int rId[] = {HandleToLong(canvasHwnd), SUMATRA_UIA_PAGE_RUNTIME_ID(pageNum)};
+    int rId[] = {HandleToLong(canvasHwnd), kSumatraUiaPageRuntimeId(pageNum)};
     for (LONG i = 0; i < 2; i++) {
         HRESULT hr = SafeArrayPutElement(psa, &i, (void*)&(rId[i]));
         ReportIf(FAILED(hr));
@@ -230,7 +230,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::get_Value(BSTR* pRetV
     }
 
     Str pageContent = dm->GetEngine()->GetTextForPage(pageNum);
-    if (!pageContent) {
+    if (len(pageContent) == 0) {
         *pRetVal = nullptr;
         return S_OK;
     }

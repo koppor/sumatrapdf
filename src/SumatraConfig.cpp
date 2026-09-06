@@ -5,40 +5,32 @@
 
 #include "resource.h"
 #include "Version.h"
+#include "SumatraConfig.h"
 
-#if defined(DEBUG)
-bool gIsDebugBuild = true;
-#else
-bool gIsDebugBuild = false;
-#endif
+bool gIsDebugBuild = IS_DEBUG;
+bool gIsAsanBuild = IS_ASAN;
 
-#if defined(ASAN_BUILD)
-bool gIsAsanBuild = true;
-#else
-bool gIsAsanBuild = false;
-#endif
-
-#if defined(PRE_RELEASE_VER)
+#ifdef PRE_RELEASE_VER
 bool gIsPreReleaseBuild = true;
 #else
 bool gIsPreReleaseBuild = false;
 #endif
 
-#if defined(BUILT_ON)
-Str builtOn = Str(QM(BUILT_ON));
+#ifdef BUILT_ON
+Str gBuiltOn = Str(QM(BUILT_ON));
 #else
-Str builtOn;
+Str gBuiltOn;
 #endif
 
 Str currentVersion = Str(CURR_VERSION_STRA);
 
-#if defined(PRE_RELEASE_VER)
+#ifdef PRE_RELEASE_VER
 Str preReleaseVersion = Str(QM(PRE_RELEASE_VER));
 #else
 Str preReleaseVersion;
 #endif
 
-#if defined(GIT_COMMIT_ID)
+#ifdef GIT_COMMIT_ID
 Str gitCommidId = Str(QM(GIT_COMMIT_ID));
 #else
 Str gitCommidId;

@@ -20,7 +20,15 @@ import {
   setCursorPos,
   sleep,
 } from "./winapi";
-import { findCanvas, launchControlled, sendCommand, sendCommandSync, waitForExit, killAndWait } from "./win-automation";
+import {
+  findCanvas,
+  launchControlled,
+  sendCommand,
+  sendCommandSync,
+  waitForExit,
+  killAndWait,
+  ensureModifierKeysUp,
+} from "./win-automation";
 
 const WM_MOUSEWHEEL = 0x020a;
 const WM_VSCROLL = 0x0115;
@@ -74,6 +82,7 @@ async function scrollToTop(canvas: number): Promise<void> {
 
 // wheel down over the middle of the canvas; returns how the vertical scrollbar moved
 async function wheelScroll(canvas: number, notches: number): Promise<{ before: number; after: number }> {
+  await ensureModifierKeysUp();
   // park the real cursor over the document: the wheel handler redirects to the
   // ToC tree when the cursor is over the sidebar
   const cr = getClientRect(canvas);

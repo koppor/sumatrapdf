@@ -1,6 +1,6 @@
 # sumatrapdf-tool trace
 
-> The command-line tools are provided by `sumatrapdf-tool`, which is installed next to `SumatraPDF.exe`. They only work after SumatraPDF has been installed.
+or [SumatraPDF.exe trace](Tools.md)
 
 **Available in [pre-release 3.7](https://www.sumatrapdfreader.org/prerelease)**
 
@@ -8,7 +8,7 @@
 
 Trace is an advanced tool for inspecting how a page is rendered.
 
-It prints a trace of all the device calls used to draw a page, in XML format. The root element is the document, with a child element for each page, and within each page one element per device call (path fills and strokes, text spans, images, clips etc.).
+It prints an XML trace of all the device calls used to draw a page. The root element is the document, with a child element for each page, and within each page one element per device call (path fills and strokes, text spans, images, clips, etc.).
 
 The output is very large and can look like:
 

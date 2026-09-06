@@ -47,6 +47,7 @@ GfxDirect2D::GfxDirect2D(HDC hdc) {
 GfxDirect2D::~GfxDirect2D() = default;
 void GfxDirect2D::FillRect(const Rect&, Color) {}
 void GfxDirect2D::FillRects(const Rect*, int, Color, u8, int) {}
+void GfxDirect2D::FillQuads(const Point*, int, Color, u8, int) {}
 void GfxDirect2D::DrawRect(const Rect&, Color, int) {}
 void GfxDirect2D::DrawDashedRect(const Rect&, Color) {}
 void GfxDirect2D::FillRoundedRect(const Rect&, int, Color, Color) {}
@@ -118,6 +119,137 @@ static void InitDirect2D() {
 bool Direct2DAvailable() {
     InitDirect2D();
     return gD2DFactory != nullptr && gDWriteFactory != nullptr;
+}
+
+// d3d11 throws a first-chance C++ EH the first time a DC render target BindDC /
+// BeginDraws on an HDC (GDI interop device setup). Reuse the target AND skip
+// BindDC when the HDC and size match, so page-flip toolbar paints stay quiet.
+constexpr int kD2DTargetPool = 8;
+
+struct D2DTargetSlot {
+    ID2D1DCRenderTarget* target = nullptr;
+    HDC boundHdc = nullptr;
+    bool inUse = false;
+    int dx = 0;
+    int dy = 0;
+};
+
+static D2DTargetSlot gD2DSlots[kD2DTargetPool];
+
+static D2D1_RENDER_TARGET_PROPERTIES D2DDcTargetProps() {
+    return D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                                        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f,
+                                        96.0f, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_FEATURE_LEVEL_DEFAULT);
+}
+
+static ID2D1DCRenderTarget* D2DCreateDcTarget() {
+    if (!gD2DFactory) {
+        return nullptr;
+    }
+    ID2D1DCRenderTarget* t = nullptr;
+    D2D1_RENDER_TARGET_PROPERTIES props = D2DDcTargetProps();
+    HRESULT hr = gD2DFactory->CreateDCRenderTarget(&props, &t);
+    if (FAILED(hr) || !t) {
+        logf("GfxDirect2D: CreateDCRenderTarget failed 0x%x\n", (int)hr);
+        return nullptr;
+    }
+    return t;
+}
+
+static D2DTargetSlot* D2DSlotFor(ID2D1DCRenderTarget* t) {
+    if (!t) {
+        return nullptr;
+    }
+    for (int i = 0; i < kD2DTargetPool; i++) {
+        if (gD2DSlots[i].target == t) {
+            return &gD2DSlots[i];
+        }
+    }
+    return nullptr;
+}
+
+static void D2DNoteBind(ID2D1DCRenderTarget* t, HDC hdc, int dx, int dy) {
+    D2DTargetSlot* slot = D2DSlotFor(t);
+    if (!slot) {
+        return;
+    }
+    slot->boundHdc = hdc;
+    slot->dx = dx;
+    slot->dy = dy;
+}
+
+static ID2D1DCRenderTarget* D2DAcquireDcTarget(int dx, int dy, bool* owned) {
+    *owned = true;
+    int empty = -1;
+    int wrongSize = -1;
+    for (int i = 0; i < kD2DTargetPool; i++) {
+        if (gD2DSlots[i].inUse) {
+            continue;
+        }
+        if (gD2DSlots[i].target && gD2DSlots[i].dx == dx && gD2DSlots[i].dy == dy) {
+            gD2DSlots[i].inUse = true;
+            *owned = false;
+            return gD2DSlots[i].target;
+        }
+        if (!gD2DSlots[i].target) {
+            if (empty < 0) {
+                empty = i;
+            }
+        } else if (wrongSize < 0) {
+            wrongSize = i;
+        }
+    }
+
+    ID2D1DCRenderTarget* t = D2DCreateDcTarget();
+    if (!t) {
+        return nullptr;
+    }
+    int slot = empty >= 0 ? empty : wrongSize;
+    if (slot < 0) {
+        *owned = true;
+        return t;
+    }
+    if (gD2DSlots[slot].target) {
+        gD2DSlots[slot].target->Release();
+    }
+    gD2DSlots[slot].target = t;
+    gD2DSlots[slot].boundHdc = nullptr;
+    gD2DSlots[slot].inUse = true;
+    gD2DSlots[slot].dx = dx;
+    gD2DSlots[slot].dy = dy;
+    *owned = false;
+    return t;
+}
+
+static void D2DDropSlot(ID2D1DCRenderTarget* t) {
+    D2DTargetSlot* slot = D2DSlotFor(t);
+    if (slot) {
+        slot->target = nullptr;
+        slot->boundHdc = nullptr;
+        slot->inUse = false;
+    }
+    t->Release();
+}
+
+static void D2DReleaseDcTarget(ID2D1DCRenderTarget* t, bool owned, bool drop) {
+    if (!t) {
+        return;
+    }
+    if (owned) {
+        t->Release();
+        return;
+    }
+    if (drop) {
+        D2DDropSlot(t);
+        return;
+    }
+    for (int i = 0; i < kD2DTargetPool; i++) {
+        if (gD2DSlots[i].target == t) {
+            gD2DSlots[i].inUse = false;
+            return;
+        }
+    }
+    t->Release();
 }
 
 //--- text formats
@@ -237,7 +369,7 @@ static IDWriteTextFormat* GetTextFormat(PlatformFont* font, IDWriteInlineObject*
     }
     IDWriteInlineObject* ellipsis = nullptr;
     gDWriteFactory->CreateEllipsisTrimmingSign(format, &ellipsis);
-    gTextFormats->Append({font, format, ellipsis});
+    VecAppend(*gTextFormats, {font, format, ellipsis});
     *ellipsisOut = ellipsis;
     return format;
 }
@@ -278,30 +410,49 @@ GfxDirect2D::GfxDirect2D(HDC hdc) {
     if (sz.dx <= 0 || sz.dy <= 0) {
         return;
     }
-    // 96 dpi so a DIP is a pixel; the caller's coordinates are pixels
-    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f,
-        96.0f, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_FEATURE_LEVEL_DEFAULT);
-    HRESULT hr = gD2DFactory->CreateDCRenderTarget(&props, &target);
-    if (FAILED(hr) || !target) {
-        logf("GfxDirect2D: CreateDCRenderTarget failed 0x%x\n", (int)hr);
-        target = nullptr;
-        return;
-    }
     RECT rc = {0, 0, sz.dx, sz.dy};
-    hr = target->BindDC(hdc, &rc);
-    if (FAILED(hr)) {
-        logf("GfxDirect2D: BindDC failed 0x%x\n", (int)hr);
-        target->Release();
-        target = nullptr;
+    bool owned = true;
+    ID2D1DCRenderTarget* t = D2DAcquireDcTarget(sz.dx, sz.dy, &owned);
+    if (!t) {
         return;
     }
+    D2DTargetSlot* slot = D2DSlotFor(t);
+    bool sameBind = slot && slot->boundHdc == hdc && slot->dx == sz.dx && slot->dy == sz.dy;
+    if (!sameBind) {
+        HRESULT hr = t->BindDC(hdc, &rc);
+        if (FAILED(hr)) {
+            D2DReleaseDcTarget(t, owned, true);
+            t = D2DCreateDcTarget();
+            owned = true;
+            slot = nullptr;
+            if (!t) {
+                return;
+            }
+            hr = t->BindDC(hdc, &rc);
+            if (FAILED(hr)) {
+                logf("GfxDirect2D: BindDC failed 0x%x\n", (int)hr);
+                t->Release();
+                return;
+            }
+        }
+        D2DNoteBind(t, hdc, sz.dx, sz.dy);
+    }
+    target = t;
+    ownsTarget = owned;
     target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
     target->BeginDraw();
     drawing = true;
 }
 
 GfxDirect2D::~GfxDirect2D() {
+    if (brush) {
+        brush->Release();
+        brush = nullptr;
+    }
+    if (dottedStroke) {
+        dottedStroke->Release();
+        dottedStroke = nullptr;
+    }
     if (!target) {
         return;
     }
@@ -309,13 +460,16 @@ GfxDirect2D::~GfxDirect2D() {
     while (len(clipDepth) > 0) {
         PopClip();
     }
+    bool drop = false;
     if (drawing) {
         HRESULT hr = target->EndDraw();
         if (FAILED(hr)) {
             logf("GfxDirect2D: EndDraw failed 0x%x\n", (int)hr);
+            drop = true;
         }
+        drawing = false;
     }
-    target->Release();
+    D2DReleaseDcTarget(target, ownsTarget, drop);
     target = nullptr;
 }
 
@@ -374,6 +528,49 @@ void GfxDirect2D::FillRects(const Rect* rects, int count, Color col, u8 alpha, i
                 D2D1::Point2F((float)r.Right(), (float)r.y),
                 D2D1::Point2F((float)r.Right(), (float)r.Bottom()),
                 D2D1::Point2F((float)r.x, (float)r.Bottom()),
+            };
+            sink->AddLines(points, dimof(points));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        }
+        hr = sink->Close();
+        sink->Release();
+    }
+    if (SUCCEEDED(hr)) {
+        target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        ID2D1SolidColorBrush* br = GetBrush(col, alpha);
+        if (br) {
+            target->FillGeometry(path, br);
+        }
+        if (outlineWidth > 0) {
+            br = GetBrush(kColBlack, alpha);
+            if (br) {
+                target->DrawGeometry(path, br, (float)outlineWidth);
+            }
+        }
+    }
+    path->Release();
+}
+
+void GfxDirect2D::FillQuads(const Point* pts, int nQuads, Color col, u8 alpha, int outlineWidth) {
+    if (!target || ColorSkipsPaint(col) || nQuads <= 0 || !pts) {
+        return;
+    }
+    ID2D1PathGeometry* path = nullptr;
+    HRESULT hr = gD2DFactory->CreatePathGeometry(&path);
+    if (FAILED(hr)) {
+        return;
+    }
+    ID2D1GeometrySink* sink = nullptr;
+    hr = path->Open(&sink);
+    if (SUCCEEDED(hr)) {
+        sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+        for (int i = 0; i < nQuads; i++) {
+            const Point* p = pts + i * 4;
+            sink->BeginFigure(D2D1::Point2F((float)p[0].x, (float)p[0].y), D2D1_FIGURE_BEGIN_FILLED);
+            D2D1_POINT_2F points[] = {
+                D2D1::Point2F((float)p[1].x, (float)p[1].y),
+                D2D1::Point2F((float)p[2].x, (float)p[2].y),
+                D2D1::Point2F((float)p[3].x, (float)p[3].y),
             };
             sink->AddLines(points, dimof(points));
             sink->EndFigure(D2D1_FIGURE_END_CLOSED);
@@ -534,10 +731,10 @@ static void SetTextFormatFlags(IDWriteTextFormat* format, IDWriteInlineObject* e
 
     if (flags & gfxTextCenter) {
         format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-    } else if (flags & gfxTextRight) {
-        format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
-    } else {
+    } else if (GfxTextAlignToReadingStart(flags)) {
         format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    } else {
+        format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
     }
     bool vcenter = !wrap && (flags & gfxTextVCenter) != 0;
     format->SetParagraphAlignment(vcenter ? DWRITE_PARAGRAPH_ALIGNMENT_CENTER : DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
@@ -624,24 +821,41 @@ Size GfxDirect2D::MeasureText(Str s, PlatformFont* font) {
 // d2d wants 32bpp premultiplied BGRA; a Pixmap can be several other things.
 // Returns the rows to hand it (into `scratch` when a conversion was needed).
 static const u8* PixmapAsPremulBgra(Pixmap* px, Vec<u8>& scratch, int* strideOut) {
-    if (px->format == PixmapFormat::BGRA8 && px->premultiplied) {
+    if (!px || px->width <= 0 || px->height <= 0) {
+        return nullptr;
+    }
+    if (px->format == PixmapFormat::BGRA8 && px->premultiplied && px->data) {
         *strideOut = px->stride;
         return px->data;
     }
     Pixmap* src = px;
     Pixmap* owned = nullptr;
-    if (px->format == PixmapFormat::Native) {
-        // only the platform bitmap knows how to read those pixels
+    // Native pixels, or a handle-only HBITMAP with no scan0, can only be read
+    // by blitting through GDI
+    if (px->format == PixmapFormat::Native || !px->data) {
         owned = PixmapCopyAs32bppDIB(px);
-        if (!owned) {
+        if (!owned || !owned->data) {
+            FreePixmap(owned);
             return nullptr;
         }
         src = owned;
     }
+    if (!src->data) {
+        return nullptr;
+    }
     int w = src->width, h = src->height;
     int stride = w * 4;
-    scratch.Reset();
-    u8* dst = VecReserve(scratch, stride * h);
+    i64 nBytes = (i64)stride * h;
+    if (stride <= 0 || nBytes <= 0 || nBytes > INT_MAX) {
+        FreePixmap(owned);
+        return nullptr;
+    }
+    VecReset(scratch);
+    u8* dst = VecReserve(scratch, (int)nBytes);
+    if (!dst) {
+        FreePixmap(owned);
+        return nullptr;
+    }
     int srcBpp = PixmapBytesPerPixel(src->format);
     bool isRgba = src->format == PixmapFormat::RGBA8;
     bool hasAlpha = src->format != PixmapFormat::BGR8;
@@ -699,7 +913,7 @@ void GfxDirect2D::PushClip(const Rect& r) {
     }
     // d2d intersects with what is already pushed, and pops in order
     target->PushAxisAlignedClip(ToD2DRect(r), D2D1_ANTIALIAS_MODE_ALIASED);
-    clipDepth.Append(1);
+    VecAppend(clipDepth, 1);
 }
 
 void GfxDirect2D::PopClip() {
@@ -710,7 +924,7 @@ void GfxDirect2D::PopClip() {
         ReportIf(true);
         return;
     }
-    clipDepth.Pop();
+    VecPop(clipDepth);
     target->PopAxisAlignedClip();
 }
 

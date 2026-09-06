@@ -48,18 +48,21 @@
 #include "DisplayMode.h"
 #include "DocController.h"
 #include "EngineBase.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
 #include "WindowTab.h"
 #include "Notifications.h"
 #include "Translations.h"
+#include "TextSelection.h"
+#include "Selection.h"
 #include "SelectionHandlers.h"
 
 constexpr const char* kUserLangStr = "${userlang}";
 constexpr const char* kSelectionStr = "${selection}";
 constexpr const char* kSelectionJsonStr = "${selectionjson}";
 constexpr const char* kSelectionFileStr = "${selectionfile}";
+constexpr const char* kSelectionPositionStr = "${selectionposition}";
 
 // how much of the response body to show in the notification. The point is to
 // tell the user whether it worked and why not, not to render the result
@@ -94,33 +97,38 @@ static TempStr WriteSelectionToTempFileTemp(Str selection, Str ext) {
     return path;
 }
 
-// Expands ${selection}, ${selectionjson}, ${selectionfile} and ${userlang} in
-// `pattern`. `urlEncodeSelection` picks how ${selection} is escaped: URL
-// encoding for a URL, none for a request body. When URL-encoding, `budget` caps
-// the encoded length and *didTruncateOut says whether it didn't all fit.
-TempStr ExpandSelectionVarsTemp(Str pattern, Str selection, bool urlEncodeSelection, int budget, bool* didTruncateOut) {
+// Expands ${selection}, ${selectionjson}, ${selectionfile}, ${userlang} and
+// ${selectionPosition} in `pattern`. `urlEncodeSelection` picks how ${selection}
+// is escaped: URL encoding for a URL, none for a request body. When
+// URL-encoding, `budget` caps the encoded length and *didTruncateOut says
+// whether it didn't all fit. `tab` is needed for ${selectionPosition}.
+TempStr ExpandSelectionVarsTemp(Str pattern, Str selection, bool urlEncodeSelection, int budget, bool* didTruncateOut,
+                                WindowTab* tab) {
     if (didTruncateOut) {
         *didTruncateOut = false;
     }
     Str lang = trans::GetCurrentLangCode();
-    TempStr res = str::ReplaceNoCaseTemp(pattern, kUserLangStr, lang);
+    TempStr res = str::ReplaceNoCaseTemp(pattern, Str(kUserLangStr), lang);
 
-    // do the file and json forms first: they must not be affected by whatever
-    // escaping ${selection} uses
-    if (str::ContainsI(res, kSelectionFileStr)) {
+    // do the file, json and position forms first: they must not be affected by
+    // whatever escaping ${selection} uses
+    if (str::ContainsI(res, Str(kSelectionFileStr))) {
         TempStr path = WriteSelectionToTempFileTemp(selection, StrL(".txt"));
-        res = str::ReplaceNoCaseTemp(res, kSelectionFileStr, path);
+        res = str::ReplaceNoCaseTemp(res, Str(kSelectionFileStr), path);
     }
-    if (str::ContainsI(res, kSelectionJsonStr)) {
-        res = str::ReplaceNoCaseTemp(res, kSelectionJsonStr, json::EscapeStrTemp(selection));
+    if (str::ContainsI(res, Str(kSelectionJsonStr))) {
+        res = str::ReplaceNoCaseTemp(res, Str(kSelectionJsonStr), json::EscapeStrTemp(selection));
+    }
+    if (str::ContainsI(res, Str(kSelectionPositionStr))) {
+        res = str::ReplaceNoCaseTemp(res, Str(kSelectionPositionStr), FormatSelectionPositionTemp(tab));
     }
 
     if (urlEncodeSelection) {
         int b = budget > 0 ? budget : (kMaxUrlEncodedLen - len(res));
         TempStr enc = URLEncodeMayTruncateTemp(selection, b, didTruncateOut);
-        return str::ReplaceNoCaseTemp(res, kSelectionStr, enc);
+        return str::ReplaceNoCaseTemp(res, Str(kSelectionStr), enc);
     }
-    return str::ReplaceNoCaseTemp(res, kSelectionStr, selection);
+    return str::ReplaceNoCaseTemp(res, Str(kSelectionStr), selection);
 }
 
 static void ShowSelectionHandlerNotification(WindowTab* tab, Str msg, bool isWarning) {
@@ -173,11 +181,11 @@ static void PostRequestFinished(PostRequest* req) {
     bool ok = req->statusCode >= 200 && req->statusCode < 300;
     TempStr msg;
     if (req->winErr != 0) {
-        msg = fmt(_TRA("Sending selection failed (error %d)").s, (int)req->winErr);
+        msg = fmt(Tr("Sending selection failed (error %d)").s, (int)req->winErr);
     } else if (ok) {
-        msg = fmt(_TRA("Sent selection (HTTP %d)").s, (int)req->statusCode);
+        msg = fmt(Tr("Sent selection (HTTP %d)").s, (int)req->statusCode);
     } else {
-        msg = fmt(_TRA("Sending selection failed (HTTP %d)").s, (int)req->statusCode);
+        msg = fmt(Tr("Sending selection failed (HTTP %d)").s, (int)req->statusCode);
     }
     if (len(req->response) > 0) {
         TempStr body = req->response;
@@ -211,13 +219,13 @@ void SelectionHandlerPost(WindowTab* tab, Str url, Str bodyPattern, Str contentT
     // thing for "just post my text somewhere", and pairs with the default
     // text/plain content type
     Str pattern = str::IsEmptyOrWhiteSpace(bodyPattern) ? Str(kSelectionStr) : bodyPattern;
-    req->body = str::Dup(ExpandSelectionVarsTemp(pattern, selection, false));
+    req->body = str::Dup(ExpandSelectionVarsTemp(pattern, selection, false, 0, nullptr, tab));
     Str ct = str::IsEmptyOrWhiteSpace(contentType) ? StrL("text/plain; charset=utf-8") : contentType;
     req->contentType = str::Dup(ct);
     req->headers = str::Dup(headers);
 
     auto fn = MkFunc0<PostRequest>(PostRequestThread, req);
-    RunAsync(fn, "SelectionHandlerPost");
+    RunAsync(fn, StrL("SelectionHandlerPost"));
 }
 
 //--- Method = POST-VIA-BROWSER (self-submitting html form)
@@ -229,27 +237,27 @@ static void HtmlAttrEscape(str::Builder& b, Str s) {
         char c = p[i];
         switch (c) {
             case '&':
-                b.Append("&amp;");
+                b.Append(StrL("&amp;"));
                 break;
             case '<':
-                b.Append("&lt;");
+                b.Append(StrL("&lt;"));
                 break;
             case '>':
-                b.Append("&gt;");
+                b.Append(StrL("&gt;"));
                 break;
             case '"':
-                b.Append("&quot;");
+                b.Append(StrL("&quot;"));
                 break;
             case '\'':
-                b.Append("&#39;");
+                b.Append(StrL("&#39;"));
                 break;
             // a literal newline inside an attribute value does survive, but
             // only because browsers are lenient about it - be explicit
             case '\n':
-                b.Append("&#10;");
+                b.Append(StrL("&#10;"));
                 break;
             case '\r':
-                b.Append("&#13;");
+                b.Append(StrL("&#13;"));
                 break;
             default:
                 b.AppendChar(c);
@@ -266,11 +274,11 @@ void SelectionHandlerPostViaBrowser(WindowTab* tab, Str url, Str bodyPattern, St
     Str pattern = str::IsEmptyOrWhiteSpace(bodyPattern) ? StrL("text=${selection}") : bodyPattern;
 
     str::Builder html;
-    html.Append("<!doctype html><html><head><meta charset=\"utf-8\"><title>SumatraPDF</title></head>\n");
+    html.Append(StrL("<!doctype html><html><head><meta charset=\"utf-8\"><title>SumatraPDF</title></head>\n"));
     html.Append(
-        "<body onload=\"document.forms[0].submit()\">\n<form method=\"post\" accept-charset=\"utf-8\" action=\"");
+        StrL("<body onload=\"document.forms[0].submit()\">\n<form method=\"post\" accept-charset=\"utf-8\" action=\""));
     HtmlAttrEscape(html, url);
-    html.Append("\">\n");
+    html.Append(StrL("\">\n"));
 
     StrVec fields;
     Split(&fields, pattern, StrL("&"), true);
@@ -285,24 +293,24 @@ void SelectionHandlerPostViaBrowser(WindowTab* tab, Str url, Str bodyPattern, St
         if (str::IsEmptyOrWhiteSpace(name)) {
             continue;
         }
-        TempStr value = ExpandSelectionVarsTemp(valuePattern, selection, false);
-        html.Append(R"(<input type="hidden" name=")");
+        TempStr value = ExpandSelectionVarsTemp(valuePattern, selection, false, 0, nullptr, tab);
+        html.Append(StrL(R"(<input type="hidden" name=")"));
         HtmlAttrEscape(html, name);
-        html.Append("\" value=\"");
+        html.Append(StrL("\" value=\""));
         HtmlAttrEscape(html, value);
-        html.Append("\">\n");
+        html.Append(StrL("\">\n"));
     }
-    html.Append("</form>\n<noscript><button type=\"submit\">Continue</button></noscript>\n</body></html>\n");
+    html.Append(StrL("</form>\n<noscript><button type=\"submit\">Continue</button></noscript>\n</body></html>\n"));
 
     TempStr dir = GetTempDirTemp();
     if (str::IsEmptyOrWhiteSpace(dir)) {
-        ShowSelectionHandlerNotification(tab, _TRA("Couldn't create a temporary file"), true);
+        ShowSelectionHandlerNotification(tab, Tr("Couldn't create a temporary file"), true);
         return;
     }
     TempStr name = fmt("SumatraPDF-post-%d.html", (int)GetCurrentProcessId());
     TempStr path = path::JoinTemp(dir, name);
     if (!file::WriteFile(path, ToStr(html))) {
-        ShowSelectionHandlerNotification(tab, _TRA("Couldn't create a temporary file"), true);
+        ShowSelectionHandlerNotification(tab, Tr("Couldn't create a temporary file"), true);
         return;
     }
     // the file stays behind after the browser reads it; it's overwritten on the

@@ -170,38 +170,13 @@ static SeqStrNum gVirtKeysNum =
 // #define VK_NONAME         0xFC
 // #define VK_PA1            0xFD
 
-static void skipWS(Str& s) {
-    while (len(s) > 0) {
-        if (!str::IsWs(*s.s)) {
-            return;
-        }
-        s.s++;
-        s.len--;
-    }
-}
-
-static void skipPlusOrMinus(Str& s) {
-    if (len(s) > 0 && *s.s == '+') {
-        s.s++;
-        s.len--;
-        return;
-    }
-    if (len(s) > 0 && *s.s == '-') {
-        s.s++;
-        s.len--;
-        return;
-    }
-}
-
 static bool skipVirtKey(Str& s, Str key) {
     if (!str::StartsWithI(s, key)) {
         return false;
     }
     s.s += key.len;
     s.len -= key.len;
-    skipWS(s);
-    skipPlusOrMinus(s);
-    skipWS(s);
+    str::TrimAny(s, " \t+-");
     return true;
 }
 
@@ -228,17 +203,27 @@ static bool ParseShortcut(Str shortcut, ACCEL& accel) {
     BYTE fVirt = 0;
 
 again:
-    skipWS(cursor);
-    if (skipVirtKey(cursor, "alt")) {
+    str::TrimWs(cursor);
+    // before "alt": "AltGr + Return" would otherwise match "alt" and leave "Gr"
+    if (skipVirtKey(cursor, StrL("altgr")) || skipVirtKey(cursor, StrL("ralt")) ||
+        skipVirtKey(cursor, StrL("rightalt"))) {
+        // Windows reports Right Alt / AltGr as Ctrl+Alt
+        fVirt |= (FCONTROL | FALT | FVIRTKEY);
+        goto again;
+    }
+    if (skipVirtKey(cursor, StrL("alt"))) {
         fVirt |= (FALT | FVIRTKEY);
         goto again;
     }
-    if (skipVirtKey(cursor, "shift")) {
+    if (skipVirtKey(cursor, StrL("shift"))) {
         fVirt |= (FSHIFT | FVIRTKEY);
         goto again;
     }
-    if (skipVirtKey(cursor, "ctrl")) {
+    if (skipVirtKey(cursor, StrL("ctrl"))) {
         fVirt |= (FCONTROL | FVIRTKEY);
+        goto again;
+    }
+    if (skipVirtKey(cursor, StrL("global"))) {
         goto again;
     }
     accel.fVirt = fVirt;
@@ -354,10 +339,50 @@ bool IsValidShortcutString(Str shortcut) {
     return ParseShortcut(shortcut, accel);
 }
 
+int TrimGlobalPrefix(Str& shortcut) {
+    Str s = shortcut;
+    str::TrimWs(s);
+    if (!str::TrimPrefixI(s, StrL("global"))) {
+        return 0;
+    }
+    if (!str::TrimAny(s, " \t+-")) {
+        return 0;
+    }
+    if (len(s) == 0) {
+        return 0;
+    }
+    int trimmed = len(shortcut) - len(s);
+    shortcut = s;
+    return trimmed;
+}
+
+bool IsGlobalShortcut(Str shortcut) {
+    return TrimGlobalPrefix(shortcut);
+}
+
 // Fills accel with the key and modifiers shortcut names. Returns false if it
 // doesn't name a key; accel.cmd is left alone, the caller owns that.
 bool ParseShortcutString(Str shortcut, ACCEL& accel) {
     return ParseShortcut(shortcut, accel);
+}
+
+// US layout: Shift + these keys is the glyph people type (Shift+/ is "?").
+static char ShiftedPunctGlyph(BYTE key) {
+    static const struct {
+        BYTE vk;
+        char unshifted;
+        char shifted;
+    } kMap[] = {
+        {VK_OEM_2, '/', '?'}, {VK_OEM_COMMA, ',', '<'}, {VK_OEM_PERIOD, '.', '>'},
+        {VK_OEM_4, '[', '{'}, {VK_OEM_6, ']', '}'},     {VK_OEM_5, '\\', '|'},
+        {VK_OEM_1, ';', ':'}, {VK_OEM_7, '\'', '"'},    {VK_OEM_3, '`', '~'},
+    };
+    for (int i = 0; i < dimofi(kMap); i++) {
+        if (key == kMap[i].vk || key == (BYTE)kMap[i].unshifted) {
+            return kMap[i].shifted;
+        }
+    }
+    return 0;
 }
 
 // Appends " \tCtrl + O" to a menu string, for the key a is bound to.
@@ -369,32 +394,40 @@ TempStr AppendAccelKeyToMenuStringTemp(TempStr menuStr, const ACCEL& a) {
 
     // "\tCtrl + Shift + Alt + F24" / localized variants fit in ~64 bytes.
     char strScratch[64]{};
-    str::Builder str(Str(strScratch, sizeofi(strScratch)));
-    str.Append("\t"); // marks start of an accelerator in menu item
+    str::Builder str;
+    str::BuilderUseExternalBuffer(str, Str(strScratch, sizeofi(strScratch)));
+    str.Append(StrL("\t")); // marks start of an accelerator in menu item
     BYTE virt = a.fVirt;
-    if (virt & FALT) {
-        Str s = "Alt + ";
-        if (isGerman) {
-            s = "Größe + ";
-        }
-        str.Append(s);
-    }
-    if (virt & FCONTROL) {
-        Str s = "Ctrl + ";
-        if (isGerman) {
-            s = "Strg + ";
-        }
-        str.Append(s);
-    }
-    if (virt & FSHIFT) {
-        Str s = "Shift + ";
-        if (isGerman) {
-            s = "Umschalt + ";
-        }
-        str.Append(s);
-    }
-    bool isVirt = virt & FVIRTKEY;
     BYTE key = (BYTE)a.key;
+    bool isVirt = virt & FVIRTKEY;
+    char shiftedPunct = (virt & FSHIFT) ? ShiftedPunctGlyph(key) : 0;
+    if ((virt & FALT) && (virt & FCONTROL)) {
+        // same bits as AltGr on Windows; keep the name the user would type
+        str.Append(StrL("AltGr + "));
+    } else if (virt & FALT) {
+        Str s = StrL("Alt + ");
+        if (isGerman) {
+            s = StrL("Größe + ");
+        }
+        str.Append(s);
+    } else if (virt & FCONTROL) {
+        Str s = StrL("Ctrl + ");
+        if (isGerman) {
+            s = StrL("Strg + ");
+        }
+        str.Append(s);
+    }
+    if ((virt & FSHIFT) && !shiftedPunct) {
+        Str s = StrL("Shift + ");
+        if (isGerman) {
+            s = StrL("Umschalt + ");
+        }
+        str.Append(s);
+    }
+    if (shiftedPunct) {
+        str.AppendChar(shiftedPunct);
+        goto Exit;
+    }
 
     if (isVirt) {
         if (key >= VK_NUMPAD0 && key <= VK_NUMPAD9) {
@@ -433,3 +466,39 @@ Exit:
     TempStr res = str::JoinTemp(menuStr, ToStr(str));
     return res;
 }
+
+#if IS_DEBUG
+#include "base/UtAssert.h"
+
+static bool AccelShowsAs(BYTE virt, WORD key, Str expected) {
+    ACCEL a{};
+    a.fVirt = virt;
+    a.key = key;
+    TempStr s = AppendAccelKeyToMenuStringTemp(StrL(""), a);
+    if (len(s) < 1 || s.s[0] != '\t') {
+        return false;
+    }
+    return str::Eq(Str(s.s + 1, len(s) - 1), expected);
+}
+
+bool ShortcutParse_UnitTestShiftedPunct() {
+    auto prevLang = gShortcutLangCode;
+    gShortcutLangCode = nullptr;
+
+    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_2, StrL("?")));
+    utassert(AccelShowsAs(FVIRTKEY, VK_OEM_2, StrL("/")));
+    utassert(AccelShowsAs(FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_2, StrL("Ctrl + ?")));
+    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_COMMA, StrL("<")));
+    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_PERIOD, StrL(">")));
+    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_4, StrL("{")));
+    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_6, StrL("}")));
+    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_5, StrL("|")));
+    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_1, StrL(":")));
+    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_7, StrL("\"")));
+    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_3, StrL("~")));
+    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, 'A', StrL("Shift + A")));
+
+    gShortcutLangCode = prevLang;
+    return true;
+}
+#endif

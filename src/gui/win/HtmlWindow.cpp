@@ -124,7 +124,7 @@ static inline void VariantSetLong(VARIANT* res, long val) {
 }
 
 bool IsBlankUrl(Str url) {
-    return str::EqI("about:blank", url);
+    return str::EqI(StrL("about:blank"), url);
 }
 
 bool IsBlankUrl(WStr url) {
@@ -203,7 +203,7 @@ static HtmlWindow* FindHtmlWindowById(int windowId) {
     // so a crafted document can pass a negative or out-of-range value. Reject it
     // instead of indexing out of bounds (Vec::operator[]'s ReportIf is
     // diagnostic-only and still reads els[idx]). Callers null-check the result.
-    if (!gHtmlWindows.isValidIndex(windowId)) {
+    if (!VecIsValidIndex(gHtmlWindows, windowId)) {
         return nullptr;
     }
     return gHtmlWindows[windowId];
@@ -211,7 +211,7 @@ static HtmlWindow* FindHtmlWindowById(int windowId) {
 
 static int GenNewWindowId(HtmlWindow* htmlWin) {
     int newWindowId = len(gHtmlWindows);
-    gHtmlWindows.Append(htmlWin);
+    VecAppend(gHtmlWindows, htmlWin);
     ReportIf(htmlWin != FindHtmlWindowById(newWindowId));
     return newWindowId;
 }
@@ -222,9 +222,9 @@ static void FreeWindowId(int windowId) {
 }
 
 // Re-using its protocol, see comments at the top.
-#define HW_PROTO_PREFIX L"its"
+constexpr const WCHAR* kHwProtoPrefix = L"its";
 
-#define HW_PROTO_PREFIXA "its"
+#define kHwProtoPrefixA "its"
 
 // {F1EC293F-DBBD-4A4B-94F4-FA52BA0BA6EE}
 static const GUID CLSID_HW_IInternetProtocol = {0xf1ec293f,
@@ -342,16 +342,31 @@ STDMETHODIMP HW_IInternetProtocol::QueryInterface(REFIID riid, void** ppv) {
 // out $htmlWindowId and $urlRest. Returns false if url doesn't conform
 // to this pattern.
 static bool ParseProtoUrl(Str url, int* htmlWindowId, TempStr* urlRest) {
-    Str rest = str::Parse(url, HW_PROTO_PREFIXA "://%d/%S", htmlWindowId, urlRest);
-    return !rest;
+    Str rest = str::Parse(url, kHwProtoPrefixA "://%d/%S", htmlWindowId, urlRest);
+    // success-at-end is {non-null, len 0}; failure is {nullptr, 0}. !rest is
+    // true for both (str::Parse unit tests use rest.s).
+    return rest.s && len(rest) == 0;
 }
 
-#define kDefaultMimeType "text/html"
+// If url is its://<id>/<rest> for this HtmlWindow, return <rest>. Otherwise
+// return url unchanged. Logs and ReportIf if the id belongs to another window.
+static TempStr UrlWithoutProtoTemp(Str url, int windowId) {
+    int protoWindowId = 0;
+    TempStr urlReal = url;
+    bool ok = ParseProtoUrl(url, &protoWindowId, &urlReal);
+    if (ok && protoWindowId != windowId) {
+        logf("UrlWithoutProtoTemp: protoWindowId=%d windowId=%d url='%s'\n", protoWindowId, windowId, url);
+    }
+    ReportIf(ok && (protoWindowId != windowId));
+    return urlReal;
+}
+
+constexpr const char* kDefaultMimeType = "text/html";
 
 static TempStr MimeFromUrlTemp(Str url, Str imgExt = {}) {
     Str ext = str::SliceFromCharLast(url, '.');
     if (!ext.s) {
-        return {kDefaultMimeType};
+        return StrL(kDefaultMimeType);
     }
 
     Str semi = str::SliceFromChar(ext, ';');
@@ -367,12 +382,12 @@ static TempStr MimeFromUrlTemp(Str url, Str imgExt = {}) {
         return mime;
     }
 
-    TempStr contentType = ReadRegStrTemp(HKEY_CLASSES_ROOT, ext, "Content Type");
+    TempStr contentType = ReadRegStrTemp(HKEY_CLASSES_ROOT, ext, StrL("Content Type"));
     if (contentType) {
         return contentType;
     }
 
-    return {kDefaultMimeType};
+    return StrL(kDefaultMimeType);
 }
 
 // TODO: return an error page html in case of errors?
@@ -504,7 +519,7 @@ static AtomicInt gProtocolFactoryRefCount = 0;
 static HW_IInternetProtocolFactory* gInternetProtocolFactory = nullptr;
 
 // Register our protocol so that urlmon will call us for every
-// url that starts with HW_PROTO_PREFIX
+// url that starts with kHwProtoPrefix
 static void RegisterInternetProtocolFactory() {
     int val = AtomicIntInc(&gProtocolFactoryRefCount);
     if (val > 1) {
@@ -516,7 +531,7 @@ static void RegisterInternetProtocolFactory() {
     ReportIf(FAILED(hr));
     ReportIf(nullptr != gInternetProtocolFactory);
     gInternetProtocolFactory = new HW_IInternetProtocolFactory();
-    hr = internetSession->RegisterNameSpace(gInternetProtocolFactory, CLSID_HW_IInternetProtocol, HW_PROTO_PREFIX, 0,
+    hr = internetSession->RegisterNameSpace(gInternetProtocolFactory, CLSID_HW_IInternetProtocol, kHwProtoPrefix, 0,
                                             nullptr, 0);
     ReportIf(FAILED(hr));
 }
@@ -529,7 +544,7 @@ static void UnregisterInternetProtocolFactory() {
     ScopedComPtr<IInternetSession> internetSession;
     HRESULT hr = CoInternetGetSession(0, &internetSession, 0);
     ReportIf(FAILED(hr));
-    internetSession->UnregisterNameSpace(gInternetProtocolFactory, HW_PROTO_PREFIX);
+    internetSession->UnregisterNameSpace(gInternetProtocolFactory, kHwProtoPrefix);
     ULONG refCount = gInternetProtocolFactory->Release();
     ReportIf(refCount != 0);
     gInternetProtocolFactory = nullptr;
@@ -1426,10 +1441,21 @@ void HtmlWindow::OnLButtonDown() const {
     }
 }
 
+// BrowserDocView keeps the IE control alive across tab switches. Its parent is
+// the shared document canvas, so the IE subclass must not keep intercepting
+// paint, scroll, and input messages while another tab is active.
 void HtmlWindow::SetVisible(bool visible) {
-    HwndSetVisible(hwndParent, visible);
+    if (visible && !subclassId) {
+        SubclassHwnd();
+    }
     if (webBrowser) {
         webBrowser->put_Visible(visible ? VARIANT_TRUE : VARIANT_FALSE);
+    }
+    if (oleObjectHwnd) {
+        HwndSetVisible(oleObjectHwnd, visible);
+    }
+    if (!visible) {
+        UnsubclassHwnd();
     }
 }
 
@@ -1501,7 +1527,7 @@ void HtmlWindow::CopySelection() {
 }
 
 void HtmlWindow::NavigateToAboutBlank() {
-    NavigateToUrl("about:blank");
+    NavigateToUrl(StrL("about:blank"));
 }
 
 void HtmlWindow::SetHtml(Str d, Str url) {
@@ -1524,7 +1550,7 @@ void HtmlWindow::SetHtmlReal(Str d) {
     }
     htmlContent = new HtmlMoniker();
     htmlContent->SetHtml(d);
-    TempStr baseUrl = fmt(HW_PROTO_PREFIXA "://%d/", windowId);
+    TempStr baseUrl = fmt(kHwProtoPrefixA "://%d/", windowId);
     htmlContent->SetBaseUrl(ToWStrTemp(baseUrl));
 
     ScopedComPtr<IDispatch> docDispatch;
@@ -1752,10 +1778,7 @@ bool HtmlWindow::OnBeforeNavigate(Str url, bool newWindow) {
 
     // if it's url for our internal protocol, strip the protocol
     // part as we don't want to expose it to clients.
-    int protoWindowId;
-    TempStr urlReal = url;
-    bool ok = ParseProtoUrl(url, &protoWindowId, &urlReal);
-    ReportIf(ok && (protoWindowId != windowId));
+    TempStr urlReal = UrlWithoutProtoTemp(url, windowId);
     bool shouldNavigate = htmlWinCb->OnBeforeNavigate(urlReal, newWindow);
     return shouldNavigate;
 }
@@ -1785,10 +1808,7 @@ void HtmlWindow::OnDocumentComplete(Str url) {
 
     // if it's url for our internal protocol, strip the protocol
     // part as we don't want to expose it to clients.
-    int protoWindowId;
-    TempStr urlReal = url;
-    bool ok = ParseProtoUrl(url, &protoWindowId, &urlReal);
-    ReportIf(ok && (protoWindowId != windowId));
+    TempStr urlReal = UrlWithoutProtoTemp(url, windowId);
 
     str::Free(currentURL);
     currentURL = str::Dup(urlReal);

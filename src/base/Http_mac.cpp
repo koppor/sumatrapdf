@@ -42,7 +42,7 @@ static TempStr NewTempFilePathTemp(Str prefix) {
 
 static int ReadHttpStatusCode(Str statusPath) {
     Str status = file::ReadFile(statusPath);
-    if (!status) {
+    if (len(status) == 0) {
         return 0;
     }
     return ParseInt(status);
@@ -105,12 +105,13 @@ bool HttpGet(Str urlA, HttpRsp* rspOut) {
 
     TempStr bodyPath = NewTempFilePathTemp(StrL("sumatra-http-body-"));
     TempStr statusPath = NewTempFilePathTemp(StrL("sumatra-http-status-"));
-    if (!bodyPath || !statusPath) {
+    if (len(bodyPath) == 0 || len(statusPath) == 0) {
         rspOut->error = kHttpErrorFailure;
         return false;
     }
 
-    str::Builder cmd(1024);
+    str::Builder cmd;
+    str::BuilderReserve(cmd, 1024);
     bool ok = AppendCurlBase(&cmd, bodyPath, statusPath);
     AppendShellQuoted(&cmd, urlA);
     AppendStatusRedirect(&cmd, statusPath);
@@ -133,11 +134,12 @@ bool HttpGet(Str urlA, HttpRsp* rspOut) {
 bool HttpGetToFile(Str urlA, Str destFilePath, const Func1<HttpProgress*>& cbProgress, i64 maxSize) {
     logf("HttpGetToFile: url: '%s', file: '%s'\n", urlA, destFilePath);
     TempStr statusPath = NewTempFilePathTemp(StrL("sumatra-http-status-"));
-    if (!statusPath) {
+    if (len(statusPath) == 0) {
         return false;
     }
 
-    str::Builder cmd(1024);
+    str::Builder cmd;
+    str::BuilderReserve(cmd, 1024);
     bool ok = AppendCurlBase(&cmd, destFilePath, statusPath);
     if (maxSize >= 0) {
         cmd.Append(fmt(" --max-filesize %lld ", maxSize));
@@ -166,7 +168,7 @@ bool HttpPost(Str serverA, int port, Str urlA, str::Builder* headers, str::Build
     TempStr bodyPath = NewTempFilePathTemp(StrL("sumatra-http-post-body-"));
     TempStr outPath = NewTempFilePathTemp(StrL("sumatra-http-post-out-"));
     TempStr statusPath = NewTempFilePathTemp(StrL("sumatra-http-status-"));
-    if (!bodyPath || !outPath || !statusPath) {
+    if (len(bodyPath) == 0 || len(outPath) == 0 || len(statusPath) == 0) {
         return false;
     }
 
@@ -182,7 +184,8 @@ bool HttpPost(Str serverA, int port, Str urlA, str::Builder* headers, str::Build
 
     {
         TempStr url = BuildPostUrlTemp(serverA, port, urlA);
-        str::Builder cmd(1024);
+        str::Builder cmd;
+        str::BuilderReserve(cmd, 1024);
         ok = AppendCurlBase(&cmd, outPath, statusPath);
         cmd.Append(StrL(" --request POST "));
         AppendHeaders(&cmd, headers);

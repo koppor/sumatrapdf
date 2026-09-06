@@ -37,12 +37,22 @@ Diagnostics:
     - readability-qualified-auto
     - modernize-use-auto
     - modernize-use-nodiscard
+    - bugprone-derived-method-shadowing-base-method
     - readability-simplify-boolean-expr
     - readability-use-std-min-max
     - readability-named-parameter
     - readability-non-const-parameter
     - readability-braces-around-statements
     - readability-uppercase-literal-suffix
+    - modernize-macro-to-enum
+    - bugprone-reserved-identifier
+    - readability-named-parameter
+    - misc-multiple-inheritance
+    - readability-avoid-nested-conditional-operator
+    - misc-use-internal-linkage
+    - modernize-use-auto
+    - misc-use-internal-linkage
+    - modernize-avoid-setjmp-longjmp
 ---
 # When editing a header under src/base/, force-include Base.h plus other
 # src/base/*.h not already included by Base.h (headers are not self-sufficient).
@@ -428,4 +438,3 @@ CompileFlags:
     - WebpReader.h
     - -include
     - WindowTab.h
-

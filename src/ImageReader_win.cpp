@@ -12,12 +12,13 @@
 #include "AvifReader.h"
 #include "JxlReader.h"
 #include "WebpReader.h"
-#include "ImageReader.h"
 
 #if COMPILER_MSVC
 #pragma warning(disable : 4668)
 #endif
 #include <wincodec.h>
+
+#include "ImageReader.h"
 
 using Gdiplus::Bitmap;
 using Gdiplus::BitmapData;
@@ -44,20 +45,14 @@ static Pixmap* PixmapFromExtFormatsData(Str bmpData, FileType kind) {
     return nullptr;
 }
 
-static Bitmap* WICDecodeImageFromStream(IStream* stream) {
-    ScopedCom com;
+static Bitmap* WICFrameToBitmap(IWICImagingFactory* pFactory, IWICBitmapFrameDecode* srcFrame) {
+    if (!pFactory || !srcFrame) {
+        return nullptr;
+    }
     HRESULT hr;
 
 #define HR(hr) \
     if (FAILED(hr)) return nullptr;
-    ScopedComPtr<IWICImagingFactory> pFactory;
-    if (!pFactory.Create(CLSID_WICImagingFactory)) {
-        return nullptr;
-    }
-    ScopedComPtr<IWICBitmapDecoder> pDecoder;
-    HR(pFactory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &pDecoder));
-    ScopedComPtr<IWICBitmapFrameDecode> srcFrame;
-    HR(pDecoder->GetFrame(0, &srcFrame));
     ScopedComPtr<IWICFormatConverter> pConverter;
 
     int orientation = 0;
@@ -78,6 +73,12 @@ static Bitmap* WICDecodeImageFromStream(IStream* stream) {
 
     uint w, h;
     HR(pConverter->GetSize(&w, &h));
+    if (w == 0 || h == 0 || w > (uint)INT_MAX || h > (uint)INT_MAX) {
+        return nullptr;
+    }
+    if ((i64)w * (i64)h * 4 > kMaxDecodedPixmapBytes) {
+        return nullptr;
+    }
     double xres, yres;
     HR(pConverter->GetResolution(&xres, &yres));
     Bitmap bmp((INT)w, (INT)h, PixelFormat32bppARGB);
@@ -87,12 +88,34 @@ static Bitmap* WICDecodeImageFromStream(IStream* stream) {
     if (ok != Ok) {
         return nullptr;
     }
-    HR(pConverter->CopyPixels(nullptr, bmpData.Stride, bmpData.Stride * h, (BYTE*)bmpData.Scan0));
+    size_t bufBytes = (size_t)bmpData.Stride * (size_t)h;
+    if (bufBytes > UINT_MAX) {
+        bmp.UnlockBits(&bmpData);
+        return nullptr;
+    }
+    HR(pConverter->CopyPixels(nullptr, bmpData.Stride, (UINT)bufBytes, (BYTE*)bmpData.Scan0));
     bmp.UnlockBits(&bmpData);
     bmp.SetResolution((float)xres, (float)yres);
 #undef HR
     ApplyExifOrientation(&bmp, orientation);
     return bmp.Clone(0, 0, (INT)bmp.GetWidth(), (INT)bmp.GetHeight(), PixelFormat32bppARGB);
+}
+
+static Bitmap* WICDecodeImageFromStream(IStream* stream) {
+    ScopedCom com;
+
+#define HR(hr) \
+    if (FAILED(hr)) return nullptr;
+    ScopedComPtr<IWICImagingFactory> pFactory;
+    if (!pFactory.Create(CLSID_WICImagingFactory)) {
+        return nullptr;
+    }
+    ScopedComPtr<IWICBitmapDecoder> pDecoder;
+    HR(pFactory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &pDecoder));
+    ScopedComPtr<IWICBitmapFrameDecode> srcFrame;
+    HR(pDecoder->GetFrame(0, &srcFrame));
+#undef HR
+    return WICFrameToBitmap(pFactory, srcFrame);
 }
 
 static void MaybeFlipBitmap(Bitmap* bmp) {
@@ -175,7 +198,7 @@ static Pixmap* PixmapFromDataWin(Str bmpData) {
     // the OS HEIF codec via WIC faster than heicdec (~1.2x AVIF / ~2x HEIC when
     // the Windows codec is installed), then fall back to heicdec.
     if (FileType::Heic == kind || FileType::Avif == kind) {
-#if defined(DEBUG)
+#if IS_DEBUG
         Pixmap* px = PixmapFromAvifData(bmpData);
         if (px) {
             return px;
@@ -217,6 +240,58 @@ static Pixmap* PixmapFromDataWin(Str bmpData) {
     return px;
 }
 
+constexpr UINT kMaxImageFrames = 1000;
+constexpr i64 kMaxDecodedFrameBytes = 512LL * 1024 * 1024;
+
+// All frames from a WIC decoder (ICO sizes, and a fallback if GDI+ multi-frame fails).
+static Vec<Pixmap*> PixmapsFromWicFrames(Str bmpData) {
+    Vec<Pixmap*> res;
+    auto* strm = CreateStreamFromData(bmpData);
+    ScopedComPtr<IStream> stream(strm);
+    if (!stream) {
+        return res;
+    }
+    ScopedCom com;
+    ScopedComPtr<IWICImagingFactory> pFactory;
+    if (!pFactory.Create(CLSID_WICImagingFactory)) {
+        return res;
+    }
+    ScopedComPtr<IWICBitmapDecoder> pDecoder;
+    HRESULT hr = pFactory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &pDecoder);
+    if (FAILED(hr)) {
+        return res;
+    }
+    UINT nFrames = 0;
+    hr = pDecoder->GetFrameCount(&nFrames);
+    if (FAILED(hr) || nFrames == 0) {
+        return res;
+    }
+    nFrames = std::min(nFrames, kMaxImageFrames);
+    i64 decodedBytes = 0;
+    for (UINT i = 0; i < nFrames; i++) {
+        ScopedComPtr<IWICBitmapFrameDecode> srcFrame;
+        if (FAILED(pDecoder->GetFrame(i, &srcFrame))) {
+            break;
+        }
+        Bitmap* bmp = WICFrameToBitmap(pFactory, srcFrame);
+        if (!bmp) {
+            continue;
+        }
+        Pixmap* px = PixmapFromGdiplus(bmp);
+        delete bmp;
+        if (!px) {
+            continue;
+        }
+        decodedBytes += PixmapByteSize(px);
+        if (decodedBytes > kMaxDecodedFrameBytes) {
+            FreePixmap(px);
+            break;
+        }
+        VecAppend(res, px);
+    }
+    return res;
+}
+
 static Vec<Pixmap*> PixmapsFromMultiFrameData(Str bmpData, FileType kind) {
     Vec<Pixmap*> res;
     Gdiplus::Bitmap* bmp = DecodeWithGdiplus(bmpData);
@@ -227,8 +302,6 @@ static Vec<Pixmap*> PixmapsFromMultiFrameData(Str bmpData, FileType kind) {
         return res;
     }
     const GUID* dim = (FileType::Tiff == kind) ? &Gdiplus::FrameDimensionPage : &Gdiplus::FrameDimensionTime;
-    constexpr UINT kMaxImageFrames = 1000;
-    constexpr i64 kMaxDecodedFrameBytes = 512LL * 1024 * 1024;
     UINT nFrames = std::min(bmp->GetFrameCount(dim), kMaxImageFrames);
     i64 decodedBytes = 0;
     for (UINT i = 0; i < nFrames; i++) {
@@ -242,7 +315,7 @@ static Vec<Pixmap*> PixmapsFromMultiFrameData(Str bmpData, FileType kind) {
                 FreePixmap(px);
                 break;
             }
-            res.Append(px);
+            VecAppend(res, px);
         }
     }
     delete bmp;
@@ -258,8 +331,15 @@ static Vec<Pixmap*> PixmapsFromMultiFrameData(Str bmpData, FileType kind) {
 // Windows: JPEG→turbo, WebP→libwebp, JXL→jxldec; HEIC/AVIF→heicdec then WIC in
 // Debug, WIC then heicdec in Release; else TGA/GDI+/WIC. POSIX: MuPDF for now.
 Pixmap* PixmapFromData(Str bmpData) {
+    if (ImageDecodedPixmapWouldBeHuge(bmpData)) {
+        return nullptr;
+    }
     Pixmap* px = PixmapFromDataFz(bmpData);
     if (px) {
+        // ICC WebP comes from mupdf, which does not apply EXIF orientation
+        if (GuessFileTypeFromData(bmpData) == FileType::Webp) {
+            px = PixmapApplyExifOrientation(px, WebpExifOrientation(bmpData));
+        }
         return px;
     }
     FileType kind = GuessFileTypeFromData(bmpData);
@@ -272,9 +352,9 @@ Pixmap* PixmapFromData(Str bmpData) {
     return PixmapFromDataWin(bmpData);
 }
 
-// Multi-page TIFF / animated GIF: Windows multi-frame path first. Everything
+// Multi-page TIFF / animated GIF / ICO: Windows multi-frame path first. Everything
 // else is a single Pixmap via PixmapFromData (native codec then Win).
-// One Pixmap per frame (multi-page TIFF / animated GIF yield >1); caller owns each.
+// One Pixmap per frame (multi-page TIFF / animated GIF / ICO yield >1); caller owns each.
 Vec<Pixmap*> PixmapsFromData(Str bmpData) {
     FileType kind = GuessFileTypeFromData(bmpData);
     if (FileType::Tiff == kind || FileType::Gif == kind) {
@@ -283,22 +363,28 @@ Vec<Pixmap*> PixmapsFromData(Str bmpData) {
             return res;
         }
     }
+    if (FileType::Ico == kind) {
+        Vec<Pixmap*> res = PixmapsFromWicFrames(bmpData);
+        if (len(res) > 0) {
+            return res;
+        }
+    }
 
     Vec<Pixmap*> res;
     Pixmap* px = PixmapFromData(bmpData);
     if (px) {
-        res.Append(px);
+        VecAppend(res, px);
     }
     return res;
 }
 
 // Load path into a RenderedBitmap (Windows); nullptr on POSIX for now.
 RenderedBitmap* LoadRenderedBitmap(Str path) {
-    if (!path) {
+    if (len(path) == 0) {
         return nullptr;
     }
     Str data = file::ReadFile(path);
-    if (!data) {
+    if (len(data) == 0) {
         return nullptr;
     }
 

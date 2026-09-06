@@ -14,14 +14,13 @@
 
 #include "Settings.h"
 #include "AppSettings.h"
-#include "GlobalPrefs.h"
 #include "MainWindow.h"
 #include "Theme.h"
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
 #include "Translations.h"
 #include "DarkMode_win.h"
-#include "ChangeLanguageDialog.h"
+#include "SumatraDialogs.h"
 
 // Search edit is a real HWND; the language list and buttons are VirtCtrl.
 // Same layout / WindowBase pattern as Change Theme.
@@ -59,7 +58,7 @@ void ChangeLanguageWnd::FilterList() {
     }
     TempStr filter = editSearch ? editSearch->GetTextTemp() : Str{};
     model->strings.Reset();
-    langIdxByListIdx.Reset();
+    VecReset(langIdxByListIdx);
     int itemToSelect = 0;
     Str currLangCode = trans::GetCurrentLangCode();
     for (int i = 0; i < trans::GetLangsCount(); i++) {
@@ -71,7 +70,7 @@ void ChangeLanguageWnd::FilterList() {
         if (str::Eq(trans::GetLangCodeByIdxTemp(i), currLangCode)) {
             itemToSelect = len(langIdxByListIdx);
         }
-        langIdxByListIdx.Append(i);
+        VecAppend(langIdxByListIdx, i);
     }
     listBox->SetModel(model);
     if (len(langIdxByListIdx) > 0) {
@@ -132,7 +131,8 @@ bool ChangeLanguageWnd::Create(MainWindow* mainWin) {
 
     {
         CreateCustomArgs args;
-        args.title = _TRA("Change Language");
+        args.owner = win ? win->hwndFrame : nullptr;
+        args.title = Tr("Change Language");
         args.visible = false;
         args.style = WS_POPUPWINDOW | WS_CAPTION;
         args.font = GetFont();
@@ -179,10 +179,10 @@ bool ChangeLanguageWnd::Create(MainWindow* mainWin) {
         hbox->gap = font->averageCharWidth;
         auto pad = Insets{4, 0, 4, 0};
 
-        btnCancel = NewThemedButton(hwnd, _TRA("Cancel"), font, false);
+        btnCancel = NewThemedButton(hwnd, Tr("Cancel"), font, false);
         btnCancel->onClick = MkMethod1<ChangeLanguageWnd, VirtMouseEvent*, &ChangeLanguageWnd::OnCancel>(this);
         hbox->AddChild(new Padding(btnCancel, pad));
-        btnOk = NewThemedButton(hwnd, _TRA("OK"), font, true);
+        btnOk = NewThemedButton(hwnd, Tr("OK"), font, true);
         btnOk->onClick = MkMethod1<ChangeLanguageWnd, VirtMouseEvent*, &ChangeLanguageWnd::OnOk>(this);
         hbox->AddChild(new Padding(btnOk, pad));
         vbox->AddChild(hbox);
@@ -198,9 +198,7 @@ bool ChangeLanguageWnd::Create(MainWindow* mainWin) {
     UpdateTheme();
 
     SetIsVisible(true);
-    if (editSearch) {
-        HwndSetFocus(editSearch->hwnd);
-    }
+    EditSetFocus(editSearch);
     return true;
 }
 
@@ -222,4 +220,5 @@ void ShowChangeLanguageDialog(MainWindow* win) {
         return;
     }
     gChangeLanguageWnd = wnd;
+    RunModalWindow(wnd->hwnd, win ? win->hwndFrame : nullptr);
 }

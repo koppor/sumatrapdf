@@ -247,7 +247,6 @@ struct DocumentViewLinkHandler : ILinkHandler {
         IPageDestination* dest = data->reader ? data->reader->GetEngine()->GetNamedDest(name) : nullptr;
         if (dest) {
             ScrollTo(dest);
-            delete dest;
         }
     }
 
@@ -346,13 +345,27 @@ static void OnPaint(DocumentView* view, PlatformCanvasPaintEvent* ev) {
             if (!page || !page->isShown) {
                 continue;
             }
-            RectF transformed = data->reader->GetEngine()->Transform(ToRectF(selection.rects[i]), pageNo,
-                                                                     page->zoomReal, data->rotation);
-            Rect screenRect = transformed.Round();
-            screenRect.Offset(page->pageOnScreen.x, page->pageOnScreen.y);
-            selectionRects.Append(screenRect);
+            if (selection.quads && !selection.quads[i].IsEmpty()) {
+                QuadF q = selection.quads[i];
+                EngineBase* eng = data->reader->GetEngine();
+                PointF corners[4] = {q.ul, q.ur, q.lr, q.ll};
+                Point pts[4];
+                for (int k = 0; k < 4; k++) {
+                    PointF t = eng->Transform(corners[k], pageNo, page->zoomReal, data->rotation);
+                    pts[k] = Point((int)t.x + page->pageOnScreen.x, (int)t.y + page->pageOnScreen.y);
+                }
+                ev->gfx->FillQuads(pts, 1, MkRgb(255, 225, 70), 115);
+            } else {
+                RectF transformed = data->reader->GetEngine()->Transform(ToRectF(selection.rects[i]), pageNo,
+                                                                         page->zoomReal, data->rotation);
+                Rect screenRect = transformed.Round();
+                screenRect.Offset(page->pageOnScreen.x, page->pageOnScreen.y);
+                selectionRects.Append(screenRect);
+            }
         }
-        ev->gfx->FillRects(selectionRects.els, len(selectionRects), MkRgb(255, 225, 70), 115);
+        if (len(selectionRects) > 0) {
+            ev->gfx->FillRects(selectionRects.els, len(selectionRects), MkRgb(255, 225, 70), 115);
+        }
     }
 
     int current = data->layout.CurrentPageNo();
@@ -475,12 +488,23 @@ static void ScrollBy(DocumentView* view, int dx, int dy) {
     SetViewOffset(view, Point(data->viewOffset.x + dx, data->viewOffset.y + dy));
 }
 
+static void ScrollByPage(DocumentView* view, int direction) {
+    auto* data = ViewData(view);
+    if (IsContinuous(data->displayMode)) {
+        int pageStep = std::max(data->viewSize.dy - 60, 60);
+        ScrollBy(view, 0, direction * pageStep);
+    } else {
+        view->GoToPage(data->startPage + direction);
+    }
+}
+
 static void OnCanvasKey(DocumentView* view, PlatformCanvasKeyEvent* ev) {
     auto* data = ViewData(view);
     if (!data->reader) {
         return;
     }
     int pageStep = std::max(data->viewSize.dy - 60, 60);
+    int horizontalPageStep = std::max(data->viewSize.dx - 60, 60);
     switch (ev->key) {
         case PlatformKey::Escape:
             if (view->HasTextSelection()) {
@@ -497,36 +521,40 @@ static void OnCanvasKey(DocumentView* view, PlatformCanvasKeyEvent* ev) {
             view->GoToPage(data->reader->PageCount());
             ev->didHandle = true;
             return;
+        case PlatformKey::Enter:
+            ScrollByPage(view, ev->isShift ? -1 : 1);
+            ev->didHandle = true;
+            return;
         case PlatformKey::PageUp:
-            if (IsContinuous(data->displayMode)) {
-                ScrollBy(view, 0, -pageStep);
-            } else {
-                view->GoToPage(data->startPage - 1);
-            }
+            ScrollByPage(view, -1);
             ev->didHandle = true;
             return;
         case PlatformKey::PageDown:
-            if (IsContinuous(data->displayMode)) {
-                ScrollBy(view, 0, pageStep);
-            } else {
-                view->GoToPage(data->startPage + 1);
-            }
+            ScrollByPage(view, 1);
             ev->didHandle = true;
             return;
         case PlatformKey::Left:
-            ScrollBy(view, -45, 0);
+            ScrollBy(view, ev->isShift ? -horizontalPageStep : -45, 0);
             ev->didHandle = true;
             return;
         case PlatformKey::Up:
-            ScrollBy(view, 0, -45);
+            if (ev->isCtrl) {
+                ScrollByPage(view, -1);
+            } else {
+                ScrollBy(view, 0, ev->isShift ? -(pageStep / 2) : -45);
+            }
             ev->didHandle = true;
             return;
         case PlatformKey::Right:
-            ScrollBy(view, 45, 0);
+            ScrollBy(view, ev->isShift ? horizontalPageStep : 45, 0);
             ev->didHandle = true;
             return;
         case PlatformKey::Down:
-            ScrollBy(view, 0, 45);
+            if (ev->isCtrl) {
+                ScrollByPage(view, 1);
+            } else {
+                ScrollBy(view, 0, ev->isShift ? pageStep / 2 : 45);
+            }
             ev->didHandle = true;
             return;
         case PlatformKey::Plus:
@@ -553,6 +581,22 @@ static void OnCanvasKey(DocumentView* view, PlatformCanvasKeyEvent* ev) {
     }
     if (ev->isCtrl && c == 'c') {
         view->CopySelection();
+    } else if (ev->isCtrl || ev->isAlt) {
+        return;
+    } else if (c == ' ') {
+        ScrollByPage(view, ev->isShift ? -1 : 1);
+    } else if (c == 'h') {
+        ScrollBy(view, -45, 0);
+    } else if (c == 'j') {
+        ScrollBy(view, 0, 45);
+    } else if (c == 'k') {
+        ScrollBy(view, 0, -45);
+    } else if (c == 'l') {
+        ScrollBy(view, 45, 0);
+    } else if (c == 'n') {
+        view->GoToPage(data->startPage + 1);
+    } else if (c == 'p') {
+        view->GoToPage(data->startPage - 1);
     } else if (c == 'c') {
         view->SetContinuous(!view->IsContinuous());
     } else if (c == 'f') {
@@ -600,9 +644,9 @@ DocumentView::~DocumentView() {
     data = nullptr;
 }
 
-bool DocumentView::Open(Str path) {
+bool DocumentView::Open(Str path, PasswordUI* pwdUI) {
     auto* viewData = ViewData(this);
-    ReaderModel* reader = ReaderModel::Create(path);
+    ReaderModel* reader = ReaderModel::Create(path, pwdUI);
     if (!reader) {
         return false;
     }
@@ -809,7 +853,7 @@ bool DocumentView::FindText(Str text, bool forward, bool restart) {
     bool newText = !str::Eq(search->lastText, text);
     search->SetDirection(forward ? TextSearch::Direction::Forward : TextSearch::Direction::Backward);
     TextSel* result = nullptr;
-    if (restart || newText || !search->findText) {
+    if (restart || newText || len(search->findText) == 0) {
         result = search->FindFirst(CurrentPageNo(), text);
     } else {
         result = search->FindNext();

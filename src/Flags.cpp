@@ -2,21 +2,21 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/CmdLineArgsIter.h"
+#include "base/CmdLineArgs.h"
 #if OS_WIN
 #include "base/Win.h"
 #endif
 
 #include "Settings.h"
 #include "DisplayMode.h"
-#include "Flags.h"
 #if OS_WIN
 #include "Print.h"
 #endif
-#include "SumatraLog.h"
 #if OS_WIN && !defined(SUMATRA_TEST_UTIL)
 #include "Translations.h"
 #endif
+#include "Flags.h"
+#include "SumatraLog.h"
 
 // @gen-start flags
 // clang-format off
@@ -42,8 +42,9 @@ enum class Arg {
     FwdSearchColor = 68, FwdSearchPermanent = 69, MangaMode = 70, Search = 71,
     AllUsers = 72, AllUsers2 = 73, RunInstallNow = 74, Adobe = 75,
     DDE = 76, Pwd = 77, EngineDump = 78, SetColorRange = 79,
-    UpgradeFrom = 80, ForTesting = 81, WindowPos = 82, DumpExif = 83,
-    DumpChm = 84, Control = 85, UnitTests = 86,
+    UpgradeFrom = 80, ForTesting = 81, QuickLook = 82, QuickLookAgent = 83,
+    WindowPos = 84, DumpExif = 85, DumpChm = 86, Control = 87,
+    UnitTests = 88, NewWindowTabs = 89,
 };
 
 static SeqStrings gArgNames =
@@ -67,8 +68,9 @@ static SeqStrings gArgNames =
     "fwdsearch-color\0" "fwdsearch-permanent\0" "manga-mode\0" "search\0"
     "all-users\0" "allusers\0" "run-install-now\0" "a\0"
     "dde\0" "pwd\0" "engine-dump\0" "set-color-range\0"
-    "upgrade-from\0" "for-testing\0" "window-pos\0" "dump-exif\0"
-    "dump-chm\0" "dbg-control\0" "unit-tests\0";
+    "upgrade-from\0" "for-testing\0" "quicklook\0" "quicklook-agent\0"
+    "window-pos\0" "dump-exif\0" "dump-chm\0" "dbg-control\0"
+    "unit-tests\0" "new-window-tabs\0";
 // clang-format on
 // @gen-end flags
 
@@ -95,7 +97,7 @@ void ShowPrintersDialog(bool consoleOnly) {
         }
     }
     if (!consoleOnly) {
-        ShowTextInWindowDialog(_TRA("SumatraPDF - Show Printers"), ToStr(out));
+        ShowTextInWindowDialog(Tr("SumatraPDF - Show Printers"), ToStr(out));
     }
 #else
     (void)consoleOnly;
@@ -118,22 +120,22 @@ void ShowPrintersDialog(bool) {}
 // into an interable list (returns nullptr on parsing errors)
 // caller must delete the result
 bool ParsePageRanges(Str ranges, Vec<PageRange>& result) {
-    if (!ranges) {
+    if (len(ranges) == 0) {
         return false;
     }
 
     StrVec rangeList;
-    Split(&rangeList, ranges, ",", true);
+    Split(&rangeList, ranges, StrL(","), true);
     SortNatural(&rangeList);
 
     for (Str rangeStr : rangeList) {
         int start, end;
         if (!str::IsNull(str::Parse(rangeStr, "%d-%d%$", &start, &end)) && 0 < start && start <= end) {
-            result.Append(PageRange{start, end});
+            VecAppend(result, PageRange{start, end});
         } else if (!str::IsNull(str::Parse(rangeStr, "%d-%$", &start)) && 0 < start) {
-            result.Append(PageRange{start, INT_MAX});
+            VecAppend(result, PageRange{start, INT_MAX});
         } else if (!str::IsNull(str::Parse(rangeStr, "%d%$", &start)) && 0 < start) {
-            result.Append(PageRange{start, start});
+            VecAppend(result, PageRange{start, start});
         } else {
             return false;
         }
@@ -225,17 +227,33 @@ static void ParseScrollValue(Point* scroll, Str txt) {
 }
 
 // Adobe Reader /t accepts optional driver and port after the printer name; we ignore them.
-static void SkipOptionalAdobePrinterParams(CmdLineArgsIter& args) {
-    Str driver = args.AdditionalParam(1);
-    if (!driver || CouldBeArg(driver)) {
+static Str AdditionalParam(StrNode* next) {
+    if (!next || CouldBeArg(next->s)) {
+        return {};
+    }
+    return next->s;
+}
+
+static Str EatParam(StrNode*& next) {
+    if (!next) {
+        return {};
+    }
+    Str s = next->s;
+    next = next->next;
+    return s;
+}
+
+static void SkipOptionalAdobePrinterParams(StrNode*& next) {
+    Str driver = AdditionalParam(next);
+    if (len(driver) == 0 || CouldBeArg(driver)) {
         return;
     }
-    args.EatParam();
-    Str port = args.AdditionalParam(1);
-    if (!port || CouldBeArg(port)) {
+    EatParam(next);
+    Str port = AdditionalParam(next);
+    if (len(port) == 0 || CouldBeArg(port)) {
         return;
     }
-    args.EatParam();
+    EatParam(next);
 }
 
 static Arg GetArg(Str s) {
@@ -262,19 +280,19 @@ static void ParseAdobeFlags(FileArgs& i, Str s) {
 
     // tha args can be separated with `#` or `?` or `:`
     // i.e. `foo#bar` or foo&bar` or `foo:bar`
-    Split(&parts, s, "&", true);
+    Split(&parts, s, StrL("&"), true);
     if (len(parts) == 1) {
         parts.Reset();
-        Split(&parts, s, "#", true);
+        Split(&parts, s, StrL("#"), true);
     }
     if (len(parts) == 1) {
         parts.Reset();
-        Split(&parts, s, ";", true);
+        Split(&parts, s, StrL(";"), true);
     }
 
     for (Str part : parts) {
         parts2.Reset();
-        Split(&parts2, part, "=", true);
+        Split(&parts2, part, StrL("="), true);
         if (len(parts2) != 2) {
             continue;
         }
@@ -367,12 +385,15 @@ FileArgs* ParseFileArgs(Str path) {
 void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
     ReportIf(!a);
     // logf("ParseFlags: cmdLine: '%s'\n", ToUtf8Temp(cmdLine));
-    CmdLineArgsIter args(cmdLine);
+    StrNode* root = ParseCmdLine(cmdLine);
+    defer {
+        FreeStrNode(nullptr, root);
+    };
+    StrNode* firstArg = root ? root->next : nullptr;
 
     // if the first argument is a tool name, skip parsing flags entirely
-    if (toolNames && args.curr < args.nArgs) {
-        Str firstArg = args.at(args.curr);
-        if (firstArg && SeqStrIndexIS(toolNames.s, firstArg) >= 0) {
+    if (toolNames && firstArg) {
+        if (SeqStrIndexIS(toolNames.s, firstArg->s) >= 0) {
             return;
         }
     }
@@ -380,7 +401,10 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
     Str param = {};
     int paramInt = 0;
 
-    for (Str argName = args.NextArg(); argName; argName = args.NextArg()) {
+    StrNode* nextArg = firstArg;
+    for (StrNode* argNode = firstArg; argNode; argNode = nextArg) {
+        Str argName = argNode->s;
+        nextArg = argNode->next;
         // we register SumatraPDF with "%1" "%2" "%3" "%4"
         // for some reason that makes Directory Opus "Open With" provide the file twice
         // and gives "%3" and "%4' on cmd-line.
@@ -402,7 +426,7 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
         }
         if (arg == Arg::PrintToDefault) {
             i.printerName = str::Dup(a, GetDefaultPrinterNameTemp());
-            if (!i.printerName) {
+            if (len(i.printerName) == 0) {
                 i.printDialog = true;
             }
             i.exitWhenDone = true;
@@ -415,27 +439,27 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
         if (arg == Arg::PrintSilent) {
             // Adobe Reader: /t <file> <printer> [<driver> [<port>]]
             // also: <file> /t <printer> when the file is given earlier on the cmd-line
-            Str p1 = args.EatParam();
-            if (!p1) {
+            Str p1 = EatParam(nextArg);
+            if (len(p1) == 0) {
                 goto CollectFile;
             }
-            Str p2 = args.AdditionalParam(1);
+            Str p2 = AdditionalParam(nextArg);
             if (p2 && !CouldBeArg(p2)) {
                 if (len(i.fileNames) == 0 || !str::Eq(i.fileNames[len(i.fileNames) - 1], p1)) {
                     i.fileNames.Append(p1);
                 }
-                i.printerName = str::Dup(a, args.EatParam());
+                i.printerName = str::Dup(a, EatParam(nextArg));
             } else if (len(i.fileNames) > 0) {
                 i.printerName = str::Dup(a, p1);
             } else {
                 i.fileNames.Append(p1);
                 i.printerName = str::Dup(a, GetDefaultPrinterNameTemp());
-                if (!i.printerName) {
+                if (len(i.printerName) == 0) {
                     i.printDialog = true;
                 }
             }
             i.exitWhenDone = true;
-            SkipOptionalAdobePrinterParams(args);
+            SkipOptionalAdobePrinterParams(nextArg);
             continue;
         }
         if (arg == Arg::Help || arg == Arg::Help2 || arg == Arg::Help3) {
@@ -524,8 +548,20 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
             i.inNewWindow = true;
             continue;
         }
+        if (arg == Arg::NewWindowTabs) {
+            i.inNewWindowTabs = true;
+            continue;
+        }
         if (arg == Arg::ForTesting) {
             i.forTesting = true;
+            continue;
+        }
+        if (arg == Arg::QuickLook) {
+            i.quickLook = true;
+            continue;
+        }
+        if (arg == Arg::QuickLookAgent) {
+            i.quickLookAgent = true;
             continue;
         }
         if (arg == Arg::UnitTests) {
@@ -562,16 +598,16 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
             continue;
         }
         if ((arg == Arg::ArgEnumPrinters) || (arg == Arg::ListPrinters)) {
-            // defer UI until after SetCurrentLang() so _TRA resolves (issue #5697).
+            // defer UI until after SetCurrentLang() so Tr resolves (issue #5697).
             // Do not return early: later flags like -console / -silent must still apply.
             i.showPrintersDialog = true;
             i.exitImmediately = true;
             continue;
         }
-        param = args.EatParam();
+        param = EatParam(nextArg);
         // following args require at least one param
         // if no params here, assume this is a file
-        if (!param) {
+        if (len(param) == 0) {
             // argName starts with '-' but there are no params after that and it's not
             // one of the args without params, so assume this is a file that starts with '-'
             goto CollectFile;
@@ -600,7 +636,7 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
             // disable-auto-rotation; page numbers can be negative (-1 = last page)
             // e.g. -print-settings "1-3,5,10-8,odd,fit" or "last" or "-1"
             i.printSettings = str::Dup(a, param);
-            str::RemoveCharsInPlace(i.printSettings, " ");
+            str::RemoveCharsInPlace(i.printSettings, StrL(" "));
             str::TransCharsInPlace(i.printSettings, StrL(";"), StrL(","));
             continue;
         }
@@ -612,11 +648,11 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
             i.controlPipeName = str::Dup(a, param);
             continue;
         }
-        if ((arg == Arg::ForwardSearch1 || arg == Arg::ForwardSearch2) && args.AdditionalParam(1)) {
+        if ((arg == Arg::ForwardSearch1 || arg == Arg::ForwardSearch2) && AdditionalParam(nextArg)) {
             // -forward-search is for consistency with -inverse-search
             // -fwdsearch is for consistency with -fwdsearch-*
             i.forwardSearchOrigin = str::Dup(a, param);
-            i.forwardSearchLine = ParseInt(args.EatParam());
+            i.forwardSearchLine = ParseInt(EatParam(nextArg));
             continue;
         }
         if (arg == Arg::NamedDest || arg == Arg::NamedDest2) {
@@ -654,9 +690,9 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
             // <parent HWND> is a (numeric) window handle to
             // become the parent of a frameless SumatraPDF
             // (used e.g. for embedding it into a browser plugin)
-            if (args.AdditionalParam(1) && !str::IsDigit(param.s[0])) {
+            if (AdditionalParam(nextArg) && !str::IsDigit(param.s[0])) {
                 i.pluginURL = str::Dup(a, param);
-                i.hwndPluginParent = (HWND)(intptr_t)ParseInt64(args.EatParam());
+                i.hwndPluginParent = (HWND)(intptr_t)ParseInt64(EatParam(nextArg));
             } else {
                 i.hwndPluginParent = (HWND)(intptr_t)ParseInt64(param);
             }
@@ -671,19 +707,19 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
             //      -stress-test dir 301-  2x  render all files in dir twice, skipping first 300
             //      -stress-test dir *.pdf;*.xps  render all files in dir that are either PDF or XPS
             i.stressTestPath = str::Dup(a, param);
-            Str s = args.AdditionalParam(1);
+            Str s = AdditionalParam(nextArg);
             if (str::ContainsChar(s, '*')) {
-                i.stressTestFilter = str::Dup(a, args.EatParam());
-                s = args.AdditionalParam(1);
+                i.stressTestFilter = str::Dup(a, EatParam(nextArg));
+                s = AdditionalParam(nextArg);
             }
             if (s && IsValidPageRange(s)) {
-                i.stressTestRanges = str::Dup(a, args.EatParam());
-                s = args.AdditionalParam(1);
+                i.stressTestRanges = str::Dup(a, EatParam(nextArg));
+                s = AdditionalParam(nextArg);
             }
             int num;
             if (s && !str::IsNull(str::Parse(s, "%dx%$", &num)) && num > 0) {
                 i.stressTestCycles = num;
-                args.EatParam();
+                EatParam(nextArg);
             }
             continue;
         }
@@ -712,9 +748,9 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
         }
         if (arg == Arg::Bench) {
             i.pathsToBenchmark.Append(param);
-            Str s = args.AdditionalParam(1);
+            Str s = AdditionalParam(nextArg);
             if (s && IsBenchPagesInfo(s)) {
-                s = args.EatParam();
+                s = EatParam(nextArg);
                 i.pathsToBenchmark.Append(s);
             } else {
                 // pathsToBenchmark are always in pairs
@@ -785,14 +821,14 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
             i.globalPrefArgs.Append(param);
             continue;
         }
-        if (arg == Arg::SetColorRange && args.AdditionalParam(1)) {
+        if (arg == Arg::SetColorRange && AdditionalParam(nextArg)) {
             i.globalPrefArgs.Append(argName);
             i.globalPrefArgs.Append(param);
-            i.globalPrefArgs.Append(args.EatParam());
+            i.globalPrefArgs.Append(EatParam(nextArg));
             continue;
         }
         // again, argName is any of the known args, so assume it's a file starting with '-'
-        args.RewindParam();
+        nextArg = argNode->next;
 
     CollectFile:
         // Resolve shell shortcuts so opening a .lnk loads the target document.
@@ -809,8 +845,8 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
         // silently extract files to directory given if /d
         // or current directory if no /d given
         i.silent = true;
-        if (!i.installDir) {
-            i.installDir = str::Dup(a, ".");
+        if (len(i.installDir) == 0) {
+            i.installDir = str::Dup(a, StrL("."));
         }
     }
 }

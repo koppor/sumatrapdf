@@ -2,14 +2,15 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#include "base/Crypto.h"
 
 #include <wincrypt.h>
 #include <wintrust.h>
 #include <softpub.h>
 
+#include "base/Crypto.h"
+
 #ifndef DWORD_MAX
-#define DWORD_MAX 0xffffffffUL
+constexpr DWORD DWORD_MAX = 0xffffffffUL;
 #endif
 
 // TODO: could use CryptoNG available starting in Vista
@@ -70,7 +71,7 @@ static bool ExtractSignature(Str hexSignature, Str& data, ScopedMem<BYTE>& signa
     // * empty, then the signature must be found on the last line of non-binary data, starting at " Signature sha1:"
     Str hex = hexSignature;
     if (!str::TrimPrefix(hex, StrL("sha1:"))) {
-        if (!hex) {
+        if (len(hex) == 0) {
             if (data.len < 20 || memchr(data.s, 0, data.len)) {
                 return false;
             }
@@ -94,10 +95,10 @@ static bool ExtractSignature(Str hexSignature, Str& data, ScopedMem<BYTE>& signa
         if (1 != sscanf_s(hex.s + off, "%02x", &val)) {
             return false;
         }
-        signatureBytes.Append((BYTE)val);
+        VecAppend(signatureBytes, (BYTE)val);
     }
     signatureLen = len(signatureBytes);
-    signature.Set(signatureBytes.Take());
+    signature.Set(VecTake(signatureBytes));
     return true;
 }
 
@@ -176,7 +177,7 @@ Str ExtractP7m(Str d) {
         free(content);
         return {};
     }
-    return Str((char*)(content), (int)(cbContent));
+    return Str((char*)content, (int)cbContent);
 }
 
 // Authenticode / PE signature helpers (Windows only; stubs return false/null on POSIX)
@@ -245,12 +246,12 @@ TempStr GetExecutableSignerTemp(Str exePath) {
 
     PCCERT_CONTEXT certCtx = CertFindCertificateInStore(hStore, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0,
                                                         CERT_FIND_SUBJECT_CERT, &certInfo, nullptr);
-    TempStr res = nullptr;
+    TempStr res = {};
     if (certCtx) {
         char buf[512];
         DWORD n = CertGetNameStringA(certCtx, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, buf, dimof(buf));
         if (n > 1) {
-            res = str::DupTemp(buf);
+            res = str::DupTemp(Str(buf));
         }
         CertFreeCertificateContext(certCtx);
     }

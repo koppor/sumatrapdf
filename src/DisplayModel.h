@@ -50,6 +50,9 @@ struct PageInfo {
 
     // set to true if rendering this page failed (e.g. corrupt image data)
     bool failedToRender = false;
+
+    // chapter-aware equivalent of this page's flat pageNo; set in BuildPagesInfo()
+    Location loc;
 };
 
 /* The current scroll state (needed for saving/restoring the scroll position) */
@@ -67,6 +70,9 @@ struct ScrollState {
     // Only navigation history sets it (AddNavPoint(rememberZoom)), so restoring
     // a scroll state for any other reason doesn't touch the zoom.
     float zoom = 0;
+    // chapter-aware equivalent of page; lets SetScrollState() find the right
+    // page again after a chapter shifted the flat numbering
+    Location loc;
 };
 
 struct TextSelection;
@@ -112,6 +118,7 @@ struct DisplayModel : DocController {
     void SetViewPortSize(Size size) override;
 
     // table of contents
+    bool HasToc() override;
     TocTree* GetToc() override;
     void ScrollTo(int pageNo, RectF rect, float zoom) override;
     bool HandleLink(IPageDestination*, ILinkHandler*) override;
@@ -124,12 +131,25 @@ struct DisplayModel : DocController {
     bool HasPageLabels() const override;
     TempStr GetPageLabeTemp(int pageNo) const override;
     int GetPageByLabel(Str label) const override;
+    int LogicalPageCount() const;
 
     bool ValidPageNo(int pageNo) const override;
     bool GoToNextPage() override;
     bool GoToPrevPage(bool toBottom = false) override;
     bool GoToFirstPage() override;
     bool GoToLastPage() override;
+
+    // chapter-aware page addressing (forwards to the engine)
+    int ChapterCount() override;
+    int ChapterPageCount(int chapter) override;
+    Location CurrentLocation() override;
+    void GoToLocation(Location loc, bool addNavPoint) override;
+    Location LocationFromPageNo(int pageNo) override;
+    int PageNoFromLocation(Location loc) override;
+    Location ResolveDest(IPageDestination* dest) override;
+    TempStr MakeBookmarkTemp(Location loc) override;
+    Location LookupBookmark(Str s) override;
+    Location ClampLocation(Location loc) override;
 
     DisplayModel* AsFixed() override;
 
@@ -156,6 +176,7 @@ struct DisplayModel : DocController {
     float GetZoomReal(int pageNo) const;
     float MaxZoomForDocument() const;
     void Relayout(float zoomVirtual, int rotation);
+    bool ViewportReadyForRelayout() const;
 
     Rect GetViewPort() const;
     bool IsHScrollbarVisible() const;
@@ -168,6 +189,7 @@ struct DisplayModel : DocController {
     bool CanScrollUp() const;
     bool IsAtDocumentEnd() const;
     Size GetCanvasSize() const;
+    int UnusedCanvasDx() const;
 
     bool PageShown(int pageNo) const;
     bool PageVisible(int pageNo) const;
@@ -191,7 +213,7 @@ struct DisplayModel : DocController {
     Annotation* GetAnnotationAtPos(Point pt, Annotation*);
     Annotation* GetWidgetAtPos(Point pt);
 
-    int GetPageNoByPoint(Point pt) const;
+    int GetPageNoByPoint(Point pt);
     Point CvtToScreen(int pageNo, PointF pt);
     Rect CvtToScreen(int pageNo, RectF r);
     PointF CvtFromScreen(Point pt, int pageNo = kInvalidPageNo);
@@ -209,16 +231,26 @@ struct DisplayModel : DocController {
     void SetUiDpi(int dpi);
     void SetDisplayR2L(bool r2l);
     bool GetDisplayR2L() const;
+    void SetUniformPageWidth(bool enable);
+    bool GetUniformPageWidth() const;
     bool GoToPageHorizontal(bool toRight);
 
     bool ShouldCacheRendering(int pageNo) const;
     void RepaintDisplay();
+    void SyncWithEngineLayout();
+    // valid only during the PagesRenumbered callback
+    int RemapPageNo(int oldPageNo);
+    bool PageVisibleNearbyLocked(int pageNo) const;
 
     bool InPresentation() const;
 
     void BuildPagesInfo();
     float ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) const;
     SizeF PageSizeAfterRotation(int pageNo, bool fitToContent = false) const;
+    bool ShouldTreatLandscapeAsSpread() const;
+    void EnsureSpreadFlags() const;
+    int FirstPageInRow(int pageNo) const;
+    int LastPageInRow(int pageNo) const;
     void ChangeStartPage(int startPage);
     Point GetContentStart(int pageNo) const;
     void RecalcVisibleParts() const;
@@ -227,6 +259,7 @@ struct DisplayModel : DocController {
     RectF GetContentBox(int pageNo) const;
     void CalcZoomReal(float zoomVirtual);
     void GoToPage(int pageNo, int scrollY, bool addNavPt = false, int scrollX = -1);
+    bool GoToNextPage(bool keepViewOffset);
     bool GoToPrevPage(int scrollY);
     int GetPageNextToPoint(Point pt) const;
 
@@ -234,6 +267,20 @@ struct DisplayModel : DocController {
 
     /* an array of PageInfo, len of array is pageCount */
     PageInfo* pagesInfo = nullptr;
+    // snapshot of engine->PageCount() taken by BuildPagesInfo(); PageCount()
+    // returns this instead of asking the engine live, so pagesInfo indexing
+    // stays consistent even after the engine's chapter layout has moved on
+    int pageCount = 0;
+    // guards pagesInfo/pageCount against the render thread reading them while
+    // SyncWithEngineLayout() swaps in a freshly rebuilt array. UI-thread code
+    // reads pagesInfo/pageCount lock-free, same as before
+    mutable Mutex pagesInfoLock;
+    // engine->LayoutGeneration() as of the last BuildPagesInfo()
+    int layoutGeneration = 0;
+    bool syncingWithEngineLayout = false;
+    // pagesInfo[i].loc captured just before a resync rebuilds pagesInfo,
+    // indexed by the pre-resync pageNo - 1; backs RemapPageNo()
+    Vec<Location> remapOldLocs;
 
     /* Lazy media boxes: don't measure every page up-front, lay out un-measured
        pages with estimatedMediaBox and fix them up as they scroll into view.
@@ -304,6 +351,14 @@ struct DisplayModel : DocController {
     /* whether to display pages Left-to-Right or Right-to-Left.
        this value is extracted from the PDF document */
     bool displayR2L = false;
+    bool uniformPageWidth = false;
+
+    /* landscape image pages that occupy a full facing/book row
+       (ComicBookUI / ImageUI LandscapeAsSpread; issues #1324, #872) */
+    mutable Vec<u8> spreadFlags;
+    mutable Vec<int> rowFirst;
+    mutable Vec<int> rowLast;
+    mutable bool spreadCacheValid = false;
 
     /* when we're in presentation mode, _pres* contains the pre-presentation values */
     bool inPresentation = false;
@@ -311,8 +366,16 @@ struct DisplayModel : DocController {
     /* allow resizing a window without triggering a new rendering (needed for window destruction) */
     bool pauseRendering = false;
 
+    bool pendingRelayout = false;
+    bool hasPendingScroll = false;
+    ScrollState pendingScroll;
+
     void RenderFinished(PageRenderRequest* req);
     void RenderFinishedAsync(PageRenderRequest* req);
 };
 
 extern bool gPredictiveRender;
+
+// print / dump / full-document search / PDF export / stress test: lay out
+// every chapter and resync pagesInfo. No-op for a single-chapter document
+void EnsureFullLayout(DisplayModel* dm);

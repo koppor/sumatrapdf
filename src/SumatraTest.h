@@ -13,6 +13,7 @@ TempStr TripleClickLineSelectResultTemp(Str pdfPath, Str clickWord, Str expected
 TempStr ContextMenuSelectionResultTemp(Str word1, Str word2, Str cursorWord, int* exitCodeOut = nullptr);
 TempStr ClickClearsSelectionResultTemp(Str word, int* exitCodeOut = nullptr);
 TempStr RectSelectionDragResultTemp(Str word, int* exitCodeOut = nullptr);
+TempStr RotatedTextMouseDragResultTemp(Str word, int* exitCodeOut = nullptr);
 TempStr GoToFindMatchResultTemp(Str word, Str typed, int* exitCodeOut = nullptr);
 TempStr ScrollToLinkResultTemp(int minViewportDelta, int* exitCodeOut = nullptr);
 TempStr I18nErrorStringResultTemp(int* exitCodeOut = nullptr);
@@ -20,7 +21,20 @@ TempStr GetTocResultTemp(Str path, int* exitCodeOut = nullptr);
 TempStr PageLinksResultTemp(Str path, int pageNo, int* exitCodeOut = nullptr);
 TempStr PageCommentsResultTemp(Str path, int pageNo, int* exitCodeOut = nullptr);
 TempStr TocNavigateResultTemp(int destNo, int* exitCodeOut = nullptr);
+TempStr TocSidebarNavResultTemp(int destNo, int* exitCodeOut = nullptr);
+TempStr RenumberSelResultTemp(int layoutChapter, int* exitCodeOut = nullptr);
 TempStr DestZoomNavResultTemp(int destNo, int startZoomPerc, int* exitCodeOut = nullptr);
 TempStr MarkdownTocNavigateResultTemp(int destNo, int minScrollY, int* exitCodeOut = nullptr);
 TempStr MarkdownFollowLinkResultTemp(Str href, bool follow, int* exitCodeOut = nullptr);
 TempStr CadEnhanceColorsResultTemp(Str path, int pageNo, int zoomPercent, int* exitCodeOut = nullptr);
+TempStr ImageRenderEdgesResultTemp(Str path, int zoomPercent, int clipKind, int* exitCodeOut = nullptr);
+TempStr ImageInsertResultTemp(Str pdfPath, Str imagePath, int* exitCodeOut = nullptr);
+TempStr PageRenderColorsResultTemp(Str path, int* exitCodeOut = nullptr, int pageNo = 1);
+TempStr PageRenderViewPrintResultTemp(Str path, int* exitCodeOut = nullptr);
+TempStr ListSigningCertsResultTemp(int* exitCodeOut = nullptr);
+TempStr SignDocumentResultTemp(Str pdfPath, Str destPath, Str thumbprint, Str certPath, Str certPassword,
+                               Str imagePath = {}, int appearanceFlags = -1, int* exitCodeOut = nullptr);
+TempStr CmykImageSaveResultTemp(Str jpegPath, Str tiffPath, int* exitCodeOut = nullptr);
+TempStr ChapterInfoResultTemp(int* exitCodeOut = nullptr);
+TempStr GoToLocationResultTemp(int chapter, int page, int* exitCodeOut = nullptr);
+TempStr HiddenTabGoToPageResultTemp(int* exitCodeOut = nullptr);

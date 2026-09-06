@@ -2,9 +2,9 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#include "gui/Dpi.h"
 #include "base/WinDynCalls.h"
 #include "base/ScopedWin.h"
+#include "gui/Dpi.h"
 
 /* Info from https://code.msdn.microsoft.com/DPI-Tutorial-sample-64134744
 
@@ -27,6 +27,33 @@ int dpiX = 96;
 int dpiY = 96;
 
 static int gWineDpiOverride = 0;
+static bool gDpiOverrideLegacy = false;
+
+static void DpiMaybeReadEnvOverride() {
+    static bool done = false;
+    if (done) {
+        return;
+    }
+    done = true;
+    if (gDpiOverride > 0) {
+        return;
+    }
+    char buf[16]{};
+    DWORD n = GetEnvironmentVariableA("SUMATRA_DPI_OVERRIDE", buf, (DWORD)sizeof(buf));
+    if (n == 0 || n >= (DWORD)sizeof(buf)) {
+        return;
+    }
+    char* pctText = buf;
+    bool legacy = str::StartsWith(Str(buf, (int)n), StrL("legacy:"));
+    if (legacy) {
+        pctText += 7;
+    }
+    int pct = atoi(pctText);
+    if (pct >= 50 && pct <= 500) {
+        gDpiOverride = pct;
+        gDpiOverrideLegacy = legacy;
+    }
+}
 
 void DpiSetWineOverride(int dpi) {
     gWineDpiOverride = dpi;
@@ -44,7 +71,7 @@ static bool DpiIsDesktopHwnd(HWND hwnd) {
 }
 
 static bool DpiFromMonitor(HMONITOR h, int* outX, int* outY) {
-    if (!h || !DynGetDpiForMonitor) {
+    if (!h || !DynGetDpiForMonitor || gDpiOverrideLegacy) {
         return false;
     }
     uint monX = 96, monY = 96;
@@ -60,7 +87,8 @@ static bool DpiFromMonitor(HMONITOR h, int* outX, int* outY) {
 // The monitor that contains (x,y), for seeding layout DPI before a window
 // exists. GetForegroundWindow / HWND_DESKTOP report the *primary* monitor.
 int DpiGetForPoint(int x, int y) {
-    if (gDpiOverride > 0) {
+    DpiMaybeReadEnvOverride();
+    if (gDpiOverride > 0 && !gDpiOverrideLegacy) {
         return MulDiv(96, gDpiOverride, 100);
     }
     POINT pt{x, y};
@@ -68,7 +96,11 @@ int DpiGetForPoint(int x, int y) {
     if (DpiFromMonitor(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &dx, &dy)) {
         return dx;
     }
-    return 96;
+    // GetDpiForMonitor is unavailable on Windows 7. It only supports one
+    // system DPI, which the desktop DC reports even though GetDpiForWindow is
+    // also unavailable. Returning 96 here left the installer and first app
+    // window unscaled while their system fonts were scaled.
+    return DpiGetForHwnd(HWND_DESKTOP);
 }
 
 // Uncached per-window DPI. HWND_DESKTOP / null report the system (primary
@@ -79,6 +111,7 @@ int DpiGetForPoint(int x, int y) {
 // toolbar and tab bar 2.5× too big when launching on a 100% screen next to a
 // 250% primary (discussion #4831).
 static void DpiQueryForHwnd(HWND hwnd, int* outX, int* outY) {
+    DpiMaybeReadEnvOverride();
     int x = 96;
     int y = 96;
     if (gDpiOverride > 0 && !DpiIsDesktopHwnd(hwnd)) {
@@ -88,6 +121,16 @@ static void DpiQueryForHwnd(HWND hwnd, int* outX, int* outY) {
         return;
     }
     if (!DpiIsDesktopHwnd(hwnd)) {
+        HWND root = GetAncestor(hwnd, GA_ROOT);
+        if (root && !IsWindowVisible(root)) {
+            // A newly-created hidden popup with CW_USEDEFAULT is parked on the
+            // primary monitor until its owner positions it. Keep the DPI the
+            // caller seeded from the owner; querying the temporary position
+            // here makes its layout use the primary monitor's scale.
+            *outX = dpiX > 0 ? dpiX : 96;
+            *outY = dpiY > 0 ? dpiY : *outX;
+            return;
+        }
         if (DpiFromMonitor(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &x, &y)) {
             *outX = x;
             *outY = y;
@@ -107,6 +150,9 @@ static void DpiQueryForHwnd(HWND hwnd, int* outX, int* outY) {
     ScopedGetDC dc(hwnd);
     x = GetDeviceCaps(dc, LOGPIXELSX);
     y = GetDeviceCaps(dc, LOGPIXELSY);
+    if (gDpiOverrideLegacy) {
+        x = y = MulDiv(96, gDpiOverride, 100);
+    }
     if (x < 72) {
         HDC screenDC = GetDC(nullptr);
         if (screenDC) {

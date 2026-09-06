@@ -3,7 +3,7 @@
 
 #include "base/Base.h"
 
-#if defined(DEBUG)
+#if IS_DEBUG
 
 #include "gui/UIModels.h"
 #include "gui/Layout.h"
@@ -11,8 +11,9 @@
 #include "gui/Gfx.h"
 #include "gui/VirtCtrl.h"
 #include "Commands.h"
+#include "base/UtAssert.h"
+#include "AppUnitTests.h"
 
-#if defined(DEBUG)
 void TextSelection_UnitTests();
 void Layout_UnitTests();
 void VirtCtrl_UnitTests();
@@ -28,10 +29,12 @@ bool EngineMupdf_UnitTestEbookLineSpacingCss();
 bool EngineMupdf_UnitTestEbookFontFamilyCss();
 bool EngineMupdf_UnitTestEbookMarginCss();
 bool EngineMupdf_UnitTestMergeEBookUI();
-#endif
-
-// must be last to over-write assert()
-#include "base/UtAssert.h"
+bool EngineMupdf_UnitTestPageLabels();
+bool Accelerators_UnitTestFolderNavIsSafe();
+bool Accelerators_UnitTestTreeTakesLetters();
+bool ShortcutParse_UnitTestShiftedPunct();
+bool AnnotSearch_UnitTests();
+void ReadAloudHighlight_UnitTests();
 
 static void ParseTipExpectWordsLinks(Str input, int expWords, int expLinks) {
     VirtRichText* tip = ParseTip(input);
@@ -56,34 +59,35 @@ static void ParseTipExpectLinkCmd(Str input, Str expCmd) {
 
 static void ParseTip_UnitTests() {
     // issue #5752: brackets in filenames must not hang
-    ParseTipExpectPlainContains("Loading Apocalypse Bringer Mynoghra_01 [CIW].pdf ...", "[CIW]");
+    ParseTipExpectPlainContains(StrL("Loading Apocalypse Bringer Mynoghra_01 [CIW].pdf ..."), StrL("[CIW]"));
 
     // empty link text must not create a zero-word link (DrawTipWords crash)
-    ParseTipExpectWordsLinks("[](CmdFoo)", 1, 0);
-    ParseTipExpectPlainContains("[](CmdFoo)", "[](CmdFoo)");
+    ParseTipExpectWordsLinks(StrL("[](CmdFoo)"), 1, 0);
+    ParseTipExpectPlainContains(StrL("[](CmdFoo)"), StrL("[](CmdFoo)"));
 
     // URLs may contain balanced parentheses
-    ParseTipExpectLinkCmd("[text](https://example.com/foo(bar))", "https://example.com/foo(bar)");
-    ParseTipExpectWordsLinks("[text](https://example.com/foo(bar))", 1, 1);
+    ParseTipExpectLinkCmd(StrL("[text](https://example.com/foo(bar))"), StrL("https://example.com/foo(bar)"));
+    ParseTipExpectWordsLinks(StrL("[text](https://example.com/foo(bar))"), 1, 1);
 
     // Help/ link followed by trailing punctuation: the resolved URL must stop at
     // the link's ')' and not pull in the following ")." (the link cmd is a
     // non-NUL-terminated view into the tip line)
-    ParseTipExpectLinkCmd("You can [extract text from PDF file](Help/Tool-x-extract-text-from-pdf).",
-                          "https://www.sumatrapdfreader.org/docs/Tool-x-extract-text-from-pdf");
+    ParseTipExpectLinkCmd(StrL("You can [extract text from PDF file](Help/Tool-x-extract-text-from-pdf)."),
+                          StrL("https://www.sumatrapdfreader.org/docs/Tool-x-extract-text-from-pdf"));
 
     // nested brackets in link text
-    ParseTipExpectWordsLinks("[foo [bar]](CmdFoo)", 2, 1);
-    ParseTipExpectPlainContains("[foo [bar]](CmdFoo)", "foo");
-    ParseTipExpectPlainContains("[foo [bar]](CmdFoo)", "[bar]");
+    ParseTipExpectWordsLinks(StrL("[foo [bar]](CmdFoo)"), 2, 1);
+    ParseTipExpectPlainContains(StrL("[foo [bar]](CmdFoo)"), StrL("foo"));
+    ParseTipExpectPlainContains(StrL("[foo [bar]](CmdFoo)"), StrL("[bar]"));
 
     // (Key/...) only expands for real commands
-    ParseTipExpectPlainContains("file (Key/foo).pdf", "(Key/foo).pdf");
-    ParseTipExpectPlainContains("(Key/CmdCommandPalette)", "Ctrl");
+    ParseTipExpectPlainContains(StrL("file (Key/foo).pdf"), StrL("(Key/foo).pdf"));
+    ParseTipExpectPlainContains(StrL("(Key/CmdCommandPalette)"), StrL("Ctrl"));
+    ParseTipExpectPlainContains(StrL("(Key/CmdToggleKeyboardHelp)"), StrL("?"));
 
     // (Kbd/...) draws as a key-cap word; nests with (Key/...)
     {
-        VirtRichText* tip = ParseTip("(Kbd/Cmd+Shift)");
+        VirtRichText* tip = ParseTip(StrL("(Kbd/Cmd+Shift)"));
         utassert(TipWordCount(tip) == 1);
         utassert(tip->words.next->isKbd);
         utassert(str::Eq(tip->words.next->text, StrL("Cmd+Shift")));
@@ -91,7 +95,7 @@ static void ParseTip_UnitTests() {
         delete tip;
     }
     {
-        VirtRichText* tip = ParseTip("(Kbd/(Key/CmdCommandPalette)): go");
+        VirtRichText* tip = ParseTip(StrL("(Kbd/(Key/CmdCommandPalette)): go"));
         utassert(TipWordCount(tip) >= 2);
         TipWord* w0 = tip->words.next;
         TipWord* w1 = w0->next;
@@ -105,12 +109,12 @@ static void ParseTip_UnitTests() {
     }
 
     // whitespace: tab and newline break words
-    ParseTipExpectWordsLinks("line1\nline2", 2, 0);
-    ParseTipExpectWordsLinks("tab\there", 2, 0);
+    ParseTipExpectWordsLinks(StrL("line1\nline2"), 2, 0);
+    ParseTipExpectWordsLinks(StrL("tab\there"), 2, 0);
 
     // ordinary tips still work
-    ParseTipExpectWordsLinks("before [valid](CmdFoo)", 2, 1);
-    ParseTipExpectWordsLinks("[valid](CmdFoo) after", 2, 1);
+    ParseTipExpectWordsLinks(StrL("before [valid](CmdFoo)"), 2, 1);
+    ParseTipExpectWordsLinks(StrL("[valid](CmdFoo) after"), 2, 1);
 
     // GHSA-2wv2-qm2f-vmxh: a file name can contain the markup, so text from
     // outside the app must never become a link. AddPlainText / AddPlainLink are
@@ -144,7 +148,7 @@ static void ParseTip_UnitTests() {
 
 int RunAppUnitTests() {
     ParseTip_UnitTests();
-#if defined(DEBUG)
+#if IS_DEBUG
     TextSelection_UnitTests();
     Layout_UnitTests();
 #if OS_WIN
@@ -163,6 +167,12 @@ int RunAppUnitTests() {
     utassert(EngineMupdf_UnitTestEbookFontFamilyCss());
     utassert(EngineMupdf_UnitTestEbookMarginCss());
     utassert(EngineMupdf_UnitTestMergeEBookUI());
+    utassert(EngineMupdf_UnitTestPageLabels());
+    utassert(Accelerators_UnitTestFolderNavIsSafe());
+    utassert(Accelerators_UnitTestTreeTakesLetters());
+    utassert(ShortcutParse_UnitTestShiftedPunct());
+    utassert(AnnotSearch_UnitTests());
+    ReadAloudHighlight_UnitTests();
 #endif
     return utassert_print_results();
 }

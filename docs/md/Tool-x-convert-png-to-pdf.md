@@ -1,8 +1,8 @@
 # Convert PNG image to a PDF
 
-> The command-line tools are provided by `sumatrapdf-tool`, which is installed next to `SumatraPDF.exe`. They only work after SumatraPDF has been installed.
+> Use `sumatrapdf-tool.exe` or [SumatraPDF.exe](Tools.md) with the same arguments.
 
-To use SumatraPDF to convert a single PNG file to a PDF from command-line:
+To use SumatraPDF to convert a single PNG file to a PDF from the command line:
 
 `sumatrapdf-tool convert -o output.pdf input.png`
 

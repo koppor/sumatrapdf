@@ -7,8 +7,8 @@
 
 #include "SumatraConfig.h"
 
-#include "Translations.h"
 #include "resource.h"
+#include "Translations.h"
 
 namespace trans {
 
@@ -61,7 +61,7 @@ static TempStr UnescapeTemp(Str sOrig) {
         src++;
     }
     *dst = 0;
-    return unescaped;
+    return s;
 }
 
 static void FreeTranslations() {
@@ -73,7 +73,7 @@ static void ParseTranslationsTxt(Str d, Str langCode) {
     TempStr langCodePref = str::JoinTemp(langCode, StrL(":"));
 
     StrVec lines;
-    Split(&lines, d, "\n", true);
+    Split(&lines, d, StrL("\n"), true);
     int nStrings = 0;
     for (Str l : lines) {
         if (l && l.s[0] == ':') {
@@ -93,12 +93,12 @@ static void ParseTranslationsTxt(Str d, Str langCode) {
     int i = 2; // skip first 2 header lines
     while (i < nLines) {
         Str origLine = lines[i];
-        ReportDebugIf(!origLine || origLine.s[0] != ':');
+        ReportDebugIf(len(origLine) == 0 || origLine.s[0] != ':');
         orig = Str(origLine.s + 1, origLine.len - 1);
         i++;
         trans = {};
         while (i < nLines && lines[i] && lines[i].s[0] != ':') {
-            if (!trans) {
+            if (len(trans) == 0) {
                 Str line = lines[i];
                 if (str::TrimPrefix(line, langCodePref)) {
                     trans = line;
@@ -106,13 +106,13 @@ static void ParseTranslationsTxt(Str d, Str langCode) {
             }
             i++;
         }
-        if (!trans) {
+        if (len(trans) == 0) {
             nUntranslated++;
         }
         TempStr unescaped = UnescapeTemp(orig);
         c->Append(unescaped);
-        if (!trans) {
-            c->Append(nullptr);
+        if (len(trans) == 0) {
+            c->Append({});
             continue;
         }
         unescaped = UnescapeTemp(trans);
@@ -144,7 +144,7 @@ Str GetTranslation(Str s) {
         Str s2 = c->At(idx);
         if (s2.len == sLen && str::Eq(s, s2)) {
             Str tr = c->At(idx + 1);
-            if (!tr) {
+            if (len(tr) == 0) {
                 logf("Didn't find translation for '%s'\n", s);
                 return s;
             }
@@ -210,7 +210,7 @@ void SetCurrentLangByCode(Str langCode) {
         FallbackToEnglish();
         return;
     }
-    Str d = Str((char*)(data), dataSize);
+    Str d = Str((char*)data, dataSize);
     // whitespace-only / header-only with no strings: treat as empty
     bool hasString = false;
     for (int i = 0; i < d.len; i++) {
@@ -230,10 +230,10 @@ void SetCurrentLangByCode(Str langCode) {
 }
 
 Str ValidateLangCode(Str langCode) {
-    if (!langCode) return {};
+    if (len(langCode) == 0) return {};
     int idx = SeqStrIndex(gLangCodes, langCode);
     if (idx < 0) {
-        return nullptr;
+        return {};
     }
     return GetLangCodeByIdxTemp(idx);
 }
@@ -278,10 +278,6 @@ void Destroy() {
 
 } // namespace trans
 
-Str _TRA(Str s) {
+Str Tr(Str s) {
     return trans::GetTranslation(s);
-}
-
-TempWStr _TRW(Str s) {
-    return ToWStrTemp(trans::GetTranslation(s));
 }

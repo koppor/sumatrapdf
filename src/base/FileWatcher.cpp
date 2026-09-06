@@ -2,10 +2,10 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#include "base/FileWatcher.h"
 #include "base/ScopedWin.h"
 #include "base/File.h"
 #include "base/Win.h"
+#include "base/FileWatcher.h"
 
 // Log file path we must not reload-on-change (set by SumatraLog).
 static Str gFileWatcherSkipPath;
@@ -59,7 +59,7 @@ TODO:
 */
 
 // there's a balance between responsiveness to changes and efficiency
-#define FILEWATCH_DELAY_IN_MS 1000
+constexpr int kFileWatchDelayInMs = 1000;
 
 // Some people use overlapped.hEvent to store data but I'm playing it safe.
 struct OverlappedEx {
@@ -189,7 +189,6 @@ static void NotifyAboutFile(WatchedDir* d, Str fileName) {
 
     for (WatchedFile* wf = gWatchedFiles; wf; wf = wf->next) {
         if (wf->ignore) {
-            logf("NotifyAboutFile: ignoring '%s'\n", wf->filePath);
             continue;
         }
         if (wf->watchedDir != d) {
@@ -368,7 +367,7 @@ static DWORD GetTimeoutInMs() {
     ScopedMutex cs(&gFileWatcherMutex);
     for (WatchedFile* wf = gWatchedFiles; wf; wf = wf->next) {
         if (wf->isManualCheck) {
-            return FILEWATCH_DELAY_IN_MS;
+            return kFileWatchDelayInMs;
         }
     }
     return INFINITE;
@@ -405,7 +404,7 @@ static void RunManualChecks() {
             // Dup so we can use path after releasing the lock (wf may be freed).
             it.path = str::Dup(wf->filePath);
             it.state = wf->fileState;
-            items.Append(it);
+            VecAppend(items, it);
         }
     }
 
@@ -613,7 +612,7 @@ WatchedFile* FileWatcherSubscribe(Str path, const Func0& onFileChangedCb, bool e
         gThreadControlHandle = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 
         auto fn = MkFunc0Void(FileWatcherThread);
-        gThreadHandle = StartThread(fn, "FileWatcherThread");
+        gThreadHandle = StartThread(fn, StrL("FileWatcherThread"));
     }
 
     return NewWatchedFile(path, onFileChangedCb, enableManualCheck);

@@ -16,7 +16,6 @@
 
 #include "Settings.h"
 #include "AppSettings.h"
-#include "GlobalPrefs.h"
 #include "DocController.h"
 #include "EngineBase.h"
 #include "Annotation.h"
@@ -29,7 +28,7 @@
 #include "SumatraPDF.h"
 #include "Translations.h"
 #include "DarkMode_win.h"
-#include "ChangeColorDialog.h"
+#include "SumatraDialogs.h"
 
 static const int kMaxCustomColors = 13;
 static const int kNumPresets = 3;
@@ -196,7 +195,7 @@ void ChangeColorWnd::ParseCustomColors() {
         customColors[i] = 0;
     }
     customColorsChanged = false;
-    Str s = gGlobalPrefs ? gGlobalPrefs->customColors : Str{};
+    Str s = gSettings ? gSettings->customColors : Str{};
     if (len(s) == 0) {
         return;
     }
@@ -224,7 +223,7 @@ void ChangeColorWnd::ParseCustomColors() {
 }
 
 void ChangeColorWnd::SaveCustomColorsIfChanged() {
-    if (!customColorsChanged || !gGlobalPrefs) {
+    if (!customColorsChanged || !gSettings) {
         return;
     }
     str::Builder buf;
@@ -237,7 +236,7 @@ void ChangeColorWnd::SaveCustomColorsIfChanged() {
         }
         buf.Append(SerializeColorTemp(customColors[i]));
     }
-    str::ReplaceWithCopy(&gGlobalPrefs->customColors, ToStr(buf));
+    str::ReplaceWithCopy(&gSettings->customColors, ToStr(buf));
     SaveSettings();
 }
 
@@ -287,7 +286,7 @@ bool ChangeColorWnd::TryParseEdit() {
         return false;
     }
     TempStr text = editRgb->GetTextTemp();
-    if (!text || !text.s[0]) {
+    if (len(text) == 0 || !text.s[0]) {
         return false;
     }
     ParsedColor parsed;
@@ -505,7 +504,7 @@ void ChangeColorWnd::OnCancel(VirtMouseEvent*) {
 }
 
 WindowTab* ChangeColorWnd::TargetTab() {
-    if (!IsMainWindowValid(win)) {
+    if (!IsMainWindowValidAndNotClosing(win)) {
         return nullptr;
     }
     WindowTab* t = FindTabByFilePath(filePath);
@@ -531,17 +530,17 @@ void ChangeColorWnd::ApplyBackground() {
 
     if (applyToAll) {
         if (isCbx) {
-            SetColorText(gGlobalPrefs->comicBookUI.windowBgCol, colorStr);
+            SetColorText(gSettings->comicBookUI.windowBgCol, colorStr);
         } else if (isImage) {
-            SetColorText(gGlobalPrefs->imageUI.windowBgCol, colorStr);
+            SetColorText(gSettings->imageUI.windowBgCol, colorStr);
         } else if (isEbook) {
-            SetColorText(gGlobalPrefs->eBookUI.windowBgCol, colorStr);
+            SetColorText(gSettings->eBookUI.windowBgCol, colorStr);
         } else {
-            SetColorText(gGlobalPrefs->fixedPageUI.windowBgCol, colorStr);
+            SetColorText(gSettings->fixedPageUI.windowBgCol, colorStr);
         }
         FileState* fs = FileHistoryFindByPath(t->filePath);
         if (fs) {
-            SetColorText(fs->bgCol, "");
+            SetColorText(fs->bgCol, StrL(""));
         }
         t->bgColor = kColorUnset;
         t->bgColorCheckered = false;
@@ -567,7 +566,7 @@ void ChangeColorWnd::ApplyTabColor() {
     FileState* fs = FileHistoryFindByPath(t->filePath);
     if (fs) {
         if (isCheckered) {
-            SetColorText(fs->tabCol, "");
+            SetColorText(fs->tabCol, StrL(""));
         } else {
             SetColorText(fs->tabCol, SerializeColorTemp(currentColor));
         }
@@ -652,13 +651,13 @@ void ChangeColorWnd::LoadCurrentColor() {
     }
     ParsedColor* bgOverride = nullptr;
     if (isCbx) {
-        bgOverride = GetPrefsColor(gGlobalPrefs->comicBookUI.windowBgCol);
+        bgOverride = GetPrefsColor(gSettings->comicBookUI.windowBgCol);
     } else if (isImage) {
-        bgOverride = GetPrefsColor(gGlobalPrefs->imageUI.windowBgCol);
+        bgOverride = GetPrefsColor(gSettings->imageUI.windowBgCol);
     } else if (isEbook) {
-        bgOverride = GetPrefsColor(gGlobalPrefs->eBookUI.windowBgCol);
+        bgOverride = GetPrefsColor(gSettings->eBookUI.windowBgCol);
     } else {
-        bgOverride = GetPrefsColor(gGlobalPrefs->fixedPageUI.windowBgCol);
+        bgOverride = GetPrefsColor(gSettings->fixedPageUI.windowBgCol);
     }
     if (bgOverride && bgOverride->parsedOk) {
         currentColor = bgOverride->col;
@@ -681,13 +680,13 @@ void ChangeColorWnd::RelayoutRadios() {
         radioAllFiles->SetVisibility(vis);
     }
     if (show && radioAllFiles) {
-        Str label = _TRA("For all &PDF files");
+        Str label = Tr("For all &PDF files");
         if (isCbx) {
-            label = _TRA("For all &comic books");
+            label = Tr("For all &comic books");
         } else if (isImage) {
-            label = _TRA("For all &images");
+            label = Tr("For all &images");
         } else if (isEbook) {
-            label = _TRA("For all &ebooks");
+            label = Tr("For all &ebooks");
         }
         radioAllFiles->SetText(label);
         radioThisFile->SetIsChecked(true);
@@ -698,14 +697,15 @@ void ChangeColorWnd::RelayoutRadios() {
 void ChangeColorWnd::SetTargetBackground(MainWindow* mainWin) {
     win = mainWin;
     forTabColor = false;
-    tab = (IsMainWindowValid(win) && win->CurrentTab() && win->CurrentTab()->ctrl) ? win->CurrentTab() : nullptr;
+    tab = (IsMainWindowValidAndNotClosing(win) && win->CurrentTab() && win->CurrentTab()->ctrl) ? win->CurrentTab()
+                                                                                                : nullptr;
     str::ReplaceWithCopy(&filePath, tab ? tab->filePath : Str{});
     ClassifyTab(tab);
     LoadCurrentColor();
     selectedCustomIdx = -1;
     previewSelected = true;
     if (hwnd) {
-        HwndSetText(hwnd, _TRA("Change Background Color"));
+        HwndSetText(hwnd, Tr("Change Background Color"));
         RelayoutRadios();
         UpdateEditFromColor();
         int dx = DpiScale(400);
@@ -725,7 +725,7 @@ void ChangeColorWnd::SetTargetTab(MainWindow* mainWin, WindowTab* colorTab) {
     selectedCustomIdx = -1;
     previewSelected = true;
     if (hwnd) {
-        HwndSetText(hwnd, _TRA("Change Tab Color"));
+        HwndSetText(hwnd, Tr("Change Tab Color"));
         RelayoutRadios();
         UpdateEditFromColor();
         int dx = DpiScale(400);
@@ -768,7 +768,7 @@ bool ChangeColorWnd::Create(MainWindow* mainWin) {
 
     {
         CreateCustomArgs args;
-        args.title = forTabColor ? _TRA("Change Tab Color") : _TRA("Change Background Color");
+        args.title = forTabColor ? Tr("Change Tab Color") : Tr("Change Background Color");
         args.visible = false;
         args.style = WS_POPUPWINDOW | WS_CAPTION;
         args.font = GetFont();
@@ -802,7 +802,7 @@ bool ChangeColorWnd::Create(MainWindow* mainWin) {
         row->alignMain = MainAxisAlign::MainStart;
         row->alignCross = CrossAxisAlign::CrossCenter;
         auto* lab = NewVirtText({
-            .s = _TRA("RGB:"),
+            .s = Tr("RGB:"),
             .font = font,
             .isRtl = isRtl,
             .padding = DpiScaledInsets(0, 8, 0, 0),
@@ -858,7 +858,7 @@ bool ChangeColorWnd::Create(MainWindow* mainWin) {
 
         Checkbox::CreateArgs args;
         args.parent = hwnd;
-        args.text = _TRA("&This file");
+        args.text = Tr("&This file");
         args.isRtl = isRtl;
         args.isRadio = true;
         args.isGroupStart = true;
@@ -869,7 +869,7 @@ bool ChangeColorWnd::Create(MainWindow* mainWin) {
         radioThisFile = r1;
         row->AddChild(r1);
 
-        args.text = _TRA("For all &PDF files");
+        args.text = Tr("For all &PDF files");
         args.isGroupStart = false;
         args.initialState = Checkbox::State::Unchecked;
         auto* r2 = new Checkbox();
@@ -887,10 +887,10 @@ bool ChangeColorWnd::Create(MainWindow* mainWin) {
         hbox->gap = font->averageCharWidth;
         auto pad = Insets{4, 0, 4, 0};
 
-        btnCancel = NewThemedButton(hwnd, _TRA("Cancel"), font, false);
+        btnCancel = NewThemedButton(hwnd, Tr("Cancel"), font, false);
         btnCancel->onClick = MkMethod1<ChangeColorWnd, VirtMouseEvent*, &ChangeColorWnd::OnCancel>(this);
         hbox->AddChild(new Padding(btnCancel, pad));
-        btnOk = NewThemedButton(hwnd, _TRA("OK"), font, true);
+        btnOk = NewThemedButton(hwnd, Tr("OK"), font, true);
         btnOk->onClick = MkMethod1<ChangeColorWnd, VirtMouseEvent*, &ChangeColorWnd::OnOk>(this);
         hbox->AddChild(new Padding(btnOk, pad));
         vbox->AddChild(hbox);
@@ -909,24 +909,20 @@ bool ChangeColorWnd::Create(MainWindow* mainWin) {
     UpdateTheme();
 
     SetIsVisible(true);
-    if (editRgb) {
-        HwndSetFocus(editRgb->hwnd);
-        editRgb->SelectAll();
-    }
+    EditSetFocus(editRgb);
+    EditSelectAll(editRgb);
     return true;
 }
 
 void ShowChangeBackgroundColorDialog(MainWindow* win) {
-    if (!IsMainWindowValid(win) || !win->CurrentTab() || !win->CurrentTab()->ctrl) {
+    if (!IsMainWindowValidAndNotClosing(win) || !win->CurrentTab() || !win->CurrentTab()->ctrl) {
         return;
     }
     if (gChangeColorWnd) {
         gChangeColorWnd->SetTargetBackground(win);
         HwndSetFocus(gChangeColorWnd->hwnd);
-        if (gChangeColorWnd->editRgb) {
-            HwndSetFocus(gChangeColorWnd->editRgb->hwnd);
-            gChangeColorWnd->editRgb->SelectAll();
-        }
+        EditSetFocus(gChangeColorWnd->editRgb);
+        EditSelectAll(gChangeColorWnd->editRgb);
         return;
     }
     auto* wnd = new ChangeColorWnd();
@@ -945,16 +941,14 @@ void ShowChangeBackgroundColorDialog(MainWindow* win) {
 }
 
 void ShowSetTabColorDialog(MainWindow* win, WindowTab* tab) {
-    if (!IsMainWindowValid(win) || !tab || !tab->ctrl) {
+    if (!IsMainWindowValidAndNotClosing(win) || !tab || !tab->ctrl) {
         return;
     }
     if (gChangeColorWnd) {
         gChangeColorWnd->SetTargetTab(win, tab);
         HwndSetFocus(gChangeColorWnd->hwnd);
-        if (gChangeColorWnd->editRgb) {
-            HwndSetFocus(gChangeColorWnd->editRgb->hwnd);
-            gChangeColorWnd->editRgb->SelectAll();
-        }
+        EditSetFocus(gChangeColorWnd->editRgb);
+        EditSelectAll(gChangeColorWnd->editRgb);
         return;
     }
     auto* wnd = new ChangeColorWnd();

@@ -2,7 +2,7 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/CmdLineArgsIter.h"
+#include "base/CmdLineArgs.h"
 #include "base/File.h"
 #include "base/Win.h"
 
@@ -19,6 +19,7 @@
 #include "MainWindow.h"
 #include "Commands.h"
 #include "Translations.h"
+#include "ExternalViewers.h"
 
 struct ExternalViewerInfo {
     Str name; // shown to the user
@@ -38,119 +39,119 @@ static int gExternalViewersCount = 0;
 // clang-format off
 static ExternalViewerInfo gExternalViewers[] = {
     {
-        "Explorer",
+        StrL("Explorer"),
         CmdOpenWithExplorer,
-        "*",
-        "explorer.exe",
-        R"(/select,"%1")",
-        nullptr,
+        StrL("*"),
+        StrL("explorer.exe"),
+        StrL(R"(/select,"%1")"),
+        {},
         Str{},
     },
     {
-        "Directory Opus",
+        StrL("Directory Opus"),
         CmdOpenWithDirectoryOpus,
-        "*",
-        R"(GPSoftware\Directory Opus\dopus.exe)",
-        R"("%d")",
-        nullptr,
+        StrL("*"),
+        StrL(R"(GPSoftware\Directory Opus\dopus.exe)"),
+        StrL(R"("%d")"),
+        {},
         Str{},
     },
     {
-        "Total Commander",
+        StrL("Total Commander"),
         CmdOpenWithTotalCommander,
-        "*",
-        R"(totalcmd\TOTALCMD64.EXE)",
-        R"("%d")",
-        nullptr,
+        StrL("*"),
+        StrL(R"(totalcmd\TOTALCMD64.EXE)"),
+        StrL(R"("%d")"),
+        {},
         Str{},
     },
     {
-        "Double Commander",
+        StrL("Double Commander"),
         CmdOpenWithDoubleCommander,
-        "*",
-        R"(Double Commander\doublecmd.exe)",
-        R"(--no-splash --client "%d")",
-        nullptr,
+        StrL("*"),
+        StrL(R"(Double Commander\doublecmd.exe)"),
+        StrL(R"(--no-splash --client "%d")"),
+        {},
         Str{},
     },
     {
-        "Acrobat Reader",
+        StrL("Acrobat Reader"),
         CmdOpenWithAcrobat,
-        ".pdf",
-        R"(Adobe\Acrobat Reader DC\Reader\AcroRd32.exe)",
+        StrL(".pdf"),
+        StrL(R"(Adobe\Acrobat Reader DC\Reader\AcroRd32.exe)"),
         // Command line format for version 6 and later:
         //   /A "page=%d&zoom=%.1f,%d,%d&..." <filename>
         // see http://www.adobe.com/devnet/acrobat/pdfs/pdf_open_parameters.pdf#page=5
         // zoom=%z,%x,%y : percentage zoom and upper-left view (user-space coords)
-        R"(/A "page=%p&zoom=%z,%x,%y" "%1")",
+        StrL(R"(/A "page=%p&zoom=%z,%x,%y" "%1")"),
         kindEngineMupdf,
         Str{}
     },
     {
-        "Acrobat Reader",
+        StrL("Acrobat Reader"),
         CmdOpenWithAcrobat,
-        ".pdf",
-        R"(Adobe\Acrobat DC\Acrobat\Acrobat.exe)",
+        StrL(".pdf"),
+        StrL(R"(Adobe\Acrobat DC\Acrobat\Acrobat.exe)"),
         // Command line format for version 6 and later:
         //   /A "page=%d&zoom=%.1f,%d,%d&..." <filename>
         // see http://www.adobe.com/devnet/acrobat/pdfs/pdf_open_parameters.pdf#page=5
-        R"(/A "page=%p&zoom=%z,%x,%y" "%1")",
+        StrL(R"(/A "page=%p&zoom=%z,%x,%y" "%1")"),
         kindEngineMupdf,
         Str{}
     },
     {
-        "Foxit Reader",
+        StrL("Foxit Reader"),
         CmdOpenWithFoxIt,
-        ".pdf",
-        R"(Foxit Software\Foxit Reader\FoxitReader.exe)",
+        StrL(".pdf"),
+        StrL(R"(Foxit Software\Foxit Reader\FoxitReader.exe)"),
         // Foxit: filename [-n page] [-z zoom]
-        R"("%1" /A page=%p -z %z)",
+        StrL(R"("%1" /A page=%p -z %z)"),
         kindEngineMupdf,
         Str{}
     },
     {
-        "Foxit PhantomPDF",
+        StrL("Foxit PhantomPDF"),
         CmdOpenWithFoxItPhantom,
-        ".pdf",
-        R"(Foxit Software\Foxit PhantomPDF\FoxitPhantomPDF.exe)",
-        R"("%1" /A page=%p -z %z)",
+        StrL(".pdf"),
+        StrL(R"(Foxit Software\Foxit PhantomPDF\FoxitPhantomPDF.exe)"),
+        StrL(R"("%1" /A page=%p -z %z)"),
         kindEngineMupdf,
         Str{}
     },
     {
-        "PDF-XChange Editor",
+        StrL("PDF-XChange Editor"),
         CmdOpenWithPdfXchange,
-        ".pdf",
-        R"(Tracker Software\PDF Editor\PDFXEdit.exe)",
+        StrL(".pdf"),
+        StrL(R"(Tracker Software\PDF Editor\PDFXEdit.exe)"),
         // PDFXChange cmd-line format:
         // [/A "param=value [&param2=value ..."] [PDF filename]
-        R"(/A "page=%p&zoom=%z" "%1")",
+        StrL(R"(/A "page=%p&zoom=%z" "%1")"),
         kindEngineMupdf,
         Str{}
     },
     {
-        "Pdf & Djvu Bookmarker",
+        StrL("Pdf & Djvu Bookmarker"),
         CmdOpenWithPdfDjvuBookmarker,
-        ".pdf;.djvu",
-        R"(Pdf & Djvu Bookmarker\PdfDjvuBookmarker.exe)",
+        StrL(".pdf;.djvu"),
+        StrL(R"(Pdf & Djvu Bookmarker\PdfDjvuBookmarker.exe)"),
         Str{},
-        nullptr,
+        {},
         Str{}
     },
     {
-        "XPS Viewer",
+        StrL("XPS Viewer"),
         CmdOpenWithXpsViewer,
-        ".xps;.oxps",
-        "xpsrchvw.exe",
+        StrL(".xps;.oxps"),
+        StrL("xpsrchvw.exe"),
         Str{},
         kindEngineMupdf,
         Str{}
     },
     {
-        "HTML Help",
+        StrL("HTML Help"),
         CmdOpenWithHtmlHelp,
-        ".chm",
-        "hh.exe",
+        StrL(".chm"),
+        StrL("hh.exe"),
         Str{},
         kindEngineChm,
         Str{}
@@ -193,11 +194,11 @@ void FreeExternalViewers() {
 
 static TempStr GetAcrobatPathTemp() {
     // Try Adobe Acrobat as a fall-back, if the Reader isn't installed
-    Str keyName = R"(Software\Microsoft\Windows\CurrentVersion\App Paths\AcroRd32.exe)";
-    TempStr path = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, nullptr);
-    if (!path) {
-        keyName = R"(Software\Microsoft\Windows\CurrentVersion\App Paths\Acrobat.exe)";
-        path = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, nullptr);
+    Str keyName = StrL(R"(Software\Microsoft\Windows\CurrentVersion\App Paths\AcroRd32.exe)");
+    TempStr path = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, {});
+    if (len(path) == 0) {
+        keyName = StrL(R"(Software\Microsoft\Windows\CurrentVersion\App Paths\Acrobat.exe)");
+        path = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, {});
     }
     if (path && file::Exists(path)) {
         return path;
@@ -206,20 +207,20 @@ static TempStr GetAcrobatPathTemp() {
 }
 
 static TempStr GetFoxitPathTemp() {
-    Str keyName = R"(Software\Microsoft\Windows\CurrentVersion\Uninstall\Foxit Reader)";
-    TempStr path = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, "DisplayIcon");
+    Str keyName = StrL(R"(Software\Microsoft\Windows\CurrentVersion\Uninstall\Foxit Reader)");
+    TempStr path = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, StrL("DisplayIcon"));
     if (path && file::Exists(path)) {
         return path;
     }
     // Registry value for Foxit 5 (and maybe later)
-    keyName = R"(Software\Microsoft\Windows\CurrentVersion\Uninstall\Foxit Reader_is1)";
-    path = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, "DisplayIcon");
+    keyName = StrL(R"(Software\Microsoft\Windows\CurrentVersion\Uninstall\Foxit Reader_is1)");
+    path = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, StrL("DisplayIcon"));
     if (path && file::Exists(path)) {
         return path;
     }
     // Registry value for Foxit 5.5 MSI installer
-    keyName = R"(Software\Foxit Software\Foxit Reader)";
-    path = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, "InstallPath");
+    keyName = StrL(R"(Software\Foxit Software\Foxit Reader)");
+    path = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, StrL("InstallPath"));
     if (path) {
         path = path::JoinTemp(path, StrL("Foxit Reader.exe"));
     }
@@ -228,8 +229,8 @@ static TempStr GetFoxitPathTemp() {
     }
     // Registry value for Foxit PDF Reader 12.1.3.15356 (The last version with Add Bookmark function without bugs in
     // single-key accelerator)
-    keyName = R"(SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\FoxitPDFReader.exe)";
-    path = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, "Path");
+    keyName = StrL(R"(SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\FoxitPDFReader.exe)");
+    path = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, StrL("Path"));
     if (path) {
         path = path::JoinTemp(path, StrL("FoxitPDFReader.exe"));
     }
@@ -251,15 +252,17 @@ static TempStr GetAppPathExeTemp(Str exeName) {
 static TempStr GetRegisteredOpenExeTemp(Str progId) {
     TempStr keyName = fmt(R"(%s\shell\open\command)", progId);
     TempStr command = ReadRegStrTemp(HKEY_CLASSES_ROOT, keyName, {});
-    if (!command) {
+    if (len(command) == 0) {
         return {};
     }
-    StrVec args;
-    ParseCmdLine(command, args);
-    if (len(args) == 0 || !file::Exists(args[0])) {
+    StrNode* args = ParseCmdLine(command);
+    defer {
+        FreeStrNode(nullptr, args);
+    };
+    if (!args || !file::Exists(args->s)) {
         return {};
     }
-    return str::DupTemp(args[0]);
+    return str::DupTemp(args->s);
 }
 
 static TempStr FindPDFXChangeInProgramDirsTemp(const StrVec& programDirs) {
@@ -284,13 +287,13 @@ static TempStr GetPDFXChangePathTemp() {
     // V11 renamed both the vendor directory and the executable. Prefer paths
     // registered by the installer, then cover clean and upgraded installations.
     TempStr exePath = GetAppPathExeTemp(StrL("PXCEditor.exe"));
-    if (!exePath) {
+    if (len(exePath) == 0) {
         exePath = GetAppPathExeTemp(StrL("PDFXEdit.exe"));
     }
-    if (!exePath) {
+    if (len(exePath) == 0) {
         exePath = GetRegisteredOpenExeTemp(StrL("PXCEditor.PDF"));
     }
-    if (!exePath) {
+    if (len(exePath) == 0) {
         exePath = GetRegisteredOpenExeTemp(StrL("PDFXEdit.PDF"));
     }
     if (exePath) {
@@ -311,9 +314,9 @@ static TempStr GetPDFXChangePathTemp() {
     }
 
     // Legacy PDF-XChange Viewer registry entry.
-    Str keyName = R"(Software\Tracker Software\PDFViewer)";
+    Str keyName = StrL(R"(Software\Tracker Software\PDFViewer)");
     TempStr path = ReadRegStr2Temp(keyName, StrL("InstallPath"));
-    if (!path) {
+    if (len(path) == 0) {
         return {};
     }
     exePath = path::JoinTemp(path, StrL("PDFXCview.exe"));
@@ -323,10 +326,10 @@ static TempStr GetPDFXChangePathTemp() {
     return {};
 }
 
-#if defined(DEBUG)
+#if IS_DEBUG
 bool ExternalViewers_UnitTestPDFXChangePaths() {
     TempStr testDir = GetTempFilePathTemp(StrL("issue-5941"));
-    if (!testDir || !file::Delete(testDir) || !dir::Create(testDir)) {
+    if (len(testDir) == 0 || !file::Delete(testDir) || !dir::Create(testDir)) {
         return false;
     }
     defer {
@@ -346,7 +349,7 @@ bool ExternalViewers_UnitTestPDFXChangePaths() {
             return false;
         }
         TempStr found = FindPDFXChangeInProgramDirsTemp(programDirs);
-        if (!found || !path::IsSame(found, expected) || !file::Delete(expected)) {
+        if (len(found) == 0 || !path::IsSame(found, expected) || !file::Delete(expected)) {
             return false;
         }
     }
@@ -355,11 +358,11 @@ bool ExternalViewers_UnitTestPDFXChangePaths() {
 #endif
 
 static void SetKnownExternalViewerExePath(int cmdId, Str exePath) {
-    if (!exePath) {
+    if (len(exePath) == 0) {
         return;
     }
     ExternalViewerInfo* info = FindKnownExternalViewerInfoByCmdId(cmdId);
-    if (info && !info->exeFullPath) {
+    if (info && len(info->exeFullPath) == 0) {
         info->exeFullPath = str::Dup(exePath);
     }
 }
@@ -368,7 +371,7 @@ static bool DetectExternalViewer(ExternalViewerInfo* ev) {
     if (ev->exeFullPath) {
         return true;
     }
-    if (!ev->exePartialPath) {
+    if (len(ev->exePartialPath) == 0) {
         return false;
     }
 
@@ -417,8 +420,8 @@ bool CanViewWithKnownExternalViewer(WindowTab* tab, int cmdId) {
         return false;
     }
     ExternalViewerInfo* ev = FindKnownExternalViewerInfoByCmdId(cmdId);
-    if (!ev || !ev->exeFullPath) {
-        // logfa("CanViewWithKnownExternalViewer cmd: %d, !ev || ev->exeFullPath == nullptr\n", cmd);
+    if (!ev || len(ev->exeFullPath) == 0) {
+        // logf("CanViewWithKnownExternalViewer cmd: %d, !ev || ev->exeFullPath == nullptr\n", cmd);
         return false;
     }
     // must match file extension
@@ -426,7 +429,7 @@ bool CanViewWithKnownExternalViewer(WindowTab* tab, int cmdId) {
     if (!filterMatchesEverything(ev->exts)) {
         TempStr ext = path::GetExtTemp(tab->filePath);
         if (!str::ContainsI(ev->exts, ext)) {
-            // logfa("CanViewWithKnownExternalViewer cmd: %d, !pos\n", cmd);
+            // logf("CanViewWithKnownExternalViewer cmd: %d, !pos\n", cmd);
             return false;
         }
     }
@@ -434,8 +437,8 @@ bool CanViewWithKnownExternalViewer(WindowTab* tab, int cmdId) {
     if (engineKind != nullptr) {
         if (ev->engineKind != nullptr) {
             if (ev->engineKind != engineKind) {
-                logfa("CanViewWithKnownExternalViewer cmd: %d, ev->engineKind '%s' != engineKind '%s'\n", cmdId,
-                      Str(ev->engineKind), Str(engineKind));
+                logf("CanViewWithKnownExternalViewer cmd: %d, ev->engineKind '%s' != engineKind '%s'\n", cmdId,
+                     Str(ev->engineKind), Str(engineKind));
                 return false;
             }
         }
@@ -560,13 +563,13 @@ static TempStr GetDocumentPathQuoted(WindowTab* tab) {
 bool ViewWithKnownExternalViewer(WindowTab* tab, int cmdId) {
     bool canView = CanViewWithKnownExternalViewer(tab, cmdId);
     if (!canView) {
-        logfa("ViewWithKnownExternalViewer cmd: %d\n", cmdId);
+        logf("ViewWithKnownExternalViewer cmd: %d\n", cmdId);
         // with command palette can send un-enforcable command so not ReportIf
         ReportDebugIf(!canView);
         return false;
     }
     ExternalViewerInfo* ev = FindKnownExternalViewerInfoByCmdId(cmdId);
-    if (!ev->exeFullPath) {
+    if (len(ev->exeFullPath) == 0) {
         return false;
     }
     TempStr args;
@@ -591,7 +594,7 @@ bool PathMatchFilter(Str path, Str filter) {
 // and set *restOut to the remaining command line (after the exe and any spaces)
 static TempStr ExtractExePathTemp(Str cmdLine, Str* restOut) {
     Str s = cmdLine;
-    str::SkipChar(s, ' ');
+    str::TrimChar(s, ' ');
     str::Builder exe;
     if (len(s) > 0 && s.s[0] == '"') {
         s = Str(s.s + 1, s.len - 1);
@@ -607,7 +610,7 @@ static TempStr ExtractExePathTemp(Str cmdLine, Str* restOut) {
         }
         s = Str(s.s + i, s.len - i);
     }
-    str::SkipChar(s, ' ');
+    str::TrimChar(s, ' ');
     *restOut = s;
     return ToStrTemp(exe);
 }
@@ -638,7 +641,7 @@ bool RunWithExe(WindowTab* tab, Str cmdLine, Str filter) {
     if (!file::Exists(exePath)) {
         TempStr msg =
             fmt("External viewer executable not found: %s. Fix ExternalViewers in advanced settings.", exePath);
-        auto caption = _TRA("Error");
+        auto caption = Tr("Error");
         MsgBox(nullptr, msg, caption, MB_OK | MB_ICONERROR);
         return false;
     }

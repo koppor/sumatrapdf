@@ -6,7 +6,7 @@
 
 #include "Settings.h"
 #include "DisplayMode.h"
-#include "TreeModel.h"
+#include "gui/UIModels.h"
 #include "EngineBase.h"
 #include "PageRenderPolicy.h"
 #include "gui/Gfx.h"
@@ -80,14 +80,14 @@ static void RemoveCacheEntry(PageRenderServiceData* data, int idx) {
     PageRenderCacheEntry& entry = data->cache[idx];
     data->cacheBytes -= entry.policy.bytes;
     FreePixmap(entry.pixmap);
-    data->cache.RemoveAt(idx);
+    VecRemoveAt(data->cache, idx);
 }
 
 static void ClearCache(PageRenderServiceData* data) {
     for (PageRenderCacheEntry& entry : data->cache) {
         FreePixmap(entry.pixmap);
     }
-    data->cache.Reset();
+    VecReset(data->cache);
     data->cacheBytes = 0;
 }
 
@@ -109,14 +109,14 @@ static bool AddToCache(PageRenderServiceData* data, PageRenderKey key, Pixmap* p
     entry.policy.bytes = bytes;
     entry.policy.lastUse = ++data->useSerial;
     entry.pixmap = pixmap;
-    data->cache.Append(entry);
+    VecAppend(data->cache, entry);
     data->cacheBytes += bytes;
 
     int protectedIndex = len(data->cache) - 1;
     while (data->cacheBytes > data->maxBytes) {
         Vec<PageRenderPolicyCacheEntry> policyEntries;
         for (const PageRenderCacheEntry& cached : data->cache) {
-            policyEntries.Append(cached.policy);
+            VecAppend(policyEntries, cached.policy);
         }
         int evict = PageRenderPolicyPickEviction(policyEntries, protectedIndex);
         if (evict < 0) {
@@ -145,7 +145,7 @@ static void RenderWorker(PageRenderServiceData* data) {
 
         int requestIdx = PageRenderPolicyPickRequest(data->requests);
         PageRenderPolicyRequest request = data->requests[requestIdx];
-        data->requests.RemoveAt(requestIdx);
+        VecRemoveAt(data->requests, requestIdx);
         data->activeKey = request.key;
         data->hasActive = true;
         data->activeCookie = nullptr;
@@ -207,7 +207,7 @@ PageRenderService::~PageRenderService() {
 
     serviceData->mutex.Lock();
     serviceData->stopping = true;
-    serviceData->requests.Reset();
+    VecReset(serviceData->requests);
     if (serviceData->activeCookie) {
         serviceData->activeCookie->Abort();
     }
@@ -230,7 +230,7 @@ void PageRenderService::NewGeneration() {
     auto* serviceData = ServiceData(this);
     ScopedMutex lock(&serviceData->mutex);
     serviceData->generation++;
-    serviceData->requests.Reset();
+    VecReset(serviceData->requests);
     ClearCache(serviceData);
     if (serviceData->activeCookie) {
         serviceData->activeCookie->Abort();

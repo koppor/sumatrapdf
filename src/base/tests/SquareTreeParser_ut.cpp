@@ -9,10 +9,10 @@
 
 void SquareTreeTest() {
     static Str keyValueData[] = {
-        UTF8_BOM "key = value",  UTF8_BOM "key = value",    UTF8_BOM "key=value",
-        UTF8_BOM " key =value ", UTF8_BOM "  key= value  ", UTF8_BOM "key: value",
-        UTF8_BOM "key : value",  UTF8_BOM "key :value",     UTF8_BOM "# key and value:\n\tkey value\n",
-        UTF8_BOM "key\t\tvalue",
+        Str(kUtf8Bom "key = value"),  Str(kUtf8Bom "key = value"),    Str(kUtf8Bom "key=value"),
+        Str(kUtf8Bom " key =value "), Str(kUtf8Bom "  key= value  "), Str(kUtf8Bom "key: value"),
+        Str(kUtf8Bom "key : value"),  Str(kUtf8Bom "key :value"),     Str(kUtf8Bom "# key and value:\n\tkey value\n"),
+        Str(kUtf8Bom "key\t\tvalue"),
     };
 
     for (size_t i = 0; i < dimof(keyValueData); i++) {
@@ -25,15 +25,19 @@ void SquareTreeTest() {
         utassert(str::Eq(root->GetValue(StrL("KEY")), StrL("value")));
         int off = 0;
         utassert(str::Eq(root->GetValue(StrL("key"), &off), StrL("value")));
-        utassert(!root->GetValue(StrL("key"), &off));
+        utassert(len(root->GetValue(StrL("key"), &off)) == 0);
         delete root;
     }
 
     static Str nodeData[] = {
-        UTF8_BOM "node [\nkey = value\n]",      UTF8_BOM "node[ # ignore comment\n\tkey: value\n] # end of node\n",
-        UTF8_BOM "node\n[\nkey:value",          UTF8_BOM "node\n# node content:\n\t[\n\tkey: value\n\t]\n",
-        UTF8_BOM "node [\n  key : value\n]\n]", UTF8_BOM "node[\nkey=value\n]]]",
-        UTF8_BOM "[node]\nkey = value\n",       UTF8_BOM "[ node ]\nkey = value\n",
+        Str(kUtf8Bom "node [\nkey = value\n]"),
+        Str(kUtf8Bom "node[ # ignore comment\n\tkey: value\n] # end of node\n"),
+        Str(kUtf8Bom "node\n[\nkey:value"),
+        Str(kUtf8Bom "node\n# node content:\n\t[\n\tkey: value\n\t]\n"),
+        Str(kUtf8Bom "node [\n  key : value\n]\n]"),
+        Str(kUtf8Bom "node[\nkey=value\n]]]"),
+        Str(kUtf8Bom "[node]\nkey = value\n"),
+        Str(kUtf8Bom "[ node ]\nkey = value\n"),
     };
 
     for (size_t i = 0; i < dimof(nodeData); i++) {
@@ -51,10 +55,10 @@ void SquareTreeTest() {
     }
 
     static Str arrayData[] = {
-        UTF8_BOM "array [\n item = 0 \n] [\n item = 1 \n]",
-        UTF8_BOM "array [\n item = 0 \n]\n array [\n item = 1 \n]",
-        UTF8_BOM "[array]\n item = 0 \n[array]\n item = 1 \n",
-        UTF8_BOM "array [\n item = 0 \n]\n [array]\n item = 1 \n",
+        Str(kUtf8Bom "array [\n item = 0 \n] [\n item = 1 \n]"),
+        Str(kUtf8Bom "array [\n item = 0 \n]\n array [\n item = 1 \n]"),
+        Str(kUtf8Bom "[array]\n item = 0 \n[array]\n item = 1 \n"),
+        Str(kUtf8Bom "array [\n item = 0 \n]\n [array]\n item = 1 \n"),
     };
 
     for (size_t i = 0; i < dimof(arrayData); i++) {
@@ -72,15 +76,14 @@ void SquareTreeTest() {
     }
 
     static Str serArrayData[] = {
-        UTF8_BOM "array [\n[\n item = 0 \n]\n[\n item = 1 \n]\n]\n",
-        UTF8_BOM "array [\n[\n item = 0 \n] [\n item = 1 \n]]",
-        UTF8_BOM
-        "array \n# serialized array with two items: \n[\n"
-        "# first item: \n[\n item = 0 \n] # end of first item\n"
-        "# second item: \n[\n item = 1 \n] # end of second item\n"
-        "] # end of array",
-        UTF8_BOM "array [\n[\n item = 0 \n] [\n item = 1",
-        UTF8_BOM "[array]\n[\n item = 0 \n] [\n item = 1 \n]",
+        Str(kUtf8Bom "array [\n[\n item = 0 \n]\n[\n item = 1 \n]\n]\n"),
+        Str(kUtf8Bom "array [\n[\n item = 0 \n] [\n item = 1 \n]]"),
+        Str(kUtf8Bom "array \n# serialized array with two items: \n[\n"
+                     "# first item: \n[\n item = 0 \n] # end of first item\n"
+                     "# second item: \n[\n item = 1 \n] # end of second item\n"
+                     "] # end of array"),
+        Str(kUtf8Bom "array [\n[\n item = 0 \n] [\n item = 1"),
+        Str(kUtf8Bom "[array]\n[\n item = 0 \n] [\n item = 1 \n]"),
     };
 
     for (Str s : serArrayData) {
@@ -99,9 +102,9 @@ void SquareTreeTest() {
     }
 
     static Str valueArrayData[] = {
-        UTF8_BOM "count = 0\ncount = 1",
-        UTF8_BOM "count:0\ncount:1\n",
-        UTF8_BOM "# first:\n count : 0 \n#second:\n count : 1 \n",
+        Str(kUtf8Bom "count = 0\ncount = 1"),
+        Str(kUtf8Bom "count:0\ncount:1\n"),
+        Str(kUtf8Bom "# first:\n count : 0 \n#second:\n count : 1 \n"),
     };
 
     for (Str s : valueArrayData) {
@@ -113,13 +116,13 @@ void SquareTreeTest() {
         value = root->GetValue(StrL("count"), &off);
         utassert(str::Eq(value, StrL("1")) && 2 == off);
         value = root->GetValue(StrL("count"), &off);
-        utassert(!value && 2 == off);
+        utassert(len(value) == 0 && 2 == off);
         delete root;
     }
 
     static Str emptyNodeData[] = {
-        UTF8_BOM "node [\n]", UTF8_BOM "node \n [ \n ] \n", UTF8_BOM "node [", UTF8_BOM "[node] \n",
-        UTF8_BOM "[node]",    UTF8_BOM "  [  node  ]  ",
+        Str(kUtf8Bom "node [\n]"), Str(kUtf8Bom "node \n [ \n ] \n"), Str(kUtf8Bom "node ["), Str(kUtf8Bom "[node] \n"),
+        Str(kUtf8Bom "[node]"),    Str(kUtf8Bom "  [  node  ]  "),
     };
 
     for (Str s : emptyNodeData) {
@@ -131,10 +134,10 @@ void SquareTreeTest() {
     }
 
     static Str halfBrokenData[] = {
-        "node [\n child = \n]\n key = value",
-        "node [\nchild\n]\n]\n key = value",
-        "node[\n[node\nchild\nchild [ node\n]\n key = value",
-        "node [\r key = value\n node [\nchild\r\n] key = value",
+        StrL("node [\n child = \n]\n key = value"),
+        StrL("node [\nchild\n]\n]\n key = value"),
+        StrL("node[\n[node\nchild\nchild [ node\n]\n key = value"),
+        StrL("node [\r key = value\n node [\nchild\r\n] key = value"),
     };
 
     for (Str s : halfBrokenData) {
@@ -144,7 +147,7 @@ void SquareTreeTest() {
         SquareTreeNode* node = root->GetChild(StrL("Node"));
         utassert(node && 1 == len(node->data) && str::Eq(node->GetValue(StrL("child")), StrL("")));
         utassert(str::Eq(root->GetValue(StrL("key")), StrL("value")));
-        utassert(!root->GetValue(StrL("node")) && !root->GetChild(StrL("key")));
+        utassert(len(root->GetValue(StrL("node"))) == 0 && !root->GetChild(StrL("key")));
         delete root;
     }
 
@@ -154,21 +157,21 @@ void SquareTreeTest() {
         utassert(!root);
     }
     {
-        Str s = "";
+        Str s = StrL("");
         SquareTreeNode* root = ParseSquareTree(s);
         utassert(root && 0 == len(root->data));
         delete root;
     }
 
     {
-        Str s = UTF8_BOM;
+        Str s = Str(kUtf8Bom);
         SquareTreeNode* root = ParseSquareTree(s);
         utassert(root && 0 == len(root->data));
         delete root;
     }
 
     {
-        Str s = UTF8_BOM "node [\n node [\n node [\n node [\n node [\n depth 5 \n]\n]\n]\n]\n]";
+        Str s = Str(kUtf8Bom "node [\n node [\n node [\n node [\n node [\n depth 5 \n]\n]\n]\n]\n]");
         SquareTreeNode* root = ParseSquareTree(s);
         SquareTreeNode* node = root;
         for (size_t i = 0; i < 5; i++) {
@@ -180,7 +183,7 @@ void SquareTreeTest() {
     }
 
     {
-        Str s = UTF8_BOM "node1 [\n [node2] \n key:value";
+        Str s = Str(kUtf8Bom "node1 [\n [node2] \n key:value");
         SquareTreeNode* root = ParseSquareTree(s);
         utassert(root && root->GetChild(StrL("node1")) && root->GetChild(StrL("node2")));
         utassert(0 == len(root->GetChild(StrL("node1"))->data));
@@ -190,7 +193,7 @@ void SquareTreeTest() {
 
     // EOF without trailing newline / separator: must not read past data.len
     {
-        Str s = UTF8_BOM "key";
+        Str s = Str(kUtf8Bom "key");
         SquareTreeNode* root = ParseSquareTree(s);
         utassert(root && 1 == len(root->data));
         utassert(!root->data[0]->child && str::Eq(root->data[0]->key, StrL("key")));
@@ -198,14 +201,14 @@ void SquareTreeTest() {
         delete root;
     }
     {
-        Str s = UTF8_BOM "key=";
+        Str s = Str(kUtf8Bom "key=");
         SquareTreeNode* root = ParseSquareTree(s);
         utassert(root && 1 == len(root->data));
         utassert(str::Eq(root->data[0]->key, StrL("key")) && str::Eq(root->data[0]->str, StrL("")));
         delete root;
     }
     {
-        Str s = UTF8_BOM "key=value";
+        Str s = Str(kUtf8Bom "key=value");
         SquareTreeNode* root = ParseSquareTree(s);
         utassert(root && str::Eq(root->GetValue(StrL("key")), StrL("value")));
         delete root;
@@ -213,7 +216,7 @@ void SquareTreeTest() {
 
     // serialize -> parse round-trip (space indent / \n and tab / \r\n styles)
     {
-        Str s = UTF8_BOM "key = value\nnode [\n  nested = x\n  empty = \n]\ncount = 1\ncount = 2\n";
+        Str s = Str(kUtf8Bom "key = value\nnode [\n  nested = x\n  empty = \n]\ncount = 1\ncount = 2\n");
         SquareTreeNode* a = ParseSquareTree(s);
         TempStr ser = SerializeSquareTreeNodeTemp(a);
         SquareTreeNode* b = ParseSquareTree(ser);
@@ -229,7 +232,7 @@ void SquareTreeTest() {
         delete b;
     }
     {
-        Str s = UTF8_BOM "top = 1\nchild [\n  a = b\n]\n";
+        Str s = Str(kUtf8Bom "top = 1\nchild [\n  a = b\n]\n");
         SquareTreeNode* a = ParseSquareTree(s);
         str::Builder out;
         SerializeSquareTreeNode(out, a, StrL("\t"), StrL("\r\n"), 0);
@@ -239,5 +242,37 @@ void SquareTreeTest() {
         utassert(str::Eq(b->GetChild(StrL("child"))->GetValue(StrL("a")), StrL("b")));
         delete a;
         delete b;
+    }
+
+    {
+        Str body = StrL(R"([SumatraPDF]
+Latest: 21929
+BuiltOn: 2026-08-31
+Installer64: https://www.sumatrapdfreader.org/dl/prerel/21929/SumatraPDF-prerel-64-install.exe
+InstallerArm64: https://www.sumatrapdfreader.org/dl/prerel/21929/SumatraPDF-prerel-arm64-install.exe
+Installer32: https://www.sumatrapdfreader.org/dl/prerel/21929/SumatraPDF-prerel-32-install.exe
+PortableExe64: https://www.sumatrapdfreader.org/dl/prerel/21929/SumatraPDF-prerel-64.exe
+PortableExeArm64: https://www.sumatrapdfreader.org/dl/prerel/21929/SumatraPDF-prerel-arm64.exe
+PortableExe32: https://www.sumatrapdfreader.org/dl/prerel/21929/SumatraPDF-prerel-32.exe
+)");
+        utassert(len(body) == 611);
+
+        SquareTreeNode* root = ParseSquareTree(body);
+        SquareTreeNode* node = root ? root->GetChild(StrL("SumatraPDF")) : nullptr;
+        utassert(node);
+
+        Str host = StrL("https://www.sumatrapdfreader.org/");
+        Str keys[] = {
+            StrL("Installer64"),   StrL("InstallerArm64"),   StrL("Installer32"),
+            StrL("PortableExe64"), StrL("PortableExeArm64"), StrL("PortableExe32"),
+        };
+        for (Str key : keys) {
+            Str url = node->GetValue(key);
+            utassert(len(url) > 0);
+            utassert(str::StartsWith(url, host));
+        }
+        utassert(str::Eq(node->GetValue(StrL("Installer64")),
+                         StrL("https://www.sumatrapdfreader.org/dl/prerel/21929/SumatraPDF-prerel-64-install.exe")));
+        delete root;
     }
 }

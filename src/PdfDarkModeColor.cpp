@@ -8,7 +8,7 @@ extern "C" {
 }
 
 #include "Settings.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "Theme.h"
 #include "Translations.h"
 
@@ -32,7 +32,7 @@ static bool DarkChromeActive() {
 }
 
 DocumentColorsFollowTheme DocumentColorsFollowThemeFromString(Str v) {
-    if (!v || str::EqI(v, StrL("off"))) {
+    if (len(v) == 0 || str::EqI(v, StrL("off"))) {
         return DocumentColorsFollowTheme::Off;
     }
     if (str::EqI(v, StrL("smart"))) {
@@ -97,6 +97,33 @@ bool DocumentColorsFollowThemeEnabled() {
     return GetDocumentColorsFollowTheme() != DocumentColorsFollowTheme::Off;
 }
 
+static TempStr ColorToCssHexTemp(Color c) {
+    u8 r, g, b;
+    UnpackColor(c, r, g, b);
+    return fmt("#%02x%02x%02x", r, g, b);
+}
+
+// User CSS overlay for MuPDF reflowable documents (EPUB, HTML, FB2, MOBI, TXT).
+// Empty when the effective page colors are black-on-white (nothing to override).
+TempStr ReflowDocumentThemeCssTemp() {
+    Color bgCol;
+    Color txtCol = ThemePageRenderColors(bgCol);
+    if (bgCol == kColWhite && txtCol == kColBlack) {
+        return {};
+    }
+    TempStr bg = ColorToCssHexTemp(bgCol);
+    TempStr fg = ColorToCssHexTemp(txtCol);
+    TempStr link = ColorToCssHexTemp(ThemeWindowLinkColor());
+    // * first so html/body's background wins if MuPDF treats later rules as
+    // stronger (a trailing * { background: transparent } would leave the
+    // pixmap's white clear color showing through). Images are unaffected.
+    return fmt(
+        "* { color: %s !important; background-color: transparent !important; }\n"
+        "html, body { background-color: %s !important; color: %s !important; }\n"
+        "a, a * { color: %s !important; }\n",
+        fg, bg, fg, link);
+}
+
 // an unsaved value the advanced settings dialog is previewing; -1 when there is
 // none and the saved setting applies
 static int gDocumentColorsFollowThemePreview = -1;
@@ -105,13 +132,13 @@ DocumentColorsFollowTheme GetDocumentColorsFollowTheme() {
     if (gDocumentColorsFollowThemePreview >= 0) {
         return (DocumentColorsFollowTheme)gDocumentColorsFollowThemePreview;
     }
-    if (!gGlobalPrefs || !gGlobalPrefs->documentColorsFollowTheme) {
+    if (!gSettings || len(gSettings->documentColorsFollowTheme) == 0) {
         return DocumentColorsFollowTheme::Off;
     }
-    return DocumentColorsFollowThemeFromString(gGlobalPrefs->documentColorsFollowTheme);
+    return DocumentColorsFollowThemeFromString(gSettings->documentColorsFollowTheme);
 }
 
-// Render pages as if the setting had this value, without touching gGlobalPrefs,
+// Render pages as if the setting had this value, without touching gSettings,
 // so the advanced settings dialog can show what a value does before it's saved
 // (and go back to the saved one when it's cancelled). The caller re-renders.
 void SetDocumentColorsFollowThemePreview(DocumentColorsFollowTheme mode) {
@@ -129,23 +156,23 @@ void SetDocumentColorsFollowTheme(DocumentColorsFollowTheme mode) {
     if (mode < DocumentColorsFollowTheme::Off || mode > DocumentColorsFollowTheme::Legacy) {
         mode = DocumentColorsFollowTheme::Off;
     }
-    if (!gGlobalPrefs) {
+    if (!gSettings) {
         return;
     }
     Str name(DocumentColorsFollowThemeToString(mode));
-    if (!str::EqI(gGlobalPrefs->documentColorsFollowTheme, name)) {
-        str::ReplaceWithCopy(&gGlobalPrefs->documentColorsFollowTheme, name);
+    if (!str::EqI(gSettings->documentColorsFollowTheme, name)) {
+        str::ReplaceWithCopy(&gSettings->documentColorsFollowTheme, name);
     }
 }
 
 const char* DocumentColorsFollowThemeDescription(DocumentColorsFollowTheme mode) {
     if (mode == DocumentColorsFollowTheme::Smart) {
-        return _TRN("Document colors follow theme: Smart (recolor text and background, not images)");
+        return TrN("Document colors follow theme: Smart (recolor text and background, not images)").s;
     }
     if (mode == DocumentColorsFollowTheme::Legacy) {
-        return _TRN("Document colors follow theme: Legacy (recolor text, background and images)");
+        return TrN("Document colors follow theme: Legacy (recolor text, background and images)").s;
     }
-    return _TRN("Document colors follow theme: Off");
+    return TrN("Document colors follow theme: Off").s;
 }
 
 bool PdfDarkModeUsesObjectLevel() {

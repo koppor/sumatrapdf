@@ -22,18 +22,18 @@
 #include "AppTools.h"
 #include "ScreenshotCapture.h"
 #include "ShortcutParse.h"
-#include "Screenshot.h"
 #include "Theme.h"
 #include "SumatraConfig.h"
 #include "DarkMode_win.h"
 #include "Commands.h"
 #include "Accelerators.h"
 #include "Settings.h"
-#include "GlobalPrefs.h"
 #include "AppSettings.h"
 #include "MainWindow.h"
 #include "SumatraPDF.h"
 #include "Translations.h"
+#include "GlobalHotkeys.h"
+#include "Screenshot.h"
 
 static bool IsAppFrame(HWND hwnd) {
     for (MainWindow* win : gWindows) {
@@ -61,23 +61,10 @@ void InitScreenshotHost() {
     gScreenshotHost.GetOwnerHwnd = GetScreenshotOwnerHwnd;
 }
 
-static bool IsOtherSumatraProcessRunning() {
-    DWORD myPid = GetCurrentProcessId();
-    HWND hwnd = nullptr;
-    while ((hwnd = FindWindowEx(HWND_DESKTOP, hwnd, L"SUMATRA_PDF_FRAME", nullptr)) != nullptr) {
-        DWORD pid;
-        GetWindowThreadProcessId(hwnd, &pid);
-        if (pid != myPid) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // find custom shortcut key string for CmdScreenshot, or empty if none
 static Str FindScreenshotShortcut() {
-    // check gGlobalPrefs->shortcuts first (may have been updated at runtime)
-    for (Shortcut* sc : *gGlobalPrefs->shortcuts) {
+    // check gSettings->shortcuts first (may have been updated at runtime)
+    for (Shortcut* sc : *gSettings->shortcuts) {
         if (str::EqI(sc->cmd, StrL("CmdScreenshot")) && sc->key) {
             return sc->key;
         }
@@ -93,57 +80,23 @@ static Str FindScreenshotShortcut() {
     return {};
 }
 
-static UINT AccelFVirtToHotkeyMod(BYTE fVirt) {
-    UINT mod = 0;
-    if (fVirt & FALT) {
-        mod |= MOD_ALT;
-    }
-    if (fVirt & FCONTROL) {
-        mod |= MOD_CONTROL;
-    }
-    if (fVirt & FSHIFT) {
-        mod |= MOD_SHIFT;
-    }
-    return mod;
-}
-
-void RegisterScreenshotHotkey(HWND hwnd) {
-    Str shortcut = FindScreenshotShortcut();
-    if (!shortcut) {
-        // don't register global hotkey by default; require explicit
-        // Shortcuts entry (e.g. Key = PrtSc, CmdScreenshot)
-        return;
-    }
-    UINT mod = 0;
-    UINT vk = VK_SNAPSHOT;
-    ACCEL accel{};
-    if (ParseShortcutString(shortcut, accel)) {
-        mod = AccelFVirtToHotkeyMod(accel.fVirt);
-        vk = accel.key;
-    }
-    BOOL ok = RegisterHotKey(hwnd, kScreenshotHotkeyId, mod, vk);
-    if (!ok && !IsOtherSumatraProcessRunning()) {
-        MaybeDelayedWarningNotification(fmt("Couldn't register '%s' global hotkey for taking screenshots", shortcut));
-    }
-}
-
-void UnregisterScreenshotHotkey(HWND hwnd) {
-    UnregisterHotKey(hwnd, kScreenshotHotkeyId);
-}
-
 // --- Set Screenshot Hotkey dialog ---
 
 // serialize VK code + modifiers to a shortcut string like "Ctrl+Shift+F5"
-static TempStr SerializeHotkeyTemp(UINT vk, bool ctrl, bool shift, bool alt) {
+static TempStr SerializeHotkeyTemp(UINT vk, bool ctrl, bool shift, bool alt, bool altGr) {
     str::Builder s;
-    if (ctrl) {
-        s.Append("Ctrl+");
-    }
-    if (alt) {
-        s.Append("Alt+");
+    if (altGr) {
+        s.Append(StrL("AltGr+"));
+    } else {
+        if (ctrl) {
+            s.Append(StrL("Ctrl+"));
+        }
+        if (alt) {
+            s.Append(StrL("Alt+"));
+        }
     }
     if (shift) {
-        s.Append("Shift+");
+        s.Append(StrL("Shift+"));
     }
     bool isAlphaNumKey = (vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9');
     if (vk >= VK_F1 && vk <= VK_F24) {
@@ -151,25 +104,35 @@ static TempStr SerializeHotkeyTemp(UINT vk, bool ctrl, bool shift, bool alt) {
     } else if (isAlphaNumKey) {
         s.AppendChar((char)vk);
     } else if (vk == VK_SNAPSHOT) {
-        s.Append("PrtSc");
+        s.Append(StrL("PrtSc"));
+    } else if (vk == VK_RETURN) {
+        s.Append(StrL("Return"));
+    } else if (vk == VK_LEFT) {
+        s.Append(StrL("Left"));
+    } else if (vk == VK_RIGHT) {
+        s.Append(StrL("Right"));
+    } else if (vk == VK_UP) {
+        s.Append(StrL("Up"));
+    } else if (vk == VK_DOWN) {
+        s.Append(StrL("Down"));
     } else if (vk == VK_DELETE) {
-        s.Append("Delete");
+        s.Append(StrL("Delete"));
     } else if (vk == VK_INSERT) {
-        s.Append("Insert");
+        s.Append(StrL("Insert"));
     } else if (vk == VK_HOME) {
-        s.Append("Home");
+        s.Append(StrL("Home"));
     } else if (vk == VK_END) {
-        s.Append("End");
+        s.Append(StrL("End"));
     } else if (vk == VK_PRIOR) {
-        s.Append("PageUp");
+        s.Append(StrL("PageUp"));
     } else if (vk == VK_NEXT) {
-        s.Append("PageDown");
+        s.Append(StrL("PageDown"));
     } else if (vk == VK_SPACE) {
-        s.Append("Space");
+        s.Append(StrL("Space"));
     } else if (vk == VK_PAUSE) {
-        s.Append("Pause");
+        s.Append(StrL("Pause"));
     } else if (vk == VK_SCROLL) {
-        s.Append("ScrollLock");
+        s.Append(StrL("ScrollLock"));
     } else if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) {
         s.Append(fmt("Numpad%d", (int)(vk - VK_NUMPAD0)));
     } else {
@@ -181,7 +144,7 @@ static TempStr SerializeHotkeyTemp(UINT vk, bool ctrl, bool shift, bool alt) {
 
 // find existing Shortcut entry for CmdScreenshot, or nullptr
 static Shortcut* FindScreenshotShortcutEntry() {
-    for (Shortcut* sc : *gGlobalPrefs->shortcuts) {
+    for (Shortcut* sc : *gSettings->shortcuts) {
         if (str::EqI(sc->cmd, StrL("CmdScreenshot"))) {
             return sc;
         }
@@ -191,7 +154,7 @@ static Shortcut* FindScreenshotShortcutEntry() {
 
 // WM_KEYDOWN doesn't fire for VK_SNAPSHOT (PrtSc) because Windows intercepts it.
 // Use a low-level keyboard hook to capture it and post a custom message.
-constexpr UINT WM_HOTKEY_CAPTURED = WM_APP + 100;
+constexpr UINT kWmHotkeyCaptured = WM_APP + 100;
 static HHOOK gKeyboardHook = nullptr;
 static HWND gHotkeyDlgHwnd = nullptr;
 
@@ -199,7 +162,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wp, LPARAM lp) {
     if (nCode == HC_ACTION && (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN) && gHotkeyDlgHwnd) {
         auto* kb = (KBDLLHOOKSTRUCT*)lp;
         if (kb->vkCode == VK_SNAPSHOT) {
-            PostMessageW(gHotkeyDlgHwnd, WM_HOTKEY_CAPTURED, kb->vkCode, 0);
+            PostMessageW(gHotkeyDlgHwnd, kWmHotkeyCaptured, kb->vkCode, 0);
             return 1; // consume the key
         }
     }
@@ -269,7 +232,8 @@ void SetHotkeyWnd::UpdateUI() {
 }
 
 bool SetHotkeyWnd::HandleKeyDown(UINT vk) {
-    if (vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU || vk == VK_LWIN || vk == VK_RWIN) {
+    if (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_SHIFT || vk == VK_MENU ||
+        vk == VK_LMENU || vk == VK_RMENU || vk == VK_LWIN || vk == VK_RWIN) {
         return true;
     }
     if (vk == VK_ESCAPE) {
@@ -279,7 +243,14 @@ bool SetHotkeyWnd::HandleKeyDown(UINT vk) {
     bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
     bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
-    TempStr hotkey = SerializeHotkeyTemp(vk, ctrl, shift, alt);
+    bool altGr = (GetKeyState(VK_RMENU) & 0x8000) != 0;
+    // Return / arrows as a global hotkey without a modifier would steal
+    // Enter and cursor keys from every app
+    bool needsMod = (vk == VK_RETURN) || (vk == VK_LEFT) || (vk == VK_RIGHT) || (vk == VK_UP) || (vk == VK_DOWN);
+    if (needsMod && !ctrl && !shift && !alt) {
+        return true;
+    }
+    TempStr hotkey = SerializeHotkeyTemp(vk, ctrl, shift, alt, altGr);
     if (hotkey) {
         str::ReplaceWithCopy(&newHotkey, hotkey);
         UpdateUI();
@@ -288,29 +259,28 @@ bool SetHotkeyWnd::HandleKeyDown(UINT vk) {
 }
 
 void SetHotkeyWnd::DoSet(VirtMouseEvent*) {
-    if (!newHotkey) {
+    if (len(newHotkey) == 0) {
         return;
     }
     logf("SetHotkeyDoSet: setting screenshot hotkey to '%s'\n", newHotkey);
 
+    TempStr globalKey = str::JoinTemp(StrL("Global "), newHotkey);
     Shortcut* sc = FindScreenshotShortcutEntry();
     if (sc) {
-        str::ReplaceWithCopy(&sc->key, newHotkey);
+        str::ReplaceWithCopy(&sc->key, globalKey);
     } else {
         sc = new Shortcut();
         sc->cmd = str::Dup(StrL("CmdScreenshot"));
-        sc->key = str::Dup(newHotkey);
-        sc->name = nullptr;
-        sc->toolbarText = nullptr;
-        sc->toolbarSvgIcon = nullptr;
+        sc->key = str::Dup(globalKey);
+        sc->name = {};
+        sc->toolbarText = {};
+        sc->toolbarSvgIcon = {};
         sc->cmdId = 0;
-        gGlobalPrefs->shortcuts->Append(sc);
+        VecAppend(*gSettings->shortcuts, sc);
     }
     SaveSettings();
 
-    for (MainWindow* win : gWindows) {
-        RegisterScreenshotHotkey(win->hwndFrame);
-    }
+    ReRegisterGlobalHotkeys();
     committed = true;
     Close();
 }
@@ -320,7 +290,7 @@ void SetHotkeyWnd::DoRemove(VirtMouseEvent*) {
 
     Shortcut* sc = FindScreenshotShortcutEntry();
     if (sc) {
-        gGlobalPrefs->shortcuts->Remove(sc);
+        VecRemove(*gSettings->shortcuts, sc);
     }
     auto* curr = gFirstCustomCommand;
     while (curr) {
@@ -330,6 +300,7 @@ void SetHotkeyWnd::DoRemove(VirtMouseEvent*) {
         curr = curr->next;
     }
     SaveSettings();
+    ReRegisterGlobalHotkeys();
     committed = true;
     Close();
 }
@@ -351,7 +322,7 @@ VirtButton* SetHotkeyWnd::NewButton(Str text, bool isDefault) {
 }
 
 void SetHotkeyWnd::WndProc(WindowBase::WndProcEvent* ev) {
-    if (ev->msg == WM_HOTKEY_CAPTURED || ev->msg == WM_KEYDOWN || ev->msg == WM_SYSKEYDOWN) {
+    if (ev->msg == kWmHotkeyCaptured || ev->msg == WM_KEYDOWN || ev->msg == WM_SYSKEYDOWN) {
         HandleKeyDown((UINT)ev->wparam);
         ev->result = 0;
         ev->didHandle = true;
@@ -377,9 +348,7 @@ static void TeardownSetHotkeyWnd() {
     gSetHotkeyWnd = nullptr;
     SetHotkeyWnd::CleanupHook();
     if (!w->committed) {
-        for (MainWindow* win : gWindows) {
-            RegisterScreenshotHotkey(win->hwndFrame);
-        }
+        ReRegisterGlobalHotkeys();
     }
     w->ScheduleDelete();
 }
@@ -400,13 +369,15 @@ bool SetHotkeyWnd::Create(HWND owner) {
     hwndOwner = owner;
     Str existing = FindScreenshotShortcut();
     if (existing) {
+        TrimGlobalPrefix(existing);
         currentHotkey = str::Dup(existing);
     }
 
     bool isRtl = IsUIRtl();
     {
         CreateCustomArgs args;
-        args.title = _TRA("Set Screenshot Hotkey");
+        args.owner = owner;
+        args.title = Tr("Set Screenshot Hotkey");
         args.visible = false;
         args.style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
         args.exStyle = WS_EX_DLGMODALFRAME;
@@ -423,7 +394,7 @@ bool SetHotkeyWnd::Create(HWND owner) {
     vbox->alignCross = CrossAxisAlign::Stretch;
 
     prompt = NewVirtText({
-        .s = _TRA("Press a key combination:"),
+        .s = Tr("Press a key combination:"),
         .font = font,
         .isRtl = isRtl,
     });
@@ -443,13 +414,13 @@ bool SetHotkeyWnd::Create(HWND owner) {
         hbox->alignCross = CrossAxisAlign::CrossCenter;
         hbox->gap = font->averageCharWidth;
 
-        btnCancel = NewButton(_TRA("Cancel"), false);
+        btnCancel = NewButton(Tr("Cancel"), false);
         btnCancel->onClick = MkMethod1<SetHotkeyWnd, VirtMouseEvent*, &SetHotkeyWnd::OnCancel>(this);
         hbox->AddChild(btnCancel);
-        btnRemove = NewButton(_TRA("Remove"), false);
+        btnRemove = NewButton(Tr("Remove"), false);
         btnRemove->onClick = MkMethod1<SetHotkeyWnd, VirtMouseEvent*, &SetHotkeyWnd::DoRemove>(this);
         hbox->AddChild(btnRemove);
-        btnSet = NewButton(_TRA("Set"), true);
+        btnSet = NewButton(Tr("Set"), true);
         btnSet->onClick = MkMethod1<SetHotkeyWnd, VirtMouseEvent*, &SetHotkeyWnd::DoSet>(this);
         hbox->AddChild(btnSet);
 
@@ -483,9 +454,7 @@ void ShowSetScreenshotHotkeyDialog(HWND hwndOwner) {
         TeardownSetHotkeyWnd();
     }
 
-    for (MainWindow* win : gWindows) {
-        UnregisterScreenshotHotkey(win->hwndFrame);
-    }
+    UnregisterGlobalHotkeys(GetGlobalHotkeysHwnd());
 
     auto* wnd = new SetHotkeyWnd();
     wnd->hwndOwner = hwndOwner;
@@ -496,9 +465,7 @@ void ShowSetScreenshotHotkeyDialog(HWND hwndOwner) {
     wnd->SetFont(GetAppFont());
     if (!wnd->Create(hwndOwner)) {
         delete wnd;
-        for (MainWindow* win : gWindows) {
-            RegisterScreenshotHotkey(win->hwndFrame);
-        }
+        ReRegisterGlobalHotkeys();
         return;
     }
 
@@ -506,4 +473,5 @@ void ShowSetScreenshotHotkeyDialog(HWND hwndOwner) {
     gHotkeyDlgHwnd = wnd->hwnd;
     HINSTANCE h = GetModuleHandleW(nullptr);
     gKeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, h, 0);
+    RunModalWindow(wnd->hwnd, hwndOwner);
 }

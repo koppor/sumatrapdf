@@ -6,12 +6,13 @@
 #include "base/WinDynCalls.h"
 #include "base/DbgHelpDyn.h"
 #endif
+#include "base/UtAssert.h"
 
 static int g_nTotal = 0;
 static int g_nFailed = 0;
 static bool gForAi = false;
 
-#define MAX_FAILED_ASSERTS 32
+constexpr int kMaxFailedAsserts = 32;
 
 struct FailedAssert {
     Str exprStr;
@@ -19,7 +20,7 @@ struct FailedAssert {
     int lineNo;
 };
 
-static FailedAssert g_failedAssert[MAX_FAILED_ASSERTS];
+static FailedAssert g_failedAssert[kMaxFailedAsserts];
 
 void utassert_set_for_ai(bool enabled) {
     gForAi = enabled;
@@ -30,8 +31,7 @@ static void OutputDebugString(Str s) {
         return;
     }
 #if OS_WIN
-    TempStr s0 = str::Dup(s);
-    OutputDebugStringA(s0.s);
+    OutputDebugStringA(CStrTemp(s));
 #else
     fprintf(stderr, "%.*s", s.len, s.s);
 #endif
@@ -56,7 +56,7 @@ void utassert_func(bool ok, Str exprStr, Str file, int lineNo) {
     if (ok) {
         return;
     }
-    if (g_nFailed < MAX_FAILED_ASSERTS) {
+    if (g_nFailed < kMaxFailedAsserts) {
         g_failedAssert[g_nFailed].exprStr = exprStr;
         g_failedAssert[g_nFailed].file = file;
         g_failedAssert[g_nFailed].lineNo = lineNo;
@@ -94,7 +94,7 @@ int utassert_print_results() {
     }
 
     fprintf(stderr, "Failed %d (of %d) tests\n", g_nFailed, g_nTotal);
-    for (int i = 0; i < g_nFailed && i < MAX_FAILED_ASSERTS; i++) {
+    for (int i = 0; i < g_nFailed && i < kMaxFailedAsserts; i++) {
         FailedAssert* a = &(g_failedAssert[i]);
         fprintf(stderr, "'%.*s' %.*s@%d\n", a->exprStr.len, a->exprStr.s, a->file.len, a->file.s, a->lineNo);
     }

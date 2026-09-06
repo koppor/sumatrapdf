@@ -14,9 +14,10 @@
 #include "SumatraPDF.h"
 #include "DocController.h"
 #include "EngineBase.h"
-#include "EngineAll.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
+#include "LitDoc.h"
 #include "StressTesting.h"
+#include "EngineAll.h"
 
 static bool gEnableEpubWithPdfEngine = true;
 
@@ -26,7 +27,7 @@ static bool gEnableEpubWithPdfEngine = true;
 // inspects the temp copy still sniffs the right format.
 static TempStr GetCbxCachePathTemp(Str path, i64 fileSize) {
     TempStr dataDir = GetSumatraDataDirTemp();
-    if (!dataDir) {
+    if (len(dataDir) == 0) {
         return {};
     }
     if (path::IsOnNetworkDrive(dataDir)) {
@@ -66,11 +67,43 @@ static void OnCbxCopyProgress(CbxCopyProgressState* s, file::CopyProgress* p) {
     }
 }
 
+constexpr i64 kCbxNetworkLoadInMemoryMax = 32LL * 1024 * 1024;
+
+// Network-drive cbx under 32 MB: one sequential read into RAM, then extract
+// pages from those bytes. Avoids a local cache copy and the per-page re-open
+// over the wire. On failure the caller falls through to the cache-copy path.
+static EngineBase* MaybeCreateCbxFromMemory(Str path) {
+    if (!path::IsOnNetworkDrive(path) || IsStressTesting()) {
+        return nullptr;
+    }
+    i64 fileSize = file::GetSize(path);
+    if (fileSize <= 0 || fileSize > kCbxNetworkLoadInMemoryMax) {
+        return nullptr;
+    }
+    auto timeStart = TimeGet();
+    Str data = file::ReadFile(path);
+    if (len(data) == 0) {
+        logf("MaybeCreateCbxFromMemory: ReadFile('%s') failed\n", path);
+        return nullptr;
+    }
+    EngineBase* engine = CreateEngineCbxFromData(data);
+    str::Free(data);
+    if (!engine) {
+        logf("MaybeCreateCbxFromMemory: CreateEngineCbxFromData('%s') failed\n", path);
+        return nullptr;
+    }
+    engine->SetFilePath(path);
+    logf("MaybeCreateCbxFromMemory: loaded '%s' (%lld bytes) in %.2f ms\n", path, (long long)fileSize,
+         TimeSinceInMs(timeStart));
+    return engine;
+}
+
 // If `path` is on a network drive and the local cache dir is not, copy
 // it into a deterministically named file under <dataDir>/cbx-cache and
-// return the cache path. On cache hit we bump the access time so the
-// stale-files sweep in DeleteStaleFilesAsync() keeps the file warm. Any
-// failure (copy error, cache dir unavailable, ...) returns nullptr and
+// return the cache path. Files under 32 MB are loaded in memory instead
+// (see MaybeCreateCbxFromMemory). On cache hit we bump the access time so
+// the stale-files sweep in DeleteStaleFilesAsync() keeps the file warm.
+// Any failure (copy error, cache dir unavailable, ...) returns nullptr and
 // the caller falls back to opening the original file directly.
 static TempStr MaybeCopyCbxToLocalCache(Str path) {
     if (!path::IsOnNetworkDrive(path)) {
@@ -86,7 +119,7 @@ static TempStr MaybeCopyCbxToLocalCache(Str path) {
         return {};
     }
     TempStr cachePath = GetCbxCachePathTemp(path, fileSize);
-    if (!cachePath) {
+    if (len(cachePath) == 0) {
         return {};
     }
     if (file::Exists(cachePath)) {
@@ -114,6 +147,79 @@ static TempStr MaybeCopyCbxToLocalCache(Str path) {
     return cachePath;
 }
 
+static AtomicInt gOpenCacheSeq;
+
+static TempStr GetOpenCacheDirTemp() {
+    TempStr dataDir = GetSumatraDataDirTemp();
+    if (len(dataDir) == 0) {
+        return {};
+    }
+    return path::JoinTemp(dataDir, StrL("open-cache"));
+}
+
+// Copies we made of OneNote / Outlook extracts live under <dataDir>/open-cache.
+bool IsOpenCachePath(Str path) {
+    TempStr dir = GetOpenCacheDirTemp();
+    if (len(path) == 0 || len(dir) == 0) {
+        return false;
+    }
+    if (!str::StartsWithI(path, dir)) {
+        return false;
+    }
+    int n = len(dir);
+    return len(path) > n && path::IsSep(path.s[n]);
+}
+
+// Read the source with FILE_SHARE_READ|WRITE|DELETE so the host can still
+// exclusive-open or delete it the moment we close, then write our private copy.
+static bool CopyUnlockingSource(Str dst, Str src) {
+    Str data = file::ReadFile(src);
+    if (len(data) == 0) {
+        return false;
+    }
+    bool ok = file::WriteFile(dst, data);
+    str::Free(data);
+    if (!ok) {
+        file::Delete(dst);
+    }
+    return ok;
+}
+
+// OneNote and Outlook extract the attachment to a cache file, launch us, then
+// need exclusive access to that file (or its folder) to sync the section.
+// Copy it into our open-cache and load the copy so we are not holding the
+// original (issue #4705).
+TempStr MaybeCopyEphemeralHostFile(Str path) {
+    if (!path::IsEphemeralHostFile(path)) {
+        return {};
+    }
+    if (IsOpenCachePath(path)) {
+        return {};
+    }
+    i64 fileSize = file::GetSize(path);
+    if (fileSize <= 0) {
+        return {};
+    }
+    TempStr dir = GetOpenCacheDirTemp();
+    if (len(dir) == 0) {
+        return {};
+    }
+    if (!dir::CreateAll(dir)) {
+        logf("MaybeCopyEphemeralHostFile: dir::CreateAll('%s') failed\n", dir);
+        return {};
+    }
+    TempStr ext = path::GetExtTemp(path);
+    int seq = AtomicIntInc(&gOpenCacheSeq);
+    TempStr name = fmt("%d%s", seq, ext);
+    TempStr dst = path::JoinTemp(dir, name);
+    if (!CopyUnlockingSource(dst, path)) {
+        logf("MaybeCopyEphemeralHostFile: copy '%s' -> '%s' failed\n", path, dst);
+        return {};
+    }
+    logf("MaybeCopyEphemeralHostFile: '%s' -> '%s'\n", path, dst);
+    return dst;
+}
+
 /* EngineCreate.cpp */
 bool IsSupportedFileType(FileType kind, bool enableEngineEbooks) {
     if (kind == FileType::Unknown) {
@@ -136,6 +242,9 @@ bool IsSupportedFileType(FileType kind, bool enableEngineEbooks) {
         return true;
     }
     if (IsEnginePsSupportedFileType(kind)) {
+        return true;
+    }
+    if (kind == FileType::Lit) {
         return true;
     }
 
@@ -198,10 +307,14 @@ static EngineBase* CreateEngineForKind(FileType kind, FileType contentHintKind, 
 
     if (IsEngineCbxSupportedFileType(kind)) {
         // reading a cbx straight off a network drive is painfully slow
-        // (lazy-load re-opens the file for every page and even eager-load
-        // reads the whole archive over the wire). Copy it to a local
-        // cache once and load from there; FilePath() still reports the
-        // user's original path so file history / bookmarks are unchanged.
+        // (lazy-load re-opens the file for every page). Files under 32 MB
+        // are read once into memory; larger ones are copied to a local
+        // cache. FilePath() still reports the user's original path so file
+        // history / bookmarks are unchanged.
+        engine = MaybeCreateCbxFromMemory(path);
+        if (engine) {
+            return engine;
+        }
         TempStr realPath = MaybeCopyCbxToLocalCache(path);
         engine = CreateEngineCbxFromFile(path, pwdUI, contentHintKind, realPath);
         return engine;
@@ -209,6 +322,9 @@ static EngineBase* CreateEngineForKind(FileType kind, FileType contentHintKind, 
     if (IsEnginePsSupportedFileType(kind)) {
         engine = CreateEnginePsFromFile(path);
         return engine;
+    }
+    if (kind == FileType::Lit) {
+        return CreateEngineLitFromFile(path, pwdUI);
     }
     if (enableChmEngine && (kind == FileType::Chm)) {
         engine = CreateEngineChmFromFile(path);
@@ -239,6 +355,16 @@ static EngineBase* CreateEngineForKind(FileType kind, FileType contentHintKind, 
         return engine;
     }
     if (kind == FileType::Mobi) {
+        // AZW4 / Kindle Print Replica is a PDF inside a MOBI wrapper.
+        Str pdf = ExtractPdfFromPrintReplicaFile(path);
+        if (len(pdf) > 0) {
+            engine = CreateEngineMupdfFromData(pdf, StrL("file.pdf"), pwdUI);
+            str::Free(pdf);
+            if (engine) {
+                engine->SetFilePath(path);
+                return engine;
+            }
+        }
         engine = CreateEngineMobiFromFile(path);
         return engine;
     }
@@ -263,12 +389,12 @@ EngineBase* CreateEngineFromFile(Str path, PasswordUI* pwdUI, bool enableChmEngi
         if (len(extracted) > 0) {
             FileType kind = GuessFileTypeFromData(extracted);
             if (kind == FileType::PDF) {
-                EngineBase* engine = CreateEngineMupdfFromData(extracted, "file.pdf", pwdUI);
+                EngineBase* engine = CreateEngineMupdfFromData(extracted, StrL("file.pdf"), pwdUI);
                 str::Free(extracted);
                 if (engine) {
                     engine->SetFilePath(path);
-                    engine->disableAntiAlias = gGlobalPrefs->disableAntiAlias;
-                    engine->disableAutoLinks = gGlobalPrefs->disableAutoLinks;
+                    engine->disableAntiAlias = gSettings->disableAntiAlias;
+                    engine->disableAutoLinks = gSettings->disableAutoLinks;
                     return engine;
                 }
             } else {
@@ -292,11 +418,11 @@ EngineBase* CreateEngineFromFile(Str path, PasswordUI* pwdUI, bool enableChmEngi
 
     EngineBase* engine = CreateEngineForKind(kind, contentHint, path, pwdUI, enableChmEngine);
     if (engine) {
-        // gGlobalPrefs can be null in early/headless code paths (e.g. the
+        // gSettings can be null in early/headless code paths (e.g. the
         // -extract-text test harness runs before LoadSettings)
-        if (gGlobalPrefs) {
-            engine->disableAntiAlias = gGlobalPrefs->disableAntiAlias;
-            engine->disableAutoLinks = gGlobalPrefs->disableAutoLinks;
+        if (gSettings) {
+            engine->disableAntiAlias = gSettings->disableAntiAlias;
+            engine->disableAutoLinks = gSettings->disableAutoLinks;
         }
         return engine;
     }
@@ -311,9 +437,75 @@ EngineBase* CreateEngineFromFile(Str path, PasswordUI* pwdUI, bool enableChmEngi
         engine = CreateEngineForKind(contentHint, contentHint, path, pwdUI, enableChmEngine);
     }
     if (engine) {
-        engine->disableAntiAlias = gGlobalPrefs->disableAntiAlias;
-        engine->disableAutoLinks = gGlobalPrefs->disableAutoLinks;
+        engine->disableAntiAlias = gSettings->disableAntiAlias;
+        engine->disableAutoLinks = gSettings->disableAutoLinks;
     }
+    return engine;
+}
+
+static EngineBase* CreateEngineForKindFromData(FileType kind, Str data, Str nameHint, PasswordUI* pwdUI) {
+    if (kind == FileType::Unknown || len(data) == 0) {
+        return nullptr;
+    }
+    if (kind == FileType::PDF || kind == FileType::Xps || kind == FileType::Markdown) {
+        return CreateEngineMupdfFromData(data, nameHint, pwdUI);
+    }
+    if (IsEngineDjVuSupportedFileType(kind)) {
+        return CreateEngineDjvuDecFromData(data);
+    }
+    if (IsEngineImageSupportedFileType(kind)) {
+        return CreateEngineImageFromData(data);
+    }
+    if (IsEngineCbxSupportedFileType(kind)) {
+        return CreateEngineCbxFromData(data);
+    }
+    if (gEnableEpubWithPdfEngine && IsEngineMupdfSupportedFileType(kind)) {
+        EngineBase* engine = CreateEngineMupdfFromData(data, nameHint, pwdUI);
+        if (engine) {
+            return engine;
+        }
+    }
+    if (kind == FileType::Epub) {
+        return CreateEngineEpubFromData(data);
+    }
+    if (kind == FileType::Fb2 || kind == FileType::Fb2z) {
+        return CreateEngineFb2FromData(data);
+    }
+    if (kind == FileType::Mobi) {
+        Str pdf = ExtractPdfFromPrintReplicaData(data);
+        if (len(pdf) > 0) {
+            EngineBase* engine = CreateEngineMupdfFromData(pdf, StrL("file.pdf"), pwdUI);
+            str::Free(pdf);
+            if (engine) {
+                return engine;
+            }
+        }
+        return CreateEngineMobiFromData(data);
+    }
+    return nullptr;
+}
+
+static void ApplyEngineSettings(EngineBase* engine) {
+    if (!engine || !gSettings) {
+        return;
+    }
+    engine->disableAntiAlias = gSettings->disableAntiAlias;
+    engine->disableAutoLinks = gSettings->disableAutoLinks;
+}
+
+EngineBase* CreateEngineFromData(Str data, Str nameHint, PasswordUI* pwdUI) {
+    if (len(data) == 0) {
+        return nullptr;
+    }
+    FileType kind = GuessFileTypeFromName(nameHint, true);
+    EngineBase* engine = CreateEngineForKindFromData(kind, data, nameHint, pwdUI);
+    if (!engine) {
+        FileType contentKind = GuessFileTypeFromData(data);
+        if (contentKind != kind) {
+            engine = CreateEngineForKindFromData(contentKind, data, nameHint, pwdUI);
+        }
+    }
+    ApplyEngineSettings(engine);
     return engine;
 }
 
@@ -347,6 +539,13 @@ bool EngineHasUnsavedAnnotations(EngineBase* engine) {
         return false;
     }
     return EngineMupdfHasUnsavedAnnotations(engine);
+}
+
+bool EngineHasRedactMarks(EngineBase* engine) {
+    if (!IsEngineMupdf(engine)) {
+        return false;
+    }
+    return EngineMupdfHasRedactMarks(engine);
 }
 
 Annotation* EngineGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF pos, Annotation* annot) {

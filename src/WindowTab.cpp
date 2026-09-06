@@ -12,18 +12,18 @@
 #include "DocController.h"
 #include "EngineBase.h"
 #include "EngineAll.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "ChmModel.h"
 #include "MarkdownModel.h"
 #include "DisplayModel.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
-#include "WindowTab.h"
 #include "Selection.h"
 #include "ReadAloudHighlight.h"
 #include "Translations.h"
-#include "EditAnnotations.h"
+#include "AnnotEditToolbar.h"
 #include "RefHover.h"
+#include "WindowTab.h"
 
 WindowTab::WindowTab(MainWindow* win) {
     this->win = win;
@@ -31,6 +31,13 @@ WindowTab::WindowTab(MainWindow* win) {
 
 void WindowTab::SetFilePath(Str path) {
     type = Type::Document;
+    bool changed = filePath && !path::IsSame(filePath, path);
+    if (changed && IsOpenCachePath(filePath)) {
+        file::Delete(filePath);
+    }
+    if (changed) {
+        str::FreePtr(&pendingFindText);
+    }
     str::ReplaceWithCopy(&filePath, path);
 }
 
@@ -85,7 +92,7 @@ WindowTab::~WindowTab() {
         DestroyWindow(hwndPDFOutline);
         hwndPDFOutline = nullptr;
     }
-    CloseAndDeleteEditAnnotationsWindow(this);
+    CloseAnnotationUiForTab(this);
     FileWatcherUnsubscribe(watcher);
     delete selectionOnPage;
     // technically we only need to clear ctrl == gMostRecentlyOpenedDoc
@@ -104,12 +111,16 @@ WindowTab::~WindowTab() {
         SafeEngineRelease(&pendingLoadArgs->engine);
     }
     delete pendingLoadArgs;
+    if (IsOpenCachePath(filePath)) {
+        file::Delete(filePath);
+    }
     str::Free(filePath);
     filePath = {};
     str::Free(displayName);
     displayName = {};
     str::Free(frameTitle);
     str::Free(loadErrorReason);
+    str::Free(pendingFindText);
     frameTitle = {};
     str::Free(readAloudText);
     readAloudText = {};
@@ -162,13 +173,13 @@ Str WindowTab::GetTabTitle() const {
     if (displayName) {
         return displayName;
     }
-    if (!filePath) {
+    if (len(filePath) == 0) {
         if (IsAboutTab()) {
             return StrL("Home");
         }
         if (IsFavoritesTab()) {
             // same label as Favorites menu / sidebar header
-            return _TRA("Favorites");
+            return Tr("Favorites");
         }
         return StrL("");
     }
@@ -176,7 +187,7 @@ Str WindowTab::GetTabTitle() const {
     if (embeddedFileName) {
         return embeddedFileName;
     }
-    if (gGlobalPrefs->fullPathInTitle) {
+    if (gSettings->fullPathInTitle) {
         return filePath;
     }
     return path::GetBaseNameTemp(filePath);
@@ -235,15 +246,6 @@ void WindowTab::ToggleZoom() const {
     ctrl->SetZoomVirtual(NextToggleZoom(), nullptr);
 }
 
-// https://github.com/sumatrapdfreader/sumatrapdf/issues/1336
-#if 0
-LinkSaver::LinkSaver(WindowTab* tab, HWND parentHwnd, const WCHAR* fileName) {
-    this->tab = tab;
-    this->parentHwnd = parentHwnd;
-    this->fileName = fileName;
-}
-#endif
-
 bool SaveDataToFile(HWND hwndParent, Str fileName, Str data) {
     if (!CanAccessDisk()) {
         return false;
@@ -265,7 +267,7 @@ bool SaveDataToFile(HWND hwndParent, Str fileName, Str data) {
     // Prepare the file filters (use \1 instead of \0 so that the
     // double-zero terminated string isn't cut by the string handling
     // methods too early on)
-    TempStr fileFilterA = fmt("%s\1*.*\1", _TRA("All files"));
+    TempStr fileFilterA = fmt("%s\1*.*\1", Tr("All files"));
     TempWStr fileFilter = ToWStrTemp(fileFilterA);
     wstr::TransCharsInPlace(fileFilter, WStrL(L"\1"), WStrL(L"\0"));
     ofn.lpstrFilter = fileFilter.s;

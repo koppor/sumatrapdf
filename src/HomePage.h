@@ -23,11 +23,15 @@ void FreeHomePageTips();
 void HomePageInvalidateLayoutCache();
 
 void DrawHomePage(MainWindow* win, Gfx* gfx);
+void HomePageCreate(MainWindow* win);
+void HomePageRelayout(MainWindow* win);
+void HomePageHideSearch(MainWindow* win);
 void PickAnotherRandomPromotion();
 void HomePageOnVScroll(MainWindow* win, WPARAM wp);
 void HomePageOnMouseWheel(MainWindow* win, int delta);
 void HomePageFocusSearch(MainWindow* win);
 void HomePageUpdateSearchColors(MainWindow* win);
+void HomePageOnDpiChanged(MainWindow* win, int dpi);
 void HomePageDestroySearch(MainWindow* win);
 void HomePageDestroyChrome(MainWindow* win);
 bool HomePageOnCanvasMessage(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, LRESULT& res);
@@ -42,3 +46,4 @@ Str HomePageFilePathAtTemp(MainWindow* win, int x, int y);
 void HomePageClearActiveEntry(MainWindow* win);
 
 TempStr HomeListRowsResultTemp(int* exitCodeOut);
+TempStr HomeSelectionResultTemp(int* exitCodeOut);

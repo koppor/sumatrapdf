@@ -3,7 +3,6 @@
 
 #include "base/Base.h"
 #include "gui/Dpi.h"
-#include "base/Win.h"
 
 #include "gui/UIModels.h"
 #include "gui/Layout.h"
@@ -13,6 +12,7 @@
 #include "Theme.h"
 #include "DarkMode_win.h"
 #include "SumatraConfig.h"
+#include "base/Win.h"
 
 struct TextViewWnd : WindowBase {
     Edit* edit = nullptr;
@@ -74,7 +74,7 @@ bool TextViewWnd::Create(Str title, Str text) {
     SendMessageW(edit->hwnd, EM_SETLIMITTEXT, 0, 0);
 
     HDC hdc = GetDC(hwnd);
-    monoFont = HdcCreateSimpleFont(hdc, "Consolas", 14);
+    monoFont = HdcCreateSimpleFont(hdc, StrL("Consolas"), 14);
     ReleaseDC(hwnd, hdc);
     if (monoFont) {
         edit->SetFont(monoFont);

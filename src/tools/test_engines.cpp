@@ -10,24 +10,21 @@
 #endif
 
 #include "DocProperties.h"
-#include "TreeModel.h"
+#include "gui/UIModels.h"
 #include "EngineBase.h"
 #include "EngineAll.h"
 #include "TextSelection.h"
 #include "ProgressUpdateUI.h"
 #include "TextSearch.h"
+#include "LitDoc.h"
 
 void _uploadDebugReport(Str, Str, bool, bool) {}
 
 void log(Str s) {
-    if (!s) {
+    if (len(s) == 0) {
         return;
     }
     fwrite(s.s, 1, (size_t)s.len, stderr);
-}
-
-void loga(Str s) {
-    log(s);
 }
 
 struct EBookUI;
@@ -64,6 +61,9 @@ static EngineBase* CreateEngineForPath(Str path) {
     }
     if (IsEngineCbxSupportedFileType(kind)) {
         return CreateEngineCbxFromFile(path, nullptr, kind);
+    }
+    if (kind == FileType::Lit) {
+        return CreateEngineLitFromFile(path, nullptr);
     }
     if (IsEngineMupdfSupportedFileType(kind)) {
         return CreateEngineMupdfFromFile(path, kind, 96, nullptr);
@@ -230,7 +230,7 @@ static bool BenchMediabox(Str path) {
         if (ms > maxMs) {
             maxMs = ms;
         }
-        digest = digest * 1000003 + (u64)(int)mb.dx * 65599 + (u64)(int)mb.dy;
+        digest = (digest * 1000003) + ((u64)(int)mb.dx * 65599) + (u64)(int)mb.dy;
         if (mb.IsEmpty()) {
             nEmpty++;
             printf("page %d: empty mediabox\n", pageNo);

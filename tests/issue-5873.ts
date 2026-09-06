@@ -4,8 +4,8 @@
 // ToUnicode CMap that identity-maps 0xC0-0xFF to Latin-1 U+00C0-U+00FF, derived
 // from Latin Encoding glyph names, while the content stream uses Windows-1251
 // codes for Cyrillic. mupdf then extracts mojibake ("ÏÐÅÄÈÑËÎÂÈÅ" instead of
-// "ПРЕДИСЛОВИЕ"). The fix remaps via Windows-1251 when the high-byte map is
-// identity Latin-1 and the font or document looks Cyrillic.
+// "ПРЕДИСЛОВИЕ"). The fix remaps via Windows-1251 when Encoding names are
+// identity Latin-1 and the font name or document title/author looks Cyrillic.
 //
 // Fixture: tests/issue-5873.pdf (copy of the bug report PDF).
 //
@@ -33,19 +33,13 @@ export async function testit(): Promise<void> {
   console.log(`extracted ${text.length} chars`);
 
   if (text.includes(MOJIBAKE_TITLE)) {
-    throw new Error(
-      `mupdf still extracts Latin-1 mojibake for Russian title (issue #5873 regressed)`,
-    );
+    throw new Error(`mupdf still extracts Latin-1 mojibake for Russian title (issue #5873 regressed)`);
   }
   if (!text.includes(TARGET_TITLE)) {
-    throw new Error(
-      `mupdf text extraction is missing '${TARGET_TITLE}' (issue #5873)`,
-    );
+    throw new Error(`mupdf text extraction is missing '${TARGET_TITLE}' (issue #5873)`);
   }
   if (!text.includes(TARGET_WORD)) {
-    throw new Error(
-      `mupdf text extraction is missing '${TARGET_WORD}' (issue #5873)`,
-    );
+    throw new Error(`mupdf text extraction is missing '${TARGET_WORD}' (issue #5873)`);
   }
   console.log(`PASS: mupdf extracts Russian text correctly (issue #5873)`);
 }

@@ -119,20 +119,18 @@ bool SkipUntil(Str s, int& off, Str term) {
 
 // return true if skipped
 bool SkipWs(Str s, int& off) {
-    int start = off;
-    while (off < s.len && str::IsWs(s.s[off])) {
-        ++off;
-    }
-    return start != off;
+    Str rest = Str(s.s + off, s.len - off);
+    int n = str::TrimWs(rest);
+    off += n;
+    return n > 0;
 }
 
 // return true if skipped
 bool SkipNonWs(Str s, int& off) {
-    int start = off;
-    while (off < s.len && !str::IsWs(s.s[off])) {
-        ++off;
-    }
-    return start != off;
+    Str rest = Str(s.s + off, s.len - off);
+    int n = str::TrimNonWs(rest);
+    off += n;
+    return n > 0;
 }
 
 static bool IsNameChar(char c) {
@@ -155,7 +153,7 @@ bool IsSpaceOnly(Str s) {
 }
 
 static void MemAppend(char* buf, int& off, Str src) {
-    if (!buf || !src) {
+    if (!buf || len(src) == 0) {
         return;
     }
     memcpy(buf + off, src.s, src.len);
@@ -304,7 +302,6 @@ bool HtmlToken::NameIs(Str nameToFind) const {
 
 // for now just ignores any namespace qualifier
 // (i.e. succeeds for "opf:content" with name="content" and any value of ns)
-// TODO: add proper namespace support
 bool HtmlToken::NameIsNS(Str nameToCheck, Str /*ns*/) const {
     // ReportIf(!ns);
     return IsNameWithNS(name, nameToCheck);
@@ -423,7 +420,7 @@ static Str CDataText(Str raw, const GumboNode* node) {
         raw.len -= 3;
         return raw;
     }
-    return {node->v.text.text};
+    return Str(node->v.text.text);
 }
 
 static ptrdiff_t PosOfSource(Str html, Str p) {
@@ -456,9 +453,9 @@ void GumboHtmlParser::BuildEvents() {
     };
 
     Vec<Frame> toVisit;
-    toVisit.Append({output->document, false});
+    VecAppend(toVisit, {output->document, false});
     while (len(toVisit) > 0) {
-        Frame frame = toVisit.Pop();
+        Frame frame = VecPop(toVisit);
         const GumboNode* node = frame.node;
         if (!node) {
             continue;
@@ -468,25 +465,25 @@ void GumboHtmlParser::BuildEvents() {
             Str rawEnd = StrFromPiece(node->v.element.original_end_tag);
             if (len(rawEnd) > 0) {
                 Str inner = EndTagInner(rawEnd);
-                events.Append(
-                    {HtmlToken::EndTag, node, inner, TagNameFromTagInner(inner), rawEnd, PosOfSource(html, rawEnd)});
+                VecAppend(events, {HtmlToken::EndTag, node, inner, TagNameFromTagInner(inner), rawEnd,
+                                   PosOfSource(html, rawEnd)});
             }
             continue;
         }
 
         if (node->type == GUMBO_NODE_TEXT || node->type == GUMBO_NODE_WHITESPACE) {
             Str text = StrFromPiece(node->v.text.original_text);
-            if (!text) {
+            if (len(text) == 0) {
                 text = Str(node->v.text.text);
             }
-            events.Append({HtmlToken::Text, node, text, {}, text, PosOfSource(html, text)});
+            VecAppend(events, {HtmlToken::Text, node, text, {}, text, PosOfSource(html, text)});
             continue;
         }
 
         if (node->type == GUMBO_NODE_CDATA) {
             Str raw = StrFromPiece(node->v.text.original_text);
             Str text = CDataText(raw, node);
-            events.Append({HtmlToken::Text, node, text, {}, text, PosOfSource(html, text)});
+            VecAppend(events, {HtmlToken::Text, node, text, {}, text, PosOfSource(html, text)});
             continue;
         }
 
@@ -499,7 +496,7 @@ void GumboHtmlParser::BuildEvents() {
             Str rawStart = StrFromPiece(node->v.element.original_tag);
             if (len(rawStart) == 0) {
                 for (unsigned int i = children->length; i > 0; i--) {
-                    toVisit.Append({(const GumboNode*)children->data[i - 1], false});
+                    VecAppend(toVisit, {(const GumboNode*)children->data[i - 1], false});
                 }
                 continue;
             }
@@ -507,21 +504,21 @@ void GumboHtmlParser::BuildEvents() {
             bool selfClosing = IsSelfClosingStartTag(rawStart);
             Str inner = StartTagInner(rawStart, selfClosing);
             HtmlToken::TokenType type = selfClosing ? HtmlToken::EmptyElementTag : HtmlToken::StartTag;
-            events.Append({type, node, inner, TagNameFromTagInner(inner), rawStart, PosOfSource(html, rawStart)});
+            VecAppend(events, {type, node, inner, TagNameFromTagInner(inner), rawStart, PosOfSource(html, rawStart)});
 
             if (!selfClosing) {
                 if (len(StrFromPiece(node->v.element.original_end_tag)) > 0) {
-                    toVisit.Append({node, true});
+                    VecAppend(toVisit, {node, true});
                 }
                 for (unsigned int i = children->length; i > 0; i--) {
-                    toVisit.Append({(const GumboNode*)children->data[i - 1], false});
+                    VecAppend(toVisit, {(const GumboNode*)children->data[i - 1], false});
                 }
             }
             continue;
         }
 
         for (unsigned int i = children->length; i > 0; i--) {
-            toVisit.Append({(const GumboNode*)children->data[i - 1], false});
+            VecAppend(toVisit, {(const GumboNode*)children->data[i - 1], false});
         }
     }
 }

@@ -4,7 +4,7 @@
 // OpenAI Codex provider for the AI chat sidebar (see AIChatPanel.cpp)
 
 #include "base/Base.h"
-#include "base/CmdLineArgsIter.h"
+#include "base/CmdLineArgs.h"
 #include "base/DirScan.h"
 #include "base/File.h"
 #include "base/JsonParser.h"
@@ -15,21 +15,29 @@
 #include "gui/win/WinGui.h"
 
 #include "Settings.h"
-#include "GlobalPrefs.h"
 #include "AppSettings.h"
 #include "Translations.h"
 
 #include "AIChatCommon.h"
 #include "AIChatPanel.h"
 
+static bool gCodexExecutableSearched = false;
+static Str gCodexExecutablePath;
+
 static TempStr FindCodexExecutableTemp() {
+    if (gCodexExecutableSearched) {
+        return gCodexExecutablePath;
+    }
+    gCodexExecutableSearched = true;
+
     StrVec candidates;
     TempStr userProfile = GetSpecialFolderTemp(CSIDL_PROFILE);
     if (userProfile) {
         candidates.Append(fmt("%s\\.codex\\bin\\codex.exe", userProfile));
         candidates.Append(fmt("%s\\.local\\bin\\codex.exe", userProfile));
     }
-    return AIChatFindExecutableTemp(candidates, WStr(L"codex.exe"), WStr(L"codex"));
+    gCodexExecutablePath = str::Dup(AIChatFindExecutableTemp(candidates, WStr(L"codex.exe"), WStr(L"codex")));
+    return gCodexExecutablePath;
 }
 
 bool IsCodexBuildInstalled() {
@@ -41,7 +49,7 @@ TempStr CodexBuildExecutablePathTemp() {
 }
 
 static Mutex gCodexBuildLogMutex;
-static AIChatLogger gCodexBuildLogger = {&gCodexBuildLogMutex, "gpt-5.5-log.txt", "gpt-5.5"};
+static AIChatLogger gCodexBuildLogger = {&gCodexBuildLogMutex, StrL("gpt-5.5-log.txt"), StrL("gpt-5.5")};
 static bool gTriedCodexModels = false;
 static StrVec gCodexModels;
 
@@ -122,8 +130,8 @@ static bool QueryCodexModels(Str exePath, StrVec& models) {
         "\n"
         "{\"method\":\"model/list\",\"id\":2,\"params\":{\"limit\":100,\"includeHidden\":false}}\n");
     DWORD nWritten = 0;
-    bool wroteRequest =
-        WriteFile(hStdinWrite, request.s, (DWORD)request.len, &nWritten, nullptr) && nWritten == (DWORD)request.len;
+    DWORD requestLen = (DWORD)request.len;
+    bool wroteRequest = WriteFile(hStdinWrite, request.s, requestLen, &nWritten, nullptr) && nWritten == requestLen;
     if (!wroteRequest) {
         closeHandle(hStdinWrite);
         TerminateProcess(pi.hProcess, 0);
@@ -174,14 +182,14 @@ static bool QueryCodexModels(Str exePath, StrVec& models) {
 
 static TempStr CodexSessionsRootTemp() {
     TempStr userProfile = GetSpecialFolderTemp(CSIDL_PROFILE);
-    if (!userProfile) {
+    if (len(userProfile) == 0) {
         return {};
     }
     return fmt("%s\\.codex\\sessions", userProfile);
 }
 
 static TempStr NormalizeCodexPathTemp(Str path) {
-    if (!path) {
+    if (len(path) == 0) {
         return {};
     }
     str::TrimPrefix(path, StrL("\\\\?\\"));
@@ -191,7 +199,7 @@ static TempStr NormalizeCodexPathTemp(Str path) {
 static bool CodexPathsEqual(Str a, Str b) {
     TempStr na = NormalizeCodexPathTemp(a);
     TempStr nb = NormalizeCodexPathTemp(b);
-    if (!na || !nb) {
+    if (len(na) == 0 || len(nb) == 0) {
         return false;
     }
     return path::IsSame(na, nb);
@@ -202,17 +210,17 @@ static bool IsCodexRolloutFileName(Str name) {
 }
 
 static TempStr ExtractCodexPromptFromHistoryLineTemp(Str line, Str sessionId) {
-    TempStr sid = AIChatJsonStrTemp(line, "session_id");
-    if (!sid || !str::Eq(sid, sessionId)) {
+    TempStr sid = AIChatJsonStrTemp(line, StrL("session_id"));
+    if (len(sid) == 0 || !str::Eq(sid, sessionId)) {
         return {};
     }
-    return AIChatJsonStrTemp(line, "text");
+    return AIChatJsonStrTemp(line, StrL("text"));
 }
 
 static Str GetCodexSessionDescription(Str sessionId) {
     TempStr userProfile = GetSpecialFolderTemp(CSIDL_PROFILE);
-    TempStr historyPath = userProfile ? fmt("%s\\.codex\\history.jsonl", userProfile) : nullptr;
-    if (!historyPath) {
+    TempStr historyPath = userProfile ? fmt("%s\\.codex\\history.jsonl", userProfile) : TempStr();
+    if (len(historyPath) == 0) {
         return str::Dup(StrL("(no description)"));
     }
     Str data = file::ReadFile(historyPath);
@@ -224,7 +232,7 @@ static Str GetCodexSessionDescription(Str sessionId) {
     Str result;
     Str line;
 
-    while (!result && str::NextLine(rest, line, rest)) {
+    while (len(result) == 0 && str::NextLine(rest, line, rest)) {
         if (len(line) == 0) {
             continue;
         }
@@ -243,9 +251,9 @@ static bool ParseCodexRolloutMetaLine(Str line, Str matchDir, Str* sessionIdOut)
     }
     Str payload;
     str::Cut(line, StrL("\"payload\":"), nullptr, &payload);
-    TempStr cwd = payload ? AIChatJsonStrTemp(payload, "cwd") : nullptr;
-    TempStr id = payload ? AIChatJsonStrTemp(payload, "id") : nullptr;
-    if (!cwd || !id || !CodexPathsEqual(cwd, matchDir)) {
+    TempStr cwd = payload ? AIChatJsonStrTemp(payload, StrL("cwd")) : TempStr();
+    TempStr id = payload ? AIChatJsonStrTemp(payload, StrL("id")) : TempStr();
+    if (len(cwd) == 0 || len(id) == 0 || !CodexPathsEqual(cwd, matchDir)) {
         return false;
     }
     *sessionIdOut = str::Dup(id);
@@ -258,7 +266,8 @@ static void TryAddCodexSession(Str rolloutPath, const FILETIME& ft, Str matchDir
         return;
     }
     Str content = data;
-    Str firstLine, rest;
+    Str firstLine;
+    Str rest;
     if (!str::NextLine(content, firstLine, rest) || len(firstLine) == 0) {
         str::Free(data);
         return;
@@ -283,14 +292,14 @@ static void TryAddCodexSession(Str rolloutPath, const FILETIME& ft, Str matchDir
     si.display = GetCodexSessionDescription(sessionId);
     si.project = str::Dup(matchDir);
     si.timestamp = ts;
-    sessions.Append(si);
+    VecAppend(sessions, si);
     str::Free(data);
 }
 
 // Walk ~/.codex/sessions/YYYY/MM/DD/ for a rollout file whose name ends with sessionId.jsonl
 static TempStr FindCodexRolloutPathTemp(Str sessionId) {
     TempStr root = CodexSessionsRootTemp();
-    if (!root || !sessionId) {
+    if (len(root) == 0 || len(sessionId) == 0) {
         return {};
     }
     TempStr suffix = fmt("%s.jsonl", sessionId);
@@ -309,7 +318,7 @@ static TempStr FindCodexRolloutPathTemp(Str sessionId) {
 // Scan ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl for sessions with matching cwd
 static void CollectCodexSessions(Str dir, Vec<AIChatSessionInfo>& sessions) {
     TempStr root = CodexSessionsRootTemp();
-    if (!root || !dir::Exists(root)) {
+    if (len(root) == 0 || !dir::Exists(root)) {
         return;
     }
 
@@ -328,7 +337,7 @@ static void CollectCodexSessions(Str dir, Vec<AIChatSessionInfo>& sessions) {
 }
 
 static bool IsCodexInjectedUserText(Str text) {
-    if (!text) {
+    if (len(text) == 0) {
         return true;
     }
     if (str::Contains(text, StrL("# AGENTS.md"))) {
@@ -357,12 +366,12 @@ static TempStr ExtractCodexRolloutUserTextTemp(Str line) {
     if (!str::Cut(line, StrL("\"input_text\""), nullptr, &inputText)) {
         return {};
     }
-    TempStr text = AIChatJsonStrTemp(inputText, "text");
-    if (!text || IsCodexInjectedUserText(text)) {
+    TempStr text = AIChatJsonStrTemp(inputText, StrL("text"));
+    if (len(text) == 0 || IsCodexInjectedUserText(text)) {
         return {};
     }
     str::TrimWSInPlace(text, str::TrimOpt::Both);
-    return len(text) > 0 ? text : nullptr;
+    return len(text) > 0 ? text : TempStr();
 }
 
 static TempStr ExtractCodexRolloutAssistantTextTemp(Str line) {
@@ -376,17 +385,17 @@ static TempStr ExtractCodexRolloutAssistantTextTemp(Str line) {
     if (!str::Cut(line, StrL("\"output_text\""), nullptr, &outputText)) {
         return {};
     }
-    return AIChatJsonStrTemp(outputText, "text");
+    return AIChatJsonStrTemp(outputText, StrL("text"));
 }
 
 static void AppendCodexRolloutTools(MainWindow* win, Str line) {
     if (!str::Contains(line, StrL("\"type\":\"response_item\""))) {
         return;
     }
-    TempStr name = nullptr;
+    TempStr name;
     if (str::Contains(line, StrL("\"type\":\"function_call\"")) ||
         str::Contains(line, StrL("\"type\":\"custom_tool_call\""))) {
-        name = AIChatJsonStrTemp(line, "name");
+        name = AIChatJsonStrTemp(line, StrL("name"));
     }
     if (len(name) > 0) {
         str::Builder desc;
@@ -398,7 +407,7 @@ static void AppendCodexRolloutTools(MainWindow* win, Str line) {
 // Load conversation history from Codex rollout JSONL
 static void LoadCodexSessionHistory(MainWindow* win, Str sessionId, Str /*dir*/) {
     TempStr sessionPath = FindCodexRolloutPathTemp(sessionId);
-    if (!sessionPath || !file::Exists(sessionPath)) {
+    if (len(sessionPath) == 0 || !file::Exists(sessionPath)) {
         return;
     }
 
@@ -438,23 +447,23 @@ struct CodexBuildProvider : AIChatProvider {
     CodexBuildProvider() {
         backend = AIChatBackend::Codex;
         logger = &gCodexBuildLogger;
-        name = "OpenAI Codex";
-        exeName = "codex";
-        virtualHost = "https://sumatrapdf.codex/";
+        name = StrL("OpenAI Codex");
+        exeName = StrL("codex");
+        virtualHost = StrL("https://sumatrapdf.codex/");
         virtualHostW = L"https://sumatrapdf.codex/";
-        webViewDataDirPrefix = "CodexWebView";
-        docUri = "/AI-Chat-with-document#openai-codex";
-        defaultModel = "gpt-5.5";
+        webViewDataDirPrefix = StrL("CodexWebView");
+        docUri = StrL("/AI-Chat-with-document#openai-codex");
+        defaultModel = StrL("gpt-5.5");
         optionItems = "Read-only\0Workspace write\0Full access\0";
         optionCount = 3;
         optionDefault = 1;
-        checkboxLabel = "Skip Sandbox";
+        checkboxLabel = StrL("Skip Sandbox");
     }
 
-    TempStr TitleTemp() override { return str::DupTemp(_TRA("Codex chat")); }
+    TempStr TitleTemp() override { return str::DupTemp(Tr("Codex chat")); }
 
     TempStr NotInstalledInstructionTemp() override {
-        return str::DupTemp(_TRA("OpenAI Codex CLI must be installed for this functionality"));
+        return str::DupTemp(Tr("OpenAI Codex CLI must be installed for this functionality"));
     }
 
     TempStr FindExecutableTemp() override { return FindCodexExecutableTemp(); }
@@ -473,27 +482,27 @@ struct CodexBuildProvider : AIChatProvider {
                 AIChatAppendModelUnique(models, gCodexModels[i]);
             }
         } else {
-            AIChatAppendModelUnique(models, "gpt-5.5");
-            AIChatAppendModelUnique(models, "gpt-5.4");
-            AIChatAppendModelUnique(models, "o3");
+            AIChatAppendModelUnique(models, StrL("gpt-5.5"));
+            AIChatAppendModelUnique(models, StrL("gpt-5.4"));
+            AIChatAppendModelUnique(models, StrL("o3"));
         }
-        Str extra = gGlobalPrefs->codexBuild.models;
+        Str extra = gSettings->codexBuild.models;
         if (len(extra) > 0) {
             StrVec parts;
-            Split(&parts, extra, ",", true);
+            Split(&parts, extra, StrL(","), true);
             for (int i = 0; i < len(parts); i++) {
                 AIChatAppendModelUnique(models, parts[i]);
             }
         }
     }
 
-    Str GetModel() override { return gGlobalPrefs->codexBuild.model; }
-    void SetModel(Str model) override { str::ReplaceWithCopy(&gGlobalPrefs->codexBuild.model, model); }
-    int GetOption() override { return gGlobalPrefs->codexBuild.sandbox; }
-    void SetOption(int option) override { gGlobalPrefs->codexBuild.sandbox = option; }
-    bool GetFlag() override { return gGlobalPrefs->codexBuild.skipSandbox; }
-    void SetFlag(bool flag) override { gGlobalPrefs->codexBuild.skipSandbox = flag; }
-    Str GetBgColor() override { return gGlobalPrefs->codexBuild.bgColor.s; }
+    Str GetModel() override { return gSettings->codexBuild.model; }
+    void SetModel(Str model) override { str::ReplaceWithCopy(&gSettings->codexBuild.model, model); }
+    int GetOption() override { return gSettings->codexBuild.sandbox; }
+    void SetOption(int option) override { gSettings->codexBuild.sandbox = option; }
+    bool GetFlag() override { return gSettings->codexBuild.skipSandbox; }
+    void SetFlag(bool flag) override { gSettings->codexBuild.skipSandbox = flag; }
+    Str GetBgColor() override { return gSettings->codexBuild.bgColor.s; }
 
     void CollectSessions(Str dir, Vec<AIChatSessionInfo>& sessions) override { CollectCodexSessions(dir, sessions); }
 
@@ -530,22 +539,22 @@ struct CodexBuildProvider : AIChatProvider {
         if (len(line) == 0 || line.s[0] != '{') {
             return;
         }
-        TempStr eventType = AIChatJsonStrTemp(line, "type");
+        TempStr eventType = AIChatJsonStrTemp(line, StrL("type"));
 
         if (eventType && str::Eq(eventType, StrL("thread.started"))) {
-            TempStr threadId = AIChatJsonStrTemp(line, "thread_id");
+            TempStr threadId = AIChatJsonStrTemp(line, StrL("thread_id"));
             if (threadId) {
                 AIChatStreamSetSessionId(ctx, threadId);
             }
         } else if (eventType && str::Eq(eventType, StrL("item.completed"))) {
             Str p;
             if (str::Cut(line, StrL("\"type\":\"agent_message\""), nullptr, &p)) {
-                TempStr text = AIChatJsonStrTemp(p, "text");
+                TempStr text = AIChatJsonStrTemp(p, StrL("text"));
                 if (len(text) > 0) {
                     AIChatPostUpdate(ctx, AIChatUpdateType::Text, text);
                 }
             } else if (str::Cut(line, StrL("\"type\":\"command_execution\""), nullptr, &p)) {
-                TempStr cmd = AIChatJsonStrTemp(p, "command");
+                TempStr cmd = AIChatJsonStrTemp(p, StrL("command"));
                 if (len(cmd) > 0) {
                     TempStr shortCmd = ShortenStringUtf8Temp(cmd, 80);
                     str::Builder desc;

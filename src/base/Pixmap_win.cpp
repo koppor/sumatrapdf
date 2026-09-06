@@ -118,6 +118,19 @@ Pixmap* PixmapFromRenderedBitmap(RenderedBitmap* rb) {
     return p;
 }
 
+// The alpha in a DIB section is straight, not premultiplied: that is what PNG,
+// CF_DIBV5 and GDI+ all expect of a 32bpp bitmap, and mupdf hands us
+// premultiplied pixels. Undoing it here keeps the invariant in one place.
+static void UnpremultiplyBgra(u8* d) {
+    u32 a = d[3];
+    if (a == 0 || a == 255) {
+        return;
+    }
+    d[0] = (u8)std::min<u32>(255, ((u32)d[0] * 255 + (a / 2)) / a);
+    d[1] = (u8)std::min<u32>(255, ((u32)d[1] * 255 + (a / 2)) / a);
+    d[2] = (u8)std::min<u32>(255, ((u32)d[2] * 255 + (a / 2)) / a);
+}
+
 RenderedBitmap* RenderedBitmapFromPixmap(Pixmap* px) {
     if (!px) {
         return nullptr;
@@ -152,6 +165,9 @@ RenderedBitmap* RenderedBitmapFromPixmap(Pixmap* px) {
                     memcpy(dst, src, 4);
                     src += 4;
                 }
+                if (px->premultiplied) {
+                    UnpremultiplyBgra(dst);
+                }
                 dst += 4;
             }
         }
@@ -183,9 +199,109 @@ void FreePixmapNativeBitmap(Pixmap* p) {
     p->data = nullptr;
 }
 
+// Shell / association icons carry transparency in a 1-bit AND mask or a 32bpp
+// alpha channel. Gdiplus::Bitmap(HICON) drops that and leaves transparent
+// pixels as opaque black, which then shows as a black square on the home page.
+Pixmap* PixmapFromHICON(HICON hicon) {
+    if (!hicon) {
+        return nullptr;
+    }
+    ICONINFO ii{};
+    if (!GetIconInfo(hicon, &ii)) {
+        return nullptr;
+    }
+    BITMAP bm{};
+    HBITMAP srcBmp = ii.hbmColor ? ii.hbmColor : ii.hbmMask;
+    if (!srcBmp || GetObjectW(srcBmp, sizeof(bm), &bm) == 0 || bm.bmWidth <= 0 || bm.bmHeight <= 0) {
+        DeleteObject(ii.hbmColor);
+        DeleteObject(ii.hbmMask);
+        return nullptr;
+    }
+    int w = bm.bmWidth;
+    int h = ii.hbmColor ? bm.bmHeight : bm.bmHeight / 2;
+    if (h <= 0) {
+        DeleteObject(ii.hbmColor);
+        DeleteObject(ii.hbmMask);
+        return nullptr;
+    }
+
+    Pixmap* px = AllocPixmapDIB(w, h);
+    if (!px) {
+        DeleteObject(ii.hbmColor);
+        DeleteObject(ii.hbmMask);
+        return nullptr;
+    }
+    memset(px->data, 0, (size_t)px->stride * (size_t)h);
+    px->hasAlpha = true;
+
+    HDC hdc = CreateCompatibleDC(nullptr);
+    if (!hdc) {
+        FreePixmap(px);
+        DeleteObject(ii.hbmColor);
+        DeleteObject(ii.hbmMask);
+        return nullptr;
+    }
+    HGDIOBJ old = SelectObject(hdc, px->hbmp);
+    DrawIconEx(hdc, 0, 0, hicon, w, h, 0, nullptr, DI_NORMAL);
+    if (old) {
+        SelectObject(hdc, old);
+    }
+
+    bool anyAlpha = false;
+    for (int y = 0; y < h && !anyAlpha; y++) {
+        const u8* d = px->data + ((size_t)y * px->stride);
+        for (int x = 0; x < w; x++, d += 4) {
+            if (d[3] != 0) {
+                anyAlpha = true;
+                break;
+            }
+        }
+    }
+
+    if (!anyAlpha && ii.hbmMask) {
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        Pixmap* mask = AllocPixmap(w, h, PixmapFormat::BGRA8);
+        if (mask && mask->data) {
+            GetDIBits(hdc, ii.hbmMask, 0, (UINT)h, mask->data, &bmi, DIB_RGB_COLORS);
+            for (int y = 0; y < h; y++) {
+                u8* d = px->data + ((size_t)y * px->stride);
+                const u8* m = mask->data + ((size_t)y * mask->stride);
+                for (int x = 0; x < w; x++, d += 4, m += 4) {
+                    if (m[0] || m[1] || m[2]) {
+                        d[0] = d[1] = d[2] = d[3] = 0;
+                    } else {
+                        d[3] = 255;
+                    }
+                }
+            }
+        }
+        FreePixmap(mask);
+    }
+
+    DeleteDC(hdc);
+    DeleteObject(ii.hbmColor);
+    DeleteObject(ii.hbmMask);
+    return px;
+}
+
+static bool BlitPixmapRegionComposited(Pixmap* p, HDC hdc, Rect target, Rect source);
+
 bool BlitPixmapRegion(Pixmap* p, HDC hdc, Rect target, Rect source) {
     if (!p || !p->data || target.IsEmpty() || source.IsEmpty()) {
         return false;
+    }
+    // a pixmap that carries real transparency (an image with an alpha channel,
+    // or a PDF page rendered with a transparent backdrop) has to be blended
+    // with what's underneath, or SRCCOPY paints its transparent parts black
+    // (issues #5844, #1809). DIB-backed pages used to skip this and BitBlt.
+    if (p->hasAlpha && p->format == PixmapFormat::BGRA8) {
+        return BlitPixmapRegionComposited(p, hdc, target, source);
     }
     SetStretchBltMode(hdc, HALFTONE);
     if (p->hbmp) {
@@ -301,6 +417,65 @@ bool BlitPixmapAlpha(Pixmap* p, HDC hdc, Rect target) {
     return ok;
 }
 
+// Draw a region of an alpha-carrying pixmap, blending over what's already on
+// the target so the document background - a solid colour, or the checkered
+// pattern - shows through the transparent parts (issue #5844).
+//
+// Hand-rolled for the same reason as BlitPixmapAlpha: msimg32's AlphaBlend()
+// isn't linked into every consumer of base. Unlike that one this has to handle
+// a scaling blit, because a stale tile is stretched while the new one renders.
+// The sampling is nearest-neighbour, which is all a stretched stale tile is.
+static bool BlitPixmapRegionComposited(Pixmap* p, HDC hdc, Rect target, Rect source) {
+    source = Rect(0, 0, p->width, p->height).Intersect(source);
+    if (source.IsEmpty()) {
+        return false;
+    }
+    int dx = target.dx;
+    int dy = target.dy;
+    Pixmap* dst = AllocPixmapDIB(dx, dy);
+    if (!dst) {
+        return false;
+    }
+    bool ok = false;
+    HDC memDC = CreateCompatibleDC(hdc);
+    if (memDC) {
+        HGDIOBJ prev = SelectObject(memDC, dst->hbmp);
+        if (prev) {
+            // read the background, blend the source over it, put it back
+            BitBlt(memDC, 0, 0, dx, dy, hdc, target.x, target.y, SRCCOPY);
+            GdiFlush();
+            for (int y = 0; y < dy; y++) {
+                int sy = (dy == source.dy) ? y : (int)(((i64)y * source.dy) / dy);
+                const u8* srcRow = p->data + ((size_t)(source.y + sy) * p->stride);
+                u8* d = dst->data + ((size_t)y * dst->stride);
+                for (int x = 0; x < dx; x++, d += 4) {
+                    int sx = (dx == source.dx) ? x : (int)(((i64)x * source.dx) / dx);
+                    const u8* s = srcRow + ((size_t)(source.x + sx) * 4);
+                    u32 a = s[3];
+                    if (a == 0) {
+                        continue;
+                    }
+                    if (a == 255) {
+                        d[0] = s[0];
+                        d[1] = s[1];
+                        d[2] = s[2];
+                        continue;
+                    }
+                    d[0] = BlendOver(s[0], d[0], a, p->premultiplied);
+                    d[1] = BlendOver(s[1], d[1], a, p->premultiplied);
+                    d[2] = BlendOver(s[2], d[2], a, p->premultiplied);
+                }
+            }
+            GdiFlush();
+            ok = BitBlt(hdc, target.x, target.y, dx, dy, memDC, 0, 0, SRCCOPY) != 0;
+            SelectObject(memDC, prev);
+        }
+        DeleteDC(memDC);
+    }
+    FreePixmap(dst);
+    return ok;
+}
+
 static bool SkipRecolorPixel(int x, int y, Vec<Rect>* skipRects) {
     if (skipRects) {
         for (Rect& r : *skipRects) {
@@ -349,9 +524,10 @@ void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor, 
             int maxRG = pixel[2] > pixel[1] ? pixel[2] : pixel[1];
             int lum = (pixel[0] + pixel[1] + pixel[2]) / 3;
             if (linkColor && pixel[0] >= maxRG + 25 && pixel[0] >= 72 && lum <= 230) {
-                pixel[0] = linkB;
-                pixel[1] = linkG;
-                pixel[2] = linkR;
+                int rg = ((int)pixel[1] + pixel[2]) / 2;
+                pixel[0] = (u8)(linkB + Mul255(rg, (int)bgB - linkB));
+                pixel[1] = (u8)(linkG + Mul255(rg, (int)bgG - linkG));
+                pixel[2] = (u8)(linkR + Mul255(rg, (int)bgR - linkR));
                 continue;
             }
             for (int i = 0; i < 3; i++) {
@@ -367,6 +543,46 @@ static Size GetBitmapSize(HBITMAP hbmp) {
     return {bmpInfo.bmWidth, bmpInfo.bmHeight};
 }
 
+// Copy an HBITMAP into a top-down 32bpp BGRA pixmap. Reading the clipboard as
+// 24bpp GetDIBits sheared paste-as-stamp (issue #6059): area-copy puts a
+// 32-bpp CF_BITMAP on the clipboard, and converting that to DWORD-padded 24bpp
+// rows does not land on the stride the stamp path uses. 32bpp BI_RGB rows are
+// always width*4, the same as AllocPixmap(BGRA8).
+static Pixmap* PixmapFromHBITMAPPixels(HBITMAP hbmp) {
+    Size size = GetBitmapSize(hbmp);
+    if (size.dx <= 0 || size.dy <= 0) {
+        return nullptr;
+    }
+    Pixmap* pixmap = AllocPixmap(size.dx, size.dy, PixmapFormat::BGRA8);
+    if (!pixmap) {
+        return nullptr;
+    }
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = size.dx;
+    bmi.bmiHeader.biHeight = -size.dy; // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    HDC hdc = GetDC(nullptr);
+    int n = GetDIBits(hdc, hbmp, 0, (UINT)size.dy, pixmap->data, &bmi, DIB_RGB_COLORS);
+    ReleaseDC(nullptr, hdc);
+    if (!n) {
+        FreePixmap(pixmap);
+        return nullptr;
+    }
+    // CF_BITMAP has no alpha; GetDIBits leaves it 0, which would make a stamp
+    // fully transparent.
+    for (int y = 0; y < pixmap->height; y++) {
+        u8* d = pixmap->data + ((size_t)y * pixmap->stride);
+        for (int x = 0; x < pixmap->width; x++, d += 4) {
+            d[3] = 0xff;
+        }
+    }
+    return pixmap;
+}
+
 // Returns a copy of the clipboard bitmap as a platform-independent Pixmap.
 Pixmap* GetClipboardImageAsPixmap() {
     if (!IsClipboardFormatAvailable(CF_BITMAP) || !OpenClipboard(nullptr)) {
@@ -378,24 +594,7 @@ Pixmap* GetClipboardImageAsPixmap() {
     // returned by GetClipboardData() remains owned by the clipboard.
     HBITMAP hbmp = (HBITMAP)GetClipboardData(CF_BITMAP);
     if (hbmp) {
-        Size size = GetBitmapSize(hbmp);
-        pixmap = AllocPixmap(size.dx, size.dy, PixmapFormat::BGR8);
-        if (pixmap) {
-            BITMAPINFO bmi{};
-            bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
-            bmi.bmiHeader.biWidth = size.dx;
-            bmi.bmiHeader.biHeight = -size.dy;
-            bmi.bmiHeader.biPlanes = 1;
-            bmi.bmiHeader.biBitCount = 24;
-            bmi.bmiHeader.biCompression = BI_RGB;
-
-            HDC hdc = GetDC(nullptr);
-            if (!GetDIBits(hdc, hbmp, 0, size.dy, pixmap->data, &bmi, DIB_RGB_COLORS)) {
-                FreePixmap(pixmap);
-                pixmap = nullptr;
-            }
-            ReleaseDC(nullptr, hdc);
-        }
+        pixmap = PixmapFromHBITMAPPixels(hbmp);
     }
     CloseClipboard();
     return pixmap;

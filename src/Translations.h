@@ -19,11 +19,17 @@ void Destroy();
 
 } // namespace trans
 
-Str _TRA(Str s);
-TempWStr _TRW(Str s);
+Str Tr(Str s);
+inline Str Tr(const char* s) {
+    return Tr(Str(s));
+}
+template <int N>
+inline Str Tr(const char (&s)[N]) {
+    return Tr(Str((char*)s, N - 1));
+}
 
-// _TRN() marks strings that need to be translated but are used in a context
+// TrN() marks strings that need to be translated but are used in a context
 // that doesn't allow calling Trans::GetTranslationTemp() (e.g. when used as part
 // of a struct). This allows the translation manager script to see the string
 // but they'll need additional code that does Trans::GetTranslationTemp() on them
-#define _TRN(x) (x)
+#define TrN(x) StrL(x)

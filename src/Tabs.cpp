@@ -21,9 +21,8 @@
 #include "base/GuessFileType.h"
 #include "EngineAll.h"
 #include "DisplayModel.h"
-#include "GlobalPrefs.h"
 #include "SumatraPDF.h"
-#include "SumatraProperties.h"
+#include "DocumentProperties.h"
 #include "MainWindow.h"
 #include "WindowTab.h"
 #include "Commands.h"
@@ -32,17 +31,17 @@
 #include "SelectionToolbar.h"
 #include "Menu.h"
 #include "TableOfContents.h"
-#include "Tabs.h"
 #include "FileHistory.h"
 #include "Theme.h"
 #include "Translations.h"
+#include "Tabs.h"
 
 // always full path (FullPathInTitle only affects tab/window title text).
 // Append size when GetSize succeeds (may fail for offline network paths).
 // Used by Tabs and Toolbar (toolbar was overwriting tooltips with path-only).
 // full path + size (if available); optional dirty suffix for unsaved annotations
 TempStr MakeTabTooltipTemp(Str path, bool dirty) {
-    if (!path) {
+    if (len(path) == 0) {
         return Str{};
     }
     TempStr tip;
@@ -53,9 +52,37 @@ TempStr MakeTabTooltipTemp(Str path, bool dirty) {
         tip = path;
     }
     if (dirty) {
-        tip = str::JoinTemp(tip, StrL(" "), _TRA("(unsaved annotations)"));
+        tip = str::JoinTemp(tip, StrL(" "), Tr("(unsaved annotations)"));
     }
     return tip;
+}
+
+static TempStr TabPageSuffixTemp(WindowTab* tab) {
+    if (!gSettings || !gSettings->showPageNumberInTabs) {
+        return {};
+    }
+    if (!tab || !tab->IsDocLoaded() || !tab->ctrl) {
+        return {};
+    }
+    int curr = tab->ctrl->CurrentPageNo();
+    int count = tab->ctrl->PageCount();
+    if (count <= 0 || curr < 1) {
+        return {};
+    }
+    if (tab->ctrl->HasChapters()) {
+        Location loc = tab->ctrl->CurrentLocation();
+        int chapterPages = tab->ctrl->ChapterPageCount(loc.chapter);
+        return fmt(" %d/%d · %d/%d", loc.chapter, tab->ctrl->ChapterCount(), loc.page, chapterPages);
+    }
+    return fmt(" %d/%d", curr, count);
+}
+
+void UpdateTabPageText(WindowTab* tab) {
+    if (!tab || !tab->win || !tab->win->tabsCtrl) {
+        return;
+    }
+    int idx = tab->win->GetTabIdx(tab);
+    tab->win->tabsCtrl->SetPageText(idx, TabPageSuffixTemp(tab));
 }
 
 static void UpdateTabTitle(WindowTab* tab) {
@@ -71,6 +98,7 @@ static void UpdateTabTitle(WindowTab* tab) {
     }
     TempStr tooltip = MakeTabTooltipTemp(tab->filePath, dirty);
     win->tabsCtrl->SetTextAndTooltip(idx, title, tooltip);
+    UpdateTabPageText(tab);
 }
 
 int GetTabbarHeight(HWND hwnd, float factor) {
@@ -101,14 +129,6 @@ int GetTabbarHeight(HWND hwnd, float factor) {
     return (int)((float)tabDy * factor);
 }
 
-#if 0
-static inline Size GetTabSize(HWND hwnd) {
-    int dx = DpiScale(std::max(gGlobalPrefs->tabWidth, kTabMinDx));
-    int dy = GetTabbarHeight(hwnd);
-    return Size(dx, dy);
-}
-#endif
-
 static void ShowTabBar(MainWindow* win, bool show) {
     if (show == win->tabsVisible) {
         return;
@@ -123,25 +143,19 @@ static void ShowTabBar(MainWindow* win, bool show) {
 // also shows/hides the tabbar when necessary
 void UpdateTabWidth(MainWindow* win) {
     int nTabs = win->TabCount();
-    // Count real documents only: Home (and Favorites) alone should not keep the
-    // tab bar open. Showing Home as a single tab after the last document closed
-    // fought RelayoutCaption (which hides tabs with no file tabs) and caused a
-    // continuous TabsCtrl repaint storm (issue #5861).
-    int nDocTabs = 0;
-    for (int i = 0; i < nTabs; i++) {
-        WindowTab* t = win->GetTab(i);
-        if (t && !t->IsNonDocumentTab()) {
-            nDocTabs++;
-        }
-    }
+    // Hide a lone Home tab. Keeping its tab bar open after the last document
+    // closed fought RelayoutCaption and caused a continuous repaint storm
+    // (issue #5861). Favorites is a closable tab, so it must remain visible
+    // even when it is the only tab left.
+    bool onlyHomeTab = nTabs == 1 && win->GetTab(0)->IsAboutTab();
     bool showSingleTab = SettingsUseTabs() || win->tabsInTitlebar;
-    bool showTabs = (nDocTabs > 1) || (showSingleTab && (nDocTabs > 0));
+    bool showTabs = !onlyHomeTab && ((nTabs > 1) || (showSingleTab && (nTabs > 0)));
     // TabWidth is stored in logical (96-DPI) units, same as other layout
     // settings; convert to physical pixels so HiDPI monitors honor the value
     // (issue #3850). Height already uses DpiScale via GetTabbarHeight.
     if (win->tabsCtrl) {
         HWND hwnd = win->tabsCtrl->hwnd ? win->tabsCtrl->hwnd : win->hwndFrame;
-        win->tabsCtrl->tabDefaultDx = DpiScale(gGlobalPrefs->tabWidth);
+        win->tabsCtrl->tabDefaultDx = DpiScale(gSettings->tabWidth);
     }
     // Lay out only when the bar stays visible. Hiding it right after
     // TabCtrl_SetItemSize invalidated the control leaves a pending WM_PAINT for
@@ -157,10 +171,20 @@ void UpdateTabWidth(MainWindow* win) {
 }
 
 void RemoveTab(WindowTab* tab) {
-    UpdateTabFileDisplayStateForTab(tab);
+    if (!tab) {
+        return;
+    }
     MainWindow* win = tab->win;
-    win->tabSelectionHistory->Remove(tab);
+    if (!win || !win->tabsCtrl) {
+        return;
+    }
     int idx = win->GetTabIdx(tab);
+    if (idx < 0) {
+        // nested close already took this tab out of the strip (DDE CloseAllTabs)
+        return;
+    }
+    UpdateTabFileDisplayStateForTab(tab);
+    VecRemove(*win->tabSelectionHistory, tab);
     WindowTab* tab2 = win->tabsCtrl->RemoveTab<WindowTab*>(idx);
     ReportIf(tab != tab2);
     bool closedCurrentTab = (tab == win->CurrentTab());
@@ -339,79 +363,79 @@ static MenuDef menuDefContextTab[] = {
     // these top items are removed unless the document has unsaved changes;
     // text matches the "Unsaved changes" close dialog
     {
-        _TRN("&Save changes to existing PDF"),
+        TrN("&Save changes to existing PDF"),
         CmdSaveAnnotations,
     },
     {
-        _TRN("Save changes to &new PDF"),
+        TrN("Save changes to &new PDF"),
         CmdSaveAnnotationsNewFile,
     },
     {
-        _TRN("&Discard changes"),
+        TrN("&Discard changes"),
         CmdDiscardChanges,
     },
     {
-        kMenuSeparator,
+        StrL(kMenuSeparator),
         0,
     },
     {
-        _TRN("Properties..."),
+        TrN("Properties..."),
         CmdProperties,
     },
     {
-        _TRN("Show in folder"),
+        TrN("Show in folder"),
         CmdShowInFolder,
     },
     {
-        _TRN("Copy File Path"),
+        TrN("Copy File Path"),
         CmdCopyFilePath,
     },
     {
-        _TRN("Open In New Window"),
+        TrN("Open In New Window"),
         CmdDuplicateInNewWindow,
     },
     {
-        _TRN("Change Tab Color"),
+        TrN("Change Tab Color"),
         CmdSetTabColor,
     },
     {
-        kMenuSeparator,
+        StrL(kMenuSeparator),
         0,
     },
     {
-        _TRN("Close"),
+        TrN("Close"),
         CmdClose,
     },
     {
-        _TRN("Close Other Tabs"),
+        TrN("Close Other Tabs"),
         CmdCloseOtherTabs,
     },
     {
-        _TRN("Close Tabs To The Right"),
+        TrN("Close Tabs To The Right"),
         CmdCloseTabsToTheRight,
     },
     {
-        _TRN("Close Tabs To The Left"),
+        TrN("Close Tabs To The Left"),
         CmdCloseTabsToTheLeft,
     },
     {
-        _TRN("Close All Tabs"),
+        TrN("Close All Tabs"),
         CmdCloseAllTabs,
     },
     {
-        kMenuSeparator,
+        StrL(kMenuSeparator),
         0,
     },
     {
-        _TRN("Save Tab Group"),
+        TrN("Save Tab Group"),
         CmdTabGroupSave,
     },
     {
-        _TRN("Restore Tab Group"),
+        TrN("Restore Tab Group"),
         CmdTabGroupRestore,
     },
     {
-        nullptr,
+        {},
         0,
     },
 };
@@ -431,16 +455,48 @@ void CollectTabsToClose(MainWindow* win, WindowTab* currTab, Vec<WindowTab*>& to
             seenCurrent = true;
             continue;
         }
-        toCloseOther.Append(tab);
+        VecAppend(toCloseOther, tab);
         if (seenCurrent) {
-            toCloseRight.Append(tab);
+            VecAppend(toCloseRight, tab);
         } else {
-            toCloseLeft.Append(tab);
+            VecAppend(toCloseLeft, tab);
         }
     }
 }
 
+void CloseCollectedTabs(MainWindow* win, const Vec<WindowTab*>& toClose) {
+    // CloseTab can pump (DDE, SaveSettings, dialogs). A nested close may have
+    // already freed some of these pointers; GetTabIdx is pointer identity and
+    // does not dereference a freed WindowTab.
+    if (!win) {
+        return;
+    }
+    for (WindowTab* t : toClose) {
+        if (!IsMainWindowValid(win) || win->isBeingClosed) {
+            return;
+        }
+        if (win->GetTabIdx(t) < 0) {
+            continue;
+        }
+        CloseTab(t, false);
+    }
+}
+
 void CloseAllTabs(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    if (win->isBeingClosed || win->inCloseAllTabs) {
+        logf("CloseAllTabs: skip isBeingClosed=%d inCloseAllTabs=%d\n", (int)win->isBeingClosed,
+             (int)win->inCloseAllTabs);
+        return;
+    }
+    win->inCloseAllTabs = true;
+    defer {
+        if (IsMainWindowValid(win)) {
+            win->inCloseAllTabs = false;
+        }
+    };
     // can't close while iterating over the tabs so collect them first
     Vec<WindowTab*> toClose;
     int nTabs = win->TabCount();
@@ -449,11 +505,9 @@ void CloseAllTabs(MainWindow* win) {
         if (t->IsAboutTab()) {
             continue;
         }
-        toClose.Append(t);
+        VecAppend(toClose, t);
     }
-    for (WindowTab* t : toClose) {
-        CloseTab(t, false);
-    }
+    CloseCollectedTabs(win, toClose);
 }
 
 // TODO: add "Move to another window" sub-menu
@@ -490,7 +544,7 @@ static void TabsContextMenu(TabsCtrl* tabsCtrl, VirtMouseEvent* ev) {
     ctx->tab = tabUnderMouse;
     ctx->isDocLoaded = true; // tabUnderMouse is a real (non-about) document tab
     ctx->filePath = tabUnderMouse->filePath;
-    ctx->supportsAnnots = EngineSupportsAnnotations(tabEngine) && !win->isFullScreen;
+    ctx->supportsAnnots = EngineSupportsAnnotations(tabEngine);
     ctx->hasUnsavedAnnotations = EngineHasUnsavedAnnotations(tabEngine);
     ctx->canCloseOtherTabs = len(toCloseOther) > 0;
     ctx->canCloseTabsToRight = len(toCloseRight) > 0;
@@ -527,25 +581,19 @@ static void TabsContextMenu(TabsCtrl* tabsCtrl, VirtMouseEvent* ev) {
             return;
         }
         case CmdCloseOtherTabs: {
-            for (WindowTab* t : toCloseOther) {
-                CloseTab(t, false);
-            }
+            CloseCollectedTabs(win, toCloseOther);
             return;
         }
         case CmdCloseTabsToTheRight: {
-            for (WindowTab* t : toCloseRight) {
-                CloseTab(t, false);
-            }
+            CloseCollectedTabs(win, toCloseRight);
             return;
         }
         case CmdCloseTabsToTheLeft: {
-            for (WindowTab* t : toCloseLeft) {
-                CloseTab(t, false);
-            }
+            CloseCollectedTabs(win, toCloseLeft);
             return;
         }
         case CmdShowInFolder: {
-            SumatraOpenPathInDefaultFileManager(tabUnderMouse->filePath);
+            ShowFileInFolder(win, tabUnderMouse->filePath);
             return;
         }
         case CmdCopyFilePath: {
@@ -627,7 +675,7 @@ void CreateTabbar(MainWindow* win) {
     args.withToolTips = true;
     args.font = GetAppFont();
     // logical TabWidth → physical (see UpdateTabWidth / issue #3850)
-    args.tabDefaultDx = DpiScale(gGlobalPrefs->tabWidth);
+    args.tabDefaultDx = DpiScale(gSettings->tabWidth);
     args.isRtl = false; // LTR hwnd; RTL tab order follows parent frame (see UpdateWindowRtlLayout)
 
     TabsCtrl* tabsCtrl = new TabsCtrl();
@@ -666,7 +714,14 @@ static NO_INLINE void VerifyWindowTab(MainWindow* win, WindowTab* tdata) {
             expectedTocVisibility = tdata->showTocPresentation;
         }
     }
-    ReportDebugIf(win->uiState.tocVisible != expectedTocVisibility);
+    // Heading TOC is generated after the document is shown. Until that finishes
+    // the sidebar stays hidden (uiState.tocVisible) but the tab keeps the
+    // caller's showToc preference so we can open it when headings arrive.
+    if (win->uiState.tocVisible != expectedTocVisibility) {
+        bool headingPending = EngineMupdfHeadingTocPending(tdata->GetEngine());
+        bool okPendingHide = headingPending && expectedTocVisibility && !win->uiState.tocVisible;
+        ReportDebugIf(!okPendingHide);
+    }
     ReportIf(tdata->canvasRc != win->canvasRc);
 }
 
@@ -702,8 +757,8 @@ void SaveCurrentWindowTab(MainWindow* win) {
     VerifyWindowTab(win, tab);
 
     // update the selection history
-    win->tabSelectionHistory->Remove(tab);
-    win->tabSelectionHistory->Append(tab);
+    VecRemove(*win->tabSelectionHistory, tab);
+    VecAppend(*win->tabSelectionHistory, tab);
 }
 
 WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab, bool deferUpdate) {
@@ -718,7 +773,7 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab, bool deferUpdate) {
     auto* tabs = win->tabsCtrl;
     int idx = win->TabCount();
     bool useTabs = SettingsUseTabs();
-    bool noHomeTab = gGlobalPrefs->noHomeTab;
+    bool noHomeTab = gSettings->noHomeTab;
     bool createHomeTab = useTabs && !noHomeTab && (idx == 0);
     if (createHomeTab) {
         WindowTab* homeTab = new WindowTab(win);
@@ -726,7 +781,7 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab, bool deferUpdate) {
         homeTab->canvasRc = win->canvasRc;
         TabInfo* newTab = new TabInfo();
         newTab->text = str::Dup(StrL("Home"));
-        newTab->tooltip = nullptr;
+        newTab->tooltip = {};
         newTab->isPinned = true;
         newTab->canClose = true;
         newTab->userData = (UINT_PTR)homeTab;
@@ -738,6 +793,7 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab, bool deferUpdate) {
     tab->canvasRc = win->canvasRc;
     TabInfo* newTab = new TabInfo();
     newTab->text = str::Dup(tab->GetTabTitle());
+    newTab->pageText = str::Dup(TabPageSuffixTemp(tab));
     // same full path + size as UpdateTabTitle (was path-only, so size missing until
     // TabsOnChangedDoc for the active tab)
     newTab->tooltip = str::Dup(MakeTabTooltipTemp(tab->filePath, false));
@@ -820,9 +876,11 @@ void TabsOnCloseWindow(MainWindow* win) {
     win->ctrl = nullptr;
     win->currentTabTemp = nullptr;
     auto tabs = win->Tabs();
-    DeleteVecMembers(tabs);
+    // drop TabsCtrl userData first so CurrentTab() is null while WindowTab
+    // dtors run (they refresh the annotation filter via CurrentTab)
     win->tabsCtrl->RemoveAllTabs();
-    win->tabSelectionHistory->Reset();
+    DeleteVecMembers(tabs);
+    VecReset(*win->tabSelectionHistory);
 }
 
 void SetTabsInTitlebar(MainWindow* win, bool inTitleBar) {

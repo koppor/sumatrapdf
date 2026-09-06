@@ -11,7 +11,7 @@ struct MenuDef {
     UINT_PTR idOrSubmenu = 0;
 };
 
-constexpr const char* kMenuSeparator = "-----";
+#define kMenuSeparator "-----"
 
 void FreeAllMenuDrawInfos();
 void FreeMenuOwnerDrawInfo(MenuOwnerDrawInfo*);
@@ -25,6 +25,7 @@ void RemoveBadMenuSeparators(HMENU menu);
 HMENU BuildMenu(MainWindow* win);
 void OnWindowContextMenu(MainWindow* win, int x, int y);
 void OnAboutContextMenu(MainWindow* win, int x, int y);
+bool CommandUsesContextMenuPoint(int cmdId);
 void ForgetFileFromFrequentlyRead(MainWindow* win, Str filePath);
 int CmdIdFromVirtualZoom(float virtualZoom);
 void UpdateAppMenu(MainWindow* win, HMENU m);

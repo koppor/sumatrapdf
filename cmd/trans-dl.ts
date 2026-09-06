@@ -6,7 +6,7 @@
  *   (packed into .work/embedded.dat with marked/mermaid/manual via pack-embedded.ts)
  *
  * Flow:
- *   1. Extract _TR* strings from src + command names
+ *   1. Extract Tr() / TrN() strings from src + command names
  *   2. POST them to /api/dltransfor (marks active strings; returns sha1 + translations)
  *   3. Fix suspicious translations (trailing whitespace / \n / \r) via /api/edittranslation
  *      as user "ai fix"
@@ -46,7 +46,7 @@ const workDir = ".work";
 const translationsTxtPath = join(workDir, "translations.txt");
 // legacy path kept only for cleanup messaging; packing is pack-embedded.ts
 
-const translationPattern = /\b_TR[ANW]?\("(.*?)"\)/g;
+const translationPattern = /\b(?:TrN|Tr)\("(.*?)"\)/g;
 
 type AiProvider = "claude" | "grok" | "none";
 

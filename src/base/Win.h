@@ -1,7 +1,7 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
-#define DRAGQUERY_NUMFILES 0xFFFFFFFF
+constexpr UINT DRAGQUERY_NUMFILES = 0xFFFFFFFF;
 
 //--- bool / BOOL
 
@@ -65,7 +65,10 @@ bool HwndIsMouseOverRect(HWND hwnd, const Rect& r);
 //--- HWND: focus / visibility / Z-order
 
 HWND HwndSetFocus(HWND hwnd);
+HWND HwndThreadFocus();
+bool HwndSetFocusForce(HWND hwnd);
 bool HwndIsFocused(HWND);
+bool HwndIsOnScreenKeyboard(HWND);
 bool HwndIsVisible(HWND hwnd);
 void HwndSetVisible(HWND hwnd, bool visible);
 void HwndShow(HWND hwnd);
@@ -108,12 +111,24 @@ void HwndSendCommand(HWND hwnd, int cmdId, LPARAM lp = 0);
 void HwndPostCommand(HWND hwnd, int cmdId, LPARAM lp = 0);
 
 //--- edit control
+// all no-op (or return a zero value) on a null hwnd. gui/win/WinGui.h overloads
+// them on Edit*, which is what code holding a control should call
 
 void EditSelectAll(HWND);
+void EditSelectText(HWND hwnd, int start, int end);
+void EditGetSelection(HWND hwnd, int& start, int& end);
+void EditSetCursorPos(HWND hwnd, int pos);
+void EditSetCursorPosAtEnd(HWND hwnd);
+int EditGetTextLen(HWND hwnd);
+void EditSetModified(HWND hwnd, bool);
+bool EditIsModified(HWND hwnd);
+void EditSetCueText(HWND hwnd, Str);
+void EditSetMargins(HWND hwnd, int left, int right);
+void EditSetNumbersOnly(HWND hwnd, bool);
+void EditSetPasswordVisible(HWND hwnd, bool);
 
 //--- list box
 
-void ListBox_AppendString_NoSort(HWND, WStr txt);
 void LbResetContent(HWND hwnd);
 int LbAddString(HWND hwnd, WStr text);
 int LbAddString(HWND hwnd, Str text);
@@ -154,9 +169,31 @@ DWORD LvSetExtendedStyle(HWND hwnd, DWORD ex);
 int LvInsertColumn(HWND hwnd, int iCol, const LVCOLUMNW* col);
 
 //--- combo box
+// all no-op (or return a zero value) on a null hwnd. gui/win/WinGui.h overloads
+// them on DropDown*, which is what code holding a control should call
 
+void CbResetContent(HWND);
 void CbAddString(HWND, Str s);
+int CbGetItemsCount(HWND);
+void CbInsertString(HWND, int idx, Str s);
+void CbDeleteString(HWND, int idx);
+void CbSetCueBanner(HWND, Str);
+void CbSetMinVisible(HWND, int n);
+void CbSetItemHeight(HWND, int idx, int dy);
+int CbGetTextLen(HWND);
+bool CbIsDropped(HWND);
+// which item of the drop-down list is selected, -1 for none
+int CbGetCurrentSelection(HWND);
 void CbSetCurrentSelection(HWND, int);
+
+// the edit an editable (CBS_DROPDOWN) combo keeps its text in. CbEdit*Selection
+// is the text selected in there, as opposed to CbGetCurrentSelection above
+HWND CbEditHwnd(HWND);
+void CbEditSelectAll(HWND);
+void CbEditSelectText(HWND, int start, int end);
+void CbEditGetSelection(HWND, int& start, int& end);
+void CbEditSetModified(HWND, bool);
+bool CbEditIsModified(HWND);
 
 //--- toolbar
 
@@ -267,6 +304,7 @@ class DeferWinPosHelper {
     void SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
     void MoveWindow(HWND hWnd, int x, int y, int cx, int cy, BOOL bRepaint = TRUE);
     void MoveWindow(HWND hWnd, Rect r);
+    void MoveWindowNoCopyBits(HWND hWnd, Rect r);
 };
 
 //--- DC state
@@ -304,6 +342,7 @@ bool IsKeyPressed(int key);
 bool IsShiftPressed();
 bool IsAltPressed();
 bool IsCtrlPressed();
+bool IsRightButtonPressed();
 
 //--- cursors / mouse tracking
 
@@ -397,6 +436,8 @@ bool WasLaunchedByPowershellWithPipeRedirect();
 
 //--- registry
 
+extern bool gLogRegistryCalls;
+
 TempStr RegKeyNameTemp(HKEY key);
 bool RegKeyExists(HKEY keySub, Str keyName);
 TempStr ReadRegStrTemp(HKEY keySub, Str keyName, Str valName);
@@ -407,6 +448,7 @@ bool WriteRegStr(HKEY keySub, Str keyName, Str valName, Str value);
 bool LoggedWriteRegStr(HKEY keySub, Str keyName, Str valName, Str value);
 bool ReadRegDWORD(HKEY keySub, Str keyName, Str valName, DWORD& value);
 bool WriteRegDWORD(HKEY keySub, Str keyName, Str valName, DWORD value);
+bool WriteRegNone(HKEY hkey, Str key, Str valName);
 bool LoggedWriteRegDWORD(HKEY keySub, Str keyName, Str valName, DWORD value);
 bool LoggedWriteRegNone(HKEY hkey, Str key, Str valName);
 bool CreateRegKey(HKEY keySub, Str keyName);

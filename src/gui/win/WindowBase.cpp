@@ -10,11 +10,11 @@
 #include "gui/UIModels.h"
 
 #include "gui/Layout.h"
-#include "gui/win/WinGui.h"
 #include "gui/PlatformFont.h"
 #include "gui/Gfx.h"
 #include "gui/GuiColors.h"
 #include "gui/VirtCtrl.h"
+#include "gui/win/WinGui.h"
 
 // HwndBase is the win32 plumbing WindowBase and ControlBase share: one window
 // procedure, one subclassing scheme and one HWND -> object list. The two stay
@@ -66,7 +66,7 @@ static bool HwndListRemove(HwndBase* w) {
     bool removed = false;
     for (int i = 0; i < len(gHwndToWnd);) {
         if (gHwndToWnd[i].wnd == w) {
-            gHwndToWnd.RemoveAtFast(i);
+            VecRemoveAtFast(gHwndToWnd, i);
             removed = true;
         } else {
             i++;
@@ -79,14 +79,14 @@ static void HwndListAdd(HwndBase* w) {
     bool report = HwndListRemove(w);
     ReportIfFast(report);
     HwndToWnd e{w->hwnd, w};
-    gHwndToWnd.Append(e);
+    VecAppend(gHwndToWnd, e);
 }
 
 //- Taskbar.cpp
 
-const DWORD WM_TASKBARCALLBACK = WM_APP + 0x15;
-const DWORD WM_TASKBARCREATED = ::RegisterWindowMessage(L"TaskbarCreated");
-const DWORD WM_TASKBARBUTTONCREATED = ::RegisterWindowMessage(L"TaskbarButtonCreated");
+constexpr DWORD kWmTaskbarCallback = WM_APP + 0x15;
+const DWORD kWmTaskbarCreated = ::RegisterWindowMessage(L"TaskbarCreated");
+const DWORD kWmTaskbarButtonCreated = ::RegisterWindowMessage(L"TaskbarButtonCreated");
 
 //--- HwndBase
 
@@ -100,7 +100,7 @@ static LRESULT CALLBACK WndBaseWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LP
     HwndBase* w = HwndBaseFromHwnd(hwnd);
 
     if (msg == WM_NCCREATE) {
-        CREATESTRUCT* cs = (CREATESTRUCT*)(lparam);
+        CREATESTRUCT* cs = (CREATESTRUCT*)lparam;
         ReportIf(w);
         // CreateCustomHwnd / CreateControl pass the HwndBase subobject
         w = (HwndBase*)(cs->lpCreateParams);
@@ -195,7 +195,7 @@ HWND HwndBase::Detach() {
 }
 
 void HwndBase::SetText(Str s) {
-    if (!s) {
+    if (len(s) == 0) {
         s = StrL("");
     }
     HwndSetText(hwnd, s);
@@ -339,6 +339,10 @@ LRESULT HwndBase::MessageReflect(UINT msg, WPARAM wparam, LPARAM lparam) {
     }
 
     ControlBase* pWnd = ControlFromHwnd(wnd);
+    if (!pWnd) {
+        // ComboBox's inner EDIT is not a ControlBase; color via the combo
+        pWnd = ControlFromHwnd(GetParent(wnd));
+    }
     if (pWnd != nullptr) {
         return pWnd->DispatchMessageReflect(msg, wparam, lparam);
     }
@@ -360,13 +364,14 @@ HWND HwndBase::CreateCustomHwnd(const CreateCustomArgs& args, WStr defaultClassN
     WStr className = args.className ? args.className : defaultClassName;
     // TODO: validate className is not win32 control class
     RegisterWndClass(className);
-    HWND parent = args.parent;
+    ReportIf(args.parent && args.owner);
+    HWND parentOrOwner = args.parent ? args.parent : args.owner;
 
     DWORD style = args.style;
     if (style == 0) {
         style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
     }
-    if (parent) {
+    if (args.parent) {
         style |= WS_CHILD;
     } else {
         style &= ~WS_CHILD;
@@ -402,7 +407,8 @@ HWND HwndBase::CreateCustomHwnd(const CreateCustomArgs& args, WStr defaultClassN
     void* createParams = this;
     WCHAR* titleW = CWStrTemp(args.title);
 
-    HWND hwndTmp = ::CreateWindowExW(exStyle, className.s, titleW, style, x, y, dx, dy, parent, m, inst, createParams);
+    HWND hwndTmp =
+        ::CreateWindowExW(exStyle, className.s, titleW, style, x, y, dx, dy, parentOrOwner, m, inst, createParams);
 
     ReportIf(!hwndTmp);
     // hwnd should be assigned in WM_NCCREATE
@@ -530,8 +536,10 @@ void WindowBase::SetVisibility(Visibility newVisibility) {
     ReportIf(!hwnd);
     visibility = newVisibility;
     bool isVisible = IsVisible();
-    // TODO: a different way to determine if is top level vs. child window?
-    if (GetParent(hwnd) == nullptr) {
+    // ask the style, not GetParent(): for an owned popup (WS_POPUP plus
+    // GWLP_HWNDPARENT, like the keyboard help) GetParent() returns the owner,
+    // and just flipping WS_VISIBLE on a top-level window doesn't show it
+    if (!HwndIsWindowStyleSet(hwnd, WS_CHILD)) {
         ::ShowWindow(hwnd, isVisible ? SW_SHOW : SW_HIDE);
     } else {
         BOOL bIsVisible = toBOOL(isVisible);
@@ -573,7 +581,7 @@ void WindowBase::SetFocusTo(ControlBase* c) {
         return;
     }
     // the win32 focus moving away from us clears the virtual focus (WM_KILLFOCUS)
-    ::SetFocus(c->hwnd);
+    HwndSetFocusForce(c->hwnd);
 }
 
 void WindowBase::SetFocusTo(VirtCtrl* w) {
@@ -582,9 +590,7 @@ void WindowBase::SetFocusTo(VirtCtrl* w) {
     }
     // a virtual control has no HWND: we hold the focus on its behalf and route
     // the keys to it
-    if (::GetFocus() != hwnd) {
-        ::SetFocus(hwnd);
-    }
+    HwndSetFocusForce(hwnd);
     vroot->SetFocus(w);
 }
 
@@ -602,7 +608,7 @@ bool WindowBase::TabNavigate(bool backwards) {
     // control that owns the win32 focus
     int idx = -1;
     VirtCtrl* focusedVirt = vroot ? vroot->focused : nullptr;
-    HWND focusedHwnd = ::GetFocus();
+    HWND focusedHwnd = HwndThreadFocus();
     for (int i = 0; i < n && idx < 0; i++) {
         TabStop& ts = stops[i];
         if (focusedVirt && ts.vwnd == focusedVirt) {
@@ -744,6 +750,116 @@ bool WindowBase::ActivateOnEnter() {
     VirtButton* def = FindDefaultVirtButton(layout);
     if (def && def != focusedBtn && def->Click()) {
         return true;
+    }
+    return false;
+}
+
+//--- mnemonic (&X in a label) navigation
+
+// what a mnemonic can land on, in layout order: focusable controls (targeted
+// directly when the mnemonic is their own) and non-focusable labels (their
+// mnemonic focuses the next focusable stop, like statics in resource dialogs)
+struct MnemonicStop {
+    ControlBase* ctrl = nullptr;
+    VirtCtrl* vwnd = nullptr;
+    char mnemonic = 0;
+    bool focusable = false;
+};
+
+static bool IsCtrlHwndFocusable(HWND h) {
+    if (!h || !::IsWindowVisible(h) || !::IsWindowEnabled(h)) {
+        return false;
+    }
+    DWORD style = (DWORD)GetWindowLongW(h, GWL_STYLE);
+    return (style & WS_TABSTOP) != 0;
+}
+
+static void CollectMnemonicStopsVirt(VirtCtrl* w, Vec<MnemonicStop>& out) {
+    if (!w || !w->IsHitTestable()) {
+        return;
+    }
+    MnemonicStop ms;
+    ms.vwnd = w;
+    ms.focusable = w->HasFlag(vwfFocusable) && !w->HasFlag(vwfSkipTabStop);
+    // parsed once when the control's text was set
+    ms.mnemonic = w->mnemonic;
+    if (ms.focusable || ms.mnemonic) {
+        VecAppend(out, ms);
+    }
+    for (VirtCtrl* c : w->children) {
+        CollectMnemonicStopsVirt(c, out);
+    }
+}
+
+static void CollectMnemonicStops(ILayout* root, Vec<MnemonicStop>& out) {
+    if (!root || IsCollapsed(root)) {
+        return;
+    }
+    ControlBase* c = root->AsControl();
+    if (c) {
+        MnemonicStop ms;
+        ms.ctrl = c;
+        ms.focusable = IsCtrlHwndFocusable(c->hwnd);
+        if (c->hwnd && ::IsWindowVisible(c->hwnd) && ::IsWindowEnabled(c->hwnd)) {
+            ms.mnemonic = MnemonicCharInStr(HwndGetTextTemp(c->hwnd));
+        }
+        if (ms.focusable || ms.mnemonic) {
+            VecAppend(out, ms);
+        }
+        return;
+    }
+    VirtCtrl* w = root->AsVirtCtrl();
+    if (w) {
+        CollectMnemonicStopsVirt(w, out);
+        return;
+    }
+    int n = root->LayoutChildCount();
+    for (int i = 0; i < n; i++) {
+        CollectMnemonicStops(root->LayoutChildAt(i), out);
+    }
+}
+
+// focus the control whose label contains &<c>; a focusable match is targeted
+// directly (buttons / checkboxes are also clicked, like in a dialog), a match
+// on a non-focusable label focuses the next focusable stop after it
+bool WindowBase::MnemonicNavigate(char c) {
+    if (!layout) {
+        return false;
+    }
+    Vec<MnemonicStop> stops;
+    CollectMnemonicStops(layout, stops);
+    int n = len(stops);
+    c = (char)toupper((u8)c);
+    for (int i = 0; i < n; i++) {
+        char m = stops[i].mnemonic;
+        if (!m || (char)toupper((u8)m) != c) {
+            continue;
+        }
+        // the match itself if focusable, else the next focusable stop after it
+        for (int j = 0; j < n; j++) {
+            MnemonicStop& target = stops[(i + j) % n];
+            if (!target.focusable) {
+                continue;
+            }
+            if (target.vwnd) {
+                SetFocusTo(target.vwnd);
+                VirtButton* b = AsVirtButton(target.vwnd);
+                if (j == 0 && b) {
+                    b->Click();
+                }
+                return true;
+            }
+            if (vroot) {
+                vroot->SetFocus(nullptr);
+            }
+            SetFocusTo(target.ctrl);
+            TempStr cls = HwndGetClassName(target.ctrl->hwnd);
+            if (j == 0 && str::EqI(cls, StrL("Button"))) {
+                SendMessageW(target.ctrl->hwnd, BM_CLICK, 0, 0);
+            }
+            return true;
+        }
+        return false;
     }
     return false;
 }
@@ -895,7 +1011,6 @@ LRESULT WindowBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         // windows don't support WM_GETFONT / WM_SETFONT
         // only controls do. not sure if we won't interfere
         // with control handling
-        // TODO: maybe when font is nullptr, ask the original proc
         case WM_GETFONT: {
             return (LRESULT)GetHFont();
         }
@@ -1073,7 +1188,20 @@ LRESULT WindowBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
                 HDC hdc = (HDC)wparam;
                 auto* br = BackgroundBrush();
                 if (hdc && br) {
-                    HdcFillRect(hdc, HwndClientRect(hwnd), br);
+                    // A virt tree paints the full client through a
+                    // double-buffer. Filling here on a full-window erase
+                    // flashes during arrow-key list navigation.
+                    // Still fill when the DC is clipped to a child.
+                    bool fill = !vroot;
+                    if (!fill) {
+                        RECT clip{};
+                        GetClipBox(hdc, &clip);
+                        Rect client = HwndClientRect(hwnd);
+                        fill = clip.left > 0 || clip.top > 0 || clip.right < client.dx || clip.bottom < client.dy;
+                    }
+                    if (fill) {
+                        HdcFillRect(hdc, HwndClientRect(hwnd), br);
+                    }
                 }
                 return TRUE;
             }
@@ -1248,7 +1376,7 @@ LRESULT WindowBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         }
 
         default: {
-            if (msg == WM_TASKBARCREATED || msg == WM_TASKBARBUTTONCREATED || msg == WM_TASKBARCALLBACK) {
+            if (msg == kWmTaskbarCreated || msg == kWmTaskbarButtonCreated || msg == kWmTaskbarCallback) {
                 if (onTaskbarCallback.IsValid()) {
                     TaskbarCallbackEvent ev;
                     ev.w = this;
@@ -1288,6 +1416,23 @@ bool WindowBase::PreTranslateMessage(MSG& msg) {
         Close();
         return true;
     }
+    // Alt+<char> (WM_SYSCHAR), or a plain <char> when the focused control
+    // doesn't consume characters: jump to the control labeled &<char>
+    // (mnemonics, lost when resource dialogs became WindowBase)
+    if (msg.message == WM_SYSCHAR || msg.message == WM_CHAR) {
+        char c = (msg.wParam > 0x20 && msg.wParam < 128) ? (char)msg.wParam : 0;
+        if (c && layout) {
+            bool tryMnemonic = (msg.message == WM_SYSCHAR) && IsAltPressed();
+            if (!tryMnemonic && msg.message == WM_CHAR) {
+                HWND focus = ::GetFocus();
+                LRESULT code = focus ? SendMessageW(focus, WM_GETDLGCODE, 0, 0) : 0;
+                tryMnemonic = (code & DLGC_WANTCHARS) == 0;
+            }
+            if (tryMnemonic && MnemonicNavigate(c)) {
+                return true;
+            }
+        }
+    }
     if (msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN) {
         return false;
     }
@@ -1312,6 +1457,10 @@ bool WindowBase::PreTranslateMessage(MSG& msg) {
         Close();
         return true;
     }
+    if (closeOnF1 && ev.vkey == VK_F1 && !ev.isCtrl && !ev.isShift && !ev.isAlt) {
+        Close();
+        return true;
+    }
     if (ev.vkey == VK_RETURN && !ev.isCtrl && !ev.isAlt) {
         if (ActivateOnEnter()) {
             return true;
@@ -1319,9 +1468,6 @@ bool WindowBase::PreTranslateMessage(MSG& msg) {
     }
     // default Tab among mixed HWND + virtual controls
     if (ev.vkey != VK_TAB || !layout || ev.isCtrl || ev.isAlt) {
-        return false;
-    }
-    if (!vroot) {
         return false;
     }
     return TabNavigate(ev.isShift);
@@ -1375,10 +1521,14 @@ LRESULT ControlBase::OnMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
 
 void ControlBase::SetVisibility(Visibility newVisibility) {
     ReportIf(!hwnd);
+    if (visibility == newVisibility) {
+        return;
+    }
     visibility = newVisibility;
     bool isVisible = IsVisible();
-    // TODO: a different way to determine if is top level vs. child window?
-    if (GetParent(hwnd) == nullptr) {
+    // see WindowBase::SetVisibility(): only a WS_CHILD window can be shown by
+    // flipping WS_VISIBLE
+    if (!HwndIsWindowStyleSet(hwnd, WS_CHILD)) {
         ::ShowWindow(hwnd, isVisible ? SW_SHOW : SW_HIDE);
     } else {
         BOOL bIsVisible = toBOOL(isVisible);
@@ -1444,7 +1594,7 @@ Size ControlBase::GetIdealSize() {
 
 Size ControlBase::Layout(const Constraints bc) {
     dbglayout(fmt("ControlBase::Layout() %s ", Str(GetKind())));
-    LogConstraints(bc, "\n");
+    LogConstraints(bc, StrL("\n"));
 
     auto hinset = insets.left + insets.right;
     auto vinset = insets.top + insets.bottom;
@@ -1485,9 +1635,41 @@ void ControlBase::SetBounds(Rect bounds) {
     bounds.dx -= (insets.right + insets.left);
     bounds.dy -= (insets.bottom + insets.top);
 
-    HwndMoveWindow(hwnd, &bounds);
-    // TODO: optimize if doesn't change position
-    HwndInvalidate(hwnd, true);
+    if (mapRtlX) {
+        bounds.x = HwndMapChildXForRtlParent(GetParent(hwnd), bounds.x, bounds.dx);
+    }
+    // Skip a no-op MoveWindow (it still sends WM_WINDOWPOSCHANGED and flashes
+    // the TOC). Compare the HWND, not lastBounds: a parent DeferWindowPos can
+    // leave the child at a stale client y while lastBounds still matches layout
+    // (toolbar page box ended up below the bar).
+    if (hwnd && ChildPosWithinParent(hwnd) == bounds) {
+        return;
+    }
+    // Do not MoveWindow(..., TRUE): each child would paint immediately as
+    // layout walks the tree, which flashes when many dropdowns/trackbars
+    // move. Position without painting, then invalidate so they paint with
+    // the parent on the next WM_PAINT. SWP_NOCOPYBITS skips the smeared
+    // copy of old pixels into the new place.
+    // SWP_NOREDRAW also skips invalidating the parent where this child
+    // used to be, so a dropdown first shown at (0,0) then moved left a
+    // ghost over nearby contents.
+    if (hwnd) {
+        HWND parent = GetParent(hwnd);
+        RECT oldOnParent{};
+        if (parent) {
+            Rect old = HwndMapRectToWindow(HwndClientRect(hwnd), hwnd, parent);
+            oldOnParent = ToRECT(old);
+        }
+        SetWindowPos(hwnd, nullptr, bounds.x, bounds.y, bounds.dx, bounds.dy,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOREDRAW);
+        if (parent && !IsRectEmpty(&oldOnParent)) {
+            // Invalidate, don't erase: a parent fill here flashed the
+            // window on every list selection. WM_PAINT covers virt
+            // leftovers; ALLCHILDREN covers native child edits.
+            RedrawWindow(parent, &oldOnParent, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+        }
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
 }
 
 LRESULT ControlBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -1508,7 +1690,6 @@ LRESULT ControlBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
         // windows don't support WM_GETFONT / WM_SETFONT
         // only controls do. not sure if we won't interfere
         // with control handling
-        // TODO: maybe when font is nullptr, ask the original proc
         case WM_GETFONT: {
             return (LRESULT)GetHFont();
         }
@@ -1602,15 +1783,11 @@ LRESULT ControlBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
         }
 
         case WM_ERASEBKGND: {
-            // claim handled so DefWindowProc / DefSubclassProc does not fill,
-            // but paint our background when we have one; see the note in
-            // WindowBase::WndProcDefault (#5947)
+            // TreeView sets shouldEraseBackground false so WM_PAINT covers.
+            // Filling here blanks the control on every resize; the #5947
+            // parent-background fill belongs on WindowBase (checkbox
+            // DrawThemeParentBackground target), not on native controls.
             if (!shouldEraseBackground) {
-                HDC hdc = (HDC)wparam;
-                auto* br = BackgroundBrush();
-                if (hdc && br) {
-                    HdcFillRect(hdc, HwndClientRect(hwnd), br);
-                }
                 return TRUE;
             }
             break;
@@ -1775,12 +1952,11 @@ void ControlBase::AttachDlgItem(UINT id, HWND parent) {
 }
 
 HWND ControlBase::CreateControl(const CreateControlArgs& args) {
-    ReportIf(!args.className);
+    ReportIf(len(args.className) == 0);
     // TODO: validate that className is one of the known controls?
 
     font = args.font;
     if (!font) {
-        // TODO: need this?
         font = GetDefaultGuiFont();
     }
 
@@ -1904,6 +2080,9 @@ int RunMessageLoop(HACCEL accelTable, HWND hwndDialog) {
 // re-posted so the outer message loop sees it. Keyboard handling (Esc, Enter,
 // Tab) goes through the same PreTranslateMessage as the main loop.
 void RunModalWindow(HWND hwndDialog, HWND hwndParent) {
+    // Disabling an ancestor also disables the dialog and deadlocks this loop.
+    ReportIf(hwndParent && ::IsChild(hwndParent, hwndDialog));
+
     bool reEnableParent = false;
     if (hwndParent && IsWindowEnabled(hwndParent)) {
         EnableWindow(hwndParent, FALSE);

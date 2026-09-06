@@ -11,24 +11,42 @@
 #include "gui/win/WinGui.h"
 #include "gui/win/HtmlWindow.h"
 #include "gui/win/WebView.h"
-#include "gui/win/BrowserDocView.h"
 
 #include "AppTools.h"
 #include "Accelerators.h"
+#include "gui/win/BrowserDocView.h"
 
 constexpr const char* kChmVirtualHost = "https://sumatrapdf.chm/";
 constexpr const WCHAR* kChmVirtualHostW = L"https://sumatrapdf.chm/";
 
-// Injected on every WebView2 navigation. Reports the document scroll position
-// back to the host on each scroll so BrowserDocView can answer GetScrollPos()
-// synchronously (WebView2 script eval is async and can't return a value here).
-// notify() rather than call(): scrolling fires constantly and there's nothing to
-// reply with, so this must not allocate a promise per event
-constexpr const char* kReportScrollJs =
-    "(function(){var post=function(){try{var x=Math.round(window.scrollX||window.pageXOffset||0);"
-    "var y=Math.round(window.scrollY||window.pageYOffset||0);"
-    "window.__sumatra__.notify('scroll',x,y);}catch(e){}};"
-    "window.addEventListener('scroll',post,true);})();";
+// Reports the document scroll position back to the host so GetScrollPos() can
+// answer synchronously (WebView2 script eval is async and can't return a value).
+// Posted through chrome.webview, not __sumatra__.notify: AddScriptToExecuteOnDocumentCreated
+// is async and often loses the race with the first Navigate, so the bridge
+// script may be missing on this document. Hash navigation often never fires a
+// 'scroll' event either, which left GetScrollPos() at (-1,-1). So we post
+// immediately, on scroll/hashchange/load/resize, and again shortly after.
+constexpr const char* kReportScrollJs = R"JS((function(){
+  var post = function() {
+    try {
+      var wv = window.chrome && window.chrome.webview;
+      if (!wv) { return; }
+      var x = Math.round(window.scrollX || window.pageXOffset || 0);
+      var y = Math.round(window.scrollY || window.pageYOffset || 0);
+      wv.postMessage(JSON.stringify({__sumatraNotify:1,method:"scroll",params:JSON.stringify([x,y])}));
+    } catch (e) {}
+  };
+  if (!window.__sumatraScrollHooked) {
+    window.__sumatraScrollHooked = true;
+    window.addEventListener("scroll", post, true);
+    window.addEventListener("hashchange", post);
+    window.addEventListener("load", post);
+    window.addEventListener("resize", post);
+  }
+  post();
+  setTimeout(post, 0);
+  setTimeout(post, 50);
+})();)JS";
 
 // Injected on every WebView2 navigation. In-page find driven by the host's
 // own find UI: searches the *rendered* DOM text (so what we find is exactly
@@ -250,7 +268,7 @@ struct NotifyArgsState {
         return v;
     }
     Str Text(int idx) const {
-        if (idx < 0 || idx >= kMaxArgs || !args[idx]) {
+        if (idx < 0 || idx >= kMaxArgs || len(args[idx]) == 0) {
             return {};
         }
         return args[idx];
@@ -275,7 +293,7 @@ void BrowserWebviewWnd::OnJsNotifyCb(void* ctx, Str method, Str paramsJson) {
         logf("BrowserOnJsNotify: bad params for '%s': %s\n", method, paramsJson);
         return;
     }
-    if (str::Eq(method, "scroll")) {
+    if (str::Eq(method, StrL("scroll"))) {
         int x = std::max(0, st.Int(0));
         int y = std::max(0, st.Int(1));
         self->webviewScrollPos = Point(x, y);
@@ -284,11 +302,11 @@ void BrowserWebviewWnd::OnJsNotifyCb(void* ctx, Str method, Str paramsJson) {
     if (!self->cb) {
         return;
     }
-    if (str::Eq(method, "findResult")) {
+    if (str::Eq(method, StrL("findResult"))) {
         self->cb->OnFindResult(st.Int(0), st.Int(1), st.Int(2));
         return;
     }
-    if (str::Eq(method, "findAllResult")) {
+    if (str::Eq(method, StrL("findAllResult"))) {
         // downstream (BrowserFindAllResultReceived) still parses the flat
         // "<gen> <total> <recs>" form, so reassemble it here
         self->cb->OnFindAllResult(fmt("%d %d %s", st.Int(0), st.Int(1), st.Text(2)));
@@ -307,8 +325,8 @@ static TempStr ChmMimeFromPathTemp(Str path, Str data) {
 
     TempStr imgExt = GfxFileExtFromDataTemp(data);
     TempStr mime = MimeTypeFromExtTemp(ext, imgExt);
-    if (!mime) {
-        mime = "text/html";
+    if (len(mime) == 0) {
+        mime = StrL("text/html");
     }
     return mime;
 }
@@ -334,7 +352,13 @@ bool BrowserDocView::NavigationStarting(void* ctx, Str url, bool newWindow) {
     if (!view || !view->cb) {
         return false;
     }
-    return view->cb->OnBeforeNavigate(url, newWindow);
+    bool allow = view->cb->OnBeforeNavigate(url, newWindow);
+    // drop the previous page's position so GetScrollPos() does not keep a stale
+    // y while the new document (or hash) is still applying
+    if (allow && !newWindow) {
+        view->webviewScrollPos = Point(-1, -1);
+    }
+    return allow;
 }
 
 void BrowserDocView::NavigationCompleted(void* ctx, Str url, bool success) {
@@ -348,6 +372,11 @@ void BrowserDocView::NavigationCompleted(void* ctx, Str url, bool success) {
         view->wv->RegisterForwardingDropTarget();
     }
     view->cb->OnDocumentComplete(url);
+    // after zoom / restore have applied: init scripts may have missed this
+    // document, and hash navigation often never fires a 'scroll' event
+    if (view->wv) {
+        view->wv->Eval(Str(kReportScrollJs));
+    }
 }
 
 void BrowserDocView::HistoryChanged(void* ctx, bool canGoBack, bool canGoForward) {
@@ -400,6 +429,12 @@ bool BrowserDocView::IsVisible() const {
     return visible;
 }
 
+void BrowserDocView::RefreshControllerSurface() {
+    if (visible && backend == Backend::WebView2 && wv) {
+        wv->RefreshControllerSurface();
+    }
+}
+
 // show/hide without destroying WebView2 / IE. Creating a browser is slow, so
 // tab switches hide the view and show it again instead of recreate.
 void BrowserDocView::SetVisible(bool show) {
@@ -425,8 +460,9 @@ void BrowserDocView::SetVisible(bool show) {
             }
             wv->SetControllerVisible(true);
             wv->UpdateWebviewSize();
-        } else if (backend == Backend::IE && ie && ie->oleObjectHwnd) {
-            HwndSetVisible(ie->oleObjectHwnd, true);
+            wv->RefreshControllerSurface();
+        } else if (backend == Backend::IE && ie) {
+            ie->SetVisible(true);
         }
         return;
     }
@@ -435,8 +471,8 @@ void BrowserDocView::SetVisible(bool show) {
         if (wv->hwnd) {
             ::ShowWindow(wv->hwnd, SW_HIDE);
         }
-    } else if (backend == Backend::IE && ie && ie->oleObjectHwnd) {
-        HwndSetVisible(ie->oleObjectHwnd, false);
+    } else if (backend == Backend::IE && ie) {
+        ie->SetVisible(false);
     }
     UnsubclassParent();
 }
@@ -459,8 +495,16 @@ LRESULT BrowserDocView::ParentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 
         case WM_MOUSEWHEEL:
         case WM_MOUSEHWHEEL:
+            // WebView2 often delivers the wheel to this parent; swallowing it
+            // left markdown/CHM unscrollable when the browser wasn't focused (#6142).
             if (view->wv && view->wv->hwnd) {
-                return 0;
+                if (view->forwardingWheel) {
+                    return 0;
+                }
+                view->forwardingWheel = true;
+                LRESULT res = view->SendMsg(msg, wp, lp);
+                view->forwardingWheel = false;
+                return res;
             }
             break;
 
@@ -498,6 +542,7 @@ bool BrowserDocView::CreateWebView2() {
     wv->events.resolveAccelCmd = ChmResolveAccelCmd;
     wv->events.jsNotify = BrowserWebviewWnd::OnJsNotifyCb;
     wv->allowClipboardRead = false;
+    wv->defaultBackgroundColor = kColWhite;
     // forward app accelerators (Ctrl+W close tab, Ctrl+K command palette, etc.)
     // to the main window so they work while the WebView2 has keyboard focus
     wv->forwardAppAccelerators = true;
@@ -520,8 +565,8 @@ bool BrowserDocView::CreateWebView2() {
         return false;
     }
 
-    wv->Init(kReportScrollJs);
-    wv->Init(kFindInPageJs);
+    wv->Init(Str(kReportScrollJs));
+    wv->Init(Str(kFindInPageJs));
 
     backend = Backend::WebView2;
     return true;
@@ -539,7 +584,7 @@ BrowserDocView* BrowserDocView::Create(HWND hwndParent, HtmlWindowCallback* cb, 
         view->virtualHost = str::Dup(virtualHostPrefix);
         view->virtualHostW = wstr::Dup(ToWStrTemp(virtualHostPrefix));
     } else {
-        view->virtualHost = str::Dup(kChmVirtualHost);
+        view->virtualHost = str::Dup(Str(kChmVirtualHost));
         view->virtualHostW = wstr::Dup(kChmVirtualHostW);
     }
 
@@ -554,9 +599,7 @@ BrowserDocView* BrowserDocView::Create(HWND hwndParent, HtmlWindowCallback* cb, 
     if (view->ie) {
         view->backend = Backend::IE;
         // hide IE until the tab is shown
-        if (view->ie->oleObjectHwnd) {
-            HwndSetVisible(view->ie->oleObjectHwnd, false);
-        }
+        view->ie->SetVisible(false);
         return view;
     }
 
@@ -573,7 +616,7 @@ BrowserDocView::~BrowserDocView() {
 }
 
 void BrowserDocView::NavigateToDataUrl(Str url) {
-    if (!url) {
+    if (len(url) == 0) {
         return;
     }
     if (backend == Backend::WebView2 && wv) {
@@ -662,7 +705,7 @@ void BrowserDocView::SetScrollPos(Point pos) {
 void BrowserDocView::PrintCurrentPage(bool showUI) {
     if (backend == Backend::WebView2 && wv) {
         // WebView2 has no silent-print API; window.print() always shows the dialog
-        wv->Eval("window.print()");
+        wv->Eval(StrL("window.print()"));
         return;
     }
     if (backend == Backend::IE && ie) {
@@ -692,19 +735,19 @@ static TempStr JsEscapeTemp(Str s) {
         char c = s.s[i];
         switch (c) {
             case '\\':
-                buf.Append("\\\\");
+                buf.Append(StrL("\\\\"));
                 break;
             case '\'':
-                buf.Append("\\'");
+                buf.Append(StrL("\\'"));
                 break;
             case '\n':
-                buf.Append("\\n");
+                buf.Append(StrL("\\n"));
                 break;
             case '\r':
-                buf.Append("\\r");
+                buf.Append(StrL("\\r"));
                 break;
             case '\t':
-                buf.Append("\\t");
+                buf.Append(StrL("\\t"));
                 break;
             default:
                 buf.AppendChar(c);
@@ -741,7 +784,7 @@ void BrowserDocView::FindAllPages(const StrVec& pageUrls, Str term, bool matchCa
         return;
     }
     str::Builder js;
-    js.Append("window.__sumatraFind && __sumatraFind.searchAll([");
+    js.Append(StrL("window.__sumatraFind && __sumatraFind.searchAll(["));
     int n = len(pageUrls);
     for (int i = 0; i < n; i++) {
         if (i > 0) {
@@ -780,12 +823,12 @@ void BrowserDocView::FindClear() {
     if (!CanFindInPage()) {
         return;
     }
-    wv->Eval("window.__sumatraFind && __sumatraFind.clear();");
+    wv->Eval(StrL("window.__sumatraFind && __sumatraFind.clear();"));
 }
 
 void BrowserDocView::SelectAll() {
     if (backend == Backend::WebView2 && wv) {
-        wv->Eval("document.execCommand('selectAll', false, null)");
+        wv->Eval(StrL("document.execCommand('selectAll', false, null)"));
         return;
     }
     if (backend == Backend::IE && ie) {
@@ -795,7 +838,7 @@ void BrowserDocView::SelectAll() {
 
 void BrowserDocView::CopySelection() {
     if (backend == Backend::WebView2 && wv) {
-        wv->Eval("document.execCommand('copy', false, null)");
+        wv->Eval(StrL("document.execCommand('copy', false, null)"));
         return;
     }
     if (backend == Backend::IE && ie) {
@@ -805,6 +848,18 @@ void BrowserDocView::CopySelection() {
 
 LRESULT BrowserDocView::SendMsg(UINT msg, WPARAM wp, LPARAM lp) {
     if (backend == Backend::WebView2 && wv && wv->hwnd) {
+        if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) {
+            // Chromium ignores WM_MOUSEWHEEL on the host hwnd. When the frame
+            // (focused) or canvas parent gets the wheel, scroll via JS (#6142).
+            if ((LOWORD(wp) & MK_CONTROL) || IsCtrlPressed()) {
+                return SendMessageW(wv->hwnd, msg, wp, lp);
+            }
+            short delta = GET_WHEEL_DELTA_WPARAM(wp);
+            bool horiz = (msg == WM_MOUSEHWHEEL) || (LOWORD(wp) & MK_SHIFT) || IsShiftPressed();
+            int d = -(int)delta;
+            wv->Eval(horiz ? fmt("window.scrollBy(%d, 0)", d) : fmt("window.scrollBy(0, %d)", d));
+            return 0;
+        }
         return SendMessageW(wv->hwnd, msg, wp, lp);
     }
     if (backend == Backend::IE && ie) {

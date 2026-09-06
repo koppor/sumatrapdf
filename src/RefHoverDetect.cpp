@@ -7,19 +7,24 @@
 // HWND, or rendering layers.
 
 #include "base/Base.h"
+#include "RefHover.h"
 
 static constexpr float kAnchorTopMarginPt = 6.f;
 // pt of padding around the detected entry box.
 static constexpr float kEntryPadPt = 6.f;
+static constexpr float kLatePageStartRatio = 0.70f;
+
+bool ShouldSearchNextPage(RectF mediabox, float destY) {
+    return mediabox.dy > 0.f && destY >= mediabox.dy * kLatePageStartRatio;
+}
 
 static bool IsAsciiAlnum(WCHAR c) {
     return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9');
 }
 
 // Locale-independent lowercasing. The process runs in the "C" locale where
-// towlower() only folds ASCII (as does ToLowerW() in src/common), so
-// accented dictionary words ("sección", "capítulo") would never match
-// all-caps headings ("SECCIÓN 2").
+// towlower() only folds ASCII, so accented dictionary words ("sección",
+// "capítulo") would never match all-caps headings ("SECCIÓN 2").
 static WCHAR FoldCaseW(WCHAR c) {
 #if OS_WIN
     return (WCHAR)(uintptr_t)CharLowerW((LPWSTR)(uintptr_t)c);
@@ -128,13 +133,10 @@ static bool IsCaptionLabelAt(WStr text, int idx) {
     if (idx > 0 && IsAsciiAlnum(text.s[idx - 1])) {
         return false;
     }
-    for (int off = 0; SeqStrAt(gCaptionWords, off);) {
-        TempWStr w = ToWStrTemp(SeqStrAt(gCaptionWords, off));
+    for (Str word = SeqStrFirst(gCaptionWords); len(word) > 0; word = SeqStrNext(word)) {
+        TempWStr w = ToWStrTemp(word);
         if (MatchWordAt(text, idx, w, /*requireTrailingDigit=*/true)) {
             return true;
-        }
-        if (!SeqStrAdvance(gCaptionWords, off)) {
-            break;
         }
     }
     return false;
@@ -897,14 +899,11 @@ static RectF FindColumnWrapContinuation(WStr text, const Rect* coords, RectF med
 //   2. Scan forward; stop at "[N" near the same left margin (next entry) or
 //      a vertical paragraph gap.
 //   3. Return the min/max bounding box of glyphs in [start, end), padded.
-// Falls back to LandscapeBox() when the link is not a bibliography reference
-// (TOC, topbar, cross-ref, table caption). The landscape box renders a half-
-// page-tall slice of the page anchored on the destination so the user sees
-// surrounding context (e.g. the table rows under a caption).
 // Bibliography / glossary / abbreviation entry box. Tries bracket-style
 // ("[Foo+09]"), hanging-indent author-year, and single-line description-list
-// layouts. Falls back to LandscapeBox when the destination doesn't look like
-// a list entry.
+// layouts. Returns empty when there is no text near the destination so the
+// caller can recover a stale page anchor; other non-list layouts fall back to
+// LandscapeBox.
 //
 // continuationOut, if non-null, is set to a second box when a bracket-style
 // entry runs off the bottom of its 2-column-layout column with no natural
@@ -931,7 +930,7 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
     // would navigate to; the auto-fit in RefHoverOnTimer scales the bitmap
     // to popup limits.
     constexpr int kSparsePageTextLen = 50;
-    if (!text || text.len < kSparsePageTextLen || !coords) {
+    if (len(text) == 0 || text.len < kSparsePageTextLen || !coords) {
         return RectF{0.f, 0.f, mediabox.dx, mediabox.dy};
     }
     if (destY < 0.f) {
@@ -977,7 +976,7 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
         }
     }
     if (startIdx < 0) {
-        return LandscapeBox(mediabox, destX, destY, text, coords);
+        return {};
     }
 
     // PDF link destX is unreliable: poorly-authored links carry the source
@@ -1618,12 +1617,9 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
     WCHAR firstC = text.s[startIdx];
     bool digitStart = (firstC >= L'0' && firstC <= L'9');
     bool labelStart = false;
-    for (int off = 0; !labelStart && SeqStrAt(gHeadingPrefixWords, off);) {
-        TempWStr w = ToWStrTemp(SeqStrAt(gHeadingPrefixWords, off));
+    for (Str word = SeqStrFirst(gHeadingPrefixWords); !labelStart && len(word) > 0; word = SeqStrNext(word)) {
+        TempWStr w = ToWStrTemp(word);
         labelStart = MatchWordAt(text, startIdx, w, /*requireTrailingDigit=*/false);
-        if (!SeqStrAdvance(gHeadingPrefixWords, off)) {
-            break;
-        }
     }
     if (digitStart || labelStart) {
         return LandscapeBox(mediabox, destX, destY, text, coords);

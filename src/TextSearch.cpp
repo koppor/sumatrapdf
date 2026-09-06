@@ -4,7 +4,7 @@
 #include "base/Base.h"
 
 #include "DocController.h"
-#include "TreeModel.h"
+#include "gui/UIModels.h"
 #include "EngineBase.h"
 #include "ProgressUpdateUI.h"
 #include "TextSelection.h"
@@ -225,7 +225,7 @@ void TextSearch::SetPageRange(int first, int last) {
         last = 0;
     }
     if (first == 0 && last == 0) {
-        pageAllowed.Reset();
+        VecReset(pageAllowed);
         markAllPagesNonSkip(pagesToSkip);
         return;
     }
@@ -264,7 +264,7 @@ void TextSearch::SetDirection(TextSearch::Direction direction) {
 void TextSearch::SetLastResult(TextSelection* sel) {
     CopySelection(sel);
 
-    Str selection = ExtractText(" ");
+    Str selection = ExtractText(StrL(" "));
     selection.len -= str::NormalizeWSInPlace(selection);
     SetText(selection);
     str::Free(selection);
@@ -275,27 +275,6 @@ void TextSearch::SetLastResult(TextSelection* sel) {
     pageText = engine->GetTextForPage(findPage, &pageTextLen);
     forward = true;
 }
-
-#if !OS_WIN
-static int FoldCaseWCharPortable(int c) {
-    if (c >= L'A' && c <= L'Z') {
-        return c + 32;
-    }
-    if (c >= 0x00C0 && c <= 0x00DE && c != 0x00D7) {
-        return c + 32;
-    }
-    if (c >= 0x0410 && c <= 0x042F) {
-        return c + 32;
-    }
-    if (c == 0x0401) {
-        return 0x0451;
-    }
-    if ((c >= 0x0391 && c <= 0x03A1) || (c >= 0x03A3 && c <= 0x03AB)) {
-        return c + 32;
-    }
-    return (int)towlower((wint_t)c);
-}
-#endif
 
 // Locale-independent Unicode case folding for search. CharLowerW folds accented
 // letters (e.g. É->é, Ş->ş) regardless of the CRT locale, unlike towlower() or
@@ -310,11 +289,7 @@ static int FoldCaseForSearch(int c) {
         return L'i';
     }
     if (c > 0 && c <= 0xffff) {
-#if OS_WIN
-        return (WCHAR)(uintptr_t)CharLowerW((LPWSTR)(uintptr_t)c);
-#else
-        return FoldCaseWCharPortable(c);
-#endif
+        return WCharToLower((wchar_t)c);
     }
     return c;
 }
@@ -380,7 +355,7 @@ static bool MatchSearchUnit(Str h, int hLen, int hIdx, int hByteIdx, Str n, int 
 }
 
 static int StrStrFoldCase(Str haystack, int haystackLen, int startOff, Str needle, int needleLen) {
-    if (!haystack || !needle) {
+    if (len(haystack) == 0 || len(needle) == 0) {
         return startOff;
     }
     int byteIdx = Utf8CodepointToByteIndex(haystack, startOff);
@@ -420,7 +395,7 @@ static bool StartsWithAtByte(Str text, int byteIdx, Str prefix) {
 }
 
 static int StrRStr(Str text, int textLen, int endOff, Str needle, int needleLen) {
-    if (!text || !needle || endOff <= 0 || endOff > textLen) {
+    if (len(text) == 0 || len(needle) == 0 || endOff <= 0 || endOff > textLen) {
         return -1;
     }
     if (needleLen <= 0 || needleLen > endOff) {
@@ -438,7 +413,7 @@ static int StrRStr(Str text, int textLen, int endOff, Str needle, int needleLen)
 }
 
 static int StrRStrFoldCase(Str text, int textLen, int endOff, Str needle, int needleLen) {
-    if (!text || !needle || endOff <= 0 || endOff > textLen) {
+    if (len(text) == 0 || len(needle) == 0 || endOff <= 0 || endOff > textLen) {
         return -1;
     }
     // ß <-> ss makes the matched length variable, so scan forward within
@@ -484,7 +459,7 @@ TextSearch::PageAndOffset TextSearch::MatchEnd(int startOff) const {
     int currentPageTextLen = pageTextLen;
     bool lookingAtWs;
 
-    if (!findText) {
+    if (len(findText) == 0) {
         return notFound;
     }
 
@@ -630,7 +605,7 @@ TextSearch::PageAndOffset TextSearch::MatchEnd(int startOff) const {
 }
 
 static int StrStr(Str haystack, int haystackLen, int startOff, Str needle, int needleLen) {
-    if (!haystack || len(needle) == 0) {
+    if (len(haystack) == 0 || len(needle) == 0) {
         return -1;
     }
     int byteIdx = Utf8CodepointToByteIndex(haystack, startOff);
@@ -670,7 +645,7 @@ bool TextSearch::FindTextInPage(int pageNo, TextSearch::PageAndOffset* finalGlyp
             if (WasCanceled(progressCb)) {
                 return false;
             }
-            if (!anchor) {
+            if (len(anchor) == 0) {
                 found = GetNextIndex(pageTextLen, findIndex, forward);
             } else if (forward) {
                 if (matchCase) {
@@ -710,10 +685,29 @@ bool TextSearch::FindTextInPage(int pageNo, TextSearch::PageAndOffset* finalGlyp
     return true;
 }
 
+// a chaptered doc may have laid out only the first chapter when this
+// TextSearch was constructed; lay out the rest so a whole-document find
+// covers every page, and grow pagesToSkip to match
+void TextSearch::EnsureFullyLaidOut() {
+    EnsureFullLayout(engine);
+    int newPages = engine->PageCount();
+    if (newPages == nPages) {
+        return;
+    }
+    int oldPages = nPages;
+    nPages = newPages;
+    VecResize(pagesToSkip, nPages);
+    for (int i = oldPages; i < nPages; i++) {
+        pagesToSkip[i] = false;
+    }
+}
+
 bool TextSearch::FindStartingAtPage(int pageNo) {
     if (len(findText) == 0) {
         return false;
     }
+
+    EnsureFullyLaidOut();
 
     int lo = RestrictFirst();
     int hi = RestrictLast();
@@ -740,7 +734,7 @@ bool TextSearch::FindStartingAtPage(int pageNo) {
             break;
         }
         findIndex = pageTextLen;
-        if (!pageText) {
+        if (len(pageText) == 0) {
             pageNo += next;
             continue;
         }
@@ -796,7 +790,7 @@ TextSel* TextSearch::FindFirstOnPage(int pageNo, Str text) {
         return nullptr;
     }
     findIndex = pageTextLen;
-    if (!pageText) {
+    if (len(pageText) == 0) {
         return nullptr;
     }
     if (forward) {
@@ -820,8 +814,8 @@ TextSel* TextSearch::FindFirstOnPage(int pageNo, Str text) {
 }
 
 TextSel* TextSearch::FindNext() {
-    ReportIf(!findText);
-    if (!findText) {
+    ReportIf(len(findText) == 0);
+    if (len(findText) == 0) {
         return nullptr;
     }
 

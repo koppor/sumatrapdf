@@ -7,10 +7,11 @@
 // process/stream plumbing.
 
 #include "base/Base.h"
-#include "base/CmdLineArgsIter.h"
+#include "base/CmdLineArgs.h"
 #include "base/File.h"
 #include "base/Win.h"
 #include "base/UITask.h"
+#include "gui/Dpi.h"
 
 #include "gui/UIModels.h"
 #include "gui/Layout.h"
@@ -23,7 +24,6 @@
 #include "Settings.h"
 #include "DocController.h"
 #include "EngineBase.h"
-#include "GlobalPrefs.h"
 #include "AppSettings.h"
 #include "MainWindow.h"
 #include "WindowTab.h"
@@ -162,18 +162,18 @@ static void WebViewAddTool(MainWindow* win, Str text) {
 static void WebViewAddError(MainWindow* win, Str text) {
     AIChatProvider* p = CurrentProvider(win);
     if (p) {
-        AIChatLog(p->logger, "error", text);
+        AIChatLog(p->logger, StrL("error"), text);
     }
     TempStr js = fmt("addError('%s')", AIChatJsEscapeTemp(text));
     WebViewEval(win, js);
 }
 
 static void WebViewFlushBlock(MainWindow* win) {
-    WebViewEval(win, "flushBlock()");
+    WebViewEval(win, StrL("flushBlock()"));
 }
 
 static void WebViewClearChat(MainWindow* win) {
-    WebViewEval(win, "clearChat()", false); // don't record clear
+    WebViewEval(win, StrL("clearChat()"), false); // don't record clear
 }
 
 static void WebViewShowUnsupportedFileType(MainWindow* win) {
@@ -204,7 +204,7 @@ void AIChatHistoryFlushBlock(MainWindow* win) {
 
 // Replay a tab's chat log into the WebView
 static void ReplayChatLog(MainWindow* win, AIChatTabState* st) {
-    if (!st || st->chatLog.IsEmpty()) {
+    if (!st || len(st->chatLog) == 0) {
         return;
     }
     if (!win->aiChatWebView || !win->aiChatWebViewReady) {
@@ -228,7 +228,7 @@ static void UpdateAIChatPanelTitle(MainWindow* win, int labelDx) {
     if (!win || !win->aiChatLabel || !p) {
         return;
     }
-    Str docName = "document";
+    Str docName = StrL("document");
     WindowTab* tab = win->CurrentTab();
     if (tab && !tab->IsAboutTab() && tab->filePath) {
         Str title = tab->GetTabTitle();
@@ -284,13 +284,13 @@ static void PopulateSessionCombo(MainWindow* win) {
     }
 
     StrVec items;
-    items.Append("+ New Session");
+    items.Append(StrL("+ New Session"));
 
     WindowTab* tab = win->CurrentTab();
     AIChatTabState* st = GetTabState(tab, win->aiChatProvider);
-    if (!tab || !tab->filePath || !st) {
+    if (!tab || len(tab->filePath) == 0 || !st) {
         win->aiChatSessionCombo->SetItems(items);
-        win->aiChatSessionCombo->SetCurrentSelection(0);
+        CbSetCurrentSelection(win->aiChatSessionCombo, 0);
         return;
     }
 
@@ -303,7 +303,7 @@ static void PopulateSessionCombo(MainWindow* win) {
     for (int i = 0; i < len(sessions); i++) {
         Str display = sessions[i].display;
         if (len(display) == 0) {
-            display = "(no description)";
+            display = StrL("(no description)");
         }
         items.Append(ShortenStringUtf8Temp(display, 50));
         if (st->sessionId && str::Eq(st->sessionId, sessions[i].sessionId)) {
@@ -314,12 +314,12 @@ static void PopulateSessionCombo(MainWindow* win) {
 
     // if current tab has a session but it wasn't found on disk, add it anyway
     if (st->sessionId && !foundCurrent) {
-        items.Append("(current session)");
+        items.Append(StrL("(current session)"));
         selectedIdx = len(sessions) + 1;
     }
 
     win->aiChatSessionCombo->SetItems(items);
-    win->aiChatSessionCombo->SetCurrentSelection(selectedIdx);
+    CbSetCurrentSelection(win->aiChatSessionCombo, selectedIdx);
     AIChatFreeSessions(sessions);
 }
 
@@ -328,17 +328,17 @@ static void OnSessionComboChange(MainWindow* win) {
     if (!p) {
         return;
     }
-    int sel = win->aiChatSessionCombo->GetCurrentSelection();
+    int sel = CbGetCurrentSelection(win->aiChatSessionCombo);
 
     WindowTab* tab = win->CurrentTab();
     AIChatTabState* st = GetTabState(tab, win->aiChatProvider);
-    if (!tab || !tab->filePath || !st) {
+    if (!tab || len(tab->filePath) == 0 || !st) {
         return;
     }
 
     if (sel == 0) {
         // "New Session" — clear current session
-        AIChatLog(p->logger, "session", "new");
+        AIChatLog(p->logger, StrL("session"), StrL("new"));
         str::ReplaceWithCopy(&st->sessionId, Str{});
         st->chatLog.Reset();
         WebViewClearChat(win);
@@ -352,7 +352,7 @@ static void OnSessionComboChange(MainWindow* win) {
 
     int sessionIdx = sel - 1;
     if (sessionIdx >= 0 && sessionIdx < len(sessions)) {
-        AIChatLog(p->logger, "session", sessions[sessionIdx].sessionId);
+        AIChatLog(p->logger, StrL("session"), sessions[sessionIdx].sessionId);
         str::ReplaceWithCopy(&st->sessionId, sessions[sessionIdx].sessionId);
         st->chatLog.Reset();
         WebViewClearChat(win);
@@ -368,7 +368,7 @@ static void AutoSelectRecentSession(MainWindow* win) {
     AIChatProvider* p = CurrentProvider(win);
     WindowTab* tab = win->CurrentTab();
     AIChatTabState* st = GetTabState(tab, win->aiChatProvider);
-    if (!p || !st || !tab->filePath || st->sessionId) {
+    if (!p || !st || len(tab->filePath) == 0 || st->sessionId) {
         return; // already has a session or no file
     }
 
@@ -393,7 +393,7 @@ static void PopulateModelCombo(MainWindow* win, AIChatProvider* p) {
     p->BuildModelsList(models);
     StrVec items;
     for (int i = 0; i < len(models); i++) {
-        items.Append(AIChatModelDisplayNameTemp(models[i], nullptr));
+        items.Append(AIChatModelDisplayNameTemp(models[i], {}));
     }
     win->aiChatModelCombo->SetItems(items);
 }
@@ -410,14 +410,14 @@ static void ApplyAIChatSettingsToUI(MainWindow* win) {
         p->BuildModelsList(models);
         Str model = AIChatResolveModel(models, p->GetModel(), p->defaultModel);
         int modelIdx = std::max(AIChatFindModelInList(models, model), 0);
-        win->aiChatModelCombo->SetCurrentSelection(modelIdx);
+        CbSetCurrentSelection(win->aiChatModelCombo, modelIdx);
     }
     if (win->aiChatOptionCombo) {
         int optionIdx = p->GetOption();
         if (optionIdx < 0 || optionIdx >= p->optionCount) {
             optionIdx = p->optionDefault;
         }
-        win->aiChatOptionCombo->SetCurrentSelection(optionIdx);
+        CbSetCurrentSelection(win->aiChatOptionCombo, optionIdx);
     }
     if (win->aiChatCheckbox) {
         win->aiChatCheckbox->SetIsChecked(p->GetFlag());
@@ -431,7 +431,7 @@ static void SyncAIChatSettingsFromUI(MainWindow* win) {
         return;
     }
     if (win->aiChatModelCombo) {
-        int sel = win->aiChatModelCombo->GetCurrentSelection();
+        int sel = CbGetCurrentSelection(win->aiChatModelCombo);
         StrVec models;
         p->BuildModelsList(models);
         if (sel >= 0 && sel < len(models)) {
@@ -439,13 +439,13 @@ static void SyncAIChatSettingsFromUI(MainWindow* win) {
         }
     }
     if (win->aiChatOptionCombo) {
-        p->SetOption(win->aiChatOptionCombo->GetCurrentSelection());
+        p->SetOption(CbGetCurrentSelection(win->aiChatOptionCombo));
     }
     if (win->aiChatCheckbox) {
         p->SetFlag(win->aiChatCheckbox->IsChecked());
     }
     AIChatUpdateSidebarDx(win, win->aiChatDx, false);
-    SaveSettings();
+    ScheduleSaveSettings();
 }
 
 // --- Working state ---
@@ -498,9 +498,9 @@ static void StopAIChat(MainWindow* win) {
     WindowTab* tab = win->CurrentTab();
     AIChatTabState* st = GetTabState(tab, win->aiChatProvider);
     if (p && st && st->process) {
-        AIChatLog(p->logger, "stop", st->sessionId ? st->sessionId : StrL("(no session)"));
+        AIChatLog(p->logger, StrL("stop"), st->sessionId ? st->sessionId : StrL("(no session)"));
         AIChatCloseProcess(&st->process, true);
-        WebViewAddError(win, "Stopped by user.");
+        WebViewAddError(win, StrL("Stopped by user."));
         SetAIChatWorking(win, false);
     }
 }
@@ -531,7 +531,7 @@ static WindowTab* FindAIChatUpdateTab(MainWindow* win, int pid, Str sessionId) {
         if (sessionId && st->sessionId && str::Eq(st->sessionId, sessionId)) {
             return t;
         }
-        if (sessionId && str::Eq(sessionId, kAIChatPendingSessionId()) && !st->sessionId) {
+        if (sessionId && str::Eq(sessionId, kAIChatPendingSessionId()) && len(st->sessionId) == 0) {
             return t;
         }
     }
@@ -549,7 +549,7 @@ static void OnAIChatFinished(MainWindow* win, AIChatProvider* p, AIChatTabState*
         if (WaitForSingleObject(st->process, 0) == WAIT_OBJECT_0) {
             DWORD exitCode = 0;
             GetExitCodeProcess(st->process, &exitCode);
-            AIChatLog(p->logger, "exit", fmt("%lu", exitCode));
+            AIChatLog(p->logger, StrL("exit"), fmt("%lu", exitCode));
         }
         AIChatCloseProcess(&st->process, p->terminateOnFinish);
     }
@@ -567,7 +567,7 @@ static void ApplyAIChatUpdate(MainWindow* win, AIChatProvider* p, AIChatUpdateDa
     switch (data->updateType) {
         case AIChatUpdateType::Text:
             if (data->text) {
-                AIChatLog(p->logger, "<<< text", data->text);
+                AIChatLog(p->logger, StrL("<<< text"), data->text);
             }
             if (isActiveTab) {
                 WebViewAppendText(win, data->text);
@@ -575,7 +575,7 @@ static void ApplyAIChatUpdate(MainWindow* win, AIChatProvider* p, AIChatUpdateDa
             break;
         case AIChatUpdateType::Tool:
             if (data->text) {
-                AIChatLog(p->logger, "<<< tool", data->text);
+                AIChatLog(p->logger, StrL("<<< tool"), data->text);
             }
             if (isActiveTab) {
                 WebViewAddTool(win, data->text);
@@ -585,7 +585,7 @@ static void ApplyAIChatUpdate(MainWindow* win, AIChatProvider* p, AIChatUpdateDa
             if (isActiveTab) {
                 WebViewAddError(win, data->text);
             } else if (data->text) {
-                AIChatLog(p->logger, "error", data->text);
+                AIChatLog(p->logger, StrL("error"), data->text);
             }
             break;
         case AIChatUpdateType::Flush:
@@ -595,7 +595,7 @@ static void ApplyAIChatUpdate(MainWindow* win, AIChatProvider* p, AIChatUpdateDa
             break;
         case AIChatUpdateType::SessionId:
             if (data->text) {
-                AIChatLog(p->logger, "<<< session", data->text);
+                AIChatLog(p->logger, StrL("<<< session"), data->text);
             }
             if (st && data->text) {
                 str::ReplaceWithCopy(&st->sessionId, data->text);
@@ -611,7 +611,7 @@ static void OnAIChatUpdate(AIChatUpdateData* data) {
     MainWindow* win = AIChatFindMainWindowByFrame(data->hwndFrame);
     int pid = data->providerId;
     AIChatProvider* p = GetAIChatProvider(pid);
-    if (!IsMainWindowValid(win) || !win->hwndAiChatBox || !p) {
+    if (!IsMainWindowValidAndNotClosing(win) || !win->hwndAiChatBox || !p) {
         FreeAIChatUpdateData(data);
         return;
     }
@@ -671,7 +671,8 @@ static void AIChatReadThread(AIChatReadThreadCtx* ctx) {
 
     // Most SSE/provider lines are well under 4KB; grow to heap for rare large lines.
     char lineScratch[4096]{};
-    str::Builder lineBuf(Str(lineScratch, sizeofi(lineScratch)));
+    str::Builder lineBuf;
+    str::BuilderUseExternalBuffer(lineBuf, Str(lineScratch, sizeofi(lineScratch)));
     constexpr int kMaxProviderLineSize = 1024 * 1024;
     bool lineTooLong = false;
     char buf[4096];
@@ -686,7 +687,7 @@ static void AIChatReadThread(AIChatReadThreadCtx* ctx) {
                 } else {
                     Str line = ToStr(lineBuf);
                     if (line) {
-                        AIChatLog(p->logger, "<<<", line);
+                        AIChatLog(p->logger, StrL("<<<"), line);
                     }
                     p->ParseStreamLine(line, &ctx->stream);
                 }
@@ -705,9 +706,9 @@ static void AIChatReadThread(AIChatReadThreadCtx* ctx) {
 
     Str rem = lineTooLong ? Str{} : ToStr(lineBuf);
     if (rem) {
-        AIChatLog(p->logger, "<<<", rem);
+        AIChatLog(p->logger, StrL("<<<"), rem);
     }
-    AIChatLog(p->logger, "eof", "(stdout closed)");
+    AIChatLog(p->logger, StrL("eof"), StrL("(stdout closed)"));
 
     CloseHandle(hPipe);
     AIChatPostUpdate(&ctx->stream, AIChatUpdateType::Finished, {});
@@ -736,11 +737,11 @@ static void AIChatReadAllPipe(HANDLE hPipe, str::Builder& out) {
 static bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str& outText, Str& outErr) {
     AIChatProvider* p = GetAIChatProvider((int)backend);
     if (!p) {
-        outErr = str::Dup("unknown backend");
+        outErr = str::Dup(StrL("unknown backend"));
         return false;
     }
     TempStr exePath = p->FindExecutableTemp();
-    if (!exePath) {
+    if (len(exePath) == 0) {
         outErr = str::Dup(fmt("%s is not installed (not found in PATH)", p->exeName));
         return false;
     }
@@ -753,9 +754,9 @@ static bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str&
         optionIdx = p->optionDefault;
     }
     TempStr sessionId = p->generatesSessionId ? AIChatGenerateSessionIdTemp() : Str{};
-    TempStr dir = len(filePath) > 0 ? path::GetDirTemp(filePath) : str::DupTemp(".");
-    if (!dir || len(dir) == 0) {
-        dir = str::DupTemp(".");
+    TempStr dir = len(filePath) > 0 ? path::GetDirTemp(filePath) : str::DupTemp(StrL("."));
+    if (len(dir) == 0) {
+        dir = str::DupTemp(StrL("."));
     }
 
     AIChatCmdArgs args;
@@ -770,19 +771,20 @@ static bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str&
     args.isNewSession = true;
     TempStr cmdLine = p->BuildCmdLineTemp(args);
 
-    AIChatLog(p->logger, ">>> test-user", message);
-    AIChatLog(p->logger, ">>> test-file", filePath);
-    AIChatLog(p->logger, ">>> test-cwd", dir);
-    AIChatLog(p->logger, ">>> cmd", cmdLine);
+    AIChatLog(p->logger, StrL(">>> test-user"), message);
+    AIChatLog(p->logger, StrL(">>> test-file"), filePath);
+    AIChatLog(p->logger, StrL(">>> test-cwd"), dir);
+    AIChatLog(p->logger, StrL(">>> cmd"), cmdLine);
 
     AIChatProcessLaunchResult launch;
     if (!AIChatLaunchProcessWithStdoutPipe(cmdLine, dir, &launch)) {
         outErr = str::Dup(fmt("failed to launch %s", p->exeName));
-        AIChatLog(p->logger, "<<< error", outErr);
+        AIChatLog(p->logger, StrL("<<< error"), outErr);
         return false;
     }
 
-    str::Builder raw(4096);
+    str::Builder raw;
+    str::BuilderReserve(raw, 4096);
     AIChatReadAllPipe(launch.hReadPipe, raw);
     CloseHandle(launch.hReadPipe);
     launch.hReadPipe = nullptr;
@@ -790,8 +792,8 @@ static bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str&
     if (waitRes == WAIT_TIMEOUT) {
         TerminateProcess(launch.hProcess, 1);
         AIChatCloseProcess(&launch.hProcess, false);
-        outErr = str::Dup("chat timed out");
-        AIChatLog(p->logger, "<<< error", outErr);
+        outErr = str::Dup(StrL("chat timed out"));
+        AIChatLog(p->logger, StrL("<<< error"), outErr);
         return false;
     }
     AIChatCloseProcess(&launch.hProcess, false);
@@ -811,7 +813,7 @@ static bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str&
         }
         if (off > start) {
             TempStr line = str::DupTemp(Str(out.s + start, off - start));
-            AIChatLog(p->logger, "<<<", line);
+            AIChatLog(p->logger, StrL("<<<"), line);
             p->ParseStreamLine(line, &ctx);
         }
         while (off < out.len && (out.s[off] == '\n' || out.s[off] == '\r')) {
@@ -829,7 +831,7 @@ static bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str&
     Str txt = ToStr(sink.text);
     str::TrimWSInPlace(txt, str::TrimOpt::Both);
     if (len(txt) == 0) {
-        outErr = str::Dup("response contained no text");
+        outErr = str::Dup(StrL("response contained no text"));
         return false;
     }
     outText = str::Dup(txt);
@@ -838,16 +840,17 @@ static bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str&
 
 TempStr AIChatTestResultTemp(int backend, Str filePath, Str message, int* exitCode) {
     AIChatDebugReset();
-    Str text, err;
+    Str text;
+    Str err;
     bool ok = RunAIChatSync((AIChatBackend)backend, filePath, message, text, err);
     str::Builder res;
     if (ok) {
-        res.Append("OK\n");
+        res.Append(StrL("OK\n"));
         res.Append(text);
     } else {
-        res.Append("FAIL: ");
+        res.Append(StrL("FAIL: "));
         res.Append(err);
-        res.Append("\n--- debug log ---\n");
+        res.Append(StrL("\n--- debug log ---\n"));
         res.Append(AIChatDebugGetTemp());
     }
     if (exitCode) {
@@ -867,7 +870,7 @@ TempStr AIChatTestReplayResultTemp(Str userMsg, Str response, int* exitCode) {
         if (exitCode) {
             *exitCode = 2;
         }
-        return str::DupTemp("NOTREADY no-window");
+        return str::DupTemp(StrL("NOTREADY no-window"));
     }
     MainWindow* win = gWindows[0];
     AIChatDebugReset();
@@ -881,7 +884,7 @@ TempStr AIChatTestReplayResultTemp(Str userMsg, Str response, int* exitCode) {
     if (exitCode) {
         *exitCode = 0;
     }
-    return str::DupTemp("OK replayed");
+    return str::DupTemp(StrL("OK replayed"));
 }
 
 // --- Sending a message ---
@@ -902,7 +905,7 @@ static void SendAIChatMessage(MainWindow* win) {
 
     WindowTab* tab = win->CurrentTab();
     AIChatTabState* st = GetTabState(tab, win->aiChatProvider);
-    if (!tab || !tab->filePath || !st) {
+    if (!tab || len(tab->filePath) == 0 || !st) {
         return;
     }
     if (st->process) {
@@ -911,7 +914,7 @@ static void SendAIChatMessage(MainWindow* win) {
 
     TempWStr inputW = HwndGetTextWTemp(hwndInput);
     TempStr input = ToUtf8Temp(inputW);
-    HwndSetText(hwndInput, "");
+    HwndSetText(hwndInput, StrL(""));
 
     WebViewAddUser(win, input);
     SetAIChatWorking(win, true);
@@ -936,18 +939,18 @@ static void SendAIChatMessage(MainWindow* win) {
     }
 
     TempStr exePath = p->FindExecutableTemp();
-    if (!exePath) {
-        AIChatLog(p->logger, "error", fmt("Cannot find %s executable", p->exeName));
+    if (len(exePath) == 0) {
+        AIChatLog(p->logger, StrL("error"), fmt("Cannot find %s executable", p->exeName));
         WebViewAddError(win, fmt("Cannot find %s. Is %s installed?", p->exeName, p->name));
         SetAIChatWorking(win, false);
         return;
     }
 
-    AIChatLog(p->logger, ">>> user", input);
-    AIChatLog(p->logger, ">>> session",
+    AIChatLog(p->logger, StrL(">>> user"), input);
+    AIChatLog(p->logger, StrL(">>> session"),
               fmt("%s (%s)", st->sessionId ? st->sessionId : kAIChatPendingSessionId(),
                   Str(isNewSession ? "new" : "resume")));
-    AIChatLog(p->logger, ">>> cwd", dir);
+    AIChatLog(p->logger, StrL(">>> cwd"), dir);
 
     AIChatCmdArgs args;
     args.exePath = exePath;
@@ -963,25 +966,25 @@ static void SendAIChatMessage(MainWindow* win) {
     args.isNewSession = isNewSession;
     TempStr cmdLine = p->BuildCmdLineTemp(args);
 
-    AIChatLog(p->logger, ">>> cmd", cmdLine);
+    AIChatLog(p->logger, StrL(">>> cmd"), cmdLine);
 
     AIChatProcessLaunchResult launch;
     if (!AIChatLaunchProcessWithStdoutPipe(cmdLine, dir, &launch)) {
-        AIChatLog(p->logger, "error", fmt("Failed to launch %s process", p->exeName));
+        AIChatLog(p->logger, StrL("error"), fmt("Failed to launch %s process", p->exeName));
         WebViewAddError(win, fmt("Failed to launch %s. Is it installed and in PATH?", p->exeName));
         SetAIChatWorking(win, false);
         return;
     }
 
     st->process = launch.hProcess;
-    AIChatLog(p->logger, ">>> start", fmt("pid %lu", launch.processId));
+    AIChatLog(p->logger, StrL(">>> start"), fmt("pid %lu", launch.processId));
 
     auto* ctx = new AIChatReadThreadCtx();
     ctx->hReadPipe = launch.hReadPipe;
     ctx->stream.hwndFrame = win->hwndFrame;
     ctx->stream.providerId = win->aiChatProvider;
     ctx->stream.sessionId = str::Dup(st->sessionId ? st->sessionId : kAIChatPendingSessionId());
-    RunAsync(MkFunc0(StartAIChatReadThread, ctx), "AIChatReadThread");
+    RunAsync(MkFunc0(StartAIChatReadThread, ctx), StrL("AIChatReadThread"));
 }
 
 // --- WndProcs ---
@@ -1103,7 +1106,7 @@ static void DeleteAIChatWebView(MainWindow* win) {
 // replacing the old "wait 600ms and hope" timer.
 static void OnAIChatWebViewNavigated(void* ctx, Str, bool) {
     MainWindow* win = (MainWindow*)ctx;
-    if (!IsMainWindowValid(win) || !win->hwndAiChatBox) {
+    if (!IsMainWindowValidAndNotClosing(win) || !win->hwndAiChatBox) {
         return;
     }
     if (win->aiChatWebView) {
@@ -1212,6 +1215,9 @@ void UpdateAIChatTheme(MainWindow* win) {
     if (win->aiChatInput) {
         win->aiChatInput->SetColors(txtCol, bgCol);
     }
+    if (win->aiChatCheckbox) {
+        win->aiChatCheckbox->SetColors(txtCol, bgCol);
+    }
     // the panel is created after the frame-wide dark mode pass, so its
     // controls (e.g. the checkbox) need their own subclass + theme pass
     DarkModeApplyToChildControls(win->hwndAiChatBox);
@@ -1233,7 +1239,7 @@ void CreateAIChatPanel(MainWindow* win) {
         return;
     }
     HMODULE hmod = GetModuleHandle(nullptr);
-    int dx = gGlobalPrefs->sidebarDx;
+    int dx = gSettings->sidebarDx;
     DWORD style = WS_CHILD | WS_CLIPCHILDREN;
     HWND parent = win->hwndFrame;
     win->hwndAiChatBox = CreateWindowExW(0, WC_STATIC, L"", style, 0, 0, dx, 0, parent, nullptr, hmod, nullptr);
@@ -1245,10 +1251,10 @@ void CreateAIChatPanel(MainWindow* win) {
         win->aiChatSplitter->onMove = MkFunc1Void(OnAIChatSplitterMove);
     }
 
-    PlatformFont* font = GetDefaultGuiFont();
+    PlatformFont* font = GetAppFont();
 
     // label
-    PlatformFont* labelFont = GetDefaultGuiFont(true, false);
+    PlatformFont* labelFont = GetAppSidebarLabelFont();
     auto header = NewLabelWithClose(win->hwndAiChatBox, labelFont, MkFunc0(CloseAIChatPanelFromLabel, win));
     win->aiChatLabel = header.label;
     win->aiChatHeader = header.box;
@@ -1292,7 +1298,8 @@ void CreateAIChatPanel(MainWindow* win) {
     {
         Checkbox::CreateArgs args;
         args.parent = win->hwndAiChatBox;
-        args.text = "Skip Permissions";
+        args.text = StrL("Skip Permissions");
+        args.font = font;
         args.isRtl = IsUIRtl();
         win->aiChatCheckbox = new Checkbox();
         win->aiChatCheckbox->Create(args);
@@ -1300,7 +1307,7 @@ void CreateAIChatPanel(MainWindow* win) {
 
     // stop button (hidden by default, shown when agent is working)
     {
-        auto* b = NewThemedButton(win->hwndAiChatBox, "Stop", font, false);
+        auto* b = NewThemedButton(win->hwndAiChatBox, StrL("Stop"), font, false);
         b->onClick = MkFunc0(StopAIChat, win);
         b->SetIsVisible(false);
         win->aiChatStopBtn = b;
@@ -1313,7 +1320,8 @@ void CreateAIChatPanel(MainWindow* win) {
         args.isMultiLine = true;
         args.idealSizeLines = 3;
         args.withBorder = true;
-        args.cueText = "Ask about this document...";
+        args.cueText = StrL("Ask about this document...");
+        args.font = font;
         win->aiChatInput = new Edit();
         win->aiChatInput->Create(args);
     }
@@ -1357,6 +1365,29 @@ void CreateAIChatPanel(MainWindow* win) {
 
     AIChatApplySavedSidebarDx(win);
     UpdateAIChatTheme(win);
+}
+
+void UpdateAIChatDpi(MainWindow* win, int dpi) {
+    if (!win || !win->hwndAiChatBox || dpi <= 0) {
+        return;
+    }
+    PlatformFont* font = GetAppFontForDpi(dpi);
+    PlatformFont* labelFont = GetAppSidebarLabelFontForDpi(dpi);
+    win->aiChatLabel->font = labelFont;
+    win->aiChatSessionCombo->SetFont(font);
+    win->aiChatModelCombo->SetFont(font);
+    win->aiChatOptionCombo->SetFont(font);
+    win->aiChatCheckbox->SetFont(font);
+    win->aiChatInput->SetFont(font);
+    win->aiChatStopBtn->font = font;
+    int padY = DpiScaleByDpi(dpi, 5);
+    int padX = DpiScaleByDpi(dpi, 12);
+    win->aiChatStopBtn->textPadding = Insets{padY, padX, padY, padX};
+    if (win->aiChatHeader && win->aiChatHeader->ChildrenCount() > 1) {
+        ApplyLabelWithCloseDpi(win->aiChatLabel, AsVirtCloseButton(win->aiChatHeader->LayoutChildAt(1)), dpi);
+    }
+    RelayoutAIChatPanel(win);
+    HwndInvalidate(win->hwndAiChatBox, true);
 }
 
 // close the panel for the current tab (label's close button)
@@ -1419,9 +1450,7 @@ void OnAIChatToggle(MainWindow* win, int providerId) {
         EnsureWebViewReady(win);
         UpdateAIChatPanelForCurrentTab(win);
         PopulateSessionCombo(win);
-        if (win->aiChatInput) {
-            HwndSetFocus(win->aiChatInput->hwnd);
-        }
+        EditSetFocus(win->aiChatInput);
         // if the webview was recreated (provider change), its navigationCompleted
         // callback replays the chat once the new page has loaded
         // defer auto-select so SetHtml has time to load the page
@@ -1469,7 +1498,7 @@ void OnAIChatTabChanged(MainWindow* win) {
     SetAIChatWorking(win, st->process != nullptr);
 
     // if tab has in-memory chat log, replay it (fast, includes current session)
-    if (!st->chatLog.IsEmpty()) {
+    if (len(st->chatLog) > 0) {
         ReplayChatLog(win, st);
     } else if (tab->filePath && st->sessionId) {
         // fallback: load from disk

@@ -722,6 +722,11 @@ pdf_write_square_appearance(fz_context *ctx, pdf_annot *annot, fz_buffer *buf, f
 	lw = pdf_write_border_appearance(ctx, annot, buf);
 	sc = pdf_write_stroke_color_appearance(ctx, annot, buf);
 	ic = pdf_write_interior_fill_color_appearance(ctx, annot, buf);
+	/* Width 0 and no fill is a hairline in some rasterizers (pdf.js issue14164). */
+	if (lw <= 0)
+		sc = 0;
+	if (!sc && !ic)
+		return;
 	orect = pdf_dict_get_rect(ctx, annot->obj, PDF_NAME(Rect));
 	rd = pdf_annot_rect_diff(ctx, annot);
 
@@ -805,6 +810,11 @@ pdf_write_circle_appearance(fz_context *ctx, pdf_annot *annot, fz_buffer *buf, f
 	lw = pdf_write_border_appearance(ctx, annot, buf);
 	sc = pdf_write_stroke_color_appearance(ctx, annot, buf);
 	ic = pdf_write_interior_fill_color_appearance(ctx, annot, buf);
+	/* Width 0 and no fill is a hairline in some rasterizers (pdf.js issue14164). */
+	if (lw <= 0)
+		sc = 0;
+	if (!sc && !ic)
+		return;
 	orect = pdf_dict_get_rect(ctx, annot->obj, PDF_NAME(Rect));
 	rd = pdf_annot_rect_diff(ctx, annot);
 
@@ -1112,6 +1122,41 @@ extract_quad(fz_context *ctx, fz_point *quad, pdf_obj *obj, int i)
 	return sqrtf(dx * dx + dy * dy);
 }
 
+/* Acrobat order: ul, ur, ll, lr. Used when QuadPoints is missing. */
+static float
+extract_quad_from_rect(fz_point *quad, fz_rect r)
+{
+	quad[UL].x = r.x0; quad[UL].y = r.y1;
+	quad[UR].x = r.x1; quad[UR].y = r.y1;
+	quad[LL].x = r.x0; quad[LL].y = r.y0;
+	quad[LR].x = r.x1; quad[LR].y = r.y0;
+	return r.y1 - r.y0;
+}
+
+/* n is the QuadPoints array length, or 8 when falling back to a single /Rect. */
+static int
+markup_quad_len(fz_context *ctx, pdf_annot *annot, fz_rect annot_rect, int *from_rect)
+{
+	int n = pdf_array_len(ctx, pdf_dict_get(ctx, annot->obj, PDF_NAME(QuadPoints)));
+	*from_rect = 0;
+	if (n >= 8)
+		return n;
+	if (annot_rect.x1 > annot_rect.x0 && annot_rect.y1 > annot_rect.y0)
+	{
+		*from_rect = 1;
+		return 8;
+	}
+	return 0;
+}
+
+static float
+load_markup_quad(fz_context *ctx, fz_point *quad, pdf_obj *qp, int i, int from_rect, fz_rect annot_rect)
+{
+	if (from_rect)
+		return extract_quad_from_rect(quad, annot_rect);
+	return extract_quad(ctx, quad, qp, i);
+}
+
 static void
 union_quad(fz_rect *rect, const fz_point quad[4], float lw)
 {
@@ -1133,52 +1178,52 @@ static void
 pdf_write_highlight_appearance(fz_context *ctx, pdf_annot *annot, fz_buffer *buf, fz_rect *rect, pdf_obj **res)
 {
 	pdf_obj *qp;
+	fz_rect annot_rect = *rect;
 	fz_point quad[4], mquad[4], v;
 	float h, m, dx, dy, vn;
-	int i, n;
-
-	*rect = fz_empty_rect;
+	int i, n, from_rect;
 
 	pdf_write_opacity_blend_mode(ctx, annot, buf, res, FZ_BLEND_MULTIPLY);
-	pdf_write_fill_color_appearance(ctx, annot, buf);
+	if (!pdf_write_fill_color_appearance(ctx, annot, buf))
+		fz_append_string(ctx, buf, "1 1 0 rg\n"); /* Acrobat default yellow */
 
 	qp = pdf_dict_get(ctx, annot->obj, PDF_NAME(QuadPoints));
-	n = pdf_array_len(ctx, qp);
-	if (n > 0)
+	n = markup_quad_len(ctx, annot, annot_rect, &from_rect);
+	*rect = fz_empty_rect;
+	for (i = 0; i < n; i += 8)
 	{
-		for (i = 0; i < n; i += 8)
-		{
-			h = extract_quad(ctx, quad, qp, i);
-			m = h / 4.2425f; /* magic number that matches adobe's appearance */
-			dx = quad[LR].x - quad[LL].x;
-			dy = quad[LR].y - quad[LL].y;
-			vn = sqrtf(dx * dx + dy * dy);
-			v = fz_make_point(dx * m / vn, dy * m / vn);
+		h = load_markup_quad(ctx, quad, qp, i, from_rect, annot_rect);
+		m = h / 4.2425f; /* magic number that matches adobe's appearance */
+		dx = quad[LR].x - quad[LL].x;
+		dy = quad[LR].y - quad[LL].y;
+		vn = sqrtf(dx * dx + dy * dy);
+		if (vn == 0)
+			continue;
+		v = fz_make_point(dx * m / vn, dy * m / vn);
 
-			mquad[LL].x = quad[LL].x - v.x - v.y;
-			mquad[LL].y = quad[LL].y - v.y + v.x;
-			mquad[UL].x = quad[UL].x - v.x + v.y;
-			mquad[UL].y = quad[UL].y - v.y - v.x;
-			mquad[LR].x = quad[LR].x + v.x - v.y;
-			mquad[LR].y = quad[LR].y + v.y + v.x;
-			mquad[UR].x = quad[UR].x + v.x + v.y;
-			mquad[UR].y = quad[UR].y + v.y - v.x;
+		mquad[LL].x = quad[LL].x - v.x - v.y;
+		mquad[LL].y = quad[LL].y - v.y + v.x;
+		mquad[UL].x = quad[UL].x - v.x + v.y;
+		mquad[UL].y = quad[UL].y - v.y - v.x;
+		mquad[LR].x = quad[LR].x + v.x - v.y;
+		mquad[LR].y = quad[LR].y + v.y + v.x;
+		mquad[UR].x = quad[UR].x + v.x + v.y;
+		mquad[UR].y = quad[UR].y + v.y - v.x;
 
-			fz_append_printf(ctx, buf, "%g %g m\n", quad[LL].x, quad[LL].y);
-			fz_append_printf(ctx, buf, "%g %g %g %g %g %g c\n",
-				mquad[LL].x, mquad[LL].y,
-				mquad[UL].x, mquad[UL].y,
-				quad[UL].x, quad[UL].y);
-			fz_append_printf(ctx, buf, "%g %g l\n", quad[UR].x, quad[UR].y);
-			fz_append_printf(ctx, buf, "%g %g %g %g %g %g c\n",
-				mquad[UR].x, mquad[UR].y,
-				mquad[LR].x, mquad[LR].y,
-				quad[LR].x, quad[LR].y);
-			fz_append_printf(ctx, buf, "f\n");
+		fz_append_printf(ctx, buf, "%g %g m\n", quad[LL].x, quad[LL].y);
+		fz_append_printf(ctx, buf, "%g %g %g %g %g %g c\n",
+			mquad[LL].x, mquad[LL].y,
+			mquad[UL].x, mquad[UL].y,
+			quad[UL].x, quad[UL].y);
+		fz_append_printf(ctx, buf, "%g %g l\n", quad[UR].x, quad[UR].y);
+		fz_append_printf(ctx, buf, "%g %g %g %g %g %g c\n",
+			mquad[UR].x, mquad[UR].y,
+			mquad[LR].x, mquad[LR].y,
+			quad[LR].x, quad[LR].y);
+		fz_append_printf(ctx, buf, "f\n");
 
-			union_quad(rect, quad, h/16);
-			union_quad(rect, mquad, 0);
-		}
+		union_quad(rect, quad, h/16);
+		union_quad(rect, mquad, 0);
 	}
 }
 
@@ -1186,35 +1231,32 @@ static void
 pdf_write_underline_appearance(fz_context *ctx, pdf_annot *annot, fz_buffer *buf, fz_rect *rect, pdf_obj **res)
 {
 	fz_point quad[4], a, b;
+	fz_rect annot_rect = *rect;
 	float h;
 	pdf_obj *qp;
-	int i, n;
-
-	*rect = fz_empty_rect;
+	int i, n, from_rect;
 
 	pdf_write_opacity(ctx, annot, buf, res);
 	pdf_write_stroke_color_appearance(ctx, annot, buf);
 
 	qp = pdf_dict_get(ctx, annot->obj, PDF_NAME(QuadPoints));
-	n = pdf_array_len(ctx, qp);
-	if (n > 0)
+	n = markup_quad_len(ctx, annot, annot_rect, &from_rect);
+	*rect = fz_empty_rect;
+	for (i = 0; i < n; i += 8)
 	{
-		for (i = 0; i < n; i += 8)
-		{
-			/* Acrobat draws the line at 1/7 of the box width from the bottom
-			 * of the box and 1/16 thick of the box width. */
+		/* Acrobat draws the line at 1/7 of the box width from the bottom
+		 * of the box and 1/16 thick of the box width. */
 
-			h = extract_quad(ctx, quad, qp, i);
-			a = lerp_point(quad[LL], quad[UL], 1/7.0f);
-			b = lerp_point(quad[LR], quad[UR], 1/7.0f);
+		h = load_markup_quad(ctx, quad, qp, i, from_rect, annot_rect);
+		a = lerp_point(quad[LL], quad[UL], 1/7.0f);
+		b = lerp_point(quad[LR], quad[UR], 1/7.0f);
 
-			fz_append_printf(ctx, buf, "%g w\n", h/16);
-			fz_append_printf(ctx, buf, "%g %g m\n", a.x, a.y);
-			fz_append_printf(ctx, buf, "%g %g l\n", b.x, b.y);
-			fz_append_printf(ctx, buf, "S\n");
+		fz_append_printf(ctx, buf, "%g w\n", h/16);
+		fz_append_printf(ctx, buf, "%g %g m\n", a.x, a.y);
+		fz_append_printf(ctx, buf, "%g %g l\n", b.x, b.y);
+		fz_append_printf(ctx, buf, "S\n");
 
-			union_quad(rect, quad, h/16);
-		}
+		union_quad(rect, quad, h/16);
 	}
 }
 
@@ -1222,34 +1264,32 @@ static void
 pdf_write_strike_out_appearance(fz_context *ctx, pdf_annot *annot, fz_buffer *buf, fz_rect *rect, pdf_obj **res)
 {
 	fz_point quad[4], a, b;
+	fz_rect annot_rect = *rect;
 	float h;
 	pdf_obj *qp;
-	int i, n;
+	int i, n, from_rect;
 
 	pdf_write_opacity(ctx, annot, buf, res);
 	pdf_write_stroke_color_appearance(ctx, annot, buf);
 
 	qp = pdf_dict_get(ctx, annot->obj, PDF_NAME(QuadPoints));
-	n = pdf_array_len(ctx, qp);
-	if (n > 0)
+	n = markup_quad_len(ctx, annot, annot_rect, &from_rect);
+	*rect = fz_empty_rect;
+	for (i = 0; i < n; i += 8)
 	{
-		*rect = fz_empty_rect;
-		for (i = 0; i < n; i += 8)
-		{
-			/* Acrobat draws the line at 3/7 of the box width from the bottom
-			 * of the box and 1/16 thick of the box width. */
+		/* Acrobat draws the line at 3/7 of the box width from the bottom
+		 * of the box and 1/16 thick of the box width. */
 
-			h = extract_quad(ctx, quad, qp, i);
-			a = lerp_point(quad[LL], quad[UL], 3/7.0f);
-			b = lerp_point(quad[LR], quad[UR], 3/7.0f);
+		h = load_markup_quad(ctx, quad, qp, i, from_rect, annot_rect);
+		a = lerp_point(quad[LL], quad[UL], 3/7.0f);
+		b = lerp_point(quad[LR], quad[UR], 3/7.0f);
 
-			fz_append_printf(ctx, buf, "%g w\n", h/16);
-			fz_append_printf(ctx, buf, "%g %g m\n", a.x, a.y);
-			fz_append_printf(ctx, buf, "%g %g l\n", b.x, b.y);
-			fz_append_printf(ctx, buf, "S\n");
+		fz_append_printf(ctx, buf, "%g w\n", h/16);
+		fz_append_printf(ctx, buf, "%g %g m\n", a.x, a.y);
+		fz_append_printf(ctx, buf, "%g %g l\n", b.x, b.y);
+		fz_append_printf(ctx, buf, "S\n");
 
-			union_quad(rect, quad, h/16);
-		}
+		union_quad(rect, quad, h/16);
 	}
 }
 
@@ -1257,47 +1297,48 @@ static void
 pdf_write_squiggly_appearance(fz_context *ctx, pdf_annot *annot, fz_buffer *buf, fz_rect *rect, pdf_obj **res)
 {
 	fz_point quad[4], a, b, c, v;
+	fz_rect annot_rect = *rect;
 	float h, x, w;
 	pdf_obj *qp;
-	int i, n;
-
-	*rect = fz_empty_rect;
+	int i, n, from_rect;
 
 	pdf_write_opacity(ctx, annot, buf, res);
 	pdf_write_stroke_color_appearance(ctx, annot, buf);
 
 	qp = pdf_dict_get(ctx, annot->obj, PDF_NAME(QuadPoints));
-	n = pdf_array_len(ctx, qp);
-	if (n > 0)
+	n = markup_quad_len(ctx, annot, annot_rect, &from_rect);
+	*rect = fz_empty_rect;
+	for (i = 0; i < n; i += 8)
 	{
-		for (i = 0; i < n; i += 8)
+		int up = 1;
+		h = load_markup_quad(ctx, quad, qp, i, from_rect, annot_rect);
+		v = fz_make_point(quad[LR].x - quad[LL].x, quad[LR].y - quad[LL].y);
+		w = sqrtf(v.x * v.x + v.y * v.y);
+		if (w == 0)
+			continue;
+		x = 0;
+
+		fz_append_printf(ctx, buf, "%g w\n", h/16);
+		fz_append_printf(ctx, buf, "%g %g m\n", quad[LL].x, quad[LL].y);
+		while (x < w)
 		{
-			int up = 1;
-			h = extract_quad(ctx, quad, qp, i);
-			v = fz_make_point(quad[LR].x - quad[LL].x, quad[LR].y - quad[LL].y);
-			w = sqrtf(v.x * v.x + v.y * v.y);
-			x = 0;
-
-			fz_append_printf(ctx, buf, "%g w\n", h/16);
-			fz_append_printf(ctx, buf, "%g %g m\n", quad[LL].x, quad[LL].y);
-			while (x < w)
+			x += h/7;
+			if (h == 0)
+				break;
+			a = lerp_point(quad[LL], quad[LR], x/w);
+			if (up)
 			{
-				x += h/7;
-				a = lerp_point(quad[LL], quad[LR], x/w);
-				if (up)
-				{
-					b = lerp_point(quad[UL], quad[UR], x/w);
-					c = lerp_point(a, b, 1/7.0f);
-					fz_append_printf(ctx, buf, "%g %g l\n", c.x, c.y);
-				}
-				else
-					fz_append_printf(ctx, buf, "%g %g l\n", a.x, a.y);
-				up = !up;
+				b = lerp_point(quad[UL], quad[UR], x/w);
+				c = lerp_point(a, b, 1/7.0f);
+				fz_append_printf(ctx, buf, "%g %g l\n", c.x, c.y);
 			}
-			fz_append_printf(ctx, buf, "S\n");
-
-			union_quad(rect, quad, h/16);
+			else
+				fz_append_printf(ctx, buf, "%g %g l\n", a.x, a.y);
+			up = !up;
 		}
+		fz_append_printf(ctx, buf, "S\n");
+
+		union_quad(rect, quad, h/16);
 	}
 }
 
@@ -1627,6 +1668,14 @@ add_required_fonts(fz_context *ctx, pdf_document *doc, pdf_obj *res_font,
 		case UCDN_SCRIPT_BOPOMOFO: add_bopomofo = 1; break;
 		case UCDN_SCRIPT_HAN: add_han = 1; break;
 		}
+
+		// halfwidth and fullwidth forms
+		if (c >= 0xff01 && c <= 0xffee)
+			add_han = 1;
+
+		// cjk symbols and punctuation
+		if (c >= 0x3000 && c <= 0x303f)
+			add_han = 1;
 	}
 
 	if (add_han)
@@ -1762,6 +1811,15 @@ static int next_text_walk(fz_context *ctx, struct text_walk_state *state)
 
 	state->n = fz_chartorune(&state->u, state->text);
 	script = ucdn_get_script(state->u);
+
+	// halfwidth and fullwidth forms
+	if (state->u >= 0xff01 && state->u <= 0xffee)
+		script = UCDN_SCRIPT_HAN;
+
+	// cjk symbols and punctuation
+	if (state->u >= 0x3000 && state->u <= 0x303f)
+		script = UCDN_SCRIPT_HAN;
+
 	if (script == UCDN_SCRIPT_COMMON || script == UCDN_SCRIPT_INHERITED)
 		script = state->last_script;
 	state->last_script = script;
@@ -2304,9 +2362,8 @@ write_rich_content(fz_context *ctx, pdf_annot *annot, fz_buffer *buf, pdf_obj **
 	// this matches the math in write_variable_text.
 	if (!multiline)
 	{
-		float ty = ((h - b * 2) - size) / 2;
-		content_box.y0 = h - b - 0.8f * size + ty;
-		content_box.y1 = content_box.y0 + size * 2;
+		float gap = (h - b*2 - size) / 2;
+		content_box = fz_make_rect(b, b + gap, w - b * 2, h + gap + size * 2);
 	}
 
 	fz_try(ctx)
@@ -2417,6 +2474,14 @@ static int text_needs_rich_layout(fz_context *ctx, const char *s)
 			script == UCDN_SCRIPT_BOPOMOFO ||
 			script == UCDN_SCRIPT_HAN
 		)
+			continue;
+
+		// halfwidth and fullwidth forms
+		if (c >= 0xff01 && c <= 0xffee)
+			continue;
+
+		// cjk symbols and punctuation
+		if (c >= 0x3000 && c <= 0x303f)
 			continue;
 
 		return 1;
@@ -2576,6 +2641,10 @@ pdf_write_free_text_appearance(fz_context *ctx, pdf_annot *annot, fz_buffer *buf
 	pdf_annot_default_appearance(ctx, annot, &font, &size, &n, color);
 	lang = pdf_annot_language(ctx, annot);
 	rd = pdf_annot_rect_diff(ctx, annot);
+
+	/* FreeText is always multi-line so default size to 12pts if it is zero. */
+	if (size <= 0)
+		size = 12;
 
 	/* /Rotate is an undocumented annotation property supported by Adobe.
 	 * When Rotate is used, neither the box, nor the arrow move at all.
@@ -2764,6 +2833,9 @@ pdf_write_tx_widget_appearance(fz_context *ctx, pdf_annot *annot, fz_buffer *buf
 		rc = free_rc = escape_text(ctx, text);
 		if (!ds)
 		{
+			// TODO: measure accurate width to fit box if single-line!
+			if (size <= 0)
+				size = (ff & PDF_TX_FIELD_IS_MULTILINE) ? 12 : h - b*2;
 			fz_snprintf(ds_buf, sizeof ds_buf,
 				"font-family:%s;font-size:%gpt;color:#%06x;text-align:%s",
 				full_font_name(&font),
@@ -2982,6 +3054,104 @@ pdf_write_widget_appearance(fz_context *ctx, pdf_annot *annot, fz_buffer *buf,
 	}
 }
 
+/* ISO 32000-1 12.5.6.17: /Poster is a boolean or an image stream.
+ * true means extract a frame from the movie, which we cannot do. */
+static int
+pdf_write_movie_poster_appearance(fz_context *ctx, pdf_annot *annot, fz_buffer *buf,
+	fz_rect *rect, fz_rect *bbox, fz_matrix *matrix, pdf_obj **res)
+{
+	pdf_obj *poster = pdf_dict_gets(ctx, annot->obj, "Poster");
+	pdf_obj *subtype;
+
+	if (!pdf_is_stream(ctx, poster) || !pdf_is_image_stream(ctx, poster))
+		return 0;
+
+	subtype = pdf_dict_get(ctx, poster, PDF_NAME(Subtype));
+	if (subtype && !pdf_name_eq(ctx, subtype, PDF_NAME(Image)))
+		return 0;
+	if (!subtype)
+		pdf_dict_put(ctx, poster, PDF_NAME(Subtype), PDF_NAME(Image));
+
+	pdf_write_stamp_appearance_image(ctx, annot, buf, rect, bbox, matrix, res, poster);
+	return 1;
+}
+
+/* Movie, Screen, 3D, RichMedia, Watermark, PrinterMark, TrapNet, Projection
+ * (and unknown subtypes) have no synthesised AP in stock MuPDF. Draw a
+ * placeholder box, labelled with /Contents when present, so they display
+ * instead of throwing FZ_ERROR_UNSUPPORTED. */
+static void
+pdf_write_unrendered_appearance(fz_context *ctx, pdf_annot *annot, fz_buffer *buf,
+	fz_rect *rect, fz_rect *bbox, fz_matrix *matrix, pdf_obj **res)
+{
+	fz_font *font = NULL;
+	pdf_obj *res_font;
+	const char *text;
+	float x, y, w, h, fs, tw, tx, ty;
+	int sc;
+
+	x = rect->x0;
+	y = rect->y0;
+	w = rect->x1 - rect->x0;
+	h = rect->y1 - rect->y0;
+	if (w < 1)
+		w = 1;
+	if (h < 1)
+		h = 1;
+
+	pdf_write_opacity(ctx, annot, buf, res);
+	/* IC is only legal on Square/Circle/Line/Poly*; do not call
+	 * pdf_annot_interior_color here (it throws for Movie etc.). */
+	sc = pdf_write_stroke_color_appearance(ctx, annot, buf);
+	if (!sc)
+		fz_append_string(ctx, buf, "0.25 G\n");
+	fz_append_string(ctx, buf, "0.92 g\n");
+	fz_append_string(ctx, buf, "0.75 w\n");
+	fz_append_printf(ctx, buf, "%g %g %g %g re\nb\n", x, y, w, h);
+
+	text = pdf_annot_contents(ctx, annot);
+	if (text && text[0])
+	{
+		font = fz_new_base14_font(ctx, "Helvetica");
+		fz_try(ctx)
+		{
+			if (!*res)
+				*res = pdf_new_dict(ctx, annot->page->doc, 1);
+			res_font = pdf_dict_put_dict(ctx, *res, PDF_NAME(Font), 1);
+			pdf_dict_put_drop(ctx, res_font, PDF_NAME(Helv), pdf_add_simple_font(ctx, annot->page->doc, font, 0));
+
+			fs = h - 2;
+			if (fs > 10)
+				fs = 10;
+			if (fs < 4)
+				fs = 4;
+			tw = measure_stamp_string(ctx, font, text) * fs;
+			if (tw > w - 2 && tw > 0)
+			{
+				fs *= (w - 2) / tw;
+				if (fs < 3)
+					fs = 3;
+			}
+			tx = x + 1;
+			ty = y + (h - fs) * 0.35f;
+			if (ty < y)
+				ty = y;
+			fz_append_string(ctx, buf, "0 g\nBT\n");
+			fz_append_printf(ctx, buf, "/Helv %g Tf\n", fs);
+			fz_append_printf(ctx, buf, "%g %g Td\n", tx, ty);
+			write_stamp_string(ctx, buf, font, text);
+			fz_append_string(ctx, buf, " Tj\nET\n");
+		}
+		fz_always(ctx)
+			fz_drop_font(ctx, font);
+		fz_catch(ctx)
+			fz_rethrow(ctx);
+	}
+
+	*bbox = *rect;
+	*matrix = fz_identity;
+}
+
 static void
 pdf_write_appearance(fz_context *ctx, pdf_annot *annot, fz_buffer *buf,
 	fz_rect *rect, fz_rect *bbox, fz_matrix *matrix, pdf_obj **res)
@@ -2989,8 +3159,12 @@ pdf_write_appearance(fz_context *ctx, pdf_annot *annot, fz_buffer *buf,
 	switch (pdf_annot_type(ctx, annot))
 	{
 	default:
-		fz_throw(ctx, FZ_ERROR_UNSUPPORTED, "cannot create appearance stream for %s annotations",
-			pdf_dict_get_name(ctx, annot->obj, PDF_NAME(Subtype)));
+		pdf_write_unrendered_appearance(ctx, annot, buf, rect, bbox, matrix, res);
+		break;
+	case PDF_ANNOT_MOVIE:
+		if (!pdf_write_movie_poster_appearance(ctx, annot, buf, rect, bbox, matrix, res))
+			pdf_write_unrendered_appearance(ctx, annot, buf, rect, bbox, matrix, res);
+		break;
 	case PDF_ANNOT_WIDGET:
 		pdf_write_widget_appearance(ctx, annot, buf, rect, bbox, matrix, res);
 		break;

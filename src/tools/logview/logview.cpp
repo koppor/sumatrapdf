@@ -38,14 +38,10 @@
 // ---- logging required by the base library (we don't link SumatraLog.cpp) ----
 
 void log(Str s) {
-    if (!s) {
+    if (len(s) == 0) {
         return;
     }
     OutputDebugStringA(s.s);
-}
-
-void loga(Str s) {
-    log(s);
 }
 
 // base's ReportIf() references this crash-reporting hook; we don't crash-report.
@@ -63,7 +59,7 @@ constexpr const WCHAR* kPipeName = L"\\\\.\\pipe\\LOCAL\\ArsLexis-Logger";
 constexpr int kPipeBufSize = 1024 * 64;
 constexpr const WCHAR* kAboutURL = L"https://www.sumatrapdfreader.org/docs/Logview";
 
-constexpr int WM_APP_NEW_LOGS = WM_APP + 1;
+constexpr int kWmAppNewLogs = WM_APP + 1;
 
 // filtering is debounced: applied 300ms after the last keystroke in the filter box
 constexpr UINT_PTR kFilterTimerId = 1;
@@ -167,7 +163,7 @@ static bool LineMatches(Str line) {
 
 // split gFilter into gTerms (views into gFilter's buffer). called after gFilter changes.
 static void RebuildTerms() {
-    gTerms.Reset();
+    VecReset(gTerms);
     char* s = gFilter.s;
     int n = gFilter.len;
     int i = 0;
@@ -180,18 +176,18 @@ static void RebuildTerms() {
             i++;
         }
         if (i > start) {
-            gTerms.Append(Str(s + start, i - start));
+            VecAppend(gTerms, Str(s + start, i - start));
         }
     }
 }
 
 // recompute filtered[] for a tab from scratch.
 static void RebuildFiltered(Tab* tab) {
-    tab->filtered.Reset();
+    VecReset(tab->filtered);
     int n = len(tab->logs);
     for (int i = 0; i < n; i++) {
         if (LineMatches(tab->logs[i])) {
-            tab->filtered.Append(i);
+            VecAppend(tab->filtered, i);
         }
     }
 }
@@ -284,8 +280,7 @@ static void UpdateCountLabel() {
     } else {
         int n = len(tab->filtered);
         int total = len(tab->logs);
-        WCHAR sizeBuf[32];
-        FormatSizeHumanIntoWBuf((u64)tab->logBytes, WStr(sizeBuf, 32));
+        TempWStr sizeBuf = ToWStrTemp(FormatFileSizeTemp((u64)tab->logBytes));
         if (n == total) {
             wsprintfW(buf, L"%d lines · %s", total, sizeBuf);
         } else {
@@ -307,7 +302,7 @@ static Tab* FindOrCreateTab(int connNo) {
     Tab* tab = new Tab();
     tab->connNo = connNo;
     tab->name = str::Dup(StrL("logs"));
-    gTabs.Append(tab);
+    VecAppend(gTabs, tab);
     gSel = len(gTabs) - 1; // select the newest client, like the web ui
     InvalidateTabBar();
     return tab;
@@ -352,7 +347,7 @@ static void HandleValueLine(Tab* tab, Str line) {
     Value v;
     v.name = str::Dup(name);
     v.val = str::Dup(val);
-    tab->values.Append(v);
+    VecAppend(tab->values, v);
 }
 
 // measure a line's pixel width; used to grow the horizontal scroll range.
@@ -365,20 +360,20 @@ static int MeasureLineWidth(HDC hdc, Str line) {
 
 // process one received line for a client. mirrors plog() in the web ui.
 static void IngestLine(HDC measureDC, int connNo, Str raw) {
-    Str line = str::TrimSuffixWhitespace(raw); // trimEnd
+    str::TrimSuffixWhitespace(raw);
 
     Tab* tab = FindOrCreateTab(connNo);
 
-    if (str::StartsWith(line, kValuePrefix)) {
-        HandleValueLine(tab, line);
+    if (str::StartsWith(raw, kValuePrefix)) {
+        HandleValueLine(tab, raw);
         return; // value lines are not added to the log
     }
 
-    Str stored = tab->logs.Append(line);
+    Str stored = tab->logs.Append(raw);
     tab->logBytes += stored.len + 1; // +1 for the newline that was trimmed
-    if (str::StartsWith(line, kAppPrefix)) {
+    if (str::StartsWith(raw, kAppPrefix)) {
         str::Free(tab->name);
-        tab->name = str::Dup(Str(line.s + kAppPrefix.len, line.len - kAppPrefix.len));
+        tab->name = str::Dup(Str(raw.s + kAppPrefix.len, raw.len - kAppPrefix.len));
         InvalidateTabBar();
     }
 
@@ -389,7 +384,7 @@ static void IngestLine(HDC measureDC, int connNo, Str raw) {
 
     // keep the selected tab's filtered[] in sync incrementally
     if (tab == SelTab() && LineMatches(stored)) {
-        tab->filtered.Append(len(tab->logs) - 1);
+        VecAppend(tab->filtered, len(tab->logs) - 1);
     }
 }
 
@@ -397,8 +392,8 @@ static void IngestLine(HDC measureDC, int connNo, Str raw) {
 static void DrainQueue() {
     gQueueMutex.Lock();
     Vec<PendingLine> local;
-    local.Append(gQueue);
-    gQueue.Reset();
+    VecAppendVec(local, gQueue);
+    VecReset(gQueue);
     gQueueMutex.Unlock();
 
     int n = len(local);
@@ -446,7 +441,7 @@ struct LineSplitter {
     ~LineSplitter() { free(buf); }
     void Append(const char* d, int n) {
         if (len + n > cap) {
-            int newCap = (len + n) * 2 + 1024;
+            int newCap = ((len + n) * 2) + 1024;
             buf = (char*)realloc(buf, (size_t)newCap);
             cap = newCap;
         }
@@ -465,7 +460,7 @@ static void FlushLines(LineSplitter* ls, int connNo, bool* posted) {
         Str line = Str(ls->buf + start, i - start);
         char* dup = str::Dup(line).s;
         gQueueMutex.Lock();
-        gQueue.Append(PendingLine{connNo, dup});
+        VecAppend(gQueue, PendingLine{connNo, dup});
         gQueueMutex.Unlock();
         *posted = true;
         start = i + 1;
@@ -500,7 +495,7 @@ static DWORD WINAPI ReaderThread(void* arg) {
         bool posted = false;
         FlushLines(&ls, connNo, &posted);
         if (posted) {
-            PostMessageW(gHwndMain, WM_APP_NEW_LOGS, 0, 0);
+            PostMessageW(gHwndMain, kWmAppNewLogs, 0, 0);
         }
     }
 
@@ -508,9 +503,9 @@ static DWORD WINAPI ReaderThread(void* arg) {
     {
         char* dup = str::Dup(StrL("--- client disconnected ---")).s;
         gQueueMutex.Lock();
-        gQueue.Append(PendingLine{connNo, dup});
+        VecAppend(gQueue, PendingLine{connNo, dup});
         gQueueMutex.Unlock();
-        PostMessageW(gHwndMain, WM_APP_NEW_LOGS, 0, 0);
+        PostMessageW(gHwndMain, kWmAppNewLogs, 0, 0);
     }
 
     DisconnectNamedPipe(hPipe);
@@ -552,7 +547,7 @@ static void ComputeHighlight(const WCHAR* lc, int n, char* mask) {
     int nTerms = len(gTerms);
     for (int t = 0; t < nTerms; t++) {
         WStr tw = ToWStrTemp(gTerms[t]);
-        if (tw.len == 0) {
+        if (len(tw) == 0) {
             continue;
         }
         // lowercase the term in place
@@ -576,7 +571,7 @@ static void ComputeHighlight(const WCHAR* lc, int n, char* mask) {
 
 static void DrawLogLine(HDC hdc, int x, int y, Str line) {
     WStr w = ToWStrTemp(line);
-    if (w.len == 0) {
+    if (len(w) == 0) {
         return;
     }
     SetBkMode(hdc, TRANSPARENT);
@@ -627,7 +622,7 @@ static void DrawValuesOverlay(HDC hdc, RECT client, Tab* tab) {
     int pad = DpiScale(4);
     int boxW = DpiScale(240);
     int rowH = gLineDy;
-    int boxH = nVals * rowH + pad * 2;
+    int boxH = (nVals * rowH) + (pad * 2);
     RECT box;
     box.right = client.right - DpiScale(20);
     box.left = box.right - boxW;
@@ -675,7 +670,7 @@ static void PaintLog(HWND hwnd) {
 
         Tab* tab = SelTab();
         if (tab && len(tab->filtered) > 0) {
-            int rows = clientH / gLineDy + 1;
+            int rows = (clientH / gLineDy) + 1;
             int top = tab->scrollTop;
             int nFiltered = len(tab->filtered);
             int x = -tab->scrollX;
@@ -939,7 +934,7 @@ void TabBarCtrl::Paint(VirtPaintCtx& ctx) {
     Rect client = ctx.bounds;
     gfx->FillRect(client, kColTabBar);
 
-    gTabHits.Reset();
+    VecReset(gTabHits);
     int pad = DpiScale(8);
     int x = client.x;
     int n = len(gTabs);
@@ -970,7 +965,7 @@ void TabBarCtrl::Paint(VirtPaintCtx& ctx) {
         Rect rcClose{tx, ty, szClose.dx, szClose.dy};
         gfx->DrawTextAt(closeStr, {tx, ty}, fmtTxt, gUiFont, MkRgb(0x60, 0x60, 0x60));
 
-        gTabHits.Append(TabHit{ToRECT(rc), ToRECT(rcClose)});
+        VecAppend(gTabHits, TabHit{ToRECT(rc), ToRECT(rcClose)});
         x += tabW;
     }
 
@@ -1023,7 +1018,7 @@ static void CloseTab(int idx) {
         return;
     }
     FreeTab(gTabs[idx]);
-    gTabs.RemoveAt(idx);
+    VecRemoveAt(gTabs, idx);
     if (len(gTabs) == 0) {
         gSel = -1;
     } else if (gSel >= len(gTabs)) {
@@ -1098,7 +1093,7 @@ static void ClearSelectedTab() {
         return;
     }
     tab->logs.Reset();
-    tab->filtered.Reset();
+    VecReset(tab->filtered);
     tab->scrollTop = 0;
     tab->scrollX = 0;
     tab->maxWidth = 0;
@@ -1139,7 +1134,7 @@ bool LogViewWnd::Create() {
     {
         CreateCustomArgs args;
         args.className = L"LogViewMain";
-        args.title = "Logview - SumatraPDF";
+        args.title = StrL("Logview - SumatraPDF");
         args.pos = {CW_USEDEFAULT, CW_USEDEFAULT, DpiScale(1000), DpiScale(700)};
         args.bgColor = GetSysColor(COLOR_BTNFACE);
         args.icon = LoadIconW(nullptr, IDI_APPLICATION);
@@ -1158,20 +1153,20 @@ bool LogViewWnd::Create() {
         args.parent = hwnd;
         args.font = gUiFont;
         args.withBorder = true;
-        args.cueText = "filter '/'";
+        args.cueText = StrL("filter '/'");
         filterEdit = new Edit();
         filterEdit->Create(args);
         filterEdit->onTextChanged = MkFunc0Void(FilterTextChanged);
     }
 
     countText = NewVirtText({
-        .s = "",
+        .s = StrL(""),
         .font = gUiFont,
         .textColor = kColLogText,
         .align = VirtTextAlign::Right,
     });
-    btnClear = NewToolButton("c", MkFunc0Void(ClearSelectedTab));
-    btnAbout = NewToolButton("?", MkFunc1Void<VirtMouseEvent*>(AboutClicked));
+    btnClear = NewToolButton(StrL("c"), MkFunc0Void(ClearSelectedTab));
+    btnAbout = NewToolButton(StrL("?"), MkFunc1Void<VirtMouseEvent*>(AboutClicked));
 
     tabBar = new TabBarCtrl();
 
@@ -1210,7 +1205,7 @@ void LogViewWnd::OnDestroy(WindowBase::DestroyEvent*) {
 
 // custom app message for the log drain queue
 void LogViewWnd::WndProc(WindowBase::WndProcEvent* ev) {
-    if (ev->msg == WM_APP_NEW_LOGS) {
+    if (ev->msg == kWmAppNewLogs) {
         DrainQueue();
         ev->result = 0;
         ev->didHandle = true;
@@ -1228,7 +1223,7 @@ static void CreateFonts() {
     SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
     gUiFont = GetPlatformFont(CreateFontIndirectW(&ncm.lfMessageFont));
 
-    gMonoFont = GetPlatformFont("Consolas", 10, PlatformFontStyle::Regular);
+    gMonoFont = GetPlatformFont(StrL("Consolas"), 10, PlatformFontStyle::Regular);
 
     {
         ScopedSelectFont selectFont(hdc, gMonoFont->GetHFont());
@@ -1273,7 +1268,7 @@ static bool HandleKey(MSG* msg) {
 
     if (filterFocused) {
         if (key == VK_ESCAPE) {
-            gWnd->filterEdit->SetText("");
+            gWnd->filterEdit->SetText(StrL(""));
             SetFocus(gHwndLog);
             return true;
         }
@@ -1282,7 +1277,7 @@ static bool HandleKey(MSG* msg) {
 
     if (key == VK_OEM_2) { // '/' key
         SetFocus(gWnd->filterEdit->hwnd);
-        gWnd->filterEdit->SelectAll();
+        EditSelectAll(gWnd->filterEdit);
         return true;
     }
     if (key >= '1' && key <= '9') {

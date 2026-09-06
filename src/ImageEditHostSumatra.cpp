@@ -17,7 +17,6 @@
 #include "ImageReader.h"
 #include "SumatraConfig.h"
 #include "Settings.h"
-#include "GlobalPrefs.h"
 #include "AppSettings.h"
 #include "DocProperties.h"
 #include "DocController.h"
@@ -73,7 +72,7 @@ static TempStr FormatPdfDateTemp() {
 // converted to a 24-bit RGB pixmap (a format PDF supports) and stamped with
 // the current time as CreationDate/ModDate (issue #949).
 static bool SaveBitmapAsPdf(Bitmap* bmp, Str destPath) {
-    if (!bmp || !destPath) {
+    if (!bmp || len(destPath) == 0) {
         return false;
     }
     PdfCreator* c = new PdfCreator();
@@ -102,7 +101,7 @@ static void OpenSavedFile(HWND parent, Str path) {
 }
 
 static Str TranslateStr(Str s) {
-    return _TRA(s);
+    return Tr(s);
 }
 
 static void ApplyDarkMode(HWND hwnd) {
@@ -123,5 +122,5 @@ void InitImageEditHost() {
     gImageEditHost.GetFont = GetAppFont;
     gImageEditHost.GetOwnerHwnd = GetOwnerHwnd;
     gImageEditHost.appIconId = GetAppIconID();
-    gImageEditHost.escToExit = gGlobalPrefs->escToExit;
+    gImageEditHost.escToExit = gSettings->escToExit;
 }

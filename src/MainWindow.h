@@ -10,13 +10,18 @@ class SumatraUIAutomationProvider;
 struct FrameRateWnd;
 struct ReadAloudPlaybackBar;
 struct VirtText;
+struct VirtCloseButton;
 struct VirtRoot;
 struct VirtSplitter;
 struct HBox;
 struct Splitter;
 struct Tooltip;
+struct AnnotationHoverOverlay;
+struct AnnotTextPopup;
 struct TreeView;
 struct SelectionToolbar;
+struct AnnotEditToolbar;
+struct AnnotFilterToolbar;
 struct ILayout;
 struct Spacer;
 struct HwndSlot;
@@ -32,12 +37,16 @@ struct FindBarWnd;
 struct FindWindowWnd;
 struct ToolbarVirt;
 
-// one link numbered by keyboard link following (CmdToggleKeyboardLinkFollowing).
-// stored in page coordinates so the badges stay glued to their links while
-// scrolling, between the debounced recomputes
+constexpr int kMaxKeyboardLinkHintLength = 9;
+
+// One link labeled by keyboard link following (CmdToggleKeyboardLinkFollowing).
+// Stored in page coordinates so the badges stay glued to their links while
+// scrolling, between the debounced recomputes.
 struct KeyboardLinkTarget {
     int pageNo = 0;
     RectF rect;
+    char hint[kMaxKeyboardLinkHintLength + 1]{};
+    int hintLen = 0;
 };
 
 // one search match with a text snippet around it, for the floating results list
@@ -50,20 +59,20 @@ struct FindMatch {
 };
 
 // factor by how large the non-maximized caption should be in relation to the tabbar
-#define kCaptionTabBarDyFactor 1.0f
+constexpr float kCaptionTabBarDyFactor = 1.0f;
 
 // gap in pixels between top of caption and tabs; this area allows dragging the window
-#define kCaptionTopPadding 8
+constexpr int kCaptionTopPadding = 8;
 
 enum CaptionButtons {
     CB_BTN_FIRST = 0,
-    CB_MINIMIZE = CB_BTN_FIRST,
-    CB_MAXIMIZE,
-    CB_RESTORE,
-    CB_CLOSE,
-    CB_MENU,
-    CB_SYSTEM_MENU,
-    CB_BTN_COUNT
+    CB_MINIMIZE = 0,
+    CB_MAXIMIZE = 1,
+    CB_RESTORE = 2,
+    CB_CLOSE = 3,
+    CB_MENU = 4,
+    CB_SYSTEM_MENU = 5,
+    CB_BTN_COUNT = 6
 };
 
 struct ButtonInfo {
@@ -138,6 +147,10 @@ struct TouchState {
     POINTS pressRestPos{};
     DWORD pressRestTime = 0;
     bool longPressFired = false;
+    // The engine's first jump is ignored. A second move means this contact is
+    // scrolling, so a later pause must not select (issue #6006).
+    bool panMovedOnce = false;
+    bool panDidScroll = false;
 };
 
 // Which end of a touch text selection a finger is dragging (issue #538).
@@ -149,10 +162,47 @@ enum class TouchSelHandle {
     End,
 };
 
+// One in-progress annotation placement. Only one kind is active at a time;
+// starting a new placement finishes or cancels the previous one.
+enum class AnnotPlacementKind {
+    None = 0,
+    Text,
+    FreeText,
+    Stamp,
+    Caret,
+    FileAttachment,
+    Line,
+    PolyLine,
+    Shape,
+    Ink,
+};
+
+struct AnnotPlacement {
+    AnnotPlacementKind kind = AnnotPlacementKind::None;
+    int cmdId = 0;
+    int pageNo = -1;
+    Point pos;
+    PointF start;
+    Point end;
+    RectF rect;
+    Vec<PointF> points;
+    Vec<int> strokeCounts;
+    bool circle = false;
+    // highlighter brush: an ink stroke painted with a fixed-size translucent
+    // marker instead of the thin pen
+    bool highlightBrush = false;
+    float brushWidthPt = 0.f;
+    bool mouseDown = false;
+    bool didDrag = false;
+    bool constrain = false;
+
+    void Reset();
+};
+
 /* Describes position, the target (URL or file path) and infotip of a "hyperlink" */
 /* Describes information related to one window with (optional) a document
    on the screen */
-struct MainWindow {
+struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     explicit MainWindow(HWND hwnd);
     MainWindow(const MainWindow&) = delete;
     MainWindow& operator=(const MainWindow&) = delete;
@@ -181,19 +231,27 @@ struct MainWindow {
 
     HWND hwndFrame = nullptr;
     HWND hwndCanvas = nullptr;
+    // ShowScrollBar sends WM_SIZE; ignore it until UpdateScrollbars finishes (issue #5969)
+    bool suppressCanvasSizeUpdate = false;
+    // popups in screen coords (find bar, overlay scrollbars, selection toolbar, ...)
+    Func1List<MainWindow*>* onWindowMoved = nullptr;
+    // MainWindow-owned node so overlay scrollbars follow the frame
+    Func1List<MainWindow*> overlayScrollOnMoved;
 
     HWND hwndToolbar = nullptr;
     ToolbarVirt* toolbarVirt = nullptr;
     HWND hwndMenuReBar = nullptr;
     HWND hwndMenuToolbar = nullptr;
     // the search input of the active find UI (compact bar or floating window)
-    Edit* findEdit = nullptr;
+    DropDown* findEdit = nullptr;
     // optional "10-25" page-range field of the active find UI (issue #5694)
     Edit* findPagesEdit = nullptr;
     FindBarWnd* findBar = nullptr;       // compact toolbar overlay
     FindWindowWnd* findWindow = nullptr; // floating window variant (SearchUIFloating)
     // owned by the toolbar layout
     Edit* pageEdit = nullptr;
+    // chapter number edit, next to pageEdit; only for HasChapters() docs
+    Edit* chapterEdit = nullptr;
 
     // state related to table of contents (PDF bookmarks etc.)
     HWND hwndTocBox = nullptr;
@@ -201,6 +259,7 @@ struct MainWindow {
 
     // the panel header's label; the ✕ next to it closes the panel
     VirtText* tocLabel = nullptr;
+    VirtCloseButton* tocCloseBtn = nullptr;
     // the virtual controls of the header, hosted in hwndTocBox
     VirtRoot* tocRoot = nullptr;
     Edit* tocFilterEdit = nullptr;
@@ -223,10 +282,13 @@ struct MainWindow {
     // (the toc box window can be hidden and its rect stale, e.g. when only
     // favorites are showing). 0 = not laid out yet
     int sidebarDx = 0;
+    // extra frame width added so showing the sidebar does not shrink the canvas
+    int sidebarGrewFrameDx = 0;
 
     // state related to favorites
     HWND hwndFavBox = nullptr;
     VirtText* favLabel = nullptr;
+    VirtCloseButton* favCloseBtn = nullptr;
     VirtRoot* favRoot = nullptr;
     Edit* favFilterEdit = nullptr;
     TreeView* favTreeView = nullptr;
@@ -282,6 +344,7 @@ struct MainWindow {
     // finish on WM_EXITSIZEMOVE via a uitask
     bool deferDpiChromeRefresh = false;
     bool dpiChromeRefreshPending = false;
+    bool dpiChromeRefreshPosted = false;
     // keeps the sequence of tab selection. This is needed for restoration
     // of the previous tab when the current one is closed. (Points into tabs.)
     Vec<WindowTab*>* tabSelectionHistory = nullptr;
@@ -293,6 +356,8 @@ struct MainWindow {
     Tooltip* infotip = nullptr;
 
     HMENU menu = nullptr;
+    // Read Aloud submenu of `menu`; per-window so WM_INITMENUPOPUP can rebuild it
+    HMENU menuReadAloud = nullptr;
 
     DoubleBuffer* buffer = nullptr;
 
@@ -321,6 +386,19 @@ struct MainWindow {
     int resizeHandle = 0; // ResizeHandle enum casted to int
     bool annotationBeingResized = false;
     RectF annotationOriginalRect;
+    PointF annotationOriginalLineStart;
+    PointF annotationOriginalLineEnd;
+    PointF annotationLinePreviewStart;
+    PointF annotationLinePreviewEnd;
+    Vec<PointF> annotationVertexPreview;
+    int annotationResizeVertexIndex = -1;
+    float annotationResizeAspectRatio = 0;
+    UINT_PTR annotationResizeRerenderTimer = 0;
+    // free text is re-laid out on every write, which is too slow to do per
+    // mouse move: only the outline follows the pointer and the annotation is
+    // rewritten once, on mouse up
+    bool annotationResizeOutlineOnly = false;
+    RectF annotationResizePreviewRect;
 
     /* when moving the document by middle-click auto-scroll, this keeps track of
        the speed (in pixels per 20ms) at which we should scroll, which depends on
@@ -419,11 +497,12 @@ struct MainWindow {
     // inside the search box the home page draws
     Edit* homeSearch = nullptr;
     ILayout* homeSearchLayout = nullptr;
-    // remembers the search query while the edit control is destroyed
-    // (e.g. when a document tab is active)
+    // remembers the search query if the edit is destroyed (window teardown)
     Str homeSearchQuery;
 
     bool isToolbarVisible = false;
+    bool pdfAnnotationsToolbarEnabled = false;
+    AnnotPlacement annotPlacement;
     // overlay toolbar mode: the toolbar floats over the page (doesn't reserve
     // space) and is only revealed when the mouse is near the top
     bool isToolbarOverlay = false;
@@ -431,6 +510,8 @@ struct MainWindow {
     // a hide of the overlay toolbar is scheduled (after kDelayToolbarHide)
     bool toolbarOverlayHidePending = false;
     bool isFullScreen = false;
+    // chrome-less always-on-top preview from Explorer Space (issue #2568)
+    bool isQuickLook = false;
     PresentationMode presentation = PM_DISABLED;
     int windowStateBeforePresentation = 0;
     bool suppressFrameRedraw = false;
@@ -456,6 +537,7 @@ struct MainWindow {
             bool isFullScreen = false;
             bool tabsVisible = false;
             bool isToolbarVisible = false;
+            bool isToolbarOverlay = false;
             bool tocVisible = false;
             bool showFavorites = false;
             // full-window Favorites tab vs. sidebar panel: different geometry
@@ -465,7 +547,8 @@ struct MainWindow {
             int aiChatDx = 0;
             bool sidebarOnRight = false;
         };
-        Layout layout; // last applied layout state
+        Layout layout;    // last applied layout state
+        Rect lastFrameRc; // previous frame client size; a change skips WM_SETREDRAW
         // desired visibility of the sidebar / AI chat panels; applied
         // (HwndSetVisible) by RelayoutFrame
         bool tocVisible = false;
@@ -489,12 +572,15 @@ struct MainWindow {
     // switches and visits to Home/About where the notification cannot show
     // (issue #4454); restored when a document tab is active again.
     bool pageInfoWanted = false;
+    // CmdTogglePageBoxes: outline PDF Media/Crop/Bleed/Trim/Art boxes
+    bool showPageBoxes = false;
 
     // overlay scrollbars (used when scrollbars mode is "smart" or "overlay")
     struct OverlayScrollbar* overlayScrollV = nullptr;
     struct OverlayScrollbar* overlayScrollH = nullptr;
 
     int wheelAccumDelta = 0;
+    LARGE_INTEGER wheelPageTurnTime{};
     UINT_PTR delayedRepaintTimer = 0;
 
     ThreadHandle printThread = nullptr;
@@ -547,10 +633,12 @@ struct MainWindow {
     Str browserFindTerm;            // owned; the term the current md find ran with
 
     ILinkHandler* linkHandler = nullptr;
-    // keyboard link following: when on, visible links are numbered 1..9 and
-    // pressing a digit follows that link (see LinkFollow.cpp)
+    // keyboard link following: type the letter hint shown on a visible link
+    // to follow it (see LinkFollow.cpp)
     bool linkFollowActive = false;
     Vec<KeyboardLinkTarget> linkFollowTargets;
+    char linkFollowInput[kMaxKeyboardLinkHintLength + 1]{};
+    int linkFollowInputLen = 0;
 
     // keyboard text selection: a caret you move with the arrow keys to select
     // text without the mouse (see SelectTextKeyboard.cpp)
@@ -566,6 +654,9 @@ struct MainWindow {
     IPageElement* linkOnLastButtonDown = nullptr;
     Str urlOnLastButtonDown;
     Annotation* annotationUnderCursor = nullptr;
+    // a gesture that writes to the PDF as it goes (a resize drag) has a journal
+    // operation open, so Undo takes the whole gesture back in one step
+    bool pdfEditOperationActive = false;
     RefHoverState* refHover = nullptr;
     // highlight rectangle for element under cursor during context menu (in page coordinates)
     RectF contextMenuHighlightRect;
@@ -612,10 +703,26 @@ struct MainWindow {
     // a debounced show of the selection toolbar is waiting on its timer
     bool selectionToolbarShowPending = false;
 
+    // compact property row under the selected annotation in Edit PDF mode
+    AnnotEditToolbar* annotEditToolbar = nullptr;
+    // filter box on the Edit PDF toolbar and its dropdown list
+    AnnotFilterToolbar* annotFilterToolbar = nullptr;
+    // session-only: pop the annotation list into a floating window (not saved)
+    Rect annotListFloatPos;
+    bool annotListFloatPosUserSet = false;
+
+    // annotation details shown next to a hovered annotation in Edit PDF mode
+    AnnotationHoverOverlay* annotationHoverOverlay = nullptr;
+
+    // read-only card with a clicked annotation's whole text
+    AnnotTextPopup* annotTextPopup = nullptr;
+
     // set at the beginning of CloseWindow() to prevent
     // processing commands while closing (e.g. reentrancy
     // via modal dialogs pumping messages)
     bool isBeingClosed = false;
+    // CloseAllTabs is already on the stack (nested DDE CmdCloseAllTabs)
+    bool inCloseAllTabs = false;
 
     SumatraUIAutomationProvider* uiaProvider = nullptr;
 
@@ -640,6 +747,10 @@ struct MainWindow {
     void DeleteToolTip() const;
 
     bool CreateUIAProvider();
+
+    void RegisterOnWindowMoved(Func1List<MainWindow*>* cb);
+    void UnregisterOnWindowMoved(Func1List<MainWindow*>* cb);
+    void NotifyWindowMoved();
 };
 
 bool HasOpenedDocuments(MainWindow*);
@@ -651,6 +762,7 @@ bool IsRightDragging(MainWindow*);
 MainWindow* FindMainWindowByTab(WindowTab*);
 MainWindow* FindMainWindowByHwnd(HWND);
 bool IsMainWindowValid(MainWindow*);
+bool IsMainWindowValidAndNotClosing(MainWindow*);
 bool IsWindowTabValid(WindowTab*);
 extern Vec<MainWindow*> gWindows;
 extern bool gShowFrameRate;
@@ -660,4 +772,4 @@ HWND GetHwndForNotification();
 void RelayoutCaption(MainWindow* win);
 void OpenSystemMenu(MainWindow* win);
 
-Str CleanRemoteDestName(Str destName);
+void CleanRemoteDestNameInPlace(Str& destName);

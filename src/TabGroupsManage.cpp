@@ -14,7 +14,6 @@
 #include "gui/VirtCtrl.h"
 
 #include "Settings.h"
-#include "GlobalPrefs.h"
 #include "AppSettings.h"
 #include "DocController.h"
 #include "EngineBase.h"
@@ -25,6 +24,7 @@
 #include "SumatraConfig.h"
 #include "Theme.h"
 #include "DarkMode_win.h"
+#include "TabGroupsManage.h"
 
 constexpr int kPadding = 8;
 
@@ -37,11 +37,11 @@ struct TabGroupsListBoxModel : ListBoxModel {
     Vec<TabGroup*> groups;
 
     void Reload() {
-        groups.Reset();
-        auto* g = gGlobalPrefs->tabGroups;
+        VecReset(groups);
+        auto* g = gSettings->tabGroups;
         if (g) {
             for (auto* tg : *g) {
-                groups.Append(tg);
+                VecAppend(groups, tg);
             }
         }
     }
@@ -105,18 +105,18 @@ void TabGroupsWnd::SaveTabGroup() {
         if (tab->IsAboutTab()) {
             continue;
         }
-        if (!tab->filePath) {
+        if (len(tab->filePath) == 0) {
             continue;
         }
         auto* tf = AllocStruct<TabFile>();
         str::ReplaceWithCopy(&tf->path, tab->filePath);
-        group->tabFiles->Append(tf);
+        VecAppend(*group->tabFiles, tf);
     }
 
-    if (!gGlobalPrefs->tabGroups) {
-        gGlobalPrefs->tabGroups = new Vec<TabGroup*>();
+    if (!gSettings->tabGroups) {
+        gSettings->tabGroups = new Vec<TabGroup*>();
     }
-    gGlobalPrefs->tabGroups->Append(group);
+    VecAppend(*gSettings->tabGroups, group);
     SaveSettings();
     Close();
 }
@@ -126,7 +126,7 @@ void TabGroupsWnd::OpenTabGroup() {
     if (sel < 0) {
         return;
     }
-    auto* groups = gGlobalPrefs->tabGroups;
+    auto* groups = gSettings->tabGroups;
     if (!groups || sel >= len(*groups)) {
         return;
     }
@@ -193,12 +193,12 @@ void TabGroupsWnd::DeleteTabGroup(VirtMouseEvent*) {
     if (sel < 0) {
         return;
     }
-    auto* groups = gGlobalPrefs->tabGroups;
+    auto* groups = gSettings->tabGroups;
     if (!groups || sel >= len(*groups)) {
         return;
     }
     TabGroup* group = (*groups)[sel];
-    groups->Remove(group);
+    VecRemove(*groups, group);
     FreeTabGroup(group);
     SaveSettings();
     PopulateListBox(this);
@@ -249,11 +249,11 @@ static void OnListDoubleClick(TabGroupsWnd* w) {
     } else {
         int sel = w->listBox ? w->listBox->GetCurrentSelection() : -1;
         if (sel >= 0 && w->editName) {
-            auto* groups = gGlobalPrefs->tabGroups;
+            auto* groups = gSettings->tabGroups;
             if (groups && sel < len(*groups)) {
                 w->editName->SetText((*groups)[sel]->name);
-                w->editName->SelectAll();
-                HwndSetFocus(w->editName->hwnd);
+                EditSelectAll(w->editName);
+                EditSetFocus(w->editName);
             }
         }
     }
@@ -276,10 +276,10 @@ void TabGroupsWnd::OnOk(VirtMouseEvent*) {
 }
 
 static void TeardownTabGroupsWnd(TabGroupsWnd* w) {
-    if (!w || gTabGroupsWnds.Find(w) < 0) {
+    if (!w || VecFind(gTabGroupsWnds, w) < 0) {
         return;
     }
-    gTabGroupsWnds.Remove(w);
+    VecRemove(gTabGroupsWnds, w);
     w->model = nullptr;
     w->ScheduleDelete();
 }
@@ -298,7 +298,7 @@ bool TabGroupsWnd::Create(MainWindow* winIn, TabGroupDialogMode modeIn) {
     hwndParent = win->hwndFrame;
     bool isRtl = IsUIRtl();
 
-    Str titleStr = (mode == TabGroupDialogMode::Save) ? Str(_TRA("Save Tab Group")) : Str(_TRA("Restore Tab Group"));
+    Str titleStr = (mode == TabGroupDialogMode::Save) ? Str(Tr("Save Tab Group")) : Str(Tr("Restore Tab Group"));
     {
         CreateCustomArgs args;
         args.title = titleStr;
@@ -324,8 +324,8 @@ bool TabGroupsWnd::Create(MainWindow* winIn, TabGroupDialogMode modeIn) {
         args.withBorder = true;
         args.isRtl = isRtl;
         int groupNum = 1;
-        if (gGlobalPrefs->tabGroups) {
-            groupNum = len(*gGlobalPrefs->tabGroups) + 1;
+        if (gSettings->tabGroups) {
+            groupNum = len(*gSettings->tabGroups) + 1;
         }
         TempStr defaultName = fmt("group #%d", groupNum);
         args.text = defaultName;
@@ -353,14 +353,14 @@ bool TabGroupsWnd::Create(MainWindow* winIn, TabGroupDialogMode modeIn) {
         btnRow->alignCross = CrossAxisAlign::CrossCenter;
         btnRow->gap = font->averageCharWidth;
 
-        btnCancel = NewThemedButton(hwnd, _TRA("Cancel"), font, false);
+        btnCancel = NewThemedButton(hwnd, Tr("Cancel"), font, false);
         btnCancel->onClick = MkMethod1<TabGroupsWnd, VirtMouseEvent*, &TabGroupsWnd::OnCancel>(this);
         btnRow->AddChild(btnCancel);
-        btnDelete = NewThemedButton(hwnd, _TRA("Delete"), font, false);
+        btnDelete = NewThemedButton(hwnd, Tr("Delete"), font, false);
         btnDelete->onClick = MkMethod1<TabGroupsWnd, VirtMouseEvent*, &TabGroupsWnd::DeleteTabGroup>(this);
         btnDelete->SetIsEnabled(false);
         btnRow->AddChild(btnDelete);
-        Str okText = (mode == TabGroupDialogMode::Save) ? Str(_TRA("Save")) : Str(_TRA("Restore"));
+        Str okText = (mode == TabGroupDialogMode::Save) ? Str(Tr("Save")) : Str(Tr("Restore"));
         btnOk = NewThemedButton(hwnd, okText, font, true);
         btnOk->onClick = MkMethod1<TabGroupsWnd, VirtMouseEvent*, &TabGroupsWnd::OnOk>(this);
         btnRow->AddChild(btnOk);
@@ -379,8 +379,8 @@ bool TabGroupsWnd::Create(MainWindow* winIn, TabGroupDialogMode modeIn) {
     UpdateDeleteButton();
     SetIsVisible(true);
     if (editName) {
-        editName->SelectAll();
-        HwndSetFocus(editName->hwnd);
+        EditSelectAll(editName);
+        EditSetFocus(editName);
     } else {
         // no name to type in when restoring: the list owns the keyboard
         SetFocusTo(listBox);
@@ -409,7 +409,7 @@ static void ShowTabGroupsDialog(MainWindow* win, TabGroupDialogMode mode) {
         delete wnd;
         return;
     }
-    gTabGroupsWnds.Append(wnd);
+    VecAppend(gTabGroupsWnds, wnd);
 }
 
 void ShowSaveTabGroupDialog(MainWindow* win) {

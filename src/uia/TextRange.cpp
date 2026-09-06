@@ -10,11 +10,11 @@
 #include "Settings.h"
 #include "DocController.h"
 #include "EngineBase.h"
-#include "uia/TextRange.h"
 #include "DisplayModel.h"
 #include "uia/DocumentProvider.h"
 #include "uia/PageProvider.h"
 #include "TextSelection.h"
+#include "uia/TextRange.h"
 
 // creates a copy of give range
 // creates range containing the given TextSelection range
@@ -344,7 +344,6 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::CompareEndpoints(enum Te
         return E_INVALIDARG;
     }
 
-    // TODO: is range guaranteed to be a SumatraUIAutomationTextRange?
     SumatraUIAutomationTextRange* target = (SumatraUIAutomationTextRange*)range;
 
     int comp_b_page, comp_b_idx;
@@ -516,10 +515,10 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::GetBoundingRectangles(SA
                 continue;
             }
             Point tl = HwndClientToScreen(hwnd, rc.TL());
-            coords.Append((double)tl.x);
-            coords.Append((double)tl.y);
-            coords.Append((double)rc.dx);
-            coords.Append((double)rc.dy);
+            VecAppend(coords, (double)tl.x);
+            VecAppend(coords, (double)tl.y);
+            VecAppend(coords, (double)rc.dx);
+            VecAppend(coords, (double)rc.dy);
         }
     }
 
@@ -571,7 +570,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::GetText(int maxLength, B
     selection.StartAt(startPage, startGlyph);
     selection.SelectUpTo(endPage, endGlyph);
 
-    Str selected_text = selection.ExtractText("\r\n");
+    Str selected_text = selection.ExtractText(StrL("\r\n"));
 
     // -1 and [0, inf) are allowed
     if (maxLength < -1) {
@@ -862,7 +861,6 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationTextRange::MoveEndpointByRange(Text
         return E_POINTER;
     }
 
-    // TODO: is range guaranteed to be a SumatraUIAutomationTextRange?
     SumatraUIAutomationTextRange* target = (SumatraUIAutomationTextRange*)range;
 
     // extract target location

@@ -7,7 +7,7 @@
 // we pad data read with 3 zeros for convenience. That way returned
 // data is a valid null-terminated string or WCHAR*.
 // 3 is for absolute worst case of WCHAR* where last char was partially written
-#define ZERO_PADDING_COUNT 3
+constexpr int kZeroPaddingCount = 3;
 
 TempStr GetHomeDirTemp();
 TempStr ExpandEnvVarTemp(Str varName);
@@ -16,11 +16,21 @@ TempStr ToAbsolutePathTemp(Str path);
 namespace path {
 
 bool IsSep(char c) {
-    return c == PATH_SEP_CHAR || (OS_WIN && c == '/');
+    return c == kPathSepChar || (OS_WIN && c == '/');
+}
+
+bool IsDriveRoot(Str path) {
+    if (!path.s) {
+        return false;
+    }
+    while (path.len > 3 && IsSep(path.s[path.len - 1])) {
+        path.len--;
+    }
+    return path.len == 3 && path.s[1] == ':' && IsSep(path.s[2]);
 }
 
 static bool IsSep(WCHAR c) {
-    return c == PATH_SEP_WCHAR || (OS_WIN && c == L'/');
+    return c == kPathSepWChar || (OS_WIN && c == L'/');
 }
 
 static void SkipLeadingPathSep(Str& path) {
@@ -88,7 +98,7 @@ TempStr JoinTemp(Str dir, Str name, Str name2) {
     SkipLeadingPathSep(name);
     Str sepStr = {};
     if (len(dir) > 0 && !IsSep(dir.s[dir.len - 1])) {
-        sepStr = StrL(PATH_SEP);
+        sepStr = StrL(kPathSep);
     }
     TempStr res = str::JoinTemp(dir, sepStr, name);
     if (name2) {
@@ -109,7 +119,7 @@ Str Join(Arena* a, Str dir, Str name) {
     SkipLeadingPathSep(name);
     Str sepStr = {};
     if (len(dir) > 0 && !IsSep(dir.s[dir.len - 1])) {
-        sepStr = StrL(PATH_SEP);
+        sepStr = StrL(kPathSep);
     }
     return str::Join(a, dir, sepStr, name);
 }
@@ -122,7 +132,7 @@ TempWStr JoinTemp(WStr dir, WStr name, WStr name2) {
     SkipLeadingPathSep(name);
     WStr sepStr;
     if (len(dir) > 0 && !IsSep(dir.s[dir.len - 1])) {
-        sepStr = PATH_SEP_WSTR;
+        sepStr = kPathSepWStr;
     }
     TempWStr res = str::JoinTemp(dir, sepStr, name);
     if (name2) {
@@ -156,7 +166,7 @@ TempWStr GetDirTemp(WStr path) {
 TempStr GetDirTemp(Str path) {
     Str baseName = GetBaseNameTemp(path);
     if (baseName.s == path.s) {
-        return str::DupTemp(".");
+        return str::DupTemp(StrL("."));
     }
     if (baseName.s == path.s + 1) {
         return str::DupTemp(Str(path.s, 1));
@@ -204,7 +214,7 @@ static Str AdvanceUntilWildcardMatch(Str fileName, Str filter) {
 
 bool Match(Str path, Str filter) {
     Str baseName = GetBaseNameTemp(path);
-    if (!baseName) {
+    if (len(baseName) == 0) {
         return false;
     }
     while (str::ContainsChar(filter, ';')) {
@@ -222,7 +232,7 @@ bool IsWslUnc(Str path) {
 }
 
 bool IsWslMount(Str path) {
-    if (!path || !str::StartsWithI(path, StrL("/mnt/"))) {
+    if (len(path) == 0 || !str::StartsWithI(path, StrL("/mnt/"))) {
         return false;
     }
     if (path.len < 6) {
@@ -233,7 +243,7 @@ bool IsWslMount(Str path) {
 }
 
 TempStr WslUncToUnixTemp(Str path) {
-    if (!path) {
+    if (len(path) == 0) {
         return {};
     }
 
@@ -259,7 +269,7 @@ TempStr WslUncToUnixTemp(Str path) {
 }
 
 TempStr WindowsToWslMountTemp(Str path) {
-    if (!path || path.len < 3) {
+    if (len(path) == 0 || path.len < 3) {
         return {};
     }
     char drive = (char)tolower((unsigned char)path.s[0]);
@@ -310,11 +320,11 @@ Str ReadFileWithArena(Str filePath, Arena* a) {
     }
     long fileSize = ftell(fp);
     size_t nRead = 0;
-    if (fileSize < 0 || fileSize > INT_MAX - ZERO_PADDING_COUNT) {
+    if (fileSize < 0 || fileSize > INT_MAX - kZeroPaddingCount) {
         goto Error;
     }
     size = (int)fileSize;
-    d = AllocArray<char>(a, size + ZERO_PADDING_COUNT);
+    d = AllocArray<char>(a, size + kZeroPaddingCount);
     if (!d) {
         goto Error;
     }
@@ -369,7 +379,7 @@ bool StartsWithN(Str path, Str s) {
     if (ReadN(path, buf, s.len) != s.len) {
         return false;
     }
-    return memeq(buf, s.s, s.len);
+    return MemEq(buf, s.s, s.len);
 }
 
 bool StartsWith(Str path, Str s) {
@@ -469,7 +479,7 @@ Str SmartResolveDirectory(Str dir) {
     auto* ta = GetTempArena();
     char* normalized = (char*)Alloc(ta, dir.len + 1);
     for (int i = 0; i < dir.len; i++) {
-        normalized[i] = path::IsSep(dir.s[i]) ? PATH_SEP_CHAR : dir.s[i];
+        normalized[i] = path::IsSep(dir.s[i]) ? kPathSepChar : dir.s[i];
     }
     normalized[dir.len] = 0;
     Str result = Str(normalized, dir.len);

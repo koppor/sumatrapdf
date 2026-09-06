@@ -4,6 +4,7 @@
 #include "base/Base.h"
 #include "base/Pixmap.h"
 #include "base/Win.h"
+#include "base/GdiPlusUtil.h"
 
 extern "C" {
 #include <mupdf/pdf.h>
@@ -255,7 +256,7 @@ bool PdfCreator::SetProperty(DocProp prop, Str value) const {
     }
 
     Str name = SeqStrNumStrByNumber(pdfCreatorPropsMap, (i64)prop);
-    if (!name) {
+    if (len(name) == 0) {
         return false;
     }
 
@@ -347,6 +348,7 @@ bool PdfCreator::SaveToFile(Str filePath) const {
 
 // creates a simple PDF with all pages rendered as a single image
 bool PdfCreator::RenderToFile(Str pdfFileName, EngineBase* engine, int dpi) {
+    EnsureFullLayout(engine);
     PdfCreator* c = new PdfCreator();
     bool ok = true;
     // render all pages to images
@@ -380,6 +382,7 @@ bool PdfCreator::SaveImageCollectionAsPdf(Str pdfFileName, EngineBase* engine,
     if (!engine || !engine->IsImageCollection() || engine->PageCount() <= 0) {
         return false;
     }
+    EnsureFullLayout(engine);
 
     PdfCreator* c = new PdfCreator();
     if (!c->ctx || !c->doc) {
@@ -398,6 +401,11 @@ bool PdfCreator::SaveImageCollectionAsPdf(Str pdfFileName, EngineBase* engine,
         bool pageOk = false;
 
         Str data = EngineImagesGetImageData(engine, i);
+        // One file holds every frame (GIF/TIFF/ICO). Embedding that blob on
+        // each PDF page makes MuPDF show the last frame (issue #1930).
+        if (engine->kind == kindEngineImage && nPages > 1) {
+            data = {};
+        }
         if (len(data) > 0) {
             pageOk = c->AddPageFromImageData(data, dpi);
             if (!pageOk && fallbackToEmbeddable) {
@@ -416,6 +424,13 @@ bool PdfCreator::SaveImageCollectionAsPdf(Str pdfFileName, EngineBase* engine,
             Pixmap* bmp = engine->RenderPage(args);
             if (bmp && bmp->hbmp) {
                 pageOk = AddPageFromHBITMAP(c, bmp->hbmp, Size(bmp->width, bmp->height), dpi);
+            }
+            if (!pageOk && bmp) {
+                Gdiplus::Bitmap* gp = WrapPixmapGdiplus(bmp);
+                if (gp) {
+                    pageOk = c->AddPageFromGdiplusBitmap(gp, dpi);
+                    delete gp;
+                }
             }
             FreePixmap(bmp);
         }

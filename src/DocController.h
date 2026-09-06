@@ -13,6 +13,8 @@ struct TocItem;
 struct MainWindow;
 struct FileState;
 struct RenderedBitmap;
+// chapter-aware page location; full definition in ChapterTable.h
+struct Location;
 enum class DisplayMode;
 enum class DocProp : u8;
 
@@ -29,7 +31,7 @@ struct DocControllerCallback {
     virtual void GotoLink(IPageDestination*) = 0;
     // DisplayModel //
     virtual void Repaint() = 0;
-    virtual void UpdateScrollbars(Size canvas) = 0;
+    virtual void UpdateScrollbars(DisplayModel* dm, Size canvas) = 0;
     virtual void RequestRendering(DisplayModel* dm, int pageNo) = 0;
     // start (or continue) chained predictive rendering anchored to originPageNo
     virtual void RequestPredictiveRendering(DisplayModel* dm, int originPageNo, const int* pages, int nPages) = 0;
@@ -51,6 +53,10 @@ struct DocControllerCallback {
     // the controller replaced its TocTree (built in the background): show the
     // new one. Must not return while anything still points into the old tree.
     virtual void TocChanged(DocController*) = 0;
+    // the DisplayModel's flat page numbering shifted because a chapter got
+    // (re)laid out; refresh anything keyed by pageNo (selection, find, toolbar,
+    // toc selection)
+    virtual void PagesRenumbered(DisplayModel* dm) = 0;
 };
 
 struct DocController {
@@ -71,6 +77,20 @@ struct DocController {
     virtual bool CanNavigate(int dir) const = 0;
     virtual void Navigate(int dir) = 0;
 
+    // chapter-aware page addressing; single-chapter controllers (the
+    // default) behave exactly as the flat pageNo API always has
+    virtual int ChapterCount() { return 1; }
+    bool HasChapters() { return ChapterCount() > 1; }
+    virtual int ChapterPageCount(int) { return PageCount(); }
+    virtual Location CurrentLocation();
+    virtual void GoToLocation(Location loc, bool addNavPoint);
+    virtual Location LocationFromPageNo(int pageNo);
+    virtual int PageNoFromLocation(Location loc);
+    virtual Location ResolveDest(IPageDestination* dest);
+    virtual TempStr MakeBookmarkTemp(Location loc);
+    virtual Location LookupBookmark(Str s);
+    virtual Location ClampLocation(Location loc);
+
     // view settings
     virtual void SetDisplayMode(DisplayMode mode, bool keepContinuous = false) = 0;
     virtual DisplayMode GetDisplayMode() const = 0;
@@ -90,13 +110,14 @@ struct DocController {
     virtual void FindClear() {}
 
     // table of contents
-    bool HasToc() {
+    virtual bool HasToc() {
         auto* tree = GetToc();
         return tree != nullptr;
     }
     virtual TocTree* GetToc() = 0;
     virtual void ScrollTo(int pageNo, RectF rect, float zoom) = 0;
 
+    // engine-owned; do not delete
     virtual IPageDestination* GetNamedDest(Str name) = 0;
 
     // get display state (pageNo, zoom, scroll etc. of the document)

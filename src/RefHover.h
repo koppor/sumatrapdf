@@ -1,6 +1,12 @@
 /* Copyright 2026 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
+// The whole RefHover module's declarations: the public API Canvas / MainWindow
+// call, the layout detectors the unit tests exercise, and the internals shared
+// between the RefHover*.cpp files.
+
+//--- public API
+
 class EngineBase;
 struct DocController;
 struct DisplayModel;
@@ -93,6 +99,7 @@ struct RefHoverState {
         // optimistically and only need the new bitmap.
         bool showPopup = false;
         Point screenPt;
+        int destPageRaw = -1;
         float destXRaw = -1.f;
         float destYRaw = -1.f;
         // source link location (page coords) that triggered this show; carried
@@ -113,6 +120,9 @@ struct RefHoverState {
     // re-used by the wheel-zoom / wheel-scroll handlers so they can re-render
     // without re-running detection.
     struct Displayed {
+        // Original link page, which can differ from the rendered page when a
+        // broken PDF anchor stayed behind a heading moved to the next page.
+        int destPageRaw = -1;
         int destPage = -1;
         float destX = -1.f;
         float destY = -1.f;
@@ -251,3 +261,96 @@ struct PushedCitation {
 // final attempt (JabRef returns its exception message on 5xx). Caller frees.
 RefHoverPushResult RefHoverPushToJabRef(const char* entryText, const char* parserCacheKey, int* outHttpStatus = nullptr,
                                         char** outRespBody = nullptr);
+
+//--- layout detection (RefHoverDetect.cpp)
+
+// Flatten per-glyph ink boxes to uniform top-aligned line rows. mupdf reports
+// tight per-glyph boxes whose tops vary within a line; the detectors below key
+// off coords[i].y as a line coordinate, so callers must pass coords through
+// this first (grouping by baseline = y+dy). `out` needs textLen rects and must
+// not alias `coords`. Synthetic top-aligned input is left effectively
+// unchanged (each line already has a single top).
+void NormalizeGlyphLines(const Rect* coords, Rect* out, int glyphCount);
+
+int StripWatermarkGlyphs(WStr text, const Rect* coords, WCHAR* outText, Rect* outCoords);
+
+RectF LandscapeBox(RectF mediabox, float destX, float destY, WStr text, const Rect* coords);
+
+RectF DetectEquationBox(WStr text, const Rect* coords, RectF mediabox, float destX, float destY);
+
+RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX, float destY,
+                     RectF* continuationOut = nullptr, bool* outIsBibEntry = nullptr);
+
+bool ShouldSearchNextPage(RectF mediabox, float destY);
+
+//--- plain-text citation lookup (RefHoverText.cpp)
+
+bool RefHoverTryPlainText(RefHoverState* s, EngineBase* engine, int srcPage, Point pagePos, int& destPageOut,
+                          float& destXOut, float& destYOut, RectF& srcRectOut);
+
+void RefHoverFreeLookupCache(RefHoverState* s);
+
+enum class RefHoverTextMatch {
+    Any,
+    Best,
+};
+
+float RefHoverResolveDestYFromSourceText(EngineBase* engine, int srcPage, RectF srcRect, int destPage,
+                                         RefHoverTextMatch match = RefHoverTextMatch::Any);
+
+//--- citation pattern matching (RefHoverTextDetect.cpp)
+
+// Detect a "(Surname et al., 2020)" / "Surname (2020)" pattern at pagePos (page
+// coordinates). On success returns true and fills *surnameOut with a
+// freshly-allocated UTF-8 surname (caller frees) and *yearOut.
+// srcRectOut (optional): on success, set to a stable per-occurrence source
+// key — the matched citation's glyph span on the page (surname through year).
+// Lets callers tell two occurrences of the same citation apart, including
+// two markers on the same text line (different x/dx → reposition).
+bool DetectCitationInPageText(WStr text, const Rect* coords, int textLen, Point pagePos, Str* surnameOut, int* yearOut,
+                              Rect* srcRectOut = nullptr);
+
+bool FindSurnameInPageText(WStr text, const Rect* coords, int textLen, WStr surnameW, int year, float* xOut,
+                           float* yOut);
+
+bool DetectNumericCitationInPageText(WStr text, const Rect* coords, int textLen, Point pagePos, int* numOut,
+                                     Rect* srcRectOut = nullptr);
+
+bool FindNumericReferenceInPageText(WStr text, const Rect* coords, int textLen, int num, float* xOut, float* yOut);
+
+//--- shared between the RefHover*.cpp files, not for use outside them
+
+constexpr const WCHAR* kRefHoverClass = L"SumatraPDFRefHover";
+
+constexpr float kRefHoverRenderZoom = 1.5f;
+constexpr int kRefHoverMaxPopupWidth = 1200;
+constexpr int kRefHoverMaxPopupHeight = 600;
+constexpr int kRefHoverBorder = 4;
+constexpr int kRefHoverCursorPad = 30;
+constexpr int kRefHoverScrollStepPx = 60;
+constexpr float kRefHoverMinUserZoom = 0.4f;
+constexpr float kRefHoverMaxUserZoom = 3.0f;
+constexpr float kRefHoverUserZoomStep = 1.15f;
+
+constexpr int kRefHoverMaxLiveStates = 32;
+
+bool RefHoverIsLaunchLink(IPageDestination* dest);
+
+bool RefHoverIsLiveState(RefHoverState* s);
+void RefHoverRegisterLiveState(RefHoverState* s);
+void RefHoverUnregisterLiveState(RefHoverState* s);
+void RefHoverDropQueuedRender(RefHoverState* s);
+TempWStr RefHoverPageTextToWStrTemp(Str text);
+
+bool RefHoverPopupCreate(RefHoverState* s, HWND hwndCanvas);
+
+void RefHoverShowPopup(RefHoverState* s, Point screenPt);
+void RefHoverRequestRender(RefHoverState* s, EngineBase* engine, RefHoverState::RenderRequest req);
+bool RefHoverRerenderDisplayedRegion(RefHoverState* s, EngineBase* engine, int page, RectF region);
+
+// JabRef push (RefHover.cpp): capture the bibliography entry text for the
+// just-shown destination region and kick off the async existence check.
+// Resets the push badge for the new entry. `isBibEntry` is the result of
+// DetectEntryBox's outIsBibEntry — non-bib targets (figures, headings) leave
+// the previously-captured entry alive so a Ctrl+J retry still works.
+void RefHoverCaptureEntryAndCheck(RefHoverState* s, EngineBase* engine, int destPage, RectF region, bool isBibEntry);

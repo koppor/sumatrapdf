@@ -153,7 +153,41 @@ void OptimizePngFileAsync(Str path) {
     }
     auto* d = new OptimizePngData();
     d->path = str::Dup(path);
-    RunAsync(MkFunc0(OptimizePngThread, d), "OptimizePngThread");
+    RunAsync(MkFunc0(OptimizePngThread, d), StrL("OptimizePngThread"));
+}
+
+struct OptimizePngFilesData {
+    StrVec paths;
+};
+
+static void OptimizePngFilesThread(OptimizePngFilesData* d) {
+    int n = len(d->paths);
+    for (int i = 0; i < n; i++) {
+        Str p = d->paths[i];
+        if (str::EndsWithI(p, StrL(".png"))) {
+            OptimizePngFile(p);
+        }
+    }
+    delete d;
+}
+
+// Same as OptimizePngFileAsync for each .png path, one after another on a
+// single background thread so converting many pages does not spawn one
+// zopfli thread per file
+void OptimizePngFilesAsync(const StrVec& paths) {
+    auto* d = new OptimizePngFilesData();
+    int n = len(paths);
+    for (int i = 0; i < n; i++) {
+        Str p = paths[i];
+        if (str::EndsWithI(p, StrL(".png"))) {
+            d->paths.Append(p);
+        }
+    }
+    if (len(d->paths) == 0) {
+        delete d;
+        return;
+    }
+    RunAsync(MkFunc0(OptimizePngFilesThread, d), StrL("OptimizePngFilesThread"));
 }
 
 // Pack pixmap pixels as tightly packed RGBA8 for lodepng_encode32.
@@ -241,11 +275,8 @@ Str EncodeAndOptimizePngFromPixmap(const Pixmap* px) {
         return {};
     }
     Str rawPng((char*)pngOut, (int)pngSize);
-    // lodepng allocates with malloc; transfer ownership into Optimize via Dup then free
-    Str owned = str::Dup(rawPng);
+    Str optimized = OptimizePngBytesOwned(rawPng);
     free(pngOut);
-    Str optimized = OptimizePngBytesOwned(owned);
-    str::Free(owned);
     if (len(optimized) > 0) {
         logf("EncodeAndOptimizePngFromPixmap: %dx%d png %d -> %d bytes\n", px->width, px->height, (int)pngSize,
              len(optimized));

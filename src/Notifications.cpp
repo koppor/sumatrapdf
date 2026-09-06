@@ -20,8 +20,8 @@
 #include "MainWindow.h"
 #include "WindowTab.h"
 
-#include "Notifications.h"
 #include "Theme.h"
+#include "Notifications.h"
 
 static StrNode* gDelayedNotifications = nullptr;
 
@@ -146,6 +146,11 @@ constexpr int kMaxNotifs = 128;
 static NotificationWnd* gNotifs[kMaxNotifs];
 static int gNotifsCount = 0;
 
+// Notifications are drawn over the document and stay for a couple of seconds.
+// A test that reads pixels has to wait them out (which is most of the runtime
+// of e.g. tests/issue-1195.ts), so -dbg-control can switch them off.
+static bool gNotificationsEnabled = true;
+
 static int GetForHwnd(HWND hwnd, NotificationWnd* wnds[kMaxNotifs]) {
     int n = 0;
     for (int i = 0; i < gNotifsCount; i++) {
@@ -208,6 +213,11 @@ void RelayoutNotifications(HWND hwndCanvas) {
         }
         int xMargin = DpiScale(wnd->xMargin);
         int yMargin = DpiScale(wnd->yMargin);
+        // close ✕ is sized at create; re-apply if DPI changed while it was up
+        int closeDx = DpiScale(16);
+        if (wnd->closeCtrl && wnd->closeCtrl->idealSize.dx != closeDx) {
+            wnd->Layout(HwndGetTextTemp(wnd->hwnd));
+        }
         NotifCorner corner = wnd->corner;
         bool isBar = (corner == NotifCorner::BottomBar);
         Rect rect = HwndWindowRect(wnd->hwnd);
@@ -467,7 +477,7 @@ int CalcPerc(int current, int total) {
 }
 
 void NotificationWnd::Layout(Str message) {
-    if (!message) {
+    if (len(message) == 0) {
         message = StrL("");
     }
     int padX = DpiScale(12);
@@ -776,6 +786,10 @@ static NotificationWnd* NotifsGetForGroup(NotificationWnd** wnds, int nWnds, Kin
 
 NotificationWnd* ShowNotification(const NotificationCreateArgs& args) {
     ReportIf(!args.hwndParent);
+    if (!gNotificationsEnabled) {
+        // callers already handle a null (Create() / NotifsAdd() can fail)
+        return nullptr;
+    }
 
     NotificationWnd* wnd = new NotificationWnd();
     wnd->Create(args);
@@ -886,6 +900,30 @@ TempStr NotificationGetMessageTemp(NotificationWnd* wnd) {
 
 void RemoveNotification(NotificationWnd* wnd) {
     NotifsRemoveNotification(wnd);
+}
+
+void CloseNotification(NotificationWnd* wnd) {
+    if (!wnd) {
+        return;
+    }
+    wnd->ScheduleRemove();
+}
+
+bool AreNotificationsEnabled() {
+    return gNotificationsEnabled;
+}
+
+// Turning them off also takes down the ones already on screen, so a test can
+// disable them after the app has shown one (the zoom notification from -zoom
+// is up before a test can say anything).
+void SetNotificationsEnabled(bool enabled) {
+    gNotificationsEnabled = enabled;
+    if (enabled) {
+        return;
+    }
+    while (gNotifsCount > 0) {
+        NotifsRemoveNotification(gNotifs[0]);
+    }
 }
 
 bool RemoveNotificationsForGroup(HWND hwnd, Kind kind) {

@@ -15,7 +15,7 @@
 #include "DisplayMode.h"
 #include "DocController.h"
 #include "EngineBase.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "ChmModel.h"
 #include "MarkdownModel.h"
 #include "DisplayModel.h"
@@ -29,7 +29,7 @@
 #include "WindowTab.h"
 #include "Commands.h"
 #include "AppTools.h"
-#include "SearchAndDDE.h"
+#include "ExplorerQuickLook.h"
 #include "Selection.h"
 #include "Toolbar.h"
 #include "FindBar.h"
@@ -37,9 +37,60 @@
 #include "Favorites.h"
 #include "Translations.h"
 #include "Version.h"
+#include "SearchAndDDE.h"
 
 bool gIsStartup = false;
 StrVec gDdeOpenOnStartup;
+
+// last 10 find queries, newest first. Session-only (issue #893).
+constexpr int kFindHistoryMax = 10;
+static StrVec gFindHistory;
+
+void ApplyFindHistory(DropDown* dd) {
+    if (dd) {
+        dd->SetItemsKeepText(gFindHistory);
+    }
+}
+
+void RememberFindQuery(Str q) {
+    if (len(q) == 0) {
+        return;
+    }
+    TempStr trimmed = str::DupTemp(q);
+    str::TrimWSInPlace(trimmed, str::TrimOpt::Both);
+    if (len(trimmed) == 0) {
+        return;
+    }
+    int existing = gFindHistory.Find(trimmed);
+    if (existing == 0) {
+        return; // already the most recent
+    }
+    if (existing > 0) {
+        gFindHistory.RemoveAt(existing);
+    }
+    gFindHistory.InsertAt(0, trimmed);
+    while (len(gFindHistory) > kFindHistoryMax) {
+        gFindHistory.RemoveAt(len(gFindHistory) - 1);
+    }
+    for (MainWindow* w : gWindows) {
+        FindBarSyncHistory(w);
+        FindWindowSyncHistory(w);
+    }
+}
+
+TempStr FindHistoryResultTemp(int* exitCodeOut) {
+    str::Builder out;
+    for (int i = 0; i < len(gFindHistory); i++) {
+        if (i > 0) {
+            out.AppendChar('\n');
+        }
+        out.Append(gFindHistory[i]);
+    }
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    return ToStrTemp(out);
+}
 
 // Chrome-style orange for the non-active find matches. The active (current)
 // match uses the user-customizable FixedPageUI.SelectionColor instead, so it
@@ -71,8 +122,8 @@ static struct {
 } gFindMatchPaintCache;
 
 static void FreeFindMatchPaintCacheEntries() {
-    gFindMatchPaintCache.entries.Reset();
-    gFindMatchPaintCache.positions.Reset();
+    VecReset(gFindMatchPaintCache.entries);
+    VecReset(gFindMatchPaintCache.positions);
 }
 
 void InvalidateFindMatchPaintCache() {
@@ -104,6 +155,7 @@ static void BrowserFindStartSearch(MainWindow* win, DocController* md) {
     if (len(term) == 0) {
         return;
     }
+    RememberFindQuery(term);
     // intentional search start (Sioyek-style "/" mark; session-only, #5862)
     SetSearchStartFavorite(win);
     str::ReplaceWithCopy(&win->browserFindTerm, term);
@@ -135,12 +187,12 @@ static void BrowserFindUpdateStatus(MainWindow* win, DocController* md, int page
     if (win->browserFindTotal < 0) {
         // the all-pages sweep hasn't finished: show per-page numbers for now
         TempStr s = fmt("%d / %d", pageCur, pageTotal);
-        FindBarSetStatus(win, s);
+        FindBarSetStatus(win, s, pageTotal);
         return;
     }
     win->browserFindCurrent = BrowserFindGlobalMatchIdx(win, md->CurrentPageNo(), pageCur);
     TempStr s = fmt("%d / %d", win->browserFindCurrent + 1, win->browserFindTotal);
-    FindBarSetStatus(win, s);
+    FindBarSetStatus(win, s, win->browserFindTotal);
     FindWindowRefreshResults(win); // mirror the current match in the results list
 }
 
@@ -198,13 +250,48 @@ void BrowserFindAllResultReceived(MainWindow* win, Str payload) {
         fm.endPage = page;
         fm.endGlyph = idx;
         fm.snippet = str::Dup(snippet);
-        win->findMatches.Append(fm);
+        VecAppend(win->findMatches, fm);
     }
     win->browserFindTotal = total;
     win->findCountHasSnippets = true;
     BrowserFindUpdateStatus(win, md, win->browserFindPageCurrent, total); // also refreshes the results list
     // Enable/disable Find Next/Prev once we know whether any matches exist.
     ToolbarUpdateStateForWindow(win, false);
+}
+
+// Match SetText()'s normalization: strip one leading space (word-start) so a
+// trailing/whole-word space still compares as the same term.
+static Str FindTermWithoutWordStartSpace(Str text) {
+    if (text && len(text) > 0 && text.s[0] == ' ') {
+        return Str(text.s + 1, text.len - 1);
+    }
+    return text;
+}
+
+// True when the find box holds a different term than the current results /
+// last search, so Enter / Find Next should start a new search instead of
+// stepping a stale list (issue #893).
+bool FindTermDiffersFromLast(MainWindow* win) {
+    if (!win) {
+        return false;
+    }
+    TempStr term = win->findEdit ? win->findEdit->GetTextTemp() : TempStr{};
+    Str searchText = FindTermWithoutWordStartSpace(term);
+    if (len(searchText) == 0) {
+        return false;
+    }
+    if (win->findCountText && len(win->findCountText) > 0) {
+        return !str::Eq(searchText, FindTermWithoutWordStartSpace(win->findCountText));
+    }
+    if (DisplayModel* dm = win->AsFixed()) {
+        if (dm->textSearch && dm->textSearch->lastText) {
+            return !str::Eq(searchText, dm->textSearch->lastText);
+        }
+    }
+    if (win->browserFindTerm) {
+        return !str::Eq(searchText, FindTermWithoutWordStartSpace(win->browserFindTerm));
+    }
+    return true;
 }
 
 // jump to the idxInPage-th match on pageNo: directly if that page is showing,
@@ -223,6 +310,10 @@ static void BrowserFindNextPrev(MainWindow* win, DocController* md, bool forward
     // typing still pending: run the search first instead of advancing
     // through the previous term's matches
     if (FindFlushPendingSearch(win)) {
+        return;
+    }
+    if (FindTermDiffersFromLast(win)) {
+        BrowserFindStartSearch(win, md);
         return;
     }
     int n = len(win->findMatches);
@@ -277,7 +368,7 @@ void FindFirst(MainWindow* win) {
         ShowFindBar(win);
         if (win->findEdit) {
             win->findEdit->SetFocus();
-            win->findEdit->SelectAll();
+            CbEditSelectAll(win->findEdit);
         }
         return;
     }
@@ -302,7 +393,7 @@ void FindFirst(MainWindow* win) {
     // to find edit only if it's different from current text. Setting the text
     // triggers find-as-you-type via the bar's onTextChanged handler.
     if (!hadFindFocus && dm->textSelection->result.len > 0) {
-        Str sel = dm->textSelection->ExtractText(" ");
+        Str sel = dm->textSelection->ExtractText(StrL(" "));
         TempStr selection = str::DupTemp(sel);
         str::Free(sel);
         selection.len -= str::NormalizeWSInPlace(selection);
@@ -320,7 +411,7 @@ void FindFirst(MainWindow* win) {
 
     if (win->findEdit) {
         win->findEdit->SetFocus();
-        win->findEdit->SelectAll();
+        CbEditSelectAll(win->findEdit);
     }
 }
 
@@ -353,8 +444,8 @@ static void StartIncrementalFind(MainWindow* win) {
 // comma-separated list such as "3,4-6,18-". Whitespace around tokens is
 // allowed. Invalid input returns false (caller treats that as all pages).
 bool ParseFindPageRange(Str s, int nPages, Vec<bool>& allowedOut) {
-    allowedOut.Reset();
-    if (!s || len(s) == 0 || nPages < 1) {
+    VecReset(allowedOut);
+    if (len(s) == 0 || nPages < 1) {
         return true;
     }
     const char* p = s.s;
@@ -370,7 +461,7 @@ bool ParseFindPageRange(Str s, int nPages, Vec<bool>& allowedOut) {
         }
         int n = 0;
         while (p < end && *p >= '0' && *p <= '9') {
-            n = n * 10 + (*p - '0');
+            n = (n * 10) + (*p - '0');
             p++;
         }
         out = n;
@@ -415,11 +506,11 @@ bool ParseFindPageRange(Str s, int nPages, Vec<bool>& allowedOut) {
         bool haveLast = parseNum(last);
         skipWs();
         if (p < end && *p != ',') {
-            allowedOut.Reset();
+            VecReset(allowedOut);
             return false;
         }
         if (!haveFirst && !haveDash && !haveLast) {
-            allowedOut.Reset();
+            VecReset(allowedOut);
             return false;
         }
         if (haveFirst && !haveDash && !haveLast) {
@@ -429,7 +520,7 @@ bool ParseFindPageRange(Str s, int nPages, Vec<bool>& allowedOut) {
         } else if (haveFirst && haveDash && !haveLast) {
             last = nPages;
         } else if (!haveFirst && haveDash && !haveLast) {
-            allowedOut.Reset();
+            VecReset(allowedOut);
             return false;
         }
         if (first > last) {
@@ -458,7 +549,7 @@ bool ParseFindPageRange(Str s, int nPages, Vec<bool>& allowedOut) {
         }
     }
     if (!any) {
-        allowedOut.Reset();
+        VecReset(allowedOut);
     }
     return true;
 }
@@ -472,7 +563,7 @@ static bool ApplyFindPageRange(MainWindow* win) {
         Vec<bool> allowed;
         int nPages = dm->PageCount();
         if (!ParseFindPageRange(spec, nPages, allowed)) {
-            allowed.Reset();
+            VecReset(allowed);
         }
         dm->textSearch->SetAllowedPages(allowed);
     }
@@ -492,12 +583,12 @@ void OnFindBarTextChanged(MainWindow* win) {
             md->FindClear(); // remove the highlights in the webview
         }
         ClearSearchResult(win);
-        FindBarSetStatus(win, "");
+        FindBarSetStatus(win, StrL(""));
         ClearFindMatches(win);
         FindWindowRefreshResults(win); // empty the results list
         return;
     }
-    size_t nChars = win->findEdit ? win->findEdit->GetTextLen() : 0;
+    size_t nChars = CbGetTextLen(win->findEdit);
     UINT delay = (nChars <= 2) ? kFindDebounceShortDelayMs : kFindDebounceDelayMs;
     // SetTimer with the same id replaces the previous timer, so each keystroke
     // restarts the countdown
@@ -515,13 +606,13 @@ void FindDebounceTimerFired(MainWindow* win) {
     if (!win->IsDocLoaded() || !NeedsFindUI(win)) {
         return;
     }
-    if (win->findEdit && win->findEdit->GetTextLen() > 0) {
+    if (CbGetTextLen(win->findEdit) > 0) {
         StartIncrementalFind(win);
     }
 }
 
 static bool HasFindText(MainWindow* win) {
-    return win->findEdit && win->findEdit->GetTextLen() > 0;
+    return CbGetTextLen(win->findEdit) > 0;
 }
 
 // if a debounced search is pending, cancel the timer and start it now (so Enter
@@ -582,7 +673,7 @@ void FindToggleMatchCase(MainWindow* win) {
     }
     FindBarSetMatchCaseChecked(win, win->findMatchCase);
     if (win->findEdit) {
-        win->findEdit->SetModified(true);
+        CbEditSetModified(win->findEdit, true);
     }
     // re-run the search with the new match-case setting
     if (HasFindText(win)) {
@@ -608,7 +699,7 @@ void FindToggleMatchWholeWord(MainWindow* win) {
     }
     FindBarSetMatchWholeWordChecked(win, win->findMatchWholeWord);
     if (win->findEdit) {
-        win->findEdit->SetModified(true);
+        CbEditSetModified(win->findEdit, true);
     }
     // re-run the search with the new whole-word setting
     if (HasFindText(win)) {
@@ -629,7 +720,7 @@ void FindSelection(MainWindow* win, TextSearch::Direction direction) {
         return;
     }
 
-    Str sel = dm->textSelection->ExtractText(" ");
+    Str sel = dm->textSelection->ExtractText(StrL(" "));
     TempStr selection = str::DupTemp(sel);
     str::Free(sel);
     selection.len -= str::NormalizeWSInPlace(selection);
@@ -639,7 +730,7 @@ void FindSelection(MainWindow* win, TextSearch::Direction direction) {
 
     if (win->findEdit) {
         win->findEdit->SetText(selection);
-        win->findEdit->SetModified(false);
+        CbEditSetModified(win->findEdit, false);
     }
     AbortFinding(win, false); // cancel "find as you type"
     dm->textSearch->SetLastResult(dm->textSelection);
@@ -688,7 +779,7 @@ static void UpdateFindStatus(UpdateFindStatusData* d) {
     AutoDelete delData(d);
 
     auto* win = d->win;
-    if (!IsMainWindowValid(win) || win->findCancelled) {
+    if (!IsMainWindowValidAndNotClosing(win) || win->findCancelled) {
         return;
     }
     if (!d->showProgress) {
@@ -742,17 +833,17 @@ struct FindThreadData {
 
         if (!success && !loopedAround) {
             // i.e. canceled
-            FindBarSetStatus(win, "");
+            FindBarSetStatus(win, StrL(""));
         } else if (!success && loopedAround) {
             // keep it compact and consistent with the "n / m" counter
-            FindBarSetStatus(win, "0 / 0");
+            FindBarSetStatus(win, StrL("0 / 0"), 0);
         }
         // else: a match was found; the "n / m" counter (set by UpdateMatchCount
         // after this) is the only feedback - no beep on wrap-around
     }
 
     bool WasCanceled() {
-        bool winValid = IsMainWindowValid(win);
+        bool winValid = IsMainWindowValidAndNotClosing(win);
         auto res = !winValid || win->findCancelled;
         if (res) {
             logf("FindThreadData: WasCanceled() returns true, isMainWindowValid: %d, win->findCancelled: %d\n",
@@ -843,7 +934,7 @@ static void ShowMatchCount(MainWindow* win) {
         n = MatchIndexInCache(win, key);
     }
     TempStr s = fmt("%d / %d%s", n, total, Str(win->findCountCapped ? "+" : ""));
-    FindBarSetStatus(win, s);
+    FindBarSetStatus(win, s, total);
 }
 
 // cap on how many per-match snippets we build for the floating results list
@@ -860,7 +951,7 @@ void ClearFindMatches(MainWindow* win) {
     for (int i = 0; i < n; i++) {
         str::Free(win->findMatches[i].snippet);
     }
-    win->findMatches.Reset();
+    VecReset(win->findMatches);
     win->findCountHasSnippets = false;
     InvalidateFindMatchPaintCache();
     // for markdown, findMatches came from the webview's all-pages sweep; reset
@@ -886,7 +977,7 @@ void InvalidateFindForDocumentChange(MainWindow* win) {
     win->findCountValid = false;
     win->findCountCapped = false;
     win->findCountEngine = nullptr;
-    win->findCountPositions.Reset();
+    VecReset(win->findCountPositions);
     str::FreePtr(&win->findCountText);
     FindWindowUpdatePagesLabel(win);
     FindWindowRefreshResults(win);
@@ -896,7 +987,7 @@ void InvalidateFindForDocumentChange(MainWindow* win) {
     }
     TempStr s = win->findEdit->GetTextTemp();
     if (len(s) == 0) {
-        FindBarSetStatus(win, "");
+        FindBarSetStatus(win, StrL(""));
         return;
     }
     if (win->AsFixed()) {
@@ -913,7 +1004,7 @@ void InvalidateFindForDocumentChange(MainWindow* win) {
 static TempStr BuildSnippet(EngineBase* engine, const FindMatch& m) {
     int textLen = 0;
     Str pageText = engine->GetTextForPage(m.startPage, &textLen);
-    if (!pageText) {
+    if (len(pageText) == 0) {
         return {};
     }
     int mStart = limitValue(m.startGlyph, 0, textLen);
@@ -922,11 +1013,9 @@ static TempStr BuildSnippet(EngineBase* engine, const FindMatch& m) {
     const int kCtx = 40;
     int from = std::max(0, mStart - kCtx);
     int to = std::min(textLen, mEnd + kCtx);
-    Str sub = str::Dup(Utf8SliceByCodepoints(pageText, from, to - from));
-    str::NormalizeWSInPlace(sub);
-    TempStr u = str::DupTemp(sub);
-    str::FreePtr(&sub);
-    return fmt("%s%s%s", Str(from > 0 ? "..." : ""), u, Str(to < textLen ? "..." : ""));
+    TempStr sub = str::DupTemp(Utf8SliceByCodepoints(pageText, from, to - from));
+    sub.len -= str::NormalizeWSInPlace(sub);
+    return fmt("%s%s%s", Str(from > 0 ? "..." : ""), sub, Str(to < textLen ? "..." : ""));
 }
 
 struct CountThreadData {
@@ -992,7 +1081,7 @@ static void CountEndTask(CountEndTaskData* d) {
     AutoDelete delData(d);
     MainWindow* win = d->win;
     CountThreadData* ctd = d->ctd;
-    if (!IsMainWindowValid(win)) {
+    if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
     if (win->findCountThread != ctd->thread) {
@@ -1074,7 +1163,7 @@ struct CountProgressTaskData {
 static void CountProgressTask(CountProgressTaskData* d) {
     AutoDelete delData(d);
     MainWindow* win = d->win;
-    if (!IsMainWindowValid(win) || win->findCountEpoch != d->epoch) {
+    if (!IsMainWindowValidAndNotClosing(win) || win->findCountEpoch != d->epoch) {
         return;
     }
     SetFindCountProgressStatus(win, d->nFound, d->pageNo);
@@ -1128,7 +1217,7 @@ struct CountPartialTaskData {
 static void CountPartialTask(CountPartialTaskData* d) {
     AutoDelete delData(d);
     MainWindow* win = d->win;
-    if (!IsMainWindowValid(win)) {
+    if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
     if (win->findCountEpoch != d->epoch) {
@@ -1147,7 +1236,7 @@ static void CountPartialTask(CountPartialTaskData* d) {
             ClearFindMatches(win);
         }
         for (int i = 0; i < len(*d->matches); i++) {
-            win->findMatches.Append((*d->matches)[i]);
+            VecAppend(win->findMatches, (*d->matches)[i]);
             (*d->matches)[i].snippet = Str(); // transferred to win->findMatches
         }
         VecSort(win->findMatches, CmpFindMatchByPos);
@@ -1164,7 +1253,7 @@ static Vec<FindMatch>* CloneMatchesRange(Vec<FindMatch>* matches, int from, int 
     for (int i = from; i < to; i++) {
         FindMatch fm = (*matches)[i];
         fm.snippet = str::Dup(fm.snippet);
-        res->Append(fm);
+        VecAppend(*res, fm);
     }
     return res;
 }
@@ -1185,7 +1274,7 @@ static void CountThread(CountThreadData* d) {
         ts.SetMatchWholeWord(d->matchWholeWord);
         Vec<bool> allowed;
         if (!ParseFindPageRange(d->rangeSpec, engine->PageCount(), allowed)) {
-            allowed.Reset();
+            VecReset(allowed);
         }
         ts.SetAllowedPages(allowed);
         ts.SetDirection(TextSearch::Direction::Forward);
@@ -1211,7 +1300,7 @@ static void CountThread(CountThreadData* d) {
                 capped = true;
                 break;
             }
-            positions->Append(MatchKey(ts.startPage, ts.startGlyph));
+            VecAppend(*positions, MatchKey(ts.startPage, ts.startGlyph));
             d->nFoundSoFar = len(*positions); // read by CountProgress
             if (matches && len(*matches) < kMaxFindResults) {
                 FindMatch fm;
@@ -1222,7 +1311,7 @@ static void CountThread(CountThreadData* d) {
                 if (d->wantSnippets) {
                     str::ReplaceWithCopy(&fm.snippet, BuildSnippet(engine, fm));
                 }
-                matches->Append(fm);
+                VecAppend(*matches, fm);
             }
             // stream partial results so a slow scan (common word, big doc)
             // shows results and a running count early; the final full list is
@@ -1308,6 +1397,10 @@ static void StartFindCount(MainWindow* win, Str text, bool matchCase, bool match
     if (!engine) {
         return;
     }
+    // CountThread runs on a worker thread and can't touch DisplayModel; do the
+    // layout and the resync (and pageAllowed's sizing below, via
+    // ApplyFindPageRange -> dm->PageCount()) it needs here, before it starts
+    EnsureFullLayout(dm);
     win->findCountValid = false;
     // seed the progress status with the page the scan starts from, so it shows a
     // page right away instead of going blank until the first progress tick;
@@ -1330,7 +1423,7 @@ static void StartFindCount(MainWindow* win, Str text, bool matchCase, bool match
     ApplyFindPageRange(win);
     // always build the match list so PaintAllFindMatches can highlight every hit;
     // snippets only when the floating results list is showing
-    bool wantSnippets = gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win);
+    bool wantSnippets = gSettings->searchUIFloating && IsFindWindowVisible(win);
     bool wantMatchList = true;
     int epoch = AtomicIntInc(&win->findCountEpoch);
     int startPage = win->ctrl ? win->ctrl->CurrentPageNo() : 1;
@@ -1338,8 +1431,32 @@ static void StartFindCount(MainWindow* win, Str text, bool matchCase, bool match
                                   win->findPageRangeText, epoch);
     win->findCountThread = nullptr;
     auto fn = MkFunc0<CountThreadData>(CountThread, d);
-    win->findCountThread = StartThread(fn, "FindCountThread");
+    win->findCountThread = StartThread(fn, StrL("FindCountThread"));
     d->thread = win->findCountThread;
+}
+
+// Term currently being searched: the find edit if it has text, else the last
+// completed count / TextSearch (so the floating Find window can pick up a
+// CLI/DDE -search that ran while the edit was still the hidden compact bar).
+TempStr CurrentFindTermTemp(MainWindow* win) {
+    if (!win) {
+        return {};
+    }
+    if (win->findEdit) {
+        TempStr s = win->findEdit->GetTextTemp();
+        if (len(s) > 0) {
+            return s;
+        }
+    }
+    if (win->findCountText && len(win->findCountText) > 0) {
+        return str::DupTemp(win->findCountText);
+    }
+    if (DisplayModel* dm = win->AsFixed()) {
+        if (dm->textSearch && dm->textSearch->lastText) {
+            return str::DupTemp(dm->textSearch->lastText);
+        }
+    }
+    return {};
 }
 
 // update the n/m counter after a search settles on a match: instant from cache
@@ -1347,7 +1464,7 @@ static void StartFindCount(MainWindow* win, Str text, bool matchCase, bool match
 static void UpdateMatchCount(MainWindow* win, Str text) {
     DisplayModel* dm = win->AsFixed();
     void* engine = dm ? (void*)dm->GetEngine() : nullptr;
-    bool wantSnippets = gGlobalPrefs->searchUIFloating && IsFindWindowVisible(win);
+    bool wantSnippets = gSettings->searchUIFloating && IsFindWindowVisible(win);
     bool wantMatchList = true;
     ApplyFindPageRange(win);
     bool cacheHit = win->findCountValid && win->findCountText && str::Eq(win->findCountText, text) &&
@@ -1356,13 +1473,26 @@ static void UpdateMatchCount(MainWindow* win, Str text) {
                     str::Eq(win->findCountRangeText, win->findPageRangeText) &&
                     (!wantMatchList || (wantSnippets ? win->findCountHasSnippets : len(win->findMatches) > 0));
     if (cacheHit) {
-        // matches are unchanged: just refresh n/m. Don't rebuild the results
-        // list here -- it's already populated and rebuilding clears the user's
-        // selection (the list is rebuilt only when a new count installs matches).
+        // Matches are unchanged, but Find Next/Prev may have moved the active
+        // document match while focus was outside the floating Find window.
         ShowMatchCount(win);
+        FindWindowRefreshResults(win, false);
     } else {
         StartFindCount(win, text, win->findMatchCase, win->findMatchWholeWord);
     }
+}
+
+// Rebuild the match-count / snippet list for the current term without starting
+// a new interactive Find Next (opening Find after -search must not skip a hit).
+void EnsureFindSnippets(MainWindow* win) {
+    if (!win || win->findThread) {
+        return;
+    }
+    TempStr text = CurrentFindTermTemp(win);
+    if (len(text) == 0) {
+        return;
+    }
+    UpdateMatchCount(win, text);
 }
 
 static void CancelPendingFind(MainWindow* win);
@@ -1436,7 +1566,7 @@ static void FindEndTask(FindEndTaskData* d) {
     auto loopedAround = d->loopedAround;
 
     AutoDelete delData(d);
-    if (!IsMainWindowValid(win)) {
+    if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
     if (win->findThread != ftd->thread) {
@@ -1579,24 +1709,32 @@ bool AbortFinding(MainWindow* win, bool hideMessage) {
 // term differs from TextSearch::lastText we force wasModified=true. Callers can
 // still pass true for the same text (restart after match-case toggle, etc.).
 void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, Str text, bool wasModified, bool showProgress) {
+    if (!win) {
+        return;
+    }
     AbortFinding(win, false);
     if (len(text) == 0) {
         return;
     }
+    DisplayModel* dm = win->AsFixed();
+    if (!dm || !dm->textSearch) {
+        return;
+    }
+    // FindThread runs on a worker thread and can't touch DisplayModel; do
+    // the layout and the resync it needs here, before it starts
+    EnsureFullLayout(dm);
+    RememberFindQuery(text);
     if (ApplyFindPageRange(win)) {
         wasModified = true;
     }
-    DisplayModel* dm = win->AsFixed();
-    if (dm && dm->textSearch) {
-        // Match SetText()'s normalization: strip one leading space (word-start)
-        // so trailing/whole-word spaces still compare correctly.
-        Str searchText = text;
-        if (searchText && searchText.s[0] == ' ') {
-            searchText = Str(searchText.s + 1, searchText.len - 1);
-        }
-        if (!str::Eq(searchText, dm->textSearch->lastText)) {
-            wasModified = true;
-        }
+    // Match SetText()'s normalization: strip one leading space (word-start)
+    // so trailing/whole-word spaces still compare correctly.
+    Str searchText = text;
+    if (searchText && searchText.s[0] == ' ') {
+        searchText = Str(searchText.s + 1, searchText.len - 1);
+    }
+    if (!str::Eq(searchText, dm->textSearch->lastText)) {
+        wasModified = true;
     }
     // New/changed term: record search-start page as session-only favorite "/"
     // (issue #5726 / #5862). Find Next/Prev for the same term does not update it.
@@ -1607,8 +1745,49 @@ void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, Str text
     ftd->ShowUI(showProgress);
     win->findThread = nullptr;
     auto fn = MkFunc0(FindThread, ftd);
-    win->findThread = StartThread(fn, "FindThread");
+    win->findThread = StartThread(fn, StrL("FindThread"));
     ftd->thread = win->findThread; // safe because only accesssed on ui thread
+}
+
+// A command-line search can target a session-restored tab whose asynchronous
+// load has created the tab but not its controller yet. Keep the newest request
+// on that tab and start it after the controller is attached.
+void StartSearchFromCommandLine(MainWindow* win, Str text) {
+    if (!win || len(text) == 0) {
+        return;
+    }
+    if (!win->IsDocLoaded()) {
+        WindowTab* tab = win->CurrentTab();
+        if (tab && tab->type == WindowTab::Type::Document) {
+            str::ReplaceWithCopy(&tab->pendingFindText, text);
+        }
+        return;
+    }
+    // Command-line search should leave the same find UI visible as Ctrl+F,
+    // with the search term ready for another search or navigation (#6067).
+    ShowFindBar(win);
+    if (win->findEdit) {
+        win->findEdit->SetText(text);
+    }
+    if (DocController* browser = BrowserFindCtrl(win)) {
+        BrowserFindStartSearch(win, browser);
+        return;
+    }
+    FindTextOnThread(win, TextSearch::Direction::Forward, text, true, true);
+}
+
+// Consume a command-line search once its target tab is current and loaded.
+void StartPendingSearch(MainWindow* win) {
+    if (!IsMainWindowValidAndNotClosing(win) || !win->IsDocLoaded()) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    if (!tab || len(tab->pendingFindText) == 0) {
+        return;
+    }
+    TempStr text = str::DupTemp(tab->pendingFindText);
+    str::FreePtr(&tab->pendingFindText);
+    StartSearchFromCommandLine(win, text);
 }
 
 // TODO: for https://github.com/sumatrapdfreader/sumatrapdf/issues/2655
@@ -1631,7 +1810,7 @@ void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, bool sho
     TempStr s = win->findEdit->GetTextTemp();
     // if document is rtl, need to reverse the text
     // s = ReverseTextTemp(s);
-    bool wasModified = win->findEdit->IsModified();
+    bool wasModified = CbEditIsModified(win->findEdit);
     if (!wasModified) {
         // check if the find text differs from the current tab's cached search text
         // this happens when switching tabs: the find edit box shows the current text
@@ -1652,7 +1831,7 @@ void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, bool sho
             }
         }
     }
-    win->findEdit->SetModified(false);
+    CbEditSetModified(win->findEdit, false);
     FindTextOnThread(win, direction, s, wasModified, showProgress);
 }
 
@@ -1691,7 +1870,7 @@ static void AppendMatchPageRects(EngineBase* engine, const FindMatch& fm, Vec<Fi
         FindMatchPaintPageRect pr;
         pr.pageNo = ts.result.pages[i];
         pr.rect = ts.result.rects[i];
-        out.Append(pr);
+        VecAppend(out, pr);
     }
 }
 
@@ -1705,7 +1884,7 @@ static void AppendPageRectsToScreen(DisplayModel* dm, const Rect& clipRc, const 
         Rect rc = dm->CvtToScreen(pr.pageNo, ToRectF(pr.rect));
         rc = rc.Intersect(clipRc);
         if (!rc.IsEmpty()) {
-            out.Append(rc);
+            VecAppend(out, rc);
         }
     }
 }
@@ -1736,7 +1915,7 @@ static void RebuildFindMatchPaintCache(MainWindow* win, DisplayModel* dm, int fi
         entry.key = MatchKey(fm.startPage, fm.startGlyph);
         entry.firstPos = firstPos;
         entry.len = n;
-        gFindMatchPaintCache.entries.Append(entry);
+        VecAppend(gFindMatchPaintCache.entries, entry);
     }
 }
 
@@ -1752,7 +1931,7 @@ static void AppendTextSelScreenRects(DisplayModel* dm, const Rect& clipRc, TextS
         Rect rc = dm->CvtToScreen(pageNo, ToRectF(sel->rects[i]));
         rc = rc.Intersect(clipRc);
         if (!rc.IsEmpty()) {
-            out.Append(rc);
+            VecAppend(out, rc);
         }
     }
 }
@@ -1761,7 +1940,7 @@ static void PaintCurrentFindMatch(MainWindow* win, DisplayModel* dm, TextSearch*
     if (!ts || ts->result.len == 0) {
         return;
     }
-    ParsedColor* parsedCol = GetPrefsColor(gGlobalPrefs->fixedPageUI.selectionColor);
+    ParsedColor* parsedCol = GetPrefsColor(gSettings->fixedPageUI.selectionColor);
     u8 alpha = GetAlpha(parsedCol->col);
     if (alpha == 0) {
         alpha = kSelectionDefaultAlpha;
@@ -1777,7 +1956,7 @@ void PaintAllFindMatches(MainWindow* win, Gfx* gfx) {
     if (!win->IsDocLoaded() || !win->AsFixed()) {
         return;
     }
-    if (!win->findEdit || win->findEdit->GetTextLen() == 0) {
+    if (CbGetTextLen(win->findEdit) == 0) {
         return;
     }
 
@@ -1790,7 +1969,7 @@ void PaintAllFindMatches(MainWindow* win, Gfx* gfx) {
         ClearFindMatches(win);
         win->findCountValid = false;
         win->findCountEngine = nullptr;
-        win->findCountPositions.Reset();
+        VecReset(win->findCountPositions);
         str::FreePtr(&win->findCountText);
         return;
     }
@@ -1827,7 +2006,7 @@ void PaintAllFindMatches(MainWindow* win, Gfx* gfx) {
         currentKey = MatchKey(ts->startPage, ts->startGlyph);
     }
 
-    ParsedColor* parsedCol = GetPrefsColor(gGlobalPrefs->fixedPageUI.selectionColor);
+    ParsedColor* parsedCol = GetPrefsColor(gSettings->fixedPageUI.selectionColor);
     u8 alpha = GetAlpha(parsedCol->col);
     if (alpha == 0) {
         alpha = kSelectionDefaultAlpha;
@@ -1862,8 +2041,8 @@ void PaintForwardSearchMark(MainWindow* win, Gfx* gfx) {
         return;
     }
 
-    int hiLiWidth = gGlobalPrefs->forwardSearch.highlightWidth;
-    int hiLiOff = gGlobalPrefs->forwardSearch.highlightOffset;
+    int hiLiWidth = gSettings->forwardSearch.highlightWidth;
+    int hiLiOff = gSettings->forwardSearch.highlightOffset;
 
     // Draw the rectangles highlighting the forward search results
     Vec<Rect> rects;
@@ -1877,18 +2056,19 @@ void PaintForwardSearchMark(MainWindow* win, Gfx* gfx) {
             rect.y -= 4;
             rect.dy += 8;
         }
-        rects.Append(rect);
+        VecAppend(rects, rect);
     }
 
     u8 alpha =
-        (u8)(0x5f * 1.0f * (float)(HIDE_FWDSRCHMARK_STEPS - win->fwdSearchMark.hideStep) / HIDE_FWDSRCHMARK_STEPS);
-    ParsedColor* parsedCol = GetPrefsColor(gGlobalPrefs->forwardSearch.highlightColor);
+        (u8)(0x5f * 1.0f * (float)(kHideFwdSearchMarkSteps - win->fwdSearchMark.hideStep) / kHideFwdSearchMarkSteps);
+    ParsedColor* parsedCol = GetPrefsColor(gSettings->forwardSearch.highlightColor);
     PaintTransparentRectangles(gfx, win->canvasRc, rects, parsedCol->col, alpha);
 }
 
 // Replace in 'pattern' the macros %f %l %c by 'path', 'line' and 'col'
 static TempStr BuildOpenFileCmdTemp(Str pattern, Str path, int line, int col) {
-    str::Builder cmdline(256);
+    str::Builder cmdline;
+    str::BuilderReserve(cmdline, 256);
 
     logf("BuildOpenFileCmdTemp: path: '%s', pattern: '%s'\n", path, pattern);
     Str s = pattern;
@@ -1943,7 +2123,7 @@ bool OnInverseSearch(MainWindow* win, int x, int y) {
     DisplayModel* dm = tab->AsFixed();
 
     // Clear the last forward-search result
-    win->fwdSearchMark.rects.Reset();
+    VecReset(win->fwdSearchMark.rects);
     HwndInvalidate(win->hwndCanvas);
 
     // On double-clicking error message will be shown to the user
@@ -1953,7 +2133,7 @@ bool OnInverseSearch(MainWindow* win, int x, int y) {
         int err = Synchronizer::Create(path, dm->GetEngine(), &dm->pdfSync);
         if (err == PDFSYNCERR_SYNCFILE_NOTFOUND) {
             // We used to warn that "No synchronization file found" at this
-            // point if gGlobalPrefs->enableTeXEnhancements is set; we no longer
+            // point if gSettings->enableTeXEnhancements is set; we no longer
             // so do because a double-click has several other meanings
             // (selecting a word or an image, navigating quickly using links)
             // and showing an unrelated warning in all those cases seems wrong
@@ -1962,7 +2142,7 @@ bool OnInverseSearch(MainWindow* win, int x, int y) {
         if (err != PDFSYNCERR_SUCCESS) {
             NotificationCreateArgs args;
             args.hwndParent = win->hwndCanvas;
-            args.msg = _TRA("Synchronization file cannot be opened");
+            args.msg = Tr("Synchronization file cannot be opened");
             ShowNotification(args);
             return true;
         }
@@ -1981,13 +2161,13 @@ bool OnInverseSearch(MainWindow* win, int x, int y) {
     if (err != PDFSYNCERR_SUCCESS) {
         NotificationCreateArgs args;
         args.hwndParent = win->hwndCanvas;
-        args.msg = _TRA("No synchronization info at this position");
+        args.msg = Tr("No synchronization info at this position");
         ShowNotification(args);
         return true;
     }
 
-    Str inverseSearch = gGlobalPrefs->inverseSearchCmdLine;
-    if (!inverseSearch) {
+    Str inverseSearch = gSettings->inverseSearchCmdLine;
+    if (len(inverseSearch) == 0) {
         Vec<TextEditor*> editors;
         DetectTextEditors(editors);
         if (len(editors) > 0) {
@@ -2003,7 +2183,7 @@ bool OnInverseSearch(MainWindow* win, int x, int y) {
 
     NotificationCreateArgs args;
     args.hwndParent = win->hwndCanvas;
-    args.msg = _TRA("Cannot start inverse search command. Please check the command line in the settings.");
+    args.msg = Tr("Cannot start inverse search command. Please check the command line in the settings.");
     if (len(cmdLine) > 0) {
         // resolve relative paths with relation to SumatraPDF.exe's directory
         TempStr appDir = GetSelfExeDirTemp();
@@ -2011,7 +2191,7 @@ bool OnInverseSearch(MainWindow* win, int x, int y) {
         if (!process) {
             ShowNotification(args);
         }
-    } else if (gGlobalPrefs->enableTeXEnhancements) {
+    } else if (gSettings->enableTeXEnhancements) {
         ShowNotification(args);
     }
 
@@ -2019,11 +2199,103 @@ bool OnInverseSearch(MainWindow* win, int x, int y) {
 }
 
 // Show the result of a PDF forward-search synchronization (initiated by a DDE command)
+// Build a page-space box to flash after an internal jump. FitR dests already
+// have a rectangle. /XYZ is a point: a short strip at dest Y from dest X to
+// the right of the page, like the LaTeX forward-search mark. Page-level
+// /Fit with no coordinates returns empty (nothing useful to highlight).
+static bool LinkDestHighlightRect(DisplayModel* dm, int pageNo, RectF dest, Rect* out) {
+    EngineBase* engine = dm->GetEngine();
+    if (!engine || !out) {
+        return false;
+    }
+    RectF box = engine->PageMediabox(pageNo);
+    if (box.IsEmpty()) {
+        return false;
+    }
+    bool hasX = dest.x != kDestUseDefault;
+    bool hasY = dest.y != kDestUseDefault;
+    bool hasWH = dest.dx != kDestUseDefault && dest.dy != kDestUseDefault && dest.dx > 1.f && dest.dy > 1.f;
+    if (hasWH) {
+        Rect r = dest.Round();
+        if (r.IsEmpty()) {
+            return false;
+        }
+        *out = r;
+        return true;
+    }
+    if (!hasX && !hasY) {
+        return false;
+    }
+    float x = hasX ? dest.x : box.x;
+    float y = hasY ? dest.y : box.y;
+    float lineH = 20.f;
+    float y0 = y - 2.f;
+    if (y0 < box.y) {
+        y0 = box.y;
+    }
+    float w = (box.x + box.dx) - x;
+    if (w < 8.f) {
+        x = box.x;
+        w = box.dx;
+    }
+    Rect r = RectF{x, y0, w, lineH}.Round();
+    if (r.IsEmpty()) {
+        return false;
+    }
+    *out = r;
+    return true;
+}
+
+// Flash the same mark used for LaTeX forward search at an internal-link dest
+// (issues #1085, #5945). Always fades; ForwardSearch.HighlightPermanent stays
+// a SyncTeX-only option. Held longer than SyncTeX (kHideLinkDestMarkDelayInMs)
+// so the mark is still visible after the page jump.
+void ShowLinkDestHighlight(MainWindow* win, int pageNo, RectF dest) {
+    if (!win || !win->AsFixed()) {
+        return;
+    }
+    VecReset(win->fwdSearchMark.rects);
+    win->fwdSearchMark.show = false;
+    if (!gSettings || !gSettings->highlightLinkDestination) {
+        return;
+    }
+    DisplayModel* dm = win->AsFixed();
+    if (!dm->ValidPageNo(pageNo)) {
+        return;
+    }
+    Rect hl;
+    if (!LinkDestHighlightRect(dm, pageNo, dest, &hl)) {
+        return;
+    }
+    VecAppend(win->fwdSearchMark.rects, hl);
+    win->fwdSearchMark.page = pageNo;
+    win->fwdSearchMark.show = true;
+    win->fwdSearchMark.hideStep = 0;
+    SetTimer(win->hwndCanvas, kHideFwdSearchMarkTimerID, kHideLinkDestMarkDelayInMs, nullptr);
+    ScheduleRepaint(win, 0);
+}
+
+TempStr LinkDestHighlightResultTemp(int* exitCodeOut) {
+    auto finish = [&](int code, TempStr s) -> TempStr {
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        return s;
+    };
+    MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+    if (!win) {
+        return finish(2, str::DupTemp(StrL("NOTREADY no-window")));
+    }
+    int n = len(win->fwdSearchMark.rects);
+    return finish(0, fmt("OK show=%d page=%d nrects=%d enabled=%d", win->fwdSearchMark.show ? 1 : 0,
+                         win->fwdSearchMark.page, n, gSettings && gSettings->highlightLinkDestination ? 1 : 0));
+}
+
 void ShowForwardSearchResult(MainWindow* win, Str fileName, int line, int /* col */, int ret, int page,
                              Vec<Rect>& rects) {
     ReportIf(!win->AsFixed());
     DisplayModel* dm = win->AsFixed();
-    win->fwdSearchMark.rects.Reset();
+    VecReset(win->fwdSearchMark.rects);
     const PageInfo* pi = dm->GetPageInfo(page);
     if ((ret == PDFSYNCERR_SUCCESS) && (len(rects) > 0) && (nullptr != pi)) {
         // remember the position of the search result for drawing the rect later on
@@ -2031,8 +2303,8 @@ void ShowForwardSearchResult(MainWindow* win, Str fileName, int line, int /* col
         win->fwdSearchMark.page = page;
         win->fwdSearchMark.show = true;
         win->fwdSearchMark.hideStep = 0;
-        if (!gGlobalPrefs->forwardSearch.highlightPermanent) {
-            SetTimer(win->hwndCanvas, HIDE_FWDSRCHMARK_TIMER_ID, HIDE_FWDSRCHMARK_DELAY_IN_MS, nullptr);
+        if (!gSettings->forwardSearch.highlightPermanent) {
+            SetTimer(win->hwndCanvas, kHideFwdSearchMarkTimerID, kHideFwdSearchMarkDelayInMs, nullptr);
         }
 
         // Scroll to show the overall highlighted zone
@@ -2054,25 +2326,25 @@ void ShowForwardSearchResult(MainWindow* win, Str fileName, int line, int /* col
         return;
     }
 
-    TempStr buf = nullptr;
+    TempStr buf;
     NotificationCreateArgs args{};
     args.hwndParent = win->hwndCanvas;
     // several of these embed a file name read from the .synctex / .pdfsync file
     args.plainText = true;
     if (ret == PDFSYNCERR_SYNCFILE_NOTFOUND) {
-        args.msg = _TRA("No synchronization file found");
+        args.msg = Tr("No synchronization file found");
     } else if (ret == PDFSYNCERR_SYNCFILE_CANNOT_BE_OPENED) {
-        args.msg = _TRA("Synchronization file cannot be opened");
+        args.msg = Tr("Synchronization file cannot be opened");
     } else if (ret == PDFSYNCERR_INVALID_PAGE_NUMBER) {
-        buf = fmt(_TRA("Page %u does not exist").s, page);
+        buf = fmt(Tr("Page %u does not exist").s, page);
     } else if (ret == PDFSYNCERR_NO_SYNC_AT_LOCATION) {
-        args.msg = _TRA("No synchronization info at this position");
+        args.msg = Tr("No synchronization info at this position");
     } else if (ret == PDFSYNCERR_UNKNOWN_SOURCEFILE) {
-        buf = fmt(_TRA("Unknown source file (%s)").s, fileName);
+        buf = fmt(Tr("Unknown source file (%s)").s, fileName);
     } else if (ret == PDFSYNCERR_NORECORD_IN_SOURCEFILE) {
-        buf = fmt(_TRA("Source file %s has no synchronization point").s, fileName);
+        buf = fmt(Tr("Source file %s has no synchronization point").s, fileName);
     } else if (ret == PDFSYNCERR_NORECORD_FOR_THATLINE || ret == PDFSYNCERR_NOSYNCPOINT_FOR_LINERECORD) {
-        buf = fmt(_TRA("No result found around line %u in file %s").s, line, fileName);
+        buf = fmt(Tr("No result found around line %u in file %s").s, line, fileName);
     }
     if (buf) {
         args.msg = buf;
@@ -2206,12 +2478,12 @@ static Str HandleSearchCmd(HWND hwnd, Str cmd, bool* ack) {
     // Manual parse so search terms may contain " via "" escapes; str::Parse
     // stops at the first " and cannot express that.
     Str kPrefix = StrL("[Search(\"");
-    if (!str::StartsWith(cmd, kPrefix)) {
+    if (!str::TrimPrefix(cmd, kPrefix)) {
         return {};
     }
     int endFile = 0;
     TempStr pdfFile;
-    if (!ParseDdeQuoted(cmd, kPrefix.len, &pdfFile, &endFile)) {
+    if (!ParseDdeQuoted(cmd, 0, &pdfFile, &endFile)) {
         return {};
     }
     // expect "," after the closing quote of the path
@@ -2580,7 +2852,7 @@ Open new window.
 [NewWindow]
 */
 static Str HandleNewWindowCmd(Str cmd, bool* ack) {
-    Str kNewWindowCmd = "[NewWindow]";
+    Str kNewWindowCmd = StrL("[NewWindow]");
     if (!str::TrimPrefix(cmd, kNewWindowCmd)) {
         return {};
     }
@@ -2642,13 +2914,13 @@ static Str HandleGetFileStateCmd(Str cmd, bool* ack, str::Builder& res) {
         }
     }
     if (!win) {
-        res.Append("error: no opened file");
+        res.Append(StrL("error: no opened file"));
         return next;
     }
     if (!win->IsDocLoaded()) {
         ReloadDocument(win, false);
         if (!win->IsDocLoaded()) {
-            res.Append("error: file not loaded");
+            res.Append(StrL("error: file not loaded"));
             return next;
         }
     }
@@ -2706,7 +2978,7 @@ static Str HandleGetMousePosCmd(Str cmd, bool* ack, str::Builder& res) {
     }
     DisplayModel* dm = win ? win->AsFixed() : nullptr;
     if (!dm) {
-        res.Append("error: no document\n");
+        res.Append(StrL("error: no document\n"));
         return next;
     }
     Point pos = HwndGetCursorPos(win->hwndCanvas);
@@ -2759,7 +3031,7 @@ static Str HandleCmdCommand(HWND hwnd, Str cmd, bool* ack) {
     }
     MainWindow* win = FindMainWindowByHwnd(hwnd);
     if (!win) {
-        logfa("HandleCmdCommand: not executing DDE because MainWindow for hwnd 0x%p not found\n", hwnd);
+        logf("HandleCmdCommand: not executing DDE because MainWindow for hwnd 0x%p not found\n", hwnd);
         return {};
     }
 
@@ -2772,7 +3044,7 @@ static Str HandleCmdCommand(HWND hwnd, Str cmd, bool* ack) {
         }
     }
 
-    logfa("HandleCmdCommand: sending %d (%s) command\n", idToSend, cmdContent);
+    logf("HandleCmdCommand: sending %d (%s) command\n", idToSend, cmdContent);
     SendMessageW(win->hwndFrame, WM_COMMAND, idToSend, 0);
     *ack = true;
     return next;
@@ -2862,7 +3134,7 @@ LRESULT OnDDERequest(HWND hwnd, WPARAM wp, LPARAM lp) {
     }
     ATOM a = HIWORD(lp);
     TempStr cmd = AtomToStrTemp(a);
-    if (!cmd) {
+    if (len(cmd) == 0) {
         return 0;
     }
 
@@ -3039,6 +3311,10 @@ LRESULT OnCopyData(HWND hwnd, WPARAM wp, LPARAM lp) {
         return FALSE;
     }
 
+    if (HandleExplorerQuickLookCopyData(cds)) {
+        return TRUE;
+    }
+
     if (cds->dwData == kCopyDataOpen) {
         // Simple-open fast path used by the reuseInstance handshake: the
         // sibling SumatraPDF that Explorer just spawned is blocked in
@@ -3134,16 +3410,3 @@ LRESULT OnCopyData(HWND hwnd, WPARAM wp, LPARAM lp) {
 
     return FALSE;
 }
-
-#if 0
-bool RegisterDDeServer() {
-    DWORD ddeInst = (DWORD)-1;
-    auto err = DdeInitializeW(&ddeInst, nullptr, APPCMD_CLIENTONLY | CBF_FAIL_ADVISES, 0);
-    if (err != DMLERR_NO_ERROR) {
-        // Handle initialization error
-        logf("RegisterDDeServer: DdeInitializeW() failed with '%d'\n", (int)err);
-        return false;
-    }
-    return true;
-}
-#endif

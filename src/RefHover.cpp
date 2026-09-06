@@ -15,8 +15,7 @@
 
 #include "DocController.h"
 #include "EngineBase.h"
-#include "RefHoverInternal.h"
-#include "RefHoverText.h"
+#include "RefHover.h"
 
 RefHoverState* RefHoverCreate(HWND hwndCanvas) {
     auto* s = new RefHoverState();
@@ -63,7 +62,7 @@ void RefHoverSchedule(RefHoverState* s, HWND hwndCanvas, int delayMs, Point scre
     KillTimer(hwndCanvas, kRefHoverHideTimerID);
 
     bool sameSrc = s->displayed.srcPage == srcPage && s->displayed.srcRect == srcRect;
-    if (HwndIsVisible(s->hwndPopup) && s->displayed.destPage == destPage && s->displayed.destX == destX &&
+    if (HwndIsVisible(s->hwndPopup) && s->displayed.destPageRaw == destPage && s->displayed.destX == destX &&
         s->displayed.destY == destY && sameSrc) {
         return;
     }
@@ -237,7 +236,7 @@ void RefHoverMarkPushed(RefHoverState* s, const char* entryText) {
             return;
         }
     }
-    s->pushedEntryHashes.Append(h);
+    VecAppend(s->pushedEntryHashes, h);
 }
 
 bool RefHoverWasPushed(RefHoverState* s, const char* entryText) {
@@ -287,10 +286,10 @@ static char* ExtractJsonString(const char* json, const char* key) {
         return nullptr;
     }
     str::Builder needle;
-    needle.Append("\"");
-    needle.Append(key);
-    needle.Append("\"");
-    const char* p = strstr(json, ToCStr(needle));
+    needle.Append(StrL("\""));
+    needle.Append(Str(key));
+    needle.Append(StrL("\""));
+    const char* p = strstr(json, ToStrTemp(needle).s);
     if (!p) {
         return nullptr;
     }
@@ -338,7 +337,7 @@ static void ExistenceCheckUI(ExistenceCheckUIData* t) {
             t->s->parserCacheKey = t->parserCacheKey;
             t->parserCacheKey = nullptr; // ownership transferred to RefHoverState
         }
-        bool isActiveLibMatch = t->matchScope && str::Eq(t->matchScope, "active");
+        bool isActiveLibMatch = t->matchScope && str::Eq(Str(t->matchScope), StrL("active"));
         if (isActiveLibMatch) {
             // Record the positive answer (active library) so a subsequent
             // flake (server 500, LLM quota, network glitch) can't flip the
@@ -378,15 +377,16 @@ static void ExistenceCheckUI(ExistenceCheckUIData* t) {
 
 static void ExistenceCheckAsync(ExistenceCheckAsyncData* d) {
     str::Builder headers;
-    headers.Append("Content-Type: text/plain; charset=utf-8\r\n");
+    headers.Append(StrL("Content-Type: text/plain; charset=utf-8\r\n"));
     str::Builder body;
-    body.Append(d->entryText);
+    body.Append(Str(d->entryText));
     str::Builder resp;
     DWORD status = 0;
     // Lookup endpoint parses + duplicate-checks + caches in one round trip.
     // Result is JSON: {matches:[…], parserCacheKey:"…", parsedEntryType:"…"}.
-    bool ok = HttpPost("127.0.0.1", 23119, "/libraries/current/citations/lookup", &headers, &body, &resp, &status);
-    char* respStr = ToCStr(resp);
+    bool ok = HttpPost(StrL("127.0.0.1"), 23119, StrL("/libraries/current/citations/lookup"), &headers, &body, &resp,
+                       &status);
+    char* respStr = ToStrTemp(resp).s;
     bool exists = ok && ResponseHasMatch(respStr);
     char* parserCacheKey = ok ? ExtractJsonString(respStr, "parserCacheKey") : nullptr;
     char* matchScope = ok ? ExtractJsonString(respStr, "matchScope") : nullptr;
@@ -404,7 +404,7 @@ static void KickoffExistenceCheck(RefHoverState* s) {
     }
     auto* d = new ExistenceCheckAsyncData{s, s->entryVersion, str::Dup(Str(s->entryText)).s};
     auto fn = MkFunc0<ExistenceCheckAsyncData>(ExistenceCheckAsync, d);
-    RunAsync(fn, "RefHoverExistenceCheck");
+    RunAsync(fn, StrL("RefHoverExistenceCheck"));
 }
 
 void RefHoverCaptureEntryAndCheck(RefHoverState* s, EngineBase* engine, int destPage, RectF region, bool isBibEntry) {
@@ -499,14 +499,15 @@ RefHoverPushResult RefHoverPushToJabRef(const char* entryText, const char* parse
     // the slow path. Any other status (201, 5xx, 0) is the final answer.
     if (parserCacheKey && *parserCacheKey) {
         str::Builder cacheHeaders;
-        cacheHeaders.Append("Content-Length: 0\r\n");
+        cacheHeaders.Append(StrL("Content-Length: 0\r\n"));
         str::Builder emptyBody;
         str::Builder cacheResp;
         DWORD cacheStatus = 0;
         str::Builder url;
-        url.Append("/libraries/current/citations/");
-        url.Append(parserCacheKey);
-        bool cacheOk = HttpPost("127.0.0.1", 23119, ToStr(url), &cacheHeaders, &emptyBody, &cacheResp, &cacheStatus);
+        url.Append(StrL("/libraries/current/citations/"));
+        url.Append(Str(parserCacheKey));
+        bool cacheOk =
+            HttpPost(StrL("127.0.0.1"), 23119, ToStr(url), &cacheHeaders, &emptyBody, &cacheResp, &cacheStatus);
         if (cacheOk || cacheStatus != 410) {
             if (outHttpStatus) {
                 *outHttpStatus = (int)cacheStatus;
@@ -527,12 +528,12 @@ RefHoverPushResult RefHoverPushToJabRef(const char* entryText, const char* parse
         return RefHoverPushResult::Failed;
     }
     str::Builder headers;
-    headers.Append("Content-Type: text/plain; charset=utf-8\r\n");
+    headers.Append(StrL("Content-Type: text/plain; charset=utf-8\r\n"));
     str::Builder data;
-    data.Append(entryText);
+    data.Append(Str(entryText));
     DWORD status = 0;
     str::Builder resp;
-    bool ok = HttpPost("127.0.0.1", 23119, "/libraries/current/entries", &headers, &data, &resp, &status);
+    bool ok = HttpPost(StrL("127.0.0.1"), 23119, StrL("/libraries/current/entries"), &headers, &data, &resp, &status);
     if (outHttpStatus) {
         *outHttpStatus = (int)status;
     }

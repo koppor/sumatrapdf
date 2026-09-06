@@ -8,10 +8,16 @@ struct RenderedBitmap;
 struct IPageDestination;
 struct TocItem;
 struct PropValue;
+struct PageTextCache;
 enum class DocProp : u8;
+class EngineBase;
+
+// Location (chapter-aware page addressing) and ChapterTable live in
+// ChapterTable.h; pulled in here so every EngineBase.h consumer sees them.
+#include "ChapterTable.h"
 
 struct ILinkHandler {
-    virtual ~ILinkHandler() {};
+    virtual ~ILinkHandler() = default;
     virtual void GotoLink(IPageDestination*) = 0;
     virtual void GotoNamedDest(Str) = 0;
     virtual void GoToPage(int pageNo, bool addNavPoint) = 0;
@@ -69,11 +75,29 @@ struct PageLayout {
     explicit PageLayout(Type t) { type = t; }
     Type type{Type::Single};
     bool r2l = false;
-    // the document stated its reading direction, so r2l is its wish rather
-    // than our default. A remembered setting must not silently overrule it
+    // the document stated its reading direction (PDF /Direction or EPUB
+    // page-progression-direction), so r2l is its wish rather than our default.
+    // A remembered setting must not silently overrule it
     bool r2lDeclared = false;
     bool nonContinuous = false;
 };
+
+// PDF page boxes (ISO 32000). MediaBox is required; Crop/Bleed/Trim/Art are
+// optional and inherit from the parent /Pages node. They are per-page.
+enum class PdfPageBoxKind : u8 {
+    Media = 0,
+    Crop,
+    Bleed,
+    Trim,
+    Art
+};
+
+struct PdfPageBox {
+    PdfPageBoxKind kind{};
+    RectF rect;
+};
+
+const char* PdfPageBoxName(PdfPageBoxKind kind);
 
 extern Kind kindDestinationNone;
 extern Kind kindDestinationScrollTo;
@@ -83,6 +107,7 @@ extern Kind kindDestinationAttachment;
 extern Kind kindDestinationLaunchFile;
 extern Kind kindDestinationDjVu;
 extern Kind kindDestinationMupdf;
+extern Kind kindDestinationJsMenu;
 
 enum class TextExtractionState {
     NotExtracted,
@@ -94,8 +119,9 @@ enum class TextExtractionState {
 struct PageText {
     Str text;
     Rect* coords = nullptr;
-    int len = 0;         // number of bytes in text, not including the terminating null
-    int nCodepoints = 0; // number of Unicode codepoints and bounding boxes in coords
+    QuadF* quads = nullptr; // glyph corners; null when the engine only has AABBs
+    int len = 0;            // number of bytes in text, not including the terminating null
+    int nCodepoints = 0;    // number of Unicode codepoints and bounding boxes in coords
 };
 
 void FreePageText(PageText*);
@@ -106,9 +132,11 @@ struct IPageDestination : KindBase {
     int pageNo = -1;
     RectF rect;
     float zoom = 0.f;
+    // chapter-aware equivalent of pageNo; invalid until resolved
+    Location loc;
 
     IPageDestination() = default;
-    virtual ~IPageDestination() {};
+    virtual ~IPageDestination() = default;
 
     // rectangle of the destination on the above returned page
     virtual RectF GetRect2() { return rect; }
@@ -137,7 +165,7 @@ static inline Str PageDestGetValue(IPageDestination* dest) {
 // file path). A link inside the document has no address; its value is the
 // description the PDF gives it, which is for showing, not for copying
 static inline bool PageDestHasAddress(IPageDestination* dest) {
-    if (!dest || !dest->GetValue2()) {
+    if (!dest || len(dest->GetValue2()) == 0) {
         return false;
     }
     Kind k = dest->GetKind();
@@ -177,7 +205,7 @@ struct PageDestinationURL : IPageDestination {
     PageDestinationURL() = delete;
 
     PageDestinationURL(Str u) {
-        ReportIf(!u);
+        ReportIf(len(u) == 0);
         kind = kindDestinationLaunchURL;
         url = str::Dup(u);
     }
@@ -188,10 +216,10 @@ struct PageDestinationURL : IPageDestination {
     }
 
     Str GetValue2() override {
-        if (!url) {
+        if (len(url) == 0) {
             return {};
         }
-        if (!displayUrl) {
+        if (len(displayUrl) == 0) {
             displayUrl = str::Dup(url::DecodeTemp(url));
         }
         return displayUrl;
@@ -209,7 +237,7 @@ struct PageDestinationFile : IPageDestination {
     PageDestinationFile() = delete;
 
     PageDestinationFile(Str u, Str dest) {
-        ReportIf(!u);
+        ReportIf(len(u) == 0);
         kind = kindDestinationLaunchFile;
         path = str::Dup(u);
         this->dest = str::Dup(dest);
@@ -238,7 +266,19 @@ struct PageDestination : IPageDestination {
     Str GetName2() override;
 };
 
+// JavaScript app.popUpMenu items (Altium schematic PDFs, issue #1198).
+struct PageDestinationJsMenu : IPageDestination {
+    StrVec items;
+    Str tooltip;
+
+    PageDestinationJsMenu();
+    ~PageDestinationJsMenu() override;
+
+    Str GetValue2() override;
+};
+
 IPageDestination* NewSimpleDest(int pageNo, RectF rect, float zoom = 0.f, Str value = {});
+IPageDestination* NewSimpleDest(Arena* arena, int pageNo, RectF rect, float zoom = 0.f, Str value = {});
 
 // use in PageDestination::GetDestRect for values that don't matter
 constexpr float kDestUseDefault = -999.9f;
@@ -253,6 +293,8 @@ struct IPageElement {
     // position of the element on the page
     RectF rect;
     int pageNo = -1;
+    // chapter-aware equivalent of pageNo; invalid until resolved
+    Location loc;
 
     virtual ~IPageElement() = default;
 
@@ -295,13 +337,19 @@ struct PageElementComment : IPageElement {
 
 struct PageElementDestination : IPageElement {
     IPageDestination* dest;
+    bool destOwned = true; // false if dest is engine-owned (GetNamedDest)
 
-    PageElementDestination(IPageDestination* d) {
+    PageElementDestination(IPageDestination* d, bool owned = true) {
         kind = kindPageElementDest;
         dest = d;
+        destOwned = owned;
     }
 
-    ~PageElementDestination() override { delete dest; }
+    ~PageElementDestination() override {
+        if (destOwned) {
+            delete dest;
+        }
+    }
 
     Str GetValue() override {
         if (dest) {
@@ -315,8 +363,8 @@ struct PageElementDestination : IPageElement {
 // those are the same as F font bitmask in PDF docs
 // for TocItem::fontFlags
 // https://www.adobe.com/content/dam/acom/en/devnet/pdf/pdfs/PDF32000_2008.pdf page 369
-constexpr int fontBitItalic = 0;
-constexpr int fontBitBold = 1;
+constexpr int kFontBitItalic = 0;
+constexpr int kFontBitBold = 1;
 
 extern Kind kindTocFzOutline;
 extern Kind kindTocFzLink;
@@ -325,7 +373,7 @@ extern Kind kindTocDjvu;
 
 // an item in a document's Table of Content
 struct TocItem {
-    HTREEITEM hItem;
+    uintptr_t userData = 0;
 
     TocItem* parent;
 
@@ -343,13 +391,15 @@ struct TocItem {
     // page this item points to (-1 for non-page destinations)
     // if GetLink() returns a destination to a page, the two should match
     int pageNo;
+    // chapter-aware equivalent of pageNo; invalid until resolved
+    Location loc;
 
     // arbitrary number allowing to distinguish this TocItem
     // from any other of the same ToC tree (must be constant
     // between runs so that it can be persisted in FileState::tocState)
     int id;
 
-    int fontFlags; // fontBitBold, fontBitItalic
+    int fontFlags; // kFontBitBold, kFontBitItalic
     Color color;
 
     IPageDestination* dest;
@@ -382,9 +432,10 @@ void FreeTocItemRec(Arena* arena, TocItem* item);
 
 struct TocTree : TreeModel {
     TocItem* root = nullptr;
+    Arena* arena = nullptr;
 
     TocTree() = default;
-    explicit TocTree(TocItem* root);
+    explicit TocTree(TocItem* root, Arena* arena = nullptr);
     ~TocTree() override;
 
     TreeItem Root() override;
@@ -396,9 +447,18 @@ struct TocTree : TreeModel {
     bool IsExpanded(TreeItem) override;
     bool IsChecked(TreeItem) override;
 
-    void SetHandle(TreeItem, HTREEITEM) override;
-    HTREEITEM GetHandle(TreeItem) override;
+    void SetUserData(TreeItem, uintptr_t) override;
+    uintptr_t GetUserData(TreeItem) override;
 };
+
+TocTree* AllocTocTree(Arena* arena, TocItem* root);
+void DestroyTocTree(TocTree* tree);
+
+void ResolveTocPages(EngineBase* engine, TocTree* toc);
+
+// print / dump / full-document search / PDF export / stress test: lay out
+// every chapter. No-op for a single-chapter document or a null engine
+void EnsureFullLayout(EngineBase* engine);
 
 struct VisitTocTreeData {
     TocItem* ti = nullptr;
@@ -422,11 +482,21 @@ struct DarkModeProfile;
 
 struct RenderPageArgs {
     int pageNo = 0;
+    // chapter-aware equivalent of pageNo; invalid until resolved
+    Location loc;
     float zoom = 0.f;
     int rotation = 0;
     /* if nullptr: defaults to the page's mediabox */
     RectF* pageRect = nullptr;
     RenderTarget target = RenderTarget::View;
+    // the caller paints a background first and composites the page over it, so
+    // a page with transparency should keep its alpha instead of being flattened
+    // onto white. Only the canvas does that; print and export need an opaque
+    // page, and so does anything that blits the result with SRCCOPY (#5844)
+    bool keepAlpha = false;
+    // clear the page pixmap to alpha 0 so the canvas background (solid colour
+    // or a checkerboard) shows through unpainted areas (issue #1809)
+    bool transparentBackdrop = false;
     AbortCookie** cookie_out = nullptr;
     // dark/recolor rendering profile for View renders (see PdfDarkMode.h);
     // owned by the caller, only valid for the duration of RenderPage()
@@ -458,6 +528,7 @@ class EngineBase {
     // hex-encoded password fingerprint + crypt key; arena-allocated
     Str decryptionKey;
     bool hasPageLabels = false;
+    int logicalPageCount = 0;
     bool hideAnnotations = false;
     bool disableAntiAlias = false;
     bool disableAutoLinks = false;
@@ -478,11 +549,38 @@ class EngineBase {
     bool HasErrors();
     TempStr GetErrorsTextTemp();
 
-    int PageCount() const;
+    int PageCount();
+
+    // chapter-aware page addressing; single-chapter engines report ChapterCount() == 1
+    // and behave exactly as the flat pageNo API always has
+    int ChapterCount();
+    bool HasChapters();
+    int ChapterPageCount(int chapter);
+    bool IsChapterLaidOut(int chapter);
+    Location LocationFromPageNo(int pageNo);
+    int PageNoFromLocation(Location loc);
+    Location NextLocation(Location loc);
+    Location PrevLocation(Location loc);
+    Location FirstLocation();
+    Location LastLocation();
+    Location ClampLocation(Location loc);
+    int LayoutGeneration();
+    void EnsureAllChaptersLaidOut();
+    // called (from any thread) whenever LayoutGeneration() actually changes
+    void SetOnLayoutChanged(const Func0& fn) { onLayoutChanged = fn; }
+
+    // real page count for a chapter; engines with more than one chapter override this
+    virtual int LayOutChapter(int chapter);
+    // persisted position that survives re-pagination; default is "chapter:page:chapterPageCount"
+    virtual TempStr MakeBookmarkTemp(Location loc);
+    virtual Location LookupBookmark(Str s);
+    // resolves dest->loc (or dest->pageNo) to a Location, caching it on dest
+    virtual Location ResolveDest(IPageDestination* dest);
 
     // the box containing the visible page content (usually RectF(0, 0, pageWidth, pageHeight))
     virtual RectF PageMediabox(int pageNo) = 0;
     virtual RectF PageContentBox(int pageNo, RenderTarget target = RenderTarget::View);
+    virtual void GetPdfPageBoxes(int pageNo, Vec<PdfPageBox>& out);
 
     // renders a page into a cacheable Pixmap
     // (*cookie_out must be deleted after the call returns)
@@ -508,8 +606,9 @@ class EngineBase {
     bool HasTextForPage(int pageNo);
     TextExtractionState GetTextExtractionState(int pageNo);
     void RequestTextExtraction(int pageNo);
-    Str GetTextForPage(int pageNo, int* lenOut = nullptr, Rect** coordsOut = nullptr);
-    bool TryGetTextForPage(int pageNo, int* lenOut = nullptr, Rect** coordsOut = nullptr);
+    Str GetTextForPage(int pageNo, int* lenOut = nullptr, Rect** coordsOut = nullptr, QuadF** quadsOut = nullptr);
+    bool TryGetTextForPage(int pageNo, int* lenOut = nullptr, Rect** coordsOut = nullptr, QuadF** quadsOut = nullptr);
+    void InvalidateTextForPage(int pageNo);
     virtual void ReleaseTextExtractionThreadContext() {}
     // pages where clipping doesn't help are rendered in larger tiles
     virtual bool HasClipOptimizations(int pageNo) = 0;
@@ -535,16 +634,18 @@ class EngineBase {
     // returns the element at a given point or nullptr if there's none
     virtual IPageElement* GetElementAtPos(int pageNo, PointF pt) = 0;
 
+    // engine-owned; do not delete
     virtual IPageDestination* GetNamedDest(Str name);
 
     // 1-based page from safe PDF /OpenAction GoTo, or 0 (issue #1631)
     virtual int GetOpenActionPageNo() { return 0; }
 
-    bool HasToc();
+    virtual bool HasToc();
 
     virtual TocTree* GetToc();
 
     bool HasPageLabels() const;
+    int LogicalPageCount();
 
     virtual TempStr GetPageLabeTemp(int pageNo) const;
 
@@ -573,7 +674,7 @@ class EngineBase {
         (void)rotation;
         (void)renderPageRect;
         (void)bmpSize;
-        skipRects.Clear();
+        VecClear(skipRects);
     }
 
     void SetFilePath(Str s);
@@ -581,13 +682,23 @@ class EngineBase {
   protected:
     virtual ~EngineBase();
 
-    // cached text, one entry per page (lazily allocated)
-    PageText* pagesText = nullptr;
-    TextExtractionState* pagesTextState = nullptr;
+    // engines with chapters call this after chapters.SetPageCount() to keep
+    // the flat pageCount total in sync
+    void SetPageCountFromChapters();
+
+    ChapterTable chapters;
+    Func0 onLayoutChanged;
+    int notifiedGeneration = 0;
+
+    // per-chapter cached text (PageTextCache, defined in EngineBase.cpp)
+    PageTextCache* pageTextCache = nullptr;
     Mutex textCacheLock;
 
     str::Builder errors;
     Mutex errorsLock;
+
+  private:
+    void EnsureChapterTable();
 };
 
 struct PasswordUI {

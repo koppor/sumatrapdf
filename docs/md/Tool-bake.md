@@ -1,14 +1,14 @@
 # sumatrapdf-tool bake
 
-> The command-line tools are provided by `sumatrapdf-tool`, which is installed next to `SumatraPDF.exe`. They only work after SumatraPDF has been installed.
+or [SumatraPDF.exe bake](Tools.md)
 
 **Available in [pre-release 3.7](https://www.sumatrapdfreader.org/prerelease)**
 
 **Usage:** `sumatrapdf-tool bake [options] input.pdf [output.pdf]`
 
-PDF format has annotations and widgets (used in forms) as special kinds of objects.
+The PDF format has annotations and widgets (used in forms) as special kinds of objects.
 
-`bake` is an advanced tool that converts annotations and widgets into regular PDF objects. It bakes PDF form and annotations into static content.
+`bake` is an advanced tool that converts annotations and widgets into regular, static PDF content.
 
 By default it bakes both annotations and form fields into the page content. Use `-A` to keep annotations as annotations (don't bake them) and `-F` to keep form fields interactive.
 

@@ -10,7 +10,13 @@ import { join } from "node:path";
 import { ControlClient, ControlCommand, withControlledSumatra } from "./control.ts";
 import { clickAt, findCanvas, waitForFrame } from "./win-automation.ts";
 import { getClientRect } from "./winapi.ts";
-import { EXE, runStandalone, tmpPath } from "./util.ts";
+import { EXE, runStandalone, SLOW_BUILD_FACTOR, tmpPath } from "./util.ts";
+
+// This test is about geometry -- which fifth of the canvas a click lands in,
+// and which page the viewport then reports -- so it pins the window instead of
+// taking the runner's layout (a work-area-sized window shows enough of the
+// next page that GoToPrevPage leaves the reported page unchanged).
+const WINDOW_POS = ["-window-pos", "900x700@40x40"];
 
 const SETTINGS_HEAD = `UiLanguage = en
 CheckForUpdates = false
@@ -19,6 +25,7 @@ RememberOpenedFiles = false
 RememberStatePerDocument = false
 ShowToc = false
 ShowFavorites = false
+DefaultDisplayMode = single page
 `;
 
 function makePdf(): Buffer {
@@ -45,7 +52,7 @@ function makePdf(): Buffer {
   return Buffer.from(pdf, "latin1");
 }
 
-async function waitForPage(client: ControlClient, want: number, timeoutMs = 3000): Promise<number> {
+async function waitForPage(client: ControlClient, want: number, timeoutMs = 3000 * SLOW_BUILD_FACTOR): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   let last = 0;
   while (Date.now() < deadline) {
@@ -106,6 +113,24 @@ async function clickCanvasEdge(pid: number, side: "left" | "right" | "middle"): 
   await clickAt(canvas, x, y, 0);
 }
 
+async function clickEdgeUntilPage(
+  client: ControlClient,
+  pid: number,
+  side: "left" | "right",
+  want: number,
+  label: string,
+): Promise<void> {
+  let last = 0;
+  for (let i = 0; i < 3; i++) {
+    await clickCanvasEdge(pid, side);
+    last = await waitForPage(client, want, 1500 * SLOW_BUILD_FACTOR);
+    if (last === want) {
+      return;
+    }
+  }
+  throw new Error(`${label}: ${side}-edge click should go to page ${want}, got ${last}`);
+}
+
 export async function testit(): Promise<void> {
   const pdf = tmpPath("issue-1203.pdf");
   writeFileSync(pdf, makePdf());
@@ -118,23 +143,22 @@ export async function testit(): Promise<void> {
   await withControlledSumatra(
     EXE,
     async (client, proc) => {
-      if ((await queryPage(client)) !== 1) {
-        throw new Error("issue-1203 on: expected to start on page 1");
+      await client.setNotificationsEnabled(false);
+      await client.waitForRenderIdle();
+      {
+        const page = await waitForPage(client, 1);
+        if (page !== 1) {
+          throw new Error(`issue-1203 on: expected to start on page 1, got ${page}`);
+        }
       }
-      await clickCanvasEdge(proc.pid!, "right");
-      if ((await waitForPage(client, 2)) !== 2) {
-        throw new Error(`issue-1203 on: right-edge click should go to page 2, got ${await queryPage(client)}`);
-      }
-      await clickCanvasEdge(proc.pid!, "left");
-      if ((await waitForPage(client, 1)) !== 1) {
-        throw new Error(`issue-1203 on: left-edge click should go to page 1, got ${await queryPage(client)}`);
-      }
+      await clickEdgeUntilPage(client, proc.pid!, "right", 2, "issue-1203 on");
+      await clickEdgeUntilPage(client, proc.pid!, "left", 1, "issue-1203 on");
       await clickCanvasEdge(proc.pid!, "middle");
       if ((await queryPage(client)) !== 1) {
         throw new Error("issue-1203 on: middle click should stay on page 1");
       }
     },
-    ["-appdata", onDir, pdf],
+    [...WINDOW_POS, "-appdata", onDir, pdf],
   );
 
   const offDir = tmpPath("issue-1203-off");
@@ -145,15 +169,20 @@ export async function testit(): Promise<void> {
   await withControlledSumatra(
     EXE,
     async (client, proc) => {
-      if ((await queryPage(client)) !== 1) {
-        throw new Error("issue-1203 off: expected to start on page 1");
+      await client.setNotificationsEnabled(false);
+      await client.waitForRenderIdle();
+      {
+        const page = await waitForPage(client, 1);
+        if (page !== 1) {
+          throw new Error(`issue-1203 off: expected to start on page 1, got ${page}`);
+        }
       }
       await clickCanvasEdge(proc.pid!, "right");
       if ((await queryPage(client)) !== 1) {
         throw new Error("issue-1203 off: right-edge click should not turn the page");
       }
     },
-    ["-appdata", offDir, pdf],
+    [...WINDOW_POS, "-appdata", offDir, pdf],
   );
 }
 

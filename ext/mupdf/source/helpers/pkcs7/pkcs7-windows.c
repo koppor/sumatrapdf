@@ -16,6 +16,8 @@
 #include <wincrypt.h>
 #include <ncrypt.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdint.h>
 
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "ncrypt.lib")
@@ -610,6 +612,76 @@ static WCHAR* utf8_to_wide(fz_context* ctx, const char* s) {
     return w;
 }
 
+// Takes ownership of hStore and cert on success. On failure the caller still
+// owns them. The private key is acquired once here to fail early; CryptSignMessage
+// reacquires it via the cert's CERT_KEY_PROV_INFO_PROP_ID.
+static pdf_pkcs7_signer* windows_make_signer(fz_context* ctx, HCERTSTORE hStore, PCCERT_CONTEXT cert) {
+    HCRYPTPROV_OR_NCRYPT_KEY_HANDLE hKey = 0;
+    DWORD keySpec = 0;
+    BOOL mustFree = FALSE;
+    // ALLOW_NCRYPT: CurrentUser\MY certs are often CNG (software or smart card).
+    // COMPARE_KEY is CAPI-oriented and fails those with NTE_BAD_PROV_TYPE.
+    if (!CryptAcquireCertificatePrivateKey(cert, CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG, NULL, &hKey, &keySpec,
+                                           &mustFree)) {
+        fz_throw(ctx, FZ_ERROR_GENERIC, "CryptAcquireCertificatePrivateKey failed (gle=%lu)", GetLastError());
+    }
+    if (mustFree) {
+        if (keySpec == CERT_NCRYPT_KEY_SPEC) {
+            NCryptFreeObject((NCRYPT_KEY_HANDLE)hKey);
+        } else {
+            CryptReleaseContext((HCRYPTPROV)hKey, 0);
+        }
+    }
+
+    windows_signer* signer = fz_malloc_struct(ctx, windows_signer);
+    signer->base.keep = windows_keep_signer;
+    signer->base.drop = windows_drop_signer;
+    signer->base.get_signing_name = windows_get_signing_name;
+    signer->base.max_digest_size = windows_max_digest_size;
+    signer->base.create_digest = windows_create_digest;
+    signer->refs = 1;
+    signer->hStore = hStore;
+    signer->cert = cert;
+    return &signer->base;
+}
+
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    return -1;
+}
+
+// Decode a SHA-1 thumbprint (40 hex digits, optional spaces or colons) into
+// 20 bytes. Returns 0 on success.
+static int parse_thumbprint(const char* hex, BYTE out[20]) {
+    int n = 0;
+    if (!hex) {
+        return -1;
+    }
+    for (const char* p = hex; *p; p++) {
+        if (*p == ' ' || *p == ':' || *p == '-') {
+            continue;
+        }
+        int hi = hex_nibble(*p);
+        if (hi < 0 || !p[1]) {
+            return -1;
+        }
+        int lo = hex_nibble(*++p);
+        if (lo < 0 || n >= 20) {
+            return -1;
+        }
+        out[n++] = (BYTE)((hi << 4) | lo);
+    }
+    return n == 20 ? 0 : -1;
+}
+
 static pdf_pkcs7_signer* pkcs7_windows_read_pfx_imp(fz_context* ctx, const char* pfile, fz_buffer* pfxBuf,
                                                     const char* pw) {
     windows_signer* signer = NULL;
@@ -647,32 +719,7 @@ static pdf_pkcs7_signer* pkcs7_windows_read_pfx_imp(fz_context* ctx, const char*
             fz_throw(ctx, FZ_ERROR_GENERIC, "PFX has no cert with a private key");
         }
 
-        // Validate at load time: acquire the key once, release it. CryptSignMessage
-        // reacquires via the cert's stored CERT_KEY_PROV_INFO_PROP_ID.
-        HCRYPTPROV_OR_NCRYPT_KEY_HANDLE hKey = 0;
-        DWORD keySpec = 0;
-        BOOL mustFree = FALSE;
-        if (!CryptAcquireCertificatePrivateKey(cert, CRYPT_ACQUIRE_COMPARE_KEY_FLAG, NULL, &hKey, &keySpec,
-                                               &mustFree)) {
-            fz_throw(ctx, FZ_ERROR_GENERIC, "CryptAcquireCertificatePrivateKey failed (gle=%lu)", GetLastError());
-        }
-        if (mustFree) {
-            if (keySpec == CERT_NCRYPT_KEY_SPEC) {
-                NCryptFreeObject((NCRYPT_KEY_HANDLE)hKey);
-            } else {
-                CryptReleaseContext((HCRYPTPROV)hKey, 0);
-            }
-        }
-
-        signer = fz_malloc_struct(ctx, windows_signer);
-        signer->base.keep = windows_keep_signer;
-        signer->base.drop = windows_drop_signer;
-        signer->base.get_signing_name = windows_get_signing_name;
-        signer->base.max_digest_size = windows_max_digest_size;
-        signer->base.create_digest = windows_create_digest;
-        signer->refs = 1;
-        signer->hStore = hStore;
-        signer->cert = cert;
+        signer = (windows_signer*)windows_make_signer(ctx, hStore, cert);
         // ownership transferred to signer — null out locals so fz_catch doesn't free them
         hStore = NULL;
         cert = NULL;
@@ -699,4 +746,565 @@ pdf_pkcs7_signer* pkcs7_windows_read_pfx(fz_context* ctx, const char* pfile, con
 
 pdf_pkcs7_signer* pkcs7_windows_read_pfx_from_buffer(fz_context* ctx, fz_buffer* buf, const char* pw) {
     return pkcs7_windows_read_pfx_imp(ctx, NULL, buf, pw);
+}
+
+// Load a signing cert from the current user's Personal (MY) store by SHA-1
+// thumbprint. The private key stays in the store; Windows will prompt for a
+// PIN if the key container is protected.
+pdf_pkcs7_signer* pkcs7_windows_read_store(fz_context* ctx, const char* thumbprint_hex) {
+    windows_signer* signer = NULL;
+    HCERTSTORE hStore = NULL;
+    PCCERT_CONTEXT cert = NULL;
+    BYTE hash[20];
+    CRYPT_HASH_BLOB blob;
+
+    fz_var(signer);
+    fz_var(hStore);
+    fz_var(cert);
+
+    fz_try(ctx) {
+        if (parse_thumbprint(thumbprint_hex, hash) != 0) {
+            fz_throw(ctx, FZ_ERROR_ARGUMENT, "invalid certificate thumbprint");
+        }
+        hStore = CertOpenSystemStoreW(0, L"MY");
+        if (!hStore) {
+            fz_throw(ctx, FZ_ERROR_GENERIC, "CertOpenSystemStore failed (gle=%lu)", GetLastError());
+        }
+        blob.cbData = sizeof(hash);
+        blob.pbData = hash;
+        cert = CertFindCertificateInStore(hStore, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0, CERT_FIND_HASH, &blob,
+                                          NULL);
+        if (!cert) {
+            fz_throw(ctx, FZ_ERROR_GENERIC, "certificate %s not found in the Windows certificate store",
+                     thumbprint_hex ? thumbprint_hex : "");
+        }
+        signer = (windows_signer*)windows_make_signer(ctx, hStore, cert);
+        hStore = NULL;
+        cert = NULL;
+    }
+    fz_catch(ctx) {
+        if (cert) {
+            CertFreeCertificateContext(cert);
+        }
+        if (hStore) {
+            CertCloseStore(hStore, 0);
+        }
+        fz_rethrow(ctx);
+    }
+    return &signer->base;
+}
+
+// ---- inspect (algorithms, issuer, expiry, digest, RFC 3161 timestamp) ----
+
+#ifndef szOID_RFC3161_counterSign
+#define szOID_RFC3161_counterSign "1.2.840.113549.1.9.16.2.14"
+#endif
+#ifndef szOID_QC_STATEMENTS
+#define szOID_QC_STATEMENTS "1.3.6.1.5.5.7.1.3"
+#endif
+#ifndef szOID_PKCS9_COUNTER_SIGNATURE
+#define szOID_PKCS9_COUNTER_SIGNATURE "1.2.840.113549.1.9.6"
+#endif
+
+static int64_t filetime_to_unix(const FILETIME* ft) {
+    ULARGE_INTEGER u;
+    const uint64_t kEpochDiff = 11644473600ULL;
+    if (!ft || (ft->dwLowDateTime == 0 && ft->dwHighDateTime == 0)) {
+        return 0;
+    }
+    u.LowPart = ft->dwLowDateTime;
+    u.HighPart = ft->dwHighDateTime;
+    if (u.QuadPart < kEpochDiff * 10000000ULL) {
+        return 0;
+    }
+    return (int64_t)(u.QuadPart / 10000000ULL - kEpochDiff);
+}
+
+static char* fz_dup_cstr(fz_context* ctx, const char* s) {
+    if (!s || !s[0]) {
+        return NULL;
+    }
+    return fz_strdup(ctx, s);
+}
+
+static const char* hash_algo_name(const char* oid) {
+    if (!oid) {
+        return NULL;
+    }
+    if (!strcmp(oid, szOID_OIWSEC_sha1) || !strcmp(oid, szOID_RSA_SHA1RSA)) {
+        return "SHA1";
+    }
+    if (!strcmp(oid, szOID_NIST_sha256) || !strcmp(oid, szOID_RSA_SHA256RSA)) {
+        return "SHA256";
+    }
+    if (!strcmp(oid, szOID_NIST_sha384) || !strcmp(oid, szOID_RSA_SHA384RSA)) {
+        return "SHA384";
+    }
+    if (!strcmp(oid, szOID_NIST_sha512) || !strcmp(oid, szOID_RSA_SHA512RSA)) {
+        return "SHA512";
+    }
+    if (!strcmp(oid, szOID_RSA_MD5) || !strcmp(oid, szOID_RSA_MD5RSA)) {
+        return "MD5";
+    }
+    return NULL;
+}
+
+static const char* sig_algo_name(const char* oid) {
+    if (!oid) {
+        return NULL;
+    }
+    if (!strcmp(oid, szOID_RSA_RSA) || !strcmp(oid, szOID_RSA_SHA1RSA) || !strcmp(oid, szOID_RSA_SHA256RSA) ||
+        !strcmp(oid, szOID_RSA_SHA384RSA) || !strcmp(oid, szOID_RSA_SHA512RSA) || !strcmp(oid, szOID_RSA_MD5RSA)) {
+        return "RSA with PKCS n\xC2\xBA 1 v.1.5";
+    }
+    if (!strcmp(oid, szOID_RSA_SSA_PSS) || !strcmp(oid, "1.2.840.113549.1.1.10")) {
+        return "RSA-PSS";
+    }
+    if (!strcmp(oid, szOID_ECC_PUBLIC_KEY) || !strncmp(oid, "1.2.840.10045.4.", 16) ||
+        !strcmp(oid, "1.2.840.10045.2.1")) {
+        return "ECDSA";
+    }
+    return oid;
+}
+
+static CRYPT_ATTRIBUTE* find_attr(PCRYPT_ATTRIBUTES attrs, const char* oid) {
+    DWORD i;
+    if (!attrs || !oid) {
+        return NULL;
+    }
+    for (i = 0; i < attrs->cAttr; i++) {
+        if (attrs->rgAttr[i].pszObjId && !strcmp(attrs->rgAttr[i].pszObjId, oid)) {
+            return &attrs->rgAttr[i];
+        }
+    }
+    return NULL;
+}
+
+static char* hex_encode(fz_context* ctx, const unsigned char* p, DWORD n) {
+    static const char hex[] = "0123456789abcdef";
+    char* out;
+    DWORD i;
+    if (!p || n == 0) {
+        return NULL;
+    }
+    out = fz_malloc(ctx, (size_t)n * 2 + 1);
+    for (i = 0; i < n; i++) {
+        out[i * 2] = hex[p[i] >> 4];
+        out[i * 2 + 1] = hex[p[i] & 0xF];
+    }
+    out[n * 2] = 0;
+    return out;
+}
+
+static unsigned char* dup_bytes(fz_context* ctx, const unsigned char* p, int n) {
+    unsigned char* out;
+    if (!p || n <= 0) {
+        return NULL;
+    }
+    out = fz_malloc(ctx, (size_t)n);
+    memcpy(out, p, (size_t)n);
+    return out;
+}
+
+static int asn1_len(const unsigned char* p, size_t n, size_t* hdr, size_t* body) {
+    if (n < 2) {
+        return -1;
+    }
+    if (p[1] < 0x80) {
+        *hdr = 2;
+        *body = p[1];
+    } else if (p[1] == 0x80) {
+        return -1;
+    } else {
+        size_t ln = p[1] & 0x7F;
+        size_t i;
+        if (ln == 0 || ln > 4 || n < 2 + ln) {
+            return -1;
+        }
+        *body = 0;
+        for (i = 0; i < ln; i++) {
+            *body = (*body << 8) | p[2 + i];
+        }
+        *hdr = 2 + ln;
+    }
+    if (*hdr + *body > n) {
+        return -1;
+    }
+    return 0;
+}
+
+static int asn1_skip(const unsigned char** p, size_t* n) {
+    size_t hdr, body;
+    if (*n < 1 || asn1_len(*p, *n, &hdr, &body) != 0) {
+        return -1;
+    }
+    *p += hdr + body;
+    *n -= hdr + body;
+    return 0;
+}
+
+static char* oid_to_dotted(fz_context* ctx, const unsigned char* p, size_t n) {
+    char buf[128];
+    size_t used = 0;
+    size_t i;
+    unsigned int v;
+    if (n < 1) {
+        return NULL;
+    }
+    used = (size_t)snprintf(buf, sizeof(buf), "%u.%u", p[0] / 40, p[0] % 40);
+    v = 0;
+    for (i = 1; i < n && used + 12 < sizeof(buf); i++) {
+        v = (v << 7) | (p[i] & 0x7F);
+        if ((p[i] & 0x80) == 0) {
+            used += (size_t)snprintf(buf + used, sizeof(buf) - used, ".%u", v);
+            v = 0;
+        }
+    }
+    return fz_dup_cstr(ctx, buf);
+}
+
+static void parse_tstinfo(fz_context* ctx, const unsigned char* p, size_t n, pkcs7_windows_ts_info* ts) {
+    size_t hdr, body;
+    const unsigned char* q;
+    size_t left;
+    if (n < 2 || p[0] != 0x30 || asn1_len(p, n, &hdr, &body) != 0) {
+        return;
+    }
+    q = p + hdr;
+    left = body;
+    if (left < 1 || q[0] != 0x02 || asn1_skip(&q, &left) != 0) {
+        return;
+    }
+    if (left >= 2 && q[0] == 0x06 && asn1_len(q, left, &hdr, &body) == 0) {
+        ts->policy_oid = oid_to_dotted(ctx, q + hdr, body);
+        q += hdr + body;
+        left -= hdr + body;
+    }
+    if (asn1_skip(&q, &left) != 0) {
+        return;
+    }
+    if (asn1_skip(&q, &left) != 0) {
+        return;
+    }
+    if (left >= 2 && (q[0] == 0x18 || q[0] == 0x17) && asn1_len(q, left, &hdr, &body) == 0 && body >= 10 &&
+        body < 32) {
+        char tmp[32];
+        SYSTEMTIME st;
+        FILETIME ft;
+        memcpy(tmp, q + hdr, body);
+        tmp[body] = 0;
+        ZeroMemory(&st, sizeof(st));
+        if (sscanf(tmp, "%4hu%2hu%2hu%2hu%2hu%2hu", &st.wYear, &st.wMonth, &st.wDay, &st.wHour, &st.wMinute,
+                   &st.wSecond) >= 4) {
+            if (SystemTimeToFileTime(&st, &ft)) {
+                ts->gen_time_unix = filetime_to_unix(&ft);
+            }
+        }
+    }
+}
+
+static char* cert_issuer_display(fz_context* ctx, PCCERT_CONTEXT cert) {
+    DWORD n = CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, CERT_NAME_ISSUER_FLAG, NULL, NULL, 0);
+    WCHAR* wbuf;
+    int u8len;
+    char* out;
+    if (n <= 1) {
+        return NULL;
+    }
+    wbuf = fz_malloc(ctx, n * sizeof(WCHAR));
+    CertGetNameStringW(cert, CERT_NAME_SIMPLE_DISPLAY_TYPE, CERT_NAME_ISSUER_FLAG, NULL, wbuf, n);
+    u8len = WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, NULL, 0, NULL, NULL);
+    out = NULL;
+    if (u8len > 1) {
+        out = fz_malloc(ctx, (size_t)u8len);
+        WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, out, u8len, NULL, NULL);
+    }
+    fz_free(ctx, wbuf);
+    return out;
+}
+
+static void inspect_timestamp_token(fz_context* ctx, unsigned char* tok, DWORD tok_len, pkcs7_windows_ts_info* ts) {
+    HCRYPTMSG hMsg = NULL;
+    HCERTSTORE hStore = NULL;
+    PCMSG_SIGNER_INFO si = NULL;
+    PCCERT_CONTEXT cert = NULL;
+    DWORD cb = 0;
+    unsigned char* inner = NULL;
+
+    hMsg = open_msg_for_metadata(tok, tok_len);
+    if (!hMsg) {
+        return;
+    }
+    if (get_signer_count(hMsg) == 0) {
+        goto done;
+    }
+    hStore = CertOpenStore(CERT_STORE_PROV_MSG, 0, 0, 0, hMsg);
+    si = get_signer_info(hMsg, 0);
+    if (hStore && si) {
+        cert = find_signer_cert(hStore, si);
+    }
+    if (cert) {
+        ts->signer_cn = get_name_string(ctx, cert, szOID_COMMON_NAME);
+        ts->issuer_cn = cert_issuer_display(ctx, cert);
+        ts->not_after_unix = filetime_to_unix(&cert->pCertInfo->NotAfter);
+        ts->cert_der_len = (int)cert->cbCertEncoded;
+        ts->cert_der = dup_bytes(ctx, cert->pbCertEncoded, ts->cert_der_len);
+    }
+    if (si && si->HashAlgorithm.pszObjId) {
+        const char* name = hash_algo_name(si->HashAlgorithm.pszObjId);
+        ts->hash_algo = fz_dup_cstr(ctx, name ? name : si->HashAlgorithm.pszObjId);
+    }
+    if (CryptMsgGetParam(hMsg, CMSG_CONTENT_PARAM, 0, NULL, &cb) && cb > 0) {
+        inner = (unsigned char*)LocalAlloc(LPTR, cb);
+        if (inner && CryptMsgGetParam(hMsg, CMSG_CONTENT_PARAM, 0, inner, &cb)) {
+            parse_tstinfo(ctx, inner, cb, ts);
+        }
+        if (inner) {
+            LocalFree(inner);
+        }
+    }
+
+done:
+    if (cert) {
+        CertFreeCertificateContext(cert);
+    }
+    if (hStore) {
+        CertCloseStore(hStore, 0);
+    }
+    if (si) {
+        LocalFree(si);
+    }
+    if (hMsg) {
+        CryptMsgClose(hMsg);
+    }
+}
+
+static int cert_has_qc_statement(PCCERT_CONTEXT cert) {
+    PCERT_EXTENSION ext;
+    static const unsigned char kQcCompliance[] = {0x04, 0x00, 0x8E, 0x46, 0x01, 0x01};
+    DWORD i;
+    if (!cert || !cert->pCertInfo) {
+        return 0;
+    }
+    ext = CertFindExtension(szOID_QC_STATEMENTS, cert->pCertInfo->cExtension, cert->pCertInfo->rgExtension);
+    if (!ext) {
+        return 0;
+    }
+    for (i = 0; i + sizeof(kQcCompliance) <= ext->Value.cbData; i++) {
+        if (memcmp(ext->Value.pbData + i, kQcCompliance, sizeof(kQcCompliance)) == 0) {
+            return 1;
+        }
+    }
+    return 1;
+}
+
+void pkcs7_windows_sig_info_clear(pkcs7_windows_sig_info* info) {
+    if (info) {
+        memset(info, 0, sizeof(*info));
+    }
+}
+
+static void free_ts(fz_context* ctx, pkcs7_windows_ts_info* ts) {
+    fz_free(ctx, ts->signer_cn);
+    fz_free(ctx, ts->issuer_cn);
+    fz_free(ctx, ts->hash_algo);
+    fz_free(ctx, ts->policy_oid);
+    fz_free(ctx, ts->cert_der);
+}
+
+void pkcs7_windows_sig_info_free(fz_context* ctx, pkcs7_windows_sig_info* info) {
+    int i;
+    if (!info) {
+        return;
+    }
+    fz_free(ctx, info->signer_cn);
+    fz_free(ctx, info->issuer_cn);
+    fz_free(ctx, info->hash_algo);
+    fz_free(ctx, info->sig_algo);
+    fz_free(ctx, info->digest_hex);
+    fz_free(ctx, info->policy_oid);
+    fz_free(ctx, info->cert_der);
+    for (i = 0; i < info->n_ts; i++) {
+        free_ts(ctx, &info->ts[i]);
+    }
+    memset(info, 0, sizeof(*info));
+}
+
+static int ts_filled(const pkcs7_windows_ts_info* ts) {
+    return ts->signer_cn || ts->gen_time_unix || ts->cert_der;
+}
+
+static void add_ts_token(fz_context* ctx, unsigned char* p, DWORD n, pkcs7_windows_sig_info* info) {
+    pkcs7_windows_ts_info* dst;
+    if (!info || info->n_ts >= PKCS7_WINDOWS_MAX_TS || !p || n == 0) {
+        return;
+    }
+    dst = &info->ts[info->n_ts];
+    memset(dst, 0, sizeof(*dst));
+    inspect_timestamp_token(ctx, p, n, dst);
+    if (!ts_filled(dst)) {
+        free_ts(ctx, dst);
+        memset(dst, 0, sizeof(*dst));
+        return;
+    }
+    info->n_ts++;
+    info->has_timestamp = 1;
+}
+
+static int is_ts_oid(const char* oid) {
+    return oid && (!strcmp(oid, szOID_RFC3161_counterSign) || !strcmp(oid, szOID_PKCS9_COUNTER_SIGNATURE) ||
+                   !strcmp(oid, "1.2.840.113549.1.9.16.2.27") || !strcmp(oid, "1.2.840.113549.1.9.16.2.48") ||
+                   !strcmp(oid, "0.4.0.19122.1.1"));
+}
+
+static void collect_ts_from_unauth(fz_context* ctx, PCRYPT_ATTRIBUTES attrs, pkcs7_windows_sig_info* info) {
+    DWORD i, v;
+    if (!attrs) {
+        return;
+    }
+    for (i = 0; i < attrs->cAttr; i++) {
+        CRYPT_ATTRIBUTE* attr = &attrs->rgAttr[i];
+        if (!is_ts_oid(attr->pszObjId)) {
+            continue;
+        }
+        for (v = 0; v < attr->cValue; v++) {
+            add_ts_token(ctx, attr->rgValue[v].pbData, attr->rgValue[v].cbData, info);
+        }
+    }
+}
+
+static void collect_ts_from_raw(fz_context* ctx, unsigned char* sig, size_t sig_len, pkcs7_windows_sig_info* info) {
+    static const unsigned char kOid14[] = {0x06, 0x0B, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x10, 0x02, 0x0E};
+    static const unsigned char kOid27[] = {0x06, 0x0B, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x10, 0x02, 0x1B};
+    static const unsigned char kOid48[] = {0x06, 0x0B, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x10, 0x02, 0x30};
+    size_t i;
+    sig_len = trim_sig(sig, sig_len);
+    for (i = 0; i + sizeof(kOid14) + 4 < sig_len && info->n_ts < PKCS7_WINDOWS_MAX_TS; i++) {
+        int hit = 0;
+        if (memcmp(sig + i, kOid14, sizeof(kOid14)) == 0) {
+            hit = (int)sizeof(kOid14);
+        } else if (memcmp(sig + i, kOid27, sizeof(kOid27)) == 0) {
+            hit = (int)sizeof(kOid27);
+        } else if (memcmp(sig + i, kOid48, sizeof(kOid48)) == 0) {
+            hit = (int)sizeof(kOid48);
+        }
+        if (!hit) {
+            continue;
+        }
+        {
+            const unsigned char* p = sig + i + (size_t)hit;
+            size_t left = sig_len - (i + (size_t)hit);
+            size_t hdr, body;
+            if (left < 2 || p[0] != 0x31 || asn1_len(p, left, &hdr, &body) != 0) {
+                continue;
+            }
+            p += hdr;
+            left = body;
+            if (left < 2 || p[0] != 0x30 || asn1_len(p, left, &hdr, &body) != 0) {
+                continue;
+            }
+            add_ts_token(ctx, (unsigned char*)p, (DWORD)(hdr + body), info);
+        }
+        i += (size_t)hit - 1;
+    }
+}
+
+int pkcs7_windows_inspect(fz_context* ctx, unsigned char* sig, size_t sig_len, pkcs7_windows_sig_info* info) {
+    HCRYPTMSG hMsg = NULL;
+    HCERTSTORE hStore = NULL;
+    PCMSG_SIGNER_INFO si = NULL;
+    PCCERT_CONTEXT cert = NULL;
+    CRYPT_ATTRIBUTE* attr;
+    int ok = 0;
+
+    if (!info) {
+        return 0;
+    }
+    pkcs7_windows_sig_info_clear(info);
+
+    hMsg = open_msg_for_metadata(sig, sig_len);
+    if (!hMsg) {
+        warn_gle(ctx, "inspect parse envelope", GetLastError());
+        return 0;
+    }
+    if (get_signer_count(hMsg) == 0) {
+        goto done;
+    }
+    hStore = CertOpenStore(CERT_STORE_PROV_MSG, 0, 0, 0, hMsg);
+    si = get_signer_info(hMsg, 0);
+    if (!si) {
+        goto done;
+    }
+    if (hStore) {
+        cert = find_signer_cert(hStore, si);
+    }
+    if (cert) {
+        info->signer_cn = get_name_string(ctx, cert, szOID_COMMON_NAME);
+        info->issuer_cn = cert_issuer_display(ctx, cert);
+        info->not_after_unix = filetime_to_unix(&cert->pCertInfo->NotAfter);
+        info->cert_der_len = (int)cert->cbCertEncoded;
+        info->cert_der = dup_bytes(ctx, cert->pbCertEncoded, info->cert_der_len);
+        info->has_qc_statement = cert_has_qc_statement(cert);
+    }
+    if (si->HashAlgorithm.pszObjId) {
+        const char* name = hash_algo_name(si->HashAlgorithm.pszObjId);
+        info->hash_algo = fz_dup_cstr(ctx, name ? name : si->HashAlgorithm.pszObjId);
+    }
+    if (si->HashEncryptionAlgorithm.pszObjId) {
+        info->sig_algo = fz_dup_cstr(ctx, sig_algo_name(si->HashEncryptionAlgorithm.pszObjId));
+    }
+    attr = find_attr(&si->AuthAttrs, szOID_RSA_messageDigest);
+    if (attr && attr->cValue > 0) {
+        CRYPT_DATA_BLOB* blob = NULL;
+        DWORD cb = 0;
+        if (CryptDecodeObjectEx(X509_ASN_ENCODING, X509_OCTET_STRING, attr->rgValue[0].pbData, attr->rgValue[0].cbData,
+                                CRYPT_DECODE_ALLOC_FLAG, NULL, &blob, &cb) &&
+            blob) {
+            info->digest_hex = hex_encode(ctx, blob->pbData, blob->cbData);
+            LocalFree(blob);
+        }
+    }
+    if (find_attr(&si->AuthAttrs, "1.2.840.113549.1.9.16.2.12") ||
+        find_attr(&si->AuthAttrs, "1.2.840.113549.1.9.16.2.47")) {
+        info->has_cades_attr = 1;
+    }
+    if (find_attr(&si->AuthAttrs, "1.2.840.113549.1.9.16.2.15")) {
+        info->has_sig_policy_attr = 1;
+    }
+    collect_ts_from_unauth(ctx, &si->UnauthAttrs, info);
+    if (info->n_ts == 0) {
+        collect_ts_from_raw(ctx, sig, sig_len, info);
+    }
+    {
+        DWORD cb = 0;
+        if (CryptMsgGetParam(hMsg, CMSG_CONTENT_PARAM, 0, NULL, &cb) && cb > 0) {
+            unsigned char* inner = (unsigned char*)LocalAlloc(LPTR, cb);
+            if (inner && CryptMsgGetParam(hMsg, CMSG_CONTENT_PARAM, 0, inner, &cb)) {
+                pkcs7_windows_ts_info ts;
+                memset(&ts, 0, sizeof(ts));
+                parse_tstinfo(ctx, inner, cb, &ts);
+                info->gen_time_unix = ts.gen_time_unix;
+                info->policy_oid = ts.policy_oid;
+            }
+            if (inner) {
+                LocalFree(inner);
+            }
+        }
+    }
+    ok = 1;
+
+done:
+    if (cert) {
+        CertFreeCertificateContext(cert);
+    }
+    if (hStore) {
+        CertCloseStore(hStore, 0);
+    }
+    if (si) {
+        LocalFree(si);
+    }
+    if (hMsg) {
+        CryptMsgClose(hMsg);
+    }
+    return ok;
 }

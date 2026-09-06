@@ -6,7 +6,7 @@
 // VirtCloseButton. Include after gui/VirtCtrl.h (and its PlatformFont/Gfx
 // prerequisites).
 
-#define kTabMinDx 100
+constexpr int kTabMinDx = 100;
 
 struct TabsCtrl;
 struct TabInfo;
@@ -15,18 +15,19 @@ struct VirtRoot;
 struct VirtCloseButton;
 struct VirtMouseEvent;
 
-#define kTabDefaultBgCol ((Color)(-1))
+constexpr Color kTabDefaultBgCol = (Color)-1;
 
 struct TabInfo {
     Str text;
     Str tooltip;
+    Str pageText;
     bool isPinned = false;
     bool canClose = true; // TODO: same as !isPinned?
     bool isDirty = false;
     // document failed to load: the title paints in red
     bool isError = false;
     UINT_PTR userData = 0;
-    Color tabColor = (Color)(0xfeffffff); // kColorUnset; use default tab color
+    Color tabColor = (Color)0xfeffffff; // kColorUnset; use default tab color
 
     TabInfo() = default;
     ~TabInfo();
@@ -153,6 +154,7 @@ struct TabsCtrl : VirtCtrl {
     void SwapTabs(int idx1, int idx2);
 
     void SetTextAndTooltip(int idx, Str text, Str tooltip);
+    void SetPageText(int idx, Str);
     void SetTabDirty(int idx, bool isDirty);
 
     int TabCount();

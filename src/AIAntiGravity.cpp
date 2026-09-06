@@ -4,7 +4,7 @@
 // Antigravity CLI provider for the AI chat sidebar (see AIChatPanel.cpp)
 
 #include "base/Base.h"
-#include "base/CmdLineArgsIter.h"
+#include "base/CmdLineArgs.h"
 #include "base/DirScan.h"
 #include "base/File.h"
 #include "base/Win.h"
@@ -14,14 +14,21 @@
 #include "gui/win/WinGui.h"
 
 #include "Settings.h"
-#include "GlobalPrefs.h"
 #include "AppSettings.h"
 #include "Translations.h"
 
 #include "AIChatCommon.h"
 #include "AIChatPanel.h"
 
+static bool gAntiGravityExecutableSearched = false;
+static Str gAntiGravityExecutablePath;
+
 static TempStr FindAntiGravityExecutableTemp() {
+    if (gAntiGravityExecutableSearched) {
+        return gAntiGravityExecutablePath;
+    }
+    gAntiGravityExecutableSearched = true;
+
     StrVec candidates;
     TempStr userProfile = GetSpecialFolderTemp(CSIDL_PROFILE);
     if (userProfile) {
@@ -41,7 +48,8 @@ static TempStr FindAntiGravityExecutableTemp() {
     TempStr res = AIChatFindExecutableTemp(candidates, WStr(L"antigravity.exe"), WStr(L"antigravity"));
     if (res) {
         logf("FindAntiGravityExecutableTemp: found %s\n", res);
-        return res;
+        gAntiGravityExecutablePath = str::Dup(res);
+        return gAntiGravityExecutablePath;
     }
     res = AIChatFindExecutableTemp(candidates, WStr(L"agy.exe"), WStr(L"agy"));
     if (res) {
@@ -49,7 +57,8 @@ static TempStr FindAntiGravityExecutableTemp() {
     } else {
         logf("FindAntiGravityExecutableTemp: not found\n");
     }
-    return res;
+    gAntiGravityExecutablePath = str::Dup(res);
+    return gAntiGravityExecutablePath;
 }
 
 bool IsAntiGravityInstalled() {
@@ -61,7 +70,7 @@ TempStr AntiGravityExecutablePathTemp() {
 }
 
 static Mutex gAntiGravityLogMutex;
-static AIChatLogger gAntiGravityLogger = {&gAntiGravityLogMutex, "antigravity-log.txt", "antigravity"};
+static AIChatLogger gAntiGravityLogger = {&gAntiGravityLogMutex, StrL("antigravity-log.txt"), StrL("antigravity")};
 
 // --- Session history ---
 
@@ -89,7 +98,7 @@ static TempStr ExtractUserTextTemp(Str line) {
         return {};
     }
     if (str::Contains(line, StrL("\"content\":\""))) {
-        TempStr content = AIChatJsonStrTemp(line, "content");
+        TempStr content = AIChatJsonStrTemp(line, StrL("content"));
         if (!str::Contains(content, StrL("<command-"))) {
             return content;
         }
@@ -98,7 +107,7 @@ static TempStr ExtractUserTextTemp(Str line) {
         bool hasText =
             str::Contains(line, StrL("\"type\":\"text\",\"text\":\"")) || str::Contains(line, StrL("\"text\":\""));
         if (hasText) {
-            TempStr text = AIChatJsonStrTemp(line, "text");
+            TempStr text = AIChatJsonStrTemp(line, StrL("text"));
             if (!str::Contains(text, StrL("<command-"))) {
                 return text;
             }
@@ -117,7 +126,7 @@ static Str GetSessionDescription(Str sessionPath) {
     Str result;
     Str line;
 
-    while (!result && str::NextLine(rest, line, rest)) {
+    while (len(result) == 0 && str::NextLine(rest, line, rest)) {
         if (len(line) == 0) {
             continue;
         }
@@ -165,13 +174,13 @@ static void CollectAntiGravitySessionsFromDir(Str projectDir, Str dir, Vec<AICha
         si.display = desc;
         si.project = str::Dup(dir);
         si.timestamp = AIChatFileTimeToMs(de->modificationTime);
-        sessions.Append(si);
+        VecAppend(sessions, si);
     }
 }
 
 static void CollectAntiGravitySessions(Str dir, Vec<AIChatSessionInfo>& sessions) {
     TempStr userProfile = GetSpecialFolderTemp(CSIDL_PROFILE);
-    if (!userProfile) {
+    if (len(userProfile) == 0) {
         return;
     }
     TempStr encodedDir = EncodeAntiGravityDirTemp(dir);
@@ -193,7 +202,7 @@ static void CollectAntiGravitySessions(Str dir, Vec<AIChatSessionInfo>& sessions
 
 static void LoadAntiGravitySessionHistory(MainWindow* win, Str sessionId, Str dir) {
     TempStr userProfile = GetSpecialFolderTemp(CSIDL_PROFILE);
-    if (!userProfile) {
+    if (len(userProfile) == 0) {
         return;
     }
     TempStr encodedDir = EncodeAntiGravityDirTemp(dir);
@@ -234,7 +243,7 @@ static void LoadAntiGravitySessionHistory(MainWindow* win, Str sessionId, Str di
             continue;
         }
         if (str::Contains(line, StrL("\"type\":\"text\""))) {
-            TempStr text = AIChatJsonStrTemp(line, "text");
+            TempStr text = AIChatJsonStrTemp(line, StrL("text"));
             if (len(text) > 0) {
                 AIChatHistoryAppendText(win, text);
                 AIChatHistoryFlushBlock(win);
@@ -244,11 +253,11 @@ static void LoadAntiGravitySessionHistory(MainWindow* win, Str sessionId, Str di
         if (!str::Contains(line, StrL("\"type\":\"tool_use\""))) {
             continue;
         }
-        TempStr toolName = AIChatJsonStrTemp(line, "name");
-        if (!toolName) {
+        TempStr toolName = AIChatJsonStrTemp(line, StrL("name"));
+        if (len(toolName) == 0) {
             continue;
         }
-        TempStr fp = AIChatJsonStrTemp(line, "file_path");
+        TempStr fp = AIChatJsonStrTemp(line, StrL("file_path"));
         str::Builder desc;
         desc.Append(fmt("Tool: %s", toolName));
         if (fp) {
@@ -266,52 +275,52 @@ struct AntiGravityProvider : AIChatProvider {
     AntiGravityProvider() {
         backend = AIChatBackend::AntiGravity;
         logger = &gAntiGravityLogger;
-        name = "Antigravity";
-        exeName = "antigravity";
-        virtualHost = "https://sumatrapdf.antigravity/";
+        name = StrL("Antigravity");
+        exeName = StrL("antigravity");
+        virtualHost = StrL("https://sumatrapdf.antigravity/");
         virtualHostW = L"https://sumatrapdf.antigravity/";
-        webViewDataDirPrefix = "AntiGravityWebView";
-        docUri = "/AI-Chat-with-document#antigravity";
-        defaultModel = "gemini-3.6-flash";
+        webViewDataDirPrefix = StrL("AntiGravityWebView");
+        docUri = StrL("/AI-Chat-with-document#antigravity");
+        defaultModel = StrL("gemini-3.6-flash");
         optionItems = "Low\0Medium\0High\0Max\0";
         optionCount = 4;
         optionDefault = 1;
-        checkboxLabel = "Auto Approve";
+        checkboxLabel = StrL("Auto Approve");
         generatesSessionId = true;
         terminateOnFinish = true;
     }
 
-    TempStr TitleTemp() override { return str::DupTemp(_TRA("Antigravity chat")); }
+    TempStr TitleTemp() override { return str::DupTemp(Tr("Antigravity chat")); }
 
     TempStr NotInstalledInstructionTemp() override {
-        return str::DupTemp(_TRA("Install Antigravity CLI to use this feature."));
+        return str::DupTemp(Tr("Install Antigravity CLI to use this feature."));
     }
 
     TempStr FindExecutableTemp() override { return FindAntiGravityExecutableTemp(); }
 
     void BuildModelsList(StrVec& models) override {
         models.Reset();
-        AIChatAppendModelUnique(models, "gemini-3.6-flash");
-        AIChatAppendModelUnique(models, "gemini-3.6-pro");
-        AIChatAppendModelUnique(models, "claude-3-5-sonnet");
-        AIChatAppendModelUnique(models, "gpt-4o");
-        Str extra = gGlobalPrefs->antiGravity.models;
+        AIChatAppendModelUnique(models, StrL("gemini-3.6-flash"));
+        AIChatAppendModelUnique(models, StrL("gemini-3.6-pro"));
+        AIChatAppendModelUnique(models, StrL("claude-3-5-sonnet"));
+        AIChatAppendModelUnique(models, StrL("gpt-4o"));
+        Str extra = gSettings->antiGravity.models;
         if (len(extra) > 0) {
             StrVec parts;
-            Split(&parts, extra, ",", true);
+            Split(&parts, extra, StrL(","), true);
             for (int i = 0; i < len(parts); i++) {
                 AIChatAppendModelUnique(models, parts[i]);
             }
         }
     }
 
-    Str GetModel() override { return gGlobalPrefs->antiGravity.model; }
-    void SetModel(Str model) override { str::ReplaceWithCopy(&gGlobalPrefs->antiGravity.model, model); }
-    int GetOption() override { return gGlobalPrefs->antiGravity.effort; }
-    void SetOption(int option) override { gGlobalPrefs->antiGravity.effort = option; }
-    bool GetFlag() override { return gGlobalPrefs->antiGravity.autoApprove; }
-    void SetFlag(bool flag) override { gGlobalPrefs->antiGravity.autoApprove = flag; }
-    Str GetBgColor() override { return gGlobalPrefs->antiGravity.bgColor.s; }
+    Str GetModel() override { return gSettings->antiGravity.model; }
+    void SetModel(Str model) override { str::ReplaceWithCopy(&gSettings->antiGravity.model, model); }
+    int GetOption() override { return gSettings->antiGravity.effort; }
+    void SetOption(int option) override { gSettings->antiGravity.effort = option; }
+    bool GetFlag() override { return gSettings->antiGravity.autoApprove; }
+    void SetFlag(bool flag) override { gSettings->antiGravity.autoApprove = flag; }
+    Str GetBgColor() override { return gSettings->antiGravity.bgColor.s; }
 
     void CollectSessions(Str dir, Vec<AIChatSessionInfo>& sessions) override {
         CollectAntiGravitySessions(dir, sessions);
@@ -323,12 +332,12 @@ struct AntiGravityProvider : AIChatProvider {
 
     TempStr BuildCmdLineTemp(const AIChatCmdArgs& args) override {
         // must match the option list ("Low\0Medium\0High\0Max\0")
-        Str efforts[] = {"low", "medium", "high", "max"};
+        Str efforts[] = {StrL("low"), StrL("medium"), StrL("high"), StrL("max")};
         int effortIdx = args.option;
         if (effortIdx < 0 || effortIdx >= 4) {
             effortIdx = 1;
         }
-        Str autoApproveFlag = args.flag ? "--dangerously-skip-permissions" : "";
+        Str autoApproveFlag = args.flag ? StrL("--dangerously-skip-permissions") : StrL("");
         // agy has no --append-system-prompt (or any system-prompt) flag, so fold
         // the file context into the user prompt itself.
         TempStr prompt = fmt("The user is currently reading the file: %s\n\n%s", args.filePath, args.escapedInput);
@@ -336,7 +345,7 @@ struct AntiGravityProvider : AIChatProvider {
         // prompt must come last, after --model/--effort/--output-format/--conversation.
         // Otherwise --output-format stream-json is dropped and agy prints plain
         // text the stream parser can't read (response comes back empty).
-        TempStr conversationArg = str::DupTemp("");
+        TempStr conversationArg = str::DupTemp(StrL(""));
         if (len(args.sessionId) > 0 && !str::Eq(args.sessionId, StrL("pending"))) {
             conversationArg = fmt("--conversation %s", args.sessionId);
         }
@@ -348,13 +357,13 @@ struct AntiGravityProvider : AIChatProvider {
     }
 
     void ParseStreamLine(Str line, AIChatStreamCtx* ctx) override {
-        AIChatLog(&gAntiGravityLogger, "<<< stream", line);
-        TempStr eventName = AIChatJsonStrTemp(line, "event");
-        if (!eventName) {
+        AIChatLog(&gAntiGravityLogger, StrL("<<< stream"), line);
+        TempStr eventName = AIChatJsonStrTemp(line, StrL("event"));
+        if (len(eventName) == 0) {
             return;
         }
         if (str::Eq(eventName, StrL("init"))) {
-            TempStr convId = AIChatJsonStrTemp(line, "conversation_id");
+            TempStr convId = AIChatJsonStrTemp(line, StrL("conversation_id"));
             if (len(convId) > 0) {
                 AIChatPostUpdate(ctx, AIChatUpdateType::SessionId, convId);
             }
@@ -362,12 +371,12 @@ struct AntiGravityProvider : AIChatProvider {
         }
         if (str::Eq(eventName, StrL("step_update"))) {
             if (str::Contains(line, StrL("\"step_type\":\"agent_response\""))) {
-                TempStr delta = AIChatJsonStrTemp(line, "text_delta");
+                TempStr delta = AIChatJsonStrTemp(line, StrL("text_delta"));
                 if (len(delta) > 0) {
                     AIChatPostUpdate(ctx, AIChatUpdateType::Text, delta);
                 }
             } else if (str::Contains(line, StrL("\"step_type\":\"tool_use\""))) {
-                TempStr toolName = AIChatJsonStrTemp(line, "tool_name");
+                TempStr toolName = AIChatJsonStrTemp(line, StrL("tool_name"));
                 if (toolName) {
                     str::Builder desc;
                     desc.Append(fmt("Tool: %s", toolName));
@@ -377,9 +386,9 @@ struct AntiGravityProvider : AIChatProvider {
             return;
         }
         if (str::Eq(eventName, StrL("result"))) {
-            TempStr status = AIChatJsonStrTemp(line, "status");
+            TempStr status = AIChatJsonStrTemp(line, StrL("status"));
             if (status && str::Eq(status, StrL("ERROR"))) {
-                TempStr err = AIChatJsonStrTemp(line, "error");
+                TempStr err = AIChatJsonStrTemp(line, StrL("error"));
                 if (err) {
                     AIChatPostUpdate(ctx, AIChatUpdateType::Error, err);
                 }

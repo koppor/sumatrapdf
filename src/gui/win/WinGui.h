@@ -22,6 +22,7 @@ enum WindowBorderStyle {
 
 struct WindowBase;
 struct ControlBase;
+struct Edit;
 struct HwndBase;
 struct VirtRoot;
 struct PlatformFont;
@@ -56,6 +57,7 @@ struct CreateControlArgs {
 
 struct CreateCustomArgs {
     HWND parent = nullptr;
+    HWND owner = nullptr;
     WStr className;
     Str title;
     DWORD style = 0;
@@ -219,7 +221,7 @@ struct WindowBase : HwndBase {
     // WM_NCHITTEST: screenPos is from lParam; set result to HT* and didHandle
     struct NcHitTestEvent {
         WindowBase* w = nullptr;
-        Point screenPos{};
+        Point screenPos;
         LRESULT result = HTCLIENT;
         bool didHandle = false;
     };
@@ -270,7 +272,7 @@ struct WindowBase : HwndBase {
         WindowBase* w = nullptr;
         UINT msg = 0;
         UINT type = 0;
-        Size size{};
+        Size size;
     };
     struct TaskbarCallbackEvent {
         WindowBase* w = nullptr;
@@ -382,6 +384,7 @@ struct WindowBase : HwndBase {
     // `vroot->focused` says which one it is
     bool TabNavigate(bool backwards);
     bool ActivateOnEnter();
+    bool MnemonicNavigate(char c);
     void SetFocusTo(ControlBase*);
     void SetFocusTo(VirtCtrl*);
 
@@ -403,6 +406,9 @@ struct WindowBase : HwndBase {
     bool closeOnEsc = false;
     // Close() on Ctrl+W (no Alt). Off by default
     bool closeOnCtrlW = false;
+    // Close() on F1 (no modifiers), so the key that opened the window also
+    // dismisses it. Off by default
+    bool closeOnF1 = false;
     // set by ScheduleDelete(); once set the window must only die via that path
     bool deleteScheduled = false;
 
@@ -480,7 +486,7 @@ struct ControlBase : ILayout, HwndBase {
         ControlBase* w = nullptr;
         UINT msg = 0;
         UINT type = 0;
-        Size size{};
+        Size size;
     };
     struct TimerEvent {
         ControlBase* w = nullptr;
@@ -531,6 +537,8 @@ struct ControlBase : ILayout, HwndBase {
 
     ControlBase();
 
+    operator HWND() const { return hwnd; }
+
     ControlBase* AsControlBase() override;
     LRESULT OnMessage(HWND, UINT, WPARAM, LPARAM) override;
 
@@ -562,13 +570,18 @@ struct ControlBase : ILayout, HwndBase {
     void SetIsVisible(bool isVisible);
     bool IsVisible() const;
 
-    bool IsFocused() const;
-    void SetFocus();
+    virtual bool IsFocused() const;
+    virtual void SetFocus();
 
     LRESULT WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
     Insets insets{};
     Size childSize;
+
+    // like HwndSlot::mapRtlX: SetBounds() x is an offset from the physical
+    // left even when the parent is RTL (a control inside a tree that already
+    // arranged itself right-to-left, like the toolbar's page box)
+    bool mapRtlX = false;
 
     // if false, WM_ERASEBKGND returns TRUE without painting (WM_PAINT covers).
     // default true: native subclassed controls keep system erase
@@ -672,6 +685,23 @@ using TextChangedHandler = Func0;
 void PostDelayedEditSelectAll(HWND);
 void PostDelayedEditCtrlBack(HWND);
 
+// The base/Win.h edit helpers, taking the control rather than its HWND, so a
+// caller that holds an Edit* can pass it straight in. A null control is the
+// same no-op a null HWND is.
+void EditSelectAll(Edit*);
+void EditSelectText(Edit*, int start, int end);
+void EditGetSelection(Edit*, int& start, int& end);
+void EditSetCursorPos(Edit*, int pos);
+void EditSetCursorPosAtEnd(Edit*);
+int EditGetTextLen(Edit*);
+void EditSetModified(Edit*, bool);
+bool EditIsModified(Edit*);
+void EditSetCueText(Edit*, Str);
+void EditSetMargins(Edit*, int left, int right);
+void EditSetNumbersOnly(Edit*, bool);
+void EditSetPasswordVisible(Edit*, bool);
+void EditSetFocus(Edit*);
+
 struct Edit : ControlBase {
     struct CreateArgs {
         HWND parent = nullptr;
@@ -679,7 +709,8 @@ struct Edit : ControlBase {
         bool withBorder = false;
         // 1px NC underline under the client area (no WS_EX_CLIENTEDGE)
         bool withBottomBorder = false;
-        // 1px NC rectangle (not the themed WS_EX_CLIENTEDGE / Win11 accent)
+        // 1px NC rectangle in the theme edge color (not WS_EX_CLIENTEDGE / Win11 accent).
+        // withBorder uses this same frame and adds GetIdealSize padding.
         bool withFrame = false;
         bool numbersOnly = false;
         bool isPassword = false;
@@ -699,8 +730,8 @@ struct Edit : ControlBase {
         int marginLeft = 0;
         int marginRight = 0;
         // center the text vertically when the control is taller than one line
-        // (single-line only; a single-line edit otherwise sits the text at the top)
-        bool centerTextVert = false;
+        // (single-line only; no-op if the box is just one line tall)
+        bool centerTextVert = true;
         PlatformFont* font = nullptr;
         bool isRtl = false;
     };
@@ -727,9 +758,8 @@ struct Edit : ControlBase {
     // DPI-scaled CreateArgs.textPadding
     int textPadding = 0;
 
-    // remembers CreateArgs.withBorder: with themes darkmodelib strips
-    // WS_EX_CLIENTEDGE / WS_BORDER and draws the border in a subclass, so
-    // window styles can't be used to detect the border
+    // remembers CreateArgs.withBorder (padded 1px frame). Not inferred from
+    // window styles: we no longer use WS_EX_CLIENTEDGE (Win11 blue accent)
     bool createdWithBorder = false;
     bool createdWithBottomBorder = false;
     bool createdWithFrame = false;
@@ -751,25 +781,14 @@ struct Edit : ControlBase {
 
     Size GetIdealSize() override;
     int LineDy();
+    HBRUSH CtlColorBrush(HDC);
 
     void SetIdealWidthChars(int nChars);
     void SetMaxWidthChars(int nChars);
     void SetIdealWidthFromText(Str s, int extraPx = 0);
-    void SetNumbersOnly(bool);
-    void SetPasswordVisible(bool);
 
     int GetLeftTextMargin();
 
-    void SetCue(Str);
-    void SetMargins(int left, int right);
-    void SetSelection(int start, int end);
-    void GetSelection(int& start, int& end) const;
-    void SelectAll();
-    void SetCursorPosition(int pos);
-    void SetCursorPositionAtEnd();
-    int GetTextLen() const;
-    void SetModified(bool);
-    bool IsModified() const;
     void SetCursorId(LPWSTR);
     bool HasBorder();
     void ApplyTextPadding();
@@ -787,6 +806,7 @@ struct Checkbox : ControlBase {
     struct CreateArgs {
         HWND parent = nullptr;
         Str text;
+        PlatformFont* font = nullptr;
         State initialState = State::Unchecked;
         bool isRtl = false;
         bool isRadio = false;
@@ -839,12 +859,32 @@ struct Progress : ControlBase {
 
 //--- DropDown
 
+struct DropDown;
+
+// The base/Win.h combo box helpers, taking the control rather than its HWND, so
+// a caller that holds a DropDown* can pass it straight in. A null control is
+// the same no-op a null HWND is.
+void CbSetCueBanner(DropDown*, Str);
+int CbGetTextLen(DropDown*);
+bool CbIsDropped(DropDown*);
+int CbGetCurrentSelection(DropDown*);
+void CbSetCurrentSelection(DropDown*, int);
+
+HWND CbEditHwnd(DropDown*);
+void CbEditSelectAll(DropDown*);
+void CbEditSelectText(DropDown*, int start, int end);
+void CbEditGetSelection(DropDown*, int& start, int& end);
+void CbEditSetModified(DropDown*, bool);
+bool CbEditIsModified(DropDown*);
+
 struct DropDown : ControlBase {
     struct CreateArgs {
         HWND parent = nullptr;
         PlatformFont* font = nullptr;
         bool isRtl = false;
         bool isEditable = false;
+        // draw a color swatch to the left of each item (annotation color lists)
+        bool colorSwatches = false;
         // TODO: model or items
     };
 
@@ -852,9 +892,17 @@ struct DropDown : ControlBase {
 
     // TODO: use DropDownModel
     StrVec items;
+    Vec<Color> itemColors; // parallel to items when colorSwatches
+    bool colorSwatches = false;
     SelectionChangedHandler onSelectionChanged;
     TextChangedHandler onTextChanged;
     SelectionChangedHandler onCloseUp;
+    // cap preferred width the same way Edit does (find bar / find window)
+    int idealDx = 0;
+    int maxDx = 0;
+    LPWSTR cursorId = nullptr;
+    // SetItems / SetText can send CBN_*; skip handlers while we rebuild the list
+    bool suppressNotify = false;
 
     DropDown();
     ~DropDown() override = default;
@@ -862,12 +910,14 @@ struct DropDown : ControlBase {
 
     Size GetIdealSize() override;
     void OnCommand(ControlBase::CommandEvent* ev);
+    void OnMessageReflect(ControlBase::MessageReflectEvent* ev);
+    bool IsFocused() const override;
+    void SetFocus() override;
 
-    int GetCurrentSelection();
-    void SetCurrentSelection(int n);
     void SetItems(StrVec& newItems);
+    void SetItemsKeepText(StrVec& newItems);
     void SetItemsSeqStrings(SeqStrings items);
-    void SetCueBanner(Str);
+    void SetCursorId(LPWSTR);
 };
 
 //--- Trackbar
@@ -988,6 +1038,7 @@ struct TreeView : ControlBase {
     void OnNotifyReflect(ControlBase::NotifyReflectEvent* ev);
 
     Size GetIdealSize() override;
+    void SetBounds(Rect) override;
     void SetToolTipsDelayTime(int type, int timeInMs);
     HWND GetToolTipsHwnd();
 

@@ -3,21 +3,22 @@
 
 // Note: they must be in this numeric order for ::Paint() logic to detect
 // page that couldn't be rendered
-constexpr int RENDER_DELAY_UNDEFINED = INT_MAX - 1;
-constexpr int RENDER_DELAY_FAILED = INT_MAX - 2;
+constexpr int kRenderDelayUndefined = INT_MAX - 1;
+constexpr int kRenderDelayFailed = INT_MAX - 2;
 
-#define INVALID_TILE_RES ((USHORT) - 1)
+constexpr USHORT kInvalidTileRes = (USHORT)-1;
 
-#define MAX_PAGE_REQUESTS 8
+constexpr int kMaxPageRequests = 8;
 // keep this value reasonably low, else we'll run out of
 // GDI resources/memory when caching many larger bitmaps
 // TODO: this should be based on amount of memory taken by rendered pages
 // i.e. one big page can use as much memory as lots of small pages
-#define MAX_BITMAPS_CACHED 128
+constexpr int kMaxBitmapsCached = 128;
 
 // predictive rendering renders up to this many pages ahead, one at a time
 // (chained), so they don't flood the render queue
 constexpr int kMaxPredictiveRequests = 4;
+constexpr int kRenderCacheAllPages = -1;
 
 struct PageInfo;
 struct Pixmap;
@@ -34,7 +35,7 @@ struct PredictiveChain {
 /* A page is split into tiles of at most TILE_MAX_W x TILE_MAX_H pixels.
    A given tile starts at (col / 2^res * page_width, row / 2^res * page_height). */
 struct TilePosition {
-    USHORT res = INVALID_TILE_RES;
+    USHORT res = kInvalidTileRes;
     USHORT row = (USHORT)-1;
     USHORT col = (USHORT)-1;
 
@@ -59,6 +60,8 @@ struct BitmapCacheEntry {
     float zoom = 0.f;
     TilePosition tile;
     int cacheIdx = -1; // index within RenderCache.cache
+    // chapter-aware equivalent of pageNo, for RekeyForLayoutChange()
+    Location loc;
 
     // owned by the BitmapCacheEntry
     Pixmap* bitmap = nullptr;
@@ -88,6 +91,8 @@ struct PageRenderRequest {
     int rotation = 0;
     float zoom = 0.f;
     TilePosition tile;
+    // chapter-aware equivalent of pageNo, for RekeyForLayoutChange()
+    Location loc;
 
     RectF pageRect; // calculated from TilePosition
     bool abort = false;
@@ -150,13 +155,13 @@ struct FinishedRequestInfo {
 };
 
 struct RenderCache {
-    BitmapCacheEntry* cache[MAX_BITMAPS_CACHED]{};
+    BitmapCacheEntry* cache[kMaxBitmapsCached]{};
     int cacheCount = 0;
     // make sure to never ask for requestAccess in a cacheAccess
     // protected critical section in order to avoid deadlocks
     RecursiveMutex cacheAccess;
 
-    PageRenderRequest requests[MAX_PAGE_REQUESTS]{};
+    PageRenderRequest requests[kMaxPageRequests]{};
     int requestCount = 0;
 
     // ring buffer of recently finished requests (for the render-info window),
@@ -183,6 +188,9 @@ struct RenderCache {
     int idleThreads = 0;
 
     Size maxTileSize;
+    // how often ReduceTileSize() had to halve maxTileSize (and drop the whole
+    // cache with it); reported by BusyInfoTemp
+    int nTileSizeReductions = 0;
     bool isRemoteSession = false;
 
     Color textColor = 0;
@@ -209,10 +217,16 @@ struct RenderCache {
     void AbortRendering(DisplayModel* dm);
     bool IsRenderingFor(DisplayModel* dm);
     bool IsBusyFor(DisplayModel* dm);
-    bool VisibleTargetTilesReady(DisplayModel* dm);
+    // one line on what the render threads and the cache are doing, for the
+    // -dbg-control render-idle snapshot
+    TempStr BusyInfoTemp(DisplayModel* dm);
+    // whyNot (optional) gets a short reason when the answer is false, e.g.
+    // "p3 miss r0/0,0": a harness that only says "not ready" is unactionable
+    bool VisibleTargetTilesReady(DisplayModel* dm, Str* whyNot = nullptr);
     bool Exists(DisplayModel* dm, int pageNo, int rotation, float zoom = kInvalidZoom, TilePosition* tile = nullptr);
     void FreeForDisplayModel(DisplayModel* dm);
     void KeepForDisplayModel(DisplayModel* oldDm, DisplayModel* newDm);
+    void RekeyForLayoutChange(DisplayModel* dm);
     void Invalidate(DisplayModel* dm, int pageNo, RectF rect);
     int Paint(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, PageInfo* pi, bool* renderOutOfDateCue);
 
@@ -224,14 +238,14 @@ struct RenderCache {
     USHORT GetMaxTileRes(DisplayModel* dm, int pageNo, int rotation);
     bool ReduceTileSize();
 
-    bool IsRenderQueueFull() const { return requestCount == MAX_PAGE_REQUESTS; }
+    bool IsRenderQueueFull() const { return requestCount == kMaxPageRequests; }
     int GetRenderDelay(DisplayModel* dm, int pageNo, TilePosition tile);
     void RequestRendering(DisplayModel* dm, int pageNo, TilePosition tile, bool clearQueueForPage = true,
                           const PredictiveChain* chain = nullptr);
     void RequestPredictiveRendering(DisplayModel* dm, int originPageNo, const int* pages, int nPages);
     bool Render(DisplayModel* dm, int pageNo, int rotation, float zoom, TilePosition* tile, RectF* pageRect,
                 const Func1<PageRenderRequest*>& renderFinishedCb, const PredictiveChain* chain = nullptr);
-    void ClearQueueForDisplayModel(DisplayModel* dm, int pageNo = kInvalidPageNo, TilePosition* tile = nullptr);
+    void ClearQueueForDisplayModel(DisplayModel* dm, int pageNo = kRenderCacheAllPages, TilePosition* tile = nullptr);
     void AbortCurrentRequest(int threadIdx);
 
     BitmapCacheEntry* Find(DisplayModel* dm, int pageNo, int rotation, float zoom = kInvalidZoom,

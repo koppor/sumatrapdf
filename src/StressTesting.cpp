@@ -19,7 +19,7 @@
 #include "DocController.h"
 #include "EngineBase.h"
 #include "EngineAll.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "ChmModel.h"
 #include "DisplayModel.h"
 #include "RenderCache.h"
@@ -32,15 +32,17 @@
 #include "WindowTab.h"
 #include "Flags.h"
 #include "SearchAndDDE.h"
+#include "CrashHandler.h"
+#include "StressTesting.h"
 
-#define FIRST_STRESS_TIMER_ID 101
+constexpr int kFirstStressTimerID = 101;
 
 constexpr int kStressTestMaxPagesPerFile = 16;
 constexpr int kStressTestMaxPagesSlowFile = 8;
 constexpr int kStressTestSlowPageMs = 4 * 1000;
 
 static bool gIsStressTesting = false;
-static int gCurrStressTimerId = FIRST_STRESS_TIMER_ID;
+static int gCurrStressTimerId = kFirstStressTimerID;
 static Kind kNotifStressTestBenchmark = "stressTestBenchmark";
 static Kind kNotifStressTestSummary = "stressTestSummary";
 static AtomicInt gStressTestFileNo = 0;
@@ -134,7 +136,7 @@ static void BenchFile(Str path, Str pagesSpec) {
         return;
     }
 
-    if (ChmModel::IsSupportedFileType(kind) && !gGlobalPrefs->chmUI.useFixedPageUI) {
+    if (ChmModel::IsSupportedFileType(kind) && !gSettings->chmUI.useFixedPageUI) {
         BenchChmLoadOnly(path);
         return;
     }
@@ -151,6 +153,8 @@ static void BenchFile(Str path, Str pagesSpec) {
 
     double timeMs = TimeSinceInMs(t);
     logf("load: %.2f ms\n", timeMs);
+    // benching every page needs the real total, not the lazy-load snapshot
+    EnsureFullLayout(engine);
     int pages = engine->PageCount();
     logf("page count: %d\n", pages);
 
@@ -161,7 +165,7 @@ static void BenchFile(Str path, Str pagesSpec) {
     TocTree* toc = engine->GetToc();
     logf("toc: %.2f ms (%s)\n", TimeSinceInMs(tToc), Str(toc ? "present" : "none"));
 
-    if (!pagesSpec) {
+    if (len(pagesSpec) == 0) {
         for (int i = 1; i <= pages; i++) {
             BenchLoadRender(engine, i);
         }
@@ -210,7 +214,7 @@ static void BenchDir(Str dir) {
     StrVec files;
     CollectFilesToBench(dir, files);
     for (int i = 0; i < len(files); i++) {
-        BenchFile(files[i], nullptr);
+        BenchFile(files[i], {});
     }
 }
 
@@ -231,7 +235,7 @@ void BenchFileOrDir(StrVec& pathsToBench) {
 static bool IsBlacklistedForStressTest(Str filePath) {
     TempStr name = path::GetBaseNameTemp(filePath);
     for (size_t i = 0; i < dimof(gStressTestBlacklist); i++) {
-        if (str::EqI(name, gStressTestBlacklist[i])) {
+        if (str::EqI(name, Str(gStressTestBlacklist[i]))) {
             return true;
         }
     }
@@ -252,7 +256,7 @@ static bool IsStressTestSupportedFile(Str filePath, Str filter) {
     if (IsSupportedFileType(kind, true) || DocIsSupportedFileType(kind) || ChmModel::IsSupportedFileType(kind)) {
         return true;
     }
-    if (!filter) {
+    if (len(filter) == 0) {
         return false;
     }
     // sniff the file's content if it matches the filter but
@@ -296,20 +300,6 @@ static TempStr FormatTimeTemp(int totalSecs) {
         return fmt("%d mins %d secs", mins, secs);
     }
     return fmt("%d secs", secs);
-}
-
-static void FormatTime(int totalSecs, str::Builder* s) {
-    int secs = totalSecs % 60;
-    int totalMins = totalSecs / 60;
-    int mins = totalMins % 60;
-    int hrs = totalMins / 60;
-    if (hrs > 0) {
-        s->Append(fmt("%d hrs %d mins %d secs", hrs, mins, secs));
-    }
-    if (mins > 0) {
-        s->Append(fmt("%d mins %d secs", mins, secs));
-    }
-    s->Append(fmt("%d secs", secs));
 }
 
 static void MakeRandomSelection(MainWindow* win, int pageNo) {
@@ -436,10 +426,10 @@ again:
         auto fn = MkFunc1(GetNextFileCb, &path);
         bool ok = queue.Access(fn);
         if (!ok) {
-            ReportIf(path);
+            ReportIf(len(path) != 0);
             return {};
         }
-        ReportIf(!path);
+        ReportIf(len(path) == 0);
         if (!IsStressTestSupportedFile(path, fileFilter)) {
             goto again;
         }
@@ -450,9 +440,7 @@ again:
     if (StrQueue::IsSentinel(path)) {
         return {};
     }
-    path = str::Dup(path);
     if (!IsStressTestSupportedFile(path, fileFilter)) {
-        str::Free(path);
         goto again;
     }
     AtomicIntInc(&nFiles);
@@ -496,7 +484,7 @@ T RemoveRandomElementFromVec(Vec<T>& v) {
     auto n = len(v);
     ReportIf(n <= 0);
     int idx = rand() % n;
-    int res = v.PopAt(idx);
+    int res = VecPopAt(v, idx);
     return res;
 }
 
@@ -529,10 +517,10 @@ static void Start(StressTest* st, TestFileProvider* fileProvider, int cycles) {
     st->cycles = cycles;
 
     if (len(st->pageRanges) == 0) {
-        st->pageRanges.Append(PageRange());
+        VecAppend(st->pageRanges, PageRange());
     }
     if (len(st->fileRanges) == 0) {
-        st->fileRanges.Append(PageRange());
+        VecAppend(st->fileRanges, PageRange());
     }
 
     TickTimer(st);
@@ -643,32 +631,35 @@ static bool OpenFile(StressTest* st, Str fileName) {
     ctrl->SetDisplayMode(DisplayMode::Continuous);
     ctrl->SetZoomVirtual(kZoomFitPage, nullptr);
     ctrl->GoToFirstPage();
-    if (st->win->uiState.tocVisible || gGlobalPrefs->showFavorites) {
-        SetSidebarVisibility(st->win, st->win->uiState.tocVisible, gGlobalPrefs->showFavorites);
+    if (st->win->uiState.tocVisible || gSettings->showFavorites) {
+        SetSidebarVisibility(st->win, st->win->uiState.tocVisible, gSettings->showFavorites);
     }
 
     st->maxPagesForFile = kStressTestMaxPagesPerFile;
     st->nPagesRenderedThisFile = 0;
-    st->pagesToRender.Clear();
+    VecClear(st->pagesToRender);
+    DisplayModel* dmChapters = ctrl->AsFixed();
+    // stress test picks pages from the full book, not just what's laid out so far
+    EnsureFullLayout(dmChapters);
     int nPages = ctrl->PageCount();
     if (IsFullRange(st->pageRanges)) {
         Vec<int> allPages;
         for (int n = 1; n <= nPages; n++) {
-            allPages.Append(n);
+            VecAppend(allPages, n);
         }
         while ((len(st->pagesToRender) < kStressTestMaxPagesPerFile) && (len(allPages) > 0)) {
             int nRandom = RemoveRandomElementFromVec(allPages);
-            st->pagesToRender.Append(nRandom);
+            VecAppend(st->pagesToRender, nRandom);
         }
     } else {
         for (int n = 1; n <= nPages; n++) {
             if (IsInRange(st->pageRanges, n)) {
-                st->pagesToRender.Append(n);
+                VecAppend(st->pagesToRender, n);
             }
         }
         for (auto&& range : st->pageRanges) {
             for (int n = range.start; n <= range.end && n <= nPages; n++) {
-                st->pagesToRender.Append(n);
+                VecAppend(st->pagesToRender, n);
             }
         }
         if (len(st->pagesToRender) == 0) {
@@ -680,7 +671,7 @@ static bool OpenFile(StressTest* st, Str fileName) {
     int randomPageIdx = rand() % len(st->pagesToRender);
     st->pageForSearchStart = st->pagesToRender[randomPageIdx];
 
-    st->currPageNo = st->pagesToRender.PopAt(0);
+    st->currPageNo = VecPopAt(st->pagesToRender, 0);
     ctrl->GoToPage(st->currPageNo, false);
     st->currPageRenderTime = TimeGet();
     ++st->nFilesProcessed;
@@ -823,7 +814,7 @@ static bool GoToNextPage(StressTest* st) {
     }
 
     RandomizeViewingState(st);
-    st->currPageNo = st->pagesToRender.PopAt(0);
+    st->currPageNo = VecPopAt(st->pagesToRender, 0);
     ctrl->GoToPage(st->currPageNo, false);
     st->currPageRenderTime = TimeGet();
 
@@ -904,14 +895,14 @@ Next:
 }
 
 // note: used from CrashHandler, shouldn't allocate memory
-static void GetLogInfo(StressTest* st, str::Builder* s) {
-    s->Append(fmt(", stress test rendered %d files in ", st->nFilesProcessed));
-    FormatTime(SecsSinceSystemTime(st->stressStartTime), s);
-    s->Append(fmt(", currPage: %d", st->currPageNo));
+static void GetLogInfo(StressTest* st) {
+    CrashInfoAppend(fmt(", stress test rendered %d files in ", st->nFilesProcessed));
+    CrashInfoAppend(FormatTimeTemp(SecsSinceSystemTime(st->stressStartTime)));
+    CrashInfoAppend(fmt(", currPage: %d", st->currPageNo));
 }
 
 // note: used from CrashHandler.cpp, should not allocate memory
-void GetStressTestInfo(str::Builder* s) {
+void GetStressTestInfo() {
     // only add paths to files encountered during an explicit stress test
     // (for privacy reasons, users should be able to decide themselves
     // whether they want to share what files they had opened during a crash)
@@ -921,15 +912,15 @@ void GetStressTestInfo(str::Builder* s) {
 
     for (int i = 0; i < len(gWindows); i++) {
         MainWindow* w = gWindows[i];
-        if (!w || !w->CurrentTab() || !w->CurrentTab()->filePath) {
+        if (!w || !w->CurrentTab() || len(w->CurrentTab()->filePath) == 0) {
             continue;
         }
 
-        s->Append("File: ");
+        CrashInfoAppend(StrL("File: "));
         Str filePath = w->CurrentTab()->filePath;
-        s->Append(filePath);
-        GetLogInfo(w->stressTest, s);
-        s->Append("\r\n");
+        CrashInfoAppend(filePath);
+        GetLogInfo(w->stressTest);
+        CrashInfoAppend(StrL("\n"));
     }
 }
 
@@ -949,7 +940,7 @@ static void PositionStressWindows(MainWindow** windows, int n) {
     } positions[4];
 
     if (n == 1) {
-        positions[0] = {wa.x, wa.y, halfDx, wa.dy};
+        positions[0] = {wa.x + halfDx, wa.y, wa.dx - halfDx, wa.dy};
     } else if (n == 2) {
         positions[0] = {wa.x, wa.y, halfDx, wa.dy};
         positions[1] = {wa.x + halfDx, wa.y, wa.dx - halfDx, wa.dy};
@@ -970,9 +961,9 @@ static void PositionStressWindows(MainWindow** windows, int n) {
 void StartStressTest(Flags* i, MainWindow* win) {
     gIsStressTesting = true;
     // TODO: for now stress testing only supports the non-ebook ui
-    gGlobalPrefs->chmUI.useFixedPageUI = true;
+    gSettings->chmUI.useFixedPageUI = true;
     // TODO: make stress test work with tabs?
-    gGlobalPrefs->useTabs = false;
+    gSettings->useTabs = false;
     // forbid entering sleep mode during tests
     SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
     srand((unsigned int)time(nullptr));

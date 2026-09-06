@@ -3,6 +3,9 @@
 
 #include "base/Base.h"
 
+#if IS_DEBUG
+#include "base/UtAssert.h"
+#endif
 #include "PageRenderPolicy.h"
 
 bool PageRenderKey::operator==(const PageRenderKey& other) const {
@@ -20,13 +23,13 @@ void PageRenderPolicyUpsert(Vec<PageRenderPolicyRequest>& requests, const PageRe
         existing = request;
         return;
     }
-    requests.Append(request);
+    VecAppend(requests, request);
 }
 
 void PageRenderPolicyDropStale(Vec<PageRenderPolicyRequest>& requests, u32 generation) {
     for (int i = len(requests) - 1; i >= 0; i--) {
         if (requests[i].generation != generation) {
-            requests.RemoveAt(i);
+            VecRemoveAt(requests, i);
         }
     }
 }
@@ -57,10 +60,7 @@ int PageRenderPolicyPickEviction(const Vec<PageRenderPolicyCacheEntry>& entries,
     return oldest;
 }
 
-#if defined(DEBUG)
-
-// must be last to over-write assert()
-#include "base/UtAssert.h"
+#if IS_DEBUG
 
 void PageRenderPolicy_UnitTests() {
     Vec<PageRenderPolicyRequest> requests;
@@ -83,9 +83,9 @@ void PageRenderPolicy_UnitTests() {
     }
 
     Vec<PageRenderPolicyCacheEntry> cache;
-    cache.Append({10, 20});
-    cache.Append({10, 5});
-    cache.Append({10, 12});
+    VecAppend(cache, {10, 20});
+    VecAppend(cache, {10, 5});
+    VecAppend(cache, {10, 12});
     utassert(PageRenderPolicyPickEviction(cache, 0) == 1);
     utassert(PageRenderPolicyPickEviction(cache, 1) == 2);
 }

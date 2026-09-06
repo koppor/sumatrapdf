@@ -10,6 +10,12 @@ void CancelDrag(MainWindow*);
 void StartAutoScrollAtCursor(MainWindow*);
 bool ShowImageOutlines();
 void ToggleShowImageOutlines();
+bool ShowTransparencyGrid();
+void ToggleTransparencyGrid();
+bool ShowPageGrid();
+void TogglePageGrid();
+void SetShowPageGrid(bool);
+void RedrawPageGridWindows();
 bool ShowFitContentArea();
 void ToggleShowFitContentArea();
 bool IsLaserPointerActive();
@@ -29,7 +35,7 @@ void DisconnectLastDragDataObject();
 constexpr UINT_PTR kSmoothScrollTimerID = 6;
 // Timer for smooth middle-click auto-scroll (issue #2693)
 constexpr UINT_PTR kAutoScrollTimerID = 7;
-// Debounce for re-numbering keyboard link targets after scrolling (issue #2629)
+// Debounce for relabeling keyboard link targets after scrolling (issue #2629)
 constexpr UINT_PTR kLinkFollowTimerID = 11;
 constexpr uint kLinkFollowRecomputeDelayInMs = 300;
 // Blink for the keyboard text selection caret (issues #4684, #4116)
@@ -41,3 +47,8 @@ constexpr uint kSelectionToolbarShowDelayInMs = 500;
 // either as a gesture stream or as synthesized mouse messages, so the hold is
 // detected both ways; this timer is the mouse-message half.
 constexpr UINT_PTR kTouchLongPressTimerID = 14;
+// Debounce PDF page rendering while an annotation resize is in progress.
+constexpr UINT_PTR kAnnotationResizeRerenderTimerID = 15;
+constexpr uint kAnnotationResizeRerenderDelayMs = 125;
+
+void CancelAnnotationResizeRerender(MainWindow* win);

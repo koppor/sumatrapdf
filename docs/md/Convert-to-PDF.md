@@ -41,6 +41,7 @@ SumatraPDF prefers to **embed the original image bytes** when PDF can use them d
 | Format                                          | Behavior                                                                        |
 | ----------------------------------------------- | ------------------------------------------------------------------------------- |
 | **JPEG**, **PNG**                               | Embedded as-is (usually the most compact)                                       |
+| **Animated GIF, multi-page TIFF, ICO**          | Each frame is rendered as its own page (the file is not per-page bytes)         |
 | **WebP, JPEG XL, HEIC, AVIF, TGA**, and similar | Decoded, encoded as PNG, then losslessly recompressed (zopfli) before embedding |
 | If encode/embed fails                           | Page is **rendered** into the PDF as a last resort                              |
 | If every path fails for a page                  | That page is **skipped** (conversion continues with the rest)                   |
@@ -60,7 +61,7 @@ For a single open image file, **Convert to PDF…** and converting that one page
 
 ## From the command line
 
-To convert images or other documents to PDF without the GUI dialog, use `sumatrapdf-tool` (installed next to `SumatraPDF.exe` after a normal install):
+To convert images or other documents to PDF without the GUI dialog, use `sumatrapdf-tool.exe convert` or [SumatraPDF.exe convert](Tools.md):
 
 ```
 sumatrapdf-tool convert -o output.pdf input.png

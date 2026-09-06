@@ -14,7 +14,6 @@
 
 #include "Settings.h"
 #include "AppSettings.h"
-#include "GlobalPrefs.h"
 #include "MainWindow.h"
 #include "Theme.h"
 #include "SumatraConfig.h"
@@ -22,7 +21,7 @@
 #include "AppTools.h"
 #include "Translations.h"
 #include "DarkMode_win.h"
-#include "InverseSearchDialog.h"
+#include "SumatraDialogs.h"
 
 // Label, Help and OK/Cancel are VirtCtrl; the command line is an editable DropDown.
 // Same WindowBase layout as Change Theme / Custom Zoom.
@@ -55,18 +54,18 @@ void InverseSearchWnd::FillCommands() {
         return;
     }
     StrVec items;
-    Str cmdLine = gGlobalPrefs ? gGlobalPrefs->inverseSearchCmdLine : Str{};
+    Str cmdLine = gSettings ? gSettings->inverseSearchCmdLine : Str{};
     CollectInverseSearchCommands(items, cmdLine);
-    if (!cmdLine && len(items) > 0) {
+    if (len(cmdLine) == 0 && len(items) > 0) {
         cmdLine = items[0];
     }
     dropDown->SetItems(items);
-    if (!cmdLine) {
+    if (len(cmdLine) == 0) {
         return;
     }
     int idx = items.Find(cmdLine);
     if (idx >= 0) {
-        dropDown->SetCurrentSelection(idx);
+        CbSetCurrentSelection(dropDown, idx);
     } else {
         dropDown->SetText(cmdLine);
     }
@@ -78,14 +77,14 @@ void InverseSearchWnd::OnCancel(VirtMouseEvent*) {
 
 void InverseSearchWnd::OnOk(VirtMouseEvent*) {
     TempStr tmp = dropDown ? dropDown->GetTextTemp() : Str{};
-    str::ReplaceWithCopy(&gGlobalPrefs->inverseSearchCmdLine, tmp);
-    gGlobalPrefs->enableTeXEnhancements = true;
+    str::ReplaceWithCopy(&gSettings->inverseSearchCmdLine, tmp);
+    gSettings->enableTeXEnhancements = true;
     SaveSettings();
     ScheduleDelete();
 }
 
 void InverseSearchWnd::OnHelp(VirtMouseEvent*) {
-    LaunchDocumentation("/LaTeX-integration");
+    LaunchDocumentation(StrL("/LaTeX-integration"));
 }
 
 static void OnClose(WindowBase::CloseEvent* /*ev*/) {
@@ -105,7 +104,8 @@ bool InverseSearchWnd::Create(MainWindow* mainWin) {
 
     {
         CreateCustomArgs args;
-        args.title = _TRA("Set inverse search command line");
+        args.owner = win ? win->hwndFrame : nullptr;
+        args.title = Tr("Set inverse search command line");
         args.visible = false;
         args.style = WS_POPUPWINDOW | WS_CAPTION;
         args.font = GetFont();
@@ -123,7 +123,7 @@ bool InverseSearchWnd::Create(MainWindow* mainWin) {
 
     {
         auto* c = NewVirtText({
-            .s = _TRA("Enter the command line to invoke when you double-click on the PDF document:"),
+            .s = Tr("Enter the command line to invoke when you double-click on the PDF document:"),
             .font = font,
             .isRtl = isRtl,
             .padding = DpiScaledInsets(0, 0, 4, 0),
@@ -152,7 +152,7 @@ bool InverseSearchWnd::Create(MainWindow* mainWin) {
         row->gap = font->averageCharWidth;
         auto pad = Insets{4, 0, 4, 0};
 
-        btnHelp = NewThemedButton(hwnd, _TRA("Help"), font, false);
+        btnHelp = NewThemedButton(hwnd, Tr("Help"), font, false);
         btnHelp->onClick = MkMethod1<InverseSearchWnd, VirtMouseEvent*, &InverseSearchWnd::OnHelp>(this);
         row->AddChild(new Padding(btnHelp, pad));
 
@@ -160,10 +160,10 @@ bool InverseSearchWnd::Create(MainWindow* mainWin) {
         right->alignMain = MainAxisAlign::MainEnd;
         right->alignCross = CrossAxisAlign::CrossCenter;
         right->gap = font->averageCharWidth;
-        btnCancel = NewThemedButton(hwnd, _TRA("Cancel"), font, false);
+        btnCancel = NewThemedButton(hwnd, Tr("Cancel"), font, false);
         btnCancel->onClick = MkMethod1<InverseSearchWnd, VirtMouseEvent*, &InverseSearchWnd::OnCancel>(this);
         right->AddChild(new Padding(btnCancel, pad));
-        btnOk = NewThemedButton(hwnd, _TRA("OK"), font, true);
+        btnOk = NewThemedButton(hwnd, Tr("OK"), font, true);
         btnOk->onClick = MkMethod1<InverseSearchWnd, VirtMouseEvent*, &InverseSearchWnd::OnOk>(this);
         right->AddChild(new Padding(btnOk, pad));
         row->AddChild(right);
@@ -210,4 +210,5 @@ void ShowInverseSearchDialog(MainWindow* win) {
         return;
     }
     gInverseSearchWnd = wnd;
+    RunModalWindow(wnd->hwnd, win ? win->hwndFrame : nullptr);
 }

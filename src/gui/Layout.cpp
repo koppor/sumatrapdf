@@ -4,6 +4,9 @@
 #include "base/Base.h"
 #include "gui/Dpi.h"
 
+#if IS_DEBUG
+#include "base/UtAssert.h"
+#endif
 #include "gui/Layout.h"
 
 static bool gEnableDebugLayout = false;
@@ -17,7 +20,7 @@ void dbglayout(Str s) {
 
 static void LogAppendNum(str::Builder& s, int n, Str suffix) {
     if (n == Inf) {
-        s.Append("Inf");
+        s.Append(StrL("Inf"));
     } else {
         s.Append(fmt("%d", n));
     }
@@ -29,22 +32,23 @@ static void LogAppendNum(str::Builder& s, int n, Str suffix) {
 void LogConstraints(Constraints c, Str suffix) {
     // Debug-only; "dx: Inf - Inf dy: Inf - Inf <suffix>" is tiny.
     char sScratch[128]{};
-    str::Builder s(Str(sScratch, sizeofi(sScratch)));
+    str::Builder s;
+    str::BuilderUseExternalBuffer(s, Str(sScratch, sizeofi(sScratch)));
     if (c.min.dx == c.max.dx) {
-        dbglayout("dx: ");
-        LogAppendNum(s, c.min.dx, " ");
+        dbglayout(StrL("dx: "));
+        LogAppendNum(s, c.min.dx, StrL(" "));
     } else {
-        dbglayout("dx: ");
-        LogAppendNum(s, c.min.dx, " - ");
-        LogAppendNum(s, c.max.dx, " ");
+        dbglayout(StrL("dx: "));
+        LogAppendNum(s, c.min.dx, StrL(" - "));
+        LogAppendNum(s, c.max.dx, StrL(" "));
     }
     if (c.min.dy == c.max.dy) {
-        dbglayout("dy: ");
-        LogAppendNum(s, c.min.dy, " ");
+        dbglayout(StrL("dy: "));
+        LogAppendNum(s, c.min.dy, StrL(" "));
     } else {
-        dbglayout("dy: ");
-        LogAppendNum(s, c.min.dy, " - ");
-        LogAppendNum(s, c.max.dy, " ");
+        dbglayout(StrL("dy: "));
+        LogAppendNum(s, c.min.dy, StrL(" - "));
+        LogAppendNum(s, c.max.dy, StrL(" "));
     }
     s.Append(suffix);
     dbglayout(fmt("%s", ToStr(s)));
@@ -325,8 +329,8 @@ Padding::~Padding() {
 
 // ILayout
 Size Padding::Layout(const Constraints bc) {
-    dbglayout("Padding::Layout() ");
-    LogConstraints(bc, "\n");
+    dbglayout(StrL("Padding::Layout() "));
+    LogConstraints(bc, StrL("\n"));
 
     auto hinset = insets.left + insets.right;
     auto vinset = insets.top + insets.bottom;
@@ -451,7 +455,7 @@ Size VBox::Layout(const Constraints bc) {
     totalFlex = updateFlex(children, alignMain);
 
     dbglayout(fmt("VBox::Layout() %d children, %d totalFlex ", n, totalFlex));
-    LogConstraints(bc, "\n");
+    LogConstraints(bc, StrL("\n"));
 
     // Determine the constraints for layout of child elements.
     auto cbc = bc;
@@ -489,7 +493,7 @@ Size VBox::Layout(const Constraints bc) {
 
         // Perform layout of the element.  Track impact on width and height.
         auto size = v.layout->Layout(cbc);
-        v.size = size; // TODO: does that work?
+        v.size = size;
         height += size.dy;
         width = std::max(width, size.dx);
     }
@@ -586,7 +590,7 @@ int VBox::MinIntrinsicHeight(int width) {
             }
         }
     }
-    return size + gap * (count - 1);
+    return size + (gap * (count - 1));
 }
 
 void VBox::SetBounds(Rect bounds) {
@@ -708,7 +712,7 @@ boxElementInfo& VBox::AddChild(ILayout* child, int flex) {
     boxElementInfo v{};
     v.layout = child;
     v.flex = flex;
-    children.Append(v);
+    VecAppend(children, v);
     auto n = len(children);
     return children[n - 1];
 }
@@ -761,7 +765,7 @@ Size HBox::Layout(const Constraints bc) {
     }
     totalFlex = updateFlex(children, alignMain);
     dbglayout(fmt("HBox::Layout() %d children, %d totalFlex ", n, totalFlex));
-    LogConstraints(bc, "\n");
+    LogConstraints(bc, StrL("\n"));
 
     // Determine the constraints for layout of child elements.
     auto cbc = bc;
@@ -902,7 +906,7 @@ int HBox::MinIntrinsicWidth(int height) {
             }
         }
     }
-    return size + gap * (count - 1);
+    return size + (gap * (count - 1));
 }
 
 // mirror a child's x against the original HBox so MainStart packs to the right
@@ -1039,7 +1043,7 @@ boxElementInfo& HBox::AddChild(ILayout* child, int flex) {
     boxElementInfo v{};
     v.layout = child;
     v.flex = flex;
-    children.Append(v);
+    VecAppend(children, v);
     auto n = len(children);
     return children[n - 1];
 }
@@ -1071,8 +1075,8 @@ Align::~Align() {
 
 // ILayout
 Size Align::Layout(const Constraints bc) {
-    dbglayout("Align::Layout() ");
-    LogConstraints(bc, "\n");
+    dbglayout(StrL("Align::Layout() "));
+    LogConstraints(bc, StrL("\n"));
 
     Size size = Child->Layout(bc.Loosen());
     childSize = size;
@@ -1150,13 +1154,13 @@ void Table::SetSize(int nRows, int nCols) {
     RemoveAllCells();
     rows = nRows;
     cols = nCols;
-    cells.Clear();
+    VecClear(cells);
     TableCell empty;
     for (int i = 0; i < rows * cols; i++) {
-        cells.Append(empty);
+        VecAppend(cells, empty);
     }
-    colWidths.Clear();
-    rowHeights.Clear();
+    VecClear(colWidths);
+    VecClear(rowHeights);
 }
 
 void Table::MarkCovered(int row, int col, int rowSpan, int colSpan, bool covered) {
@@ -1257,9 +1261,17 @@ static int TracksSize(Vec<int>& tracks, int start, int span, int gap) {
     if (span < 1) {
         return 0;
     }
-    int size = gap * (span - 1);
+    int size = 0;
+    int n = 0;
     for (int i = start; i < start + span; i++) {
+        if (tracks[i] <= 0) {
+            continue;
+        }
+        if (n > 0) {
+            size += gap;
+        }
         size += tracks[i];
+        n++;
     }
     return size;
 }
@@ -1267,8 +1279,19 @@ static int TracksSize(Vec<int>& tracks, int start, int span, int gap) {
 // where track idx starts, relative to the first track
 static int TracksStart(Vec<int>& tracks, int idx, int gap) {
     int pos = 0;
+    int n = 0;
     for (int i = 0; i < idx; i++) {
-        pos += tracks[i] + gap;
+        if (tracks[i] <= 0) {
+            continue;
+        }
+        if (n > 0) {
+            pos += gap;
+        }
+        pos += tracks[i];
+        n++;
+    }
+    if (n > 0 && idx < len(tracks) && tracks[idx] > 0) {
+        pos += gap;
     }
     return pos;
 }
@@ -1277,10 +1300,10 @@ static int TracksStart(Vec<int>& tracks, int idx, int gap) {
 // that span several tracks are applied afterwards, so they only stretch the
 // tracks they span when what those already give them isn't enough
 void Table::Measure() {
-    colWidths.Clear();
-    colWidths.AppendBlanks(cols);
-    rowHeights.Clear();
-    rowHeights.AppendBlanks(rows);
+    VecClear(colWidths);
+    VecAppendBlanks(colWidths, cols);
+    VecClear(rowHeights);
+    VecAppendBlanks(rowHeights, rows);
 
     Constraints loose = ExpandInf();
     for (int row = 0; row < rows; row++) {
@@ -1378,6 +1401,10 @@ void Table::SetBounds(Rect r) {
         // SetBounds() without a preceding Layout()
         Measure();
     }
+    int extraDx = ContentRect().dx - TracksSize(colWidths, 0, cols, colGap);
+    if (extraDx > 0 && cols > 0) {
+        colWidths[cols - 1] += extraDx;
+    }
     for (int row = 0; row < rows; row++) {
         for (int col = 0; col < cols; col++) {
             TableCell& cell = cells[CellIdx(row, col)];
@@ -1399,7 +1426,6 @@ Size LayoutToSize(ILayout* layout, const Size size) {
     return newSize;
 }
 
-// TODO: probably not needed
 Insets DefaultInsets() {
     const int padding = 8;
     return Insets{padding, padding, padding, padding};
@@ -1494,7 +1520,7 @@ OverlayChild& Overlay::AddChild(ILayout* child, CrossAxisAlign alignH, CrossAxis
     v.child = child;
     v.alignH = alignH;
     v.alignV = alignV;
-    children.Append(v);
+    VecAppend(children, v);
     return children[len(children) - 1];
 }
 
@@ -1596,7 +1622,7 @@ boxElementInfo& Wrap::AddChild(ILayout* child, int flex) {
     boxElementInfo v{};
     v.layout = child;
     v.flex = flex;
-    children.Append(v);
+    VecAppend(children, v);
     return children[len(children) - 1];
 }
 
@@ -1606,7 +1632,7 @@ boxElementInfo& Wrap::AddChild(ILayout* child) {
 
 // greedy wrap of already-measured children into rows that fit maxWidth
 void Wrap::PackRows(int maxWidth) {
-    rows.Reset();
+    VecReset(rows);
     int n = ChildrenCount();
     Row cur{};
     bool have = false;
@@ -1617,7 +1643,7 @@ void Wrap::PackRows(int maxWidth) {
         }
         int nextW = have ? (cur.width + colGap + v.size.dx) : v.size.dx;
         if (have && maxWidth < Inf && nextW > maxWidth) {
-            rows.Append(cur);
+            VecAppend(rows, cur);
             cur = {};
             have = false;
         }
@@ -1634,12 +1660,12 @@ void Wrap::PackRows(int maxWidth) {
         }
     }
     if (have) {
-        rows.Append(cur);
+        VecAppend(rows, cur);
     }
 }
 
 Size Wrap::Layout(const Constraints bc) {
-    rows.Reset();
+    VecReset(rows);
     int n = ChildrenCount();
     if (n == 0) {
         return bc.Constrain(Size{});
@@ -1792,9 +1818,7 @@ void Wrap::SetBounds(Rect bounds) {
     }
 }
 
-#if defined(DEBUG)
-// must be last: UtAssert.h over-writes assert()
-#include "base/UtAssert.h"
+#if IS_DEBUG
 
 // Unit tests for the core layout engine. They use Spacer as a pure, HWND-free
 // leaf (fixed intrinsic size, and its SetBounds records lastBounds), so whole

@@ -10,7 +10,7 @@
 
 #include "DocController.h"
 #include "EngineBase.h"
-#include "RefHoverInternal.h"
+#include "RefHover.h"
 
 static int gClassRegistered = 0;
 
@@ -204,7 +204,7 @@ static bool RegisterClassIfNeeded() {
     WNDCLASSW wc{};
     wc.lpfnWndProc = RefHoverWndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
-    wc.lpszClassName = REF_HOVER_CLASS;
+    wc.lpszClassName = kRefHoverClass;
     wc.hCursor = GetCachedCursor(IDC_ARROW);
     ATOM atom = RegisterClassW(&wc);
     gClassRegistered = atom ? 1 : -1;
@@ -215,7 +215,7 @@ bool RefHoverPopupCreate(RefHoverState* s, HWND hwndCanvas) {
     if (!RegisterClassIfNeeded()) {
         return false;
     }
-    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, REF_HOVER_CLASS, nullptr, WS_POPUP | WS_BORDER, 0, 0, 10, 10,
+    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, kRefHoverClass, nullptr, WS_POPUP | WS_BORDER, 0, 0, 10, 10,
                                 hwndCanvas, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!hwnd) {
         return false;

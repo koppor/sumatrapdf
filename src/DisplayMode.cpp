@@ -72,7 +72,7 @@ static SeqStrings displayModeNames =
 Str DisplayModeToString(DisplayMode mode) {
     int idx = (int)mode;
     Str s = SeqStrByIndex(displayModeNames, idx);
-    if (!s) {
+    if (len(s) == 0) {
         ReportIf(true);
         return StrL("unknown display mode");
     }
@@ -83,7 +83,7 @@ Str DisplayModeToString(DisplayMode mode) {
 // Empty / unknown strings return false (Fullscreen.DisplayMode uses this
 // so an unset setting means "don't change").
 bool TryParseDisplayMode(Str s, DisplayMode* modeOut) {
-    if (!s) {
+    if (len(s) == 0) {
         return false;
     }
     // for consistency ("continuous" is used instead in the settings instead for brevity)
@@ -145,7 +145,7 @@ float ZoomFromString(Str s, float defVal) {
 }
 
 void ZoomToString(Str* dst, float zoom, FileState* fileState) {
-    float prevZoom = dst->s ? ZoomFromString(dst->s, kInvalidZoom) : kInvalidZoom;
+    float prevZoom = dst->s ? ZoomFromString(Str(dst->s), kInvalidZoom) : kInvalidZoom;
     if (prevZoom == zoom) {
         return;
     }
@@ -156,21 +156,21 @@ void ZoomToString(Str* dst, float zoom, FileState* fileState) {
             logf("File type: %s\n", ext);
         }
         logf("DisplayMode: %s\n", fileState->displayMode);
-        logf("PageNo: %d\n", fileState->pageNo);
+        logf("PageNo: %s\n", fileState->pageNo);
     }
     ReportIf(!IsValidZoom(zoom));
     if (kZoomFitPage == zoom) {
-        str::ReplaceWithCopy(dst, "fit page");
+        str::ReplaceWithCopy(dst, StrL("fit page"));
     } else if (kZoomFitWidth == zoom) {
-        str::ReplaceWithCopy(dst, "fit width");
+        str::ReplaceWithCopy(dst, StrL("fit width"));
     } else if (kZoomFitHeight == zoom) {
-        str::ReplaceWithCopy(dst, "fit height");
+        str::ReplaceWithCopy(dst, StrL("fit height"));
     } else if (kZoomFitContent == zoom) {
-        str::ReplaceWithCopy(dst, "fit content");
+        str::ReplaceWithCopy(dst, StrL("fit content"));
     } else if (kZoomShrinkToFit == zoom) {
-        str::ReplaceWithCopy(dst, "shrink to fit");
+        str::ReplaceWithCopy(dst, StrL("shrink to fit"));
     } else if (kZoomFitByOrientation == zoom) {
-        str::ReplaceWithCopy(dst, "fit by orientation");
+        str::ReplaceWithCopy(dst, StrL("fit by orientation"));
     } else {
         str::ReplaceWithCopy(dst, fmt("%g", zoom));
     }

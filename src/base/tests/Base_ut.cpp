@@ -85,6 +85,51 @@ static void Func1FromFunc0Test() {
     utassert(d1.p == -8);
 }
 
+static void testFn1List(TestFn0Data* d0, TestFn1Data* d1) {
+    d0->n++;
+    d1->p++;
+}
+
+static void Func1ListTest() {
+    utassert(sizeof(Func1List<TestFn1Data*>) == 3 * sizeof(void*));
+
+    TestFn0Data a, b, c;
+    TestFn1Data arg{};
+    Func1List<TestFn1Data*> na = MkFunc1(testFn1List, &a);
+    Func1List<TestFn1Data*> nb = MkFunc1(testFn1List, &b);
+    Func1List<TestFn1Data*> nc = MkFunc1(testFn1List, &c);
+    Func1List<TestFn1Data*>* head = nullptr;
+
+    na.Register(&head);
+    nb.Register(&head);
+    nc.Register(&head);
+    utassert(head == &nc);
+    utassert(nc.next == &nb && nb.next == &na && !na.next);
+
+    head->CallAll(&arg);
+    utassert(a.n == 1 && b.n == 1 && c.n == 1 && arg.p == 3);
+
+    // assigning a new Func1 must not unlink the node
+    nb = MkFunc1(testFn1List, &b);
+    utassert(nc.next == &nb && nb.next == &na);
+
+    nb.Unregister(&head);
+    utassert(head == &nc && nc.next == &na && !nb.next);
+
+    a.n = b.n = c.n = 0;
+    arg.p = 0;
+    head->CallAll(&arg);
+    utassert(a.n == 1 && b.n == 0 && c.n == 1 && arg.p == 2);
+
+    // unregistering a node that isn't on the list is a no-op
+    nb.Unregister(&head);
+    utassert(head == &nc && nc.next == &na);
+
+    na.Unregister(&head);
+    nc.Unregister(&head);
+    utassert(!head);
+}
+
 static void GeomTest() {
     PointF ptD(12.4f, -13.6f);
     utassert(ptD.x == 12.4f && ptD.y == -13.6f);
@@ -203,18 +248,72 @@ static void ListTest() {
 
 static void ColorTest() {
     ParsedColor parsed;
-    ParseColor(parsed, "#f2f2f2");
+    ParseColor(parsed, StrL("#f2f2f2"));
     utassert(parsed.parsedOk);
     utassert(parsed.col == MkRgb(0xf2, 0xf2, 0xf2));
 
     parsed = {};
-    ParseColor(parsed, "#80f2f2f2");
+    ParseColor(parsed, StrL("#80f2f2f2"));
     utassert(parsed.parsedOk);
     utassert(parsed.col == MkRgba(0xf2, 0xf2, 0xf2, 0x80));
 
     parsed = {};
-    ParseColor(parsed, "#f2f2f");
+    ParseColor(parsed, StrL("#f2f2f"));
     utassert(!parsed.parsedOk);
+
+    // One Dark disabled text on a lifted button fill is too close; boost it
+    Color oneDarkBg = MkRgb(0x21, 0x25, 0x2b);
+    Color oneDarkBtn = AccentColor(oneDarkBg, 14);
+    Color oneDarkDis = MkRgb(0x5c, 0x63, 0x70);
+    Color boosted = EnsureContrast(oneDarkDis, oneDarkBtn, 80);
+    utassert(abs((int)GetLightness(boosted) - (int)GetLightness(oneDarkBtn)) >= 80);
+
+    // already-contrasty pair is left alone
+    Color lightFg = MkRgb(0xf9, 0xfa, 0xfb);
+    Color blackBg = MkRgb(0, 0, 0);
+    utassert(EnsureContrast(lightFg, blackBg, 80) == lightFg);
+
+    // 45-degree diamond: center inside, a point beside it outside
+    QuadF diamond;
+    diamond.ul = {0, 10};
+    diamond.ur = {10, 0};
+    diamond.ll = {10, 20};
+    diamond.lr = {20, 10};
+    utassert(diamond.IsRotated());
+    utassert(diamond.Contains({10, 10}));
+    utassert(!diamond.Contains({0, 0}));
+}
+
+// An allocation bigger than a block gets a block sized for it alone, and that
+// block stays the current one. The next small allocation chains off it and
+// must not inherit its size: reserving is cheap, but a block made for a big
+// allocation commits everything it reserves, so inheriting would commit the
+// whole of it for a handful of bytes.
+static void ArenaChainedBlockSizeTest() {
+    Arena* a = ArenaNew();
+    utassert(a != nullptr);
+    u64 reserveChunk = a->reserveChunkSize;
+    u64 commitChunk = a->commitChunkSize;
+    utassert(reserveChunk > 0 && commitChunk > 0);
+
+    // one allocation too big for a block of the usual size
+    void* big = a->Push(reserveChunk + 4096, 8, false);
+    utassert(big != nullptr);
+    utassert(a->current->reserved > reserveChunk);
+    utassert(a->current != a);
+
+    // fill what page alignment left over at the end of it, so the next push
+    // is the one that chains
+    u64 left = a->current->reserved - a->current->pos;
+    if (left > 0) {
+        utassert(a->Push(left, 1, false) != nullptr);
+    }
+
+    void* tail = a->Push(64, 8, false);
+    utassert(tail != nullptr);
+    utassert(a->current->reserved == reserveChunk);
+    utassert(a->current->committed == commitChunk);
+    ArenaDelete(a);
 }
 
 static void ArenaPtrCompressTest() {
@@ -295,7 +394,9 @@ void BaseUtilTest() {
     Func0Test();
     Func1Test();
     Func1FromFunc0Test();
+    Func1ListTest();
     ColorTest();
+    ArenaChainedBlockSizeTest();
     ArenaPtrCompressTest();
 
     size_t n = dimof(roundUpTestCases) / 2;
@@ -315,6 +416,13 @@ void BaseUtilTest() {
     utassert(RoundToPowerOf2(15) == 16);
     utassert(RoundToPowerOf2((1 << 13) + 1) == (1 << 14));
     utassert(RoundToPowerOf2((1 << 30) + 1) == -1); // overflow: no power of 2 fits in an int
+
+    utassert(WCharToLower('A') == 'a');
+    utassert(WCharToLower('Z') == 'z');
+    utassert(WCharToLower('a') == 'a');
+    utassert(WCharToLower('0') == '0');
+    utassert(WCharToLower(0x00C9) == 0x00E9); // É -> é
+    utassert(WCharToLower(0x0410) == 0x0430); // А -> а
 
     utassert(MurmurHash2(nullptr, 0) == 0);
     utassert(MurmurHash2("test", 4) != MurmurHash2("Test", 4));

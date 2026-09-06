@@ -19,17 +19,15 @@
 #include "base/GuessFileType.h"
 #include "EngineAll.h"
 #include "DisplayModel.h"
-#include "GlobalPrefs.h"
 #include "ProgressUpdateUI.h"
 #include "TextSelection.h"
 #include "TextSearch.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AnnotPlacement.h"
 #include "WindowTab.h"
 #include "Commands.h"
 #include "AppTools.h"
-#include "Toolbar.h"
-#include "ToolbarInternal.h"
 #include "gui/Layout.h"
 #include "gui/win/WinGui.h"
 #include "gui/PlatformFont.h"
@@ -37,6 +35,7 @@
 #include "gui/VirtCtrl.h"
 #include "gui/VirtHost.h"
 #include "Theme.h"
+#include "Toolbar.h"
 
 //--- the frame and the canvas are still plain HWNDs
 
@@ -67,26 +66,56 @@ bool ToolbarFrameIsVisible(MainWindow* win) {
 }
 
 void ToolbarPostCommand(MainWindow* win, int cmdId) {
-    HwndPostCommand(win->hwndFrame, cmdId, 0);
+    LPARAM commandPoint = 0;
+    if (cmdId >= CmdCreateAnnotFirst && cmdId <= CmdCreateAnnotLast && !CommandUsesPlacementMode(cmdId)) {
+        Rect canvas = HwndClientRect(win->hwndCanvas);
+        Point pt{canvas.dx / 2, canvas.dy / 2};
+        commandPoint = MAKELPARAM(pt.x, pt.y);
+    }
+    HwndPostCommand(win->hwndFrame, cmdId, commandPoint);
+}
+
+void ToolbarSetHeight(MainWindow* win, int dy) {
+    HWND hwnd = win ? win->hwndToolbar : nullptr;
+    if (!hwnd || dy <= 0) {
+        return;
+    }
+    Rect r = ChildPosWithinParent(hwnd);
+    if (r.dy == dy) {
+        return;
+    }
+    SetWindowPos(hwnd, nullptr, 0, 0, r.dx, dy, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 //--- the native page-number edit
 
-static void OnPageEditChar(MainWindow* win, Edit::CharEvent* ev) {
-    if (!win || !win->IsDocLoaded() || !win->pageEdit) {
+// Enter in either the page or chapter edit navigates; chaptered docs read
+// both boxes and go by Location, single-chapter docs keep the page-label path
+static void OnLocationEditChar(MainWindow* win, Edit::CharEvent* ev) {
+    if (!win || !win->IsDocLoaded()) {
         return;
     }
     switch ((Key)ev->c) {
         case Key::Enter: {
-            TempStr s = win->pageEdit->GetTextTemp();
-            int newPageNo = win->ctrl->GetPageByLabel(s);
-            if (win->ctrl->ValidPageNo(newPageNo)) {
-                win->ctrl->GoToPage(newPageNo, true);
-                HwndSetFocus(win->hwndFrame);
-                // the overlay toolbar was kept up by the focus; now that
-                // it's gone, let it hide again
-                UpdateOverlayToolbarForMouse(win);
+            DocController* ctrl = win->ctrl;
+            if (ctrl->HasChapters()) {
+                int chapter = win->chapterEdit ? ParseInt(win->chapterEdit->GetTextTemp()) : 1;
+                int page = win->pageEdit ? ParseInt(win->pageEdit->GetTextTemp()) : 1;
+                Location loc = ctrl->ClampLocation({chapter, page});
+                ctrl->GoToLocation(loc, true);
+            } else if (win->pageEdit) {
+                TempStr s = win->pageEdit->GetTextTemp();
+                int newPageNo = ctrl->GetPageByLabel(s);
+                if (!ctrl->ValidPageNo(newPageNo)) {
+                    ev->didHandle = true;
+                    return;
+                }
+                ctrl->GoToPage(newPageNo, true);
             }
+            HwndSetFocus(win->hwndFrame);
+            // the overlay toolbar was kept up by the focus; now that
+            // it's gone, let it hide again
+            UpdateOverlayToolbarForMouse(win);
             ev->didHandle = true;
             return;
         }
@@ -112,7 +141,7 @@ static int PageEditPadR() {
     return PageEditPadL() + DpiScale(4);
 }
 
-Edit* ToolbarCreatePageEdit(MainWindow* win, PlatformFont* font, int iconDy) {
+static Edit* ToolbarCreateLocationEdit(MainWindow* win, PlatformFont* font, int iconDy) {
     Edit::CreateArgs args;
     args.parent = win->hwndToolbar;
     args.font = font;
@@ -126,20 +155,30 @@ Edit* ToolbarCreatePageEdit(MainWindow* win, PlatformFont* font, int iconDy) {
     // the box is as tall as the icons, so without this the digits would sit at
     // its top instead of on the same line as "Page:" and "/ N"
     args.centerTextVert = true;
-    args.text = StrL("0");
     args.marginLeft = PageEditPadL();
     args.marginRight = PageEditPadR();
     auto* e = new Edit();
     e->SetColors(TbTextColor(), ThemeWindowControlBackgroundColor());
     e->Create(args);
+    // the toolbar tree arranges itself right-to-left (HBox.rtl), so its bounds
+    // are offsets from the physical left; don't let the RTL host mirror them
+    e->mapRtlX = true;
     // #5949: fixed width, or the box would resize to every page label while
     // scrolling a document with named pages, shifting the icons next to it.
     // ideal == max pins GetIdealSize() to this width
     e->SetIdealWidthChars(6);
     e->SetMaxWidthChars(6);
     e->idealDy = iconDy;
-    e->onChar = MkFunc1(OnPageEditChar, win);
+    e->onChar = MkFunc1(OnLocationEditChar, win);
     return e;
+}
+
+Edit* ToolbarCreatePageEdit(MainWindow* win, PlatformFont* font, int iconDy) {
+    return ToolbarCreateLocationEdit(win, font, iconDy);
+}
+
+Edit* ToolbarCreateChapterEdit(MainWindow* win, PlatformFont* font, int iconDy) {
+    return ToolbarCreateLocationEdit(win, font, iconDy);
 }
 
 // no document: the find edit does nothing, so don't offer a text cursor
@@ -180,7 +219,10 @@ static bool OnCaptionDrag(MainWindow* win, VirtHostNativeMsg* ev) {
     Point pt = {GET_X_LPARAM(ev->lp), GET_Y_LPARAM(ev->lp)};
     HWND childAtPoint = ChildWindowFromPoint(hwnd, ToPOINT(pt));
     bool overChild = childAtPoint && childAtPoint != hwnd;
-    VirtCtrl* hit = ToolbarItemFromPoint(win, pt);
+    // layout bounds are physical-left; WM_LBUTTONDOWN x is mirrored on RTL
+    Point hitPt = pt;
+    UnmirrorRtl(hwnd, hitPt);
+    VirtCtrl* hit = ToolbarItemFromPoint(win, hitPt);
     if (overChild || (hit && hit->id != 0 && hit->id != PageInfoId)) {
         return false;
     }

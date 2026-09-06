@@ -90,7 +90,7 @@ static bool IsSpecialDir(Str s) {
 // IO_REPARSE_TAG_APPEXECLINK. FindFirstFile reports size 0; the reparse
 // buffer names the real package executable, whose size is what to show.
 #ifndef IO_REPARSE_TAG_APPEXECLINK
-#define IO_REPARSE_TAG_APPEXECLINK (0x8000001BL)
+constexpr ULONG IO_REPARSE_TAG_APPEXECLINK = 0x8000001BL;
 #endif
 
 static bool IsAbsolutePathW(const WCHAR* s, int cch) {
@@ -192,7 +192,7 @@ void AdvanceDirIter(DirIter::iterator* it, int n) {
     TempStr path;
 
 NextDir:
-    if (!it->pattern) {
+    if (len(it->pattern) == 0) {
         int nDirs = len(it->dirsToVisit);
         if (nDirs == 0) {
             goto DidFinish;
@@ -239,10 +239,11 @@ DidFinish:
     it->didFinish = true;
 }
 
+// field order matches Vec<T> so VecPush() can hand it to the VecNonTemplated helpers
 struct TempEntryVec {
-    DirEntry* els;
     int len;
     int cap;
+    DirEntry* els;
 };
 
 static const WStr wdot = WStrL(L".");

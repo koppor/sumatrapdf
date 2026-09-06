@@ -35,23 +35,24 @@ static TempStr EscapeTemp(Str str) {
         return str;
     }
 
-    str::Builder escaped(256);
+    str::Builder escaped;
+    str::BuilderReserve(escaped, 256);
     for (int i = 0; i < str.len; i++) {
         switch (str.s[i]) {
             case '&':
-                escaped.Append("&amp;");
+                escaped.Append(StrL("&amp;"));
                 break;
             case '<':
-                escaped.Append("&lt;");
+                escaped.Append(StrL("&lt;"));
                 break;
             case '>':
-                escaped.Append("&gt;");
+                escaped.Append(StrL("&gt;"));
                 break;
             case '"':
-                escaped.Append("&quot;");
+                escaped.Append(StrL("&quot;"));
                 break;
             case '\'':
-                escaped.Append("&amp;");
+                escaped.Append(StrL("&amp;"));
                 break;
             default:
                 escaped.AppendChar(str.s[i]);
@@ -62,7 +63,7 @@ static TempStr EscapeTemp(Str str) {
 }
 
 static void DumpProperties(EngineBase* engine, bool fullDump) {
-    Out1("\t<Properties\n");
+    Out1(StrL("\t<Properties\n"));
     TempStr str = EscapeTemp(engine->FilePath());
     Out("\t\tFilePath=\"%s\"\n", str.s);
     str = EscapeTemp(engine->GetPropertyTemp(DocProp::Title));
@@ -110,10 +111,10 @@ static void DumpProperties(EngineBase* engine, bool fullDump) {
         Out("\t\tUnsupportedFeatures=\"%s\"\n", str.s);
     }
     if (!engine->AllowsPrinting()) {
-        Out1("\t\tPrintingAllowed=\"no\"\n");
+        Out1(StrL("\t\tPrintingAllowed=\"no\"\n"));
     }
     if (!engine->AllowsCopyingText()) {
-        Out1("\t\tCopyingTextAllowed=\"no\"\n");
+        Out1(StrL("\t\tCopyingTextAllowed=\"no\"\n"));
     }
     if (engine->IsImageCollection()) {
         Out("\t\tImageFileDPI=\"%g\"\n", engine->GetFileDPI());
@@ -123,7 +124,7 @@ static void DumpProperties(EngineBase* engine, bool fullDump) {
         Out("\t\tPreferredLayout=\"%d\"\n", engine->preferredLayout);
     }
 #endif
-    Out1("\t/>\n");
+    Out1(StrL("\t/>\n"));
 
     if (!fullDump) {
         return;
@@ -131,8 +132,8 @@ static void DumpProperties(EngineBase* engine, bool fullDump) {
     TempStr fontlist = engine->GetPropertyTemp(DocProp::FontList);
     if (fontlist) {
         StrVec fonts;
-        Split(&fonts, fontlist, "\n");
-        str = EscapeTemp(Join(&fonts, "\n\t\t"));
+        Split(&fonts, fontlist, StrL("\n"));
+        str = EscapeTemp(Join(&fonts, StrL("\n\t\t")));
         Out("\t<FontList>\n\t\t%s\n\t</FontList>\n", str.s);
     }
 }
@@ -146,7 +147,7 @@ static TempStr DestRectToStrTemp(EngineBase* engine, IPageDestination* dest) {
     // as handled by LinkHandler::ScrollTo in MainWindow.cpp
     int pageNo = PageDestGetPageNo(dest);
     if (pageNo <= 0 || pageNo > engine->PageCount()) {
-        return nullptr;
+        return {};
     }
     RectF rect = PageDestGetRect(dest);
     if (rect.IsEmpty()) {
@@ -161,14 +162,14 @@ static TempStr DestRectToStrTemp(EngineBase* engine, IPageDestination* dest) {
         PointF pt = engine->Transform(rect.TL(), pageNo, 1.0, 0);
         return fmt("Point=\"x %.0f\"", pt.y);
     }
-    return nullptr;
+    return {};
 }
 
 static void DumpTocItem(EngineBase* engine, TocItem* item, int level, int& idCounter) {
     for (; item; item = item->next) {
         TempStr title = EscapeTemp(item->title);
         for (int i = 0; i < level; i++) {
-            Out1("\t");
+            Out1(StrL("\t"));
         }
         Out("<Item Title=\"%s\"", title.s);
         if (item->pageNo) {
@@ -192,17 +193,17 @@ static void DumpTocItem(EngineBase* engine, TocItem* item, int level, int& idCou
             }
         }
         if (!item->child) {
-            Out1(" />\n");
+            Out1(StrL(" />\n"));
         } else {
             if (item->isOpenDefault) {
-                Out1(" Expanded=\"yes\"");
+                Out1(StrL(" Expanded=\"yes\""));
             }
-            Out1(">\n");
+            Out1(StrL(">\n"));
             DumpTocItem(engine, item->child, level + 1, idCounter);
             for (int i = 0; i < level; i++) {
-                Out1("\t");
+                Out1(StrL("\t"));
             }
-            Out1("</Item>\n");
+            Out1(StrL("</Item>\n"));
         }
     }
 }
@@ -217,22 +218,22 @@ static void DumpToc(EngineBase* engine) {
         Out("\t<TocTree%s>\n", engine->HasToc() ? "" : " Expected=\"no\"");
         int idCounter = 0;
         DumpTocItem(engine, root, 2, idCounter);
-        Out1("\t</TocTree>\n");
+        Out1(StrL("\t</TocTree>\n"));
     } else if (engine->HasToc()) {
-        Out1("\t<TocTree />\n");
+        Out1(StrL("\t<TocTree />\n"));
     }
 }
 
 static Str ElementTypeToStr(IPageElement* el) {
     Kind kind = el->GetKind();
     if (kind) {
-        return {kind};
+        return Str(kind);
     }
     return StrL("unknown");
 }
 
 __unused static Str PageDestToStr(Kind kind) {
-    return {kind};
+    return Str(kind);
 }
 
 static void DumpPageContent(EngineBase* engine, int pageNo, bool fullDump) {
@@ -251,14 +252,14 @@ static void DumpPageContent(EngineBase* engine, int pageNo, bool fullDump) {
         Out("\t\tContentBox=\"%d %d %d %d\"\n", cbox.x, cbox.y, cbox.dx, cbox.dy);
     }
     if (!engine->HasClipOptimizations(pageNo)) {
-        Out1("\t\tHasClipOptimizations=\"no\"\n");
+        Out1(StrL("\t\tHasClipOptimizations=\"no\"\n"));
     }
-    Out1("\t>\n");
+    Out1(StrL("\t>\n"));
 
     if (fullDump) {
         PageText pageText = engine->ExtractPageText(pageNo);
         if (pageText.text) {
-            TempStr text = EscapeTemp(pageText.text.s);
+            TempStr text = EscapeTemp(Str(pageText.text.s));
             if (text) {
                 Out("\t\t<TextContent>\n%s\t\t</TextContent>\n", text.s);
             }
@@ -268,7 +269,7 @@ static void DumpPageContent(EngineBase* engine, int pageNo, bool fullDump) {
 
     Vec<IPageElement*> els = engine->GetElements(pageNo);
     if (len(els) > 0) {
-        Out1("\t\t<PageElements>\n");
+        Out1(StrL("\t\t<PageElements>\n"));
         for (auto& el : els) {
             RectF rect = el->GetRect();
             Out("\t\t\t<Element Type=\"%s\"\n\t\t\t\tRect=\"%.0f %.0f %.0f %.0f\"\n", ElementTypeToStr(el).s, rect.x,
@@ -294,18 +295,18 @@ static void DumpPageContent(EngineBase* engine, int pageNo, bool fullDump) {
             if (name) {
                 Out("\t\t\t\tLabel=\"%s\"\n", name.s);
             }
-            Out1("\t\t\t/>\n");
+            Out1(StrL("\t\t\t/>\n"));
         }
-        Out1("\t\t</PageElements>\n");
+        Out1(StrL("\t\t</PageElements>\n"));
     }
 
-    Out1("\t</Page>\n");
+    Out1(StrL("\t</Page>\n"));
 }
 
 static void DumpThumbnail(EngineBase* engine) {
     RectF rect = engine->Transform(engine->PageMediabox(1), 1, 1.0, 0);
     if (rect.IsEmpty()) {
-        Out1("\t<Thumbnail />\n");
+        Out1(StrL("\t<Thumbnail />\n"));
         return;
     }
 
@@ -315,7 +316,7 @@ static void DumpThumbnail(EngineBase* engine) {
     RenderPageArgs args(1, zoom, 0, &rect);
     Pixmap* bmp = engine->RenderPage(args);
     if (!bmp) {
-        Out1("\t<Thumbnail />\n");
+        Out1(StrL("\t<Thumbnail />\n"));
         return;
     }
 
@@ -324,16 +325,18 @@ static void DumpThumbnail(EngineBase* engine) {
     if (hexData) {
         Out("\t<Thumbnail>\n\t\t%s\n\t</Thumbnail>\n", hexData.s);
     } else {
-        Out1("\t<Thumbnail />\n");
+        Out1(StrL("\t<Thumbnail />\n"));
     }
     str::Free(imgData);
     FreePixmap(bmp);
 }
 
 __unused static void DumpData(EngineBase* engine, bool fullDump) {
-    Out1(UTF8_BOM);
-    Out1("<?xml version=\"1.0\"?>\n");
-    Out1("<EngineDump>\n");
+    EnsureFullLayout(engine);
+    ResolveTocPages(engine, engine->GetToc());
+    Out1(StrL(kUtf8Bom));
+    Out1(StrL("<?xml version=\"1.0\"?>\n"));
+    Out1(StrL("<EngineDump>\n"));
     DumpProperties(engine, fullDump);
     DumpToc(engine);
     for (int i = 1; i <= engine->PageCount(); i++) {
@@ -342,14 +345,14 @@ __unused static void DumpData(EngineBase* engine, bool fullDump) {
     if (fullDump) {
         DumpThumbnail(engine);
     }
-    Out1("</EngineDump>\n");
+    Out1(StrL("</EngineDump>\n"));
 }
 
 #define ErrOut(msg, ...) fprintf(stderr, msg "\n", __VA_ARGS__)
 #define ErrOut1(msg) fprintf(stderr, "%s", msg "\n")
 
 static bool CheckRenderPath(Str path) {
-    ReportIf(!path);
+    ReportIf(len(path) == 0);
     bool hasArg = false;
     int i = 0;
     while (i < path.len) {
@@ -386,11 +389,12 @@ __unused static bool RenderDocument(EngineBase* engine, Str renderPath, float zo
     }
 
     if (str::EndsWithI(renderPath, StrL(".txt"))) {
-        str::Builder text(1024);
+        str::Builder text;
+        str::BuilderReserve(text, 1024);
         for (int pageNo = 1; pageNo <= engine->PageCount(); pageNo++) {
             PageText pageText = engine->ExtractPageText(pageNo);
             if (pageText.text) {
-                text.Append(pageText.text.s);
+                text.Append(Str(pageText.text.s));
             }
             FreePageText(&pageText);
         }
@@ -399,7 +403,7 @@ __unused static bool RenderDocument(EngineBase* engine, Str renderPath, float zo
         }
         TempStr txtFilePath = fmt(renderPath.s, 0);
         TempStr textCrLf = str::ReplaceTemp(ToStr(text), StrL("\n"), StrL("\r\n"));
-        TempStr textUTF8BOM = str::JoinTemp(UTF8_BOM, textCrLf);
+        TempStr textUTF8BOM = str::JoinTemp(StrL(kUtf8Bom), textCrLf);
         return file::WriteFile(txtFilePath, textUTF8BOM);
     }
 
@@ -452,58 +456,6 @@ class PasswordHolder : public PasswordUI {
 };
 
 void EngineDump(const Flags& flags) {
-#if 0
-    setlocale(LC_ALL, "C");
-    DisableDataExecution();
-
-    CmdLineArgsIter argList(GetCommandLine());
-    int nArgs = argList.nArgs;
-
-    if (nArgs < 2) {
-    Usage:
-        ErrOut("%s [-pwd <password>][-quick][-render <path-%%d.tga>] <filename>",
-               path::GetBaseNameTemp(Str(argList.args[0])));
-        return 2;
-    }
-
-    Str filePath = {};
-    Str password = {};
-    bool fullDump = true;
-    Str renderPath = {};
-    float renderZoom = 1.f;
-    bool loadOnly = false, silent = false;
-
-    for (int i = 1; i < nArgs; i++) {
-        if (str::Eq(argList[i], StrL("-pwd")) && i + 1 < nArgs && !password) {
-            password = argList[++i];
-        } else if (str::Eq(argList[i], StrL("-quick"))) {
-            fullDump = false;
-        } else if (str::Eq(argList[i], StrL("-render")) && i + 1 < nArgs && !renderPath) {
-            // optional zoom argument (e.g. -render 50% file.pdf)
-            float zoom;
-            if (i + 2 < nArgs && !str::IsNull(str::Parse(argList[i + 1], "%f%%%$", &zoom)) && zoom > 0.f) {
-                renderZoom = zoom / 100.f;
-                i++;
-            }
-            renderPath = argList[++i];
-        } else if (str::Eq(argList[i], StrL("-loadonly"))) {
-            // -loadonly and -silent are only meant for profiling
-            loadOnly = true;
-        } else if (str::Eq(argList[i], StrL("-silent"))) {
-            silent = true;
-        } else if (str::Eq(argList[i], StrL("-full"))) {
-            // -full is for backward compatibility
-            fullDump = true;
-        } else if (!filePath) {
-            filePath = argList[i];
-        } else {
-            goto Usage;
-        }
-    }
-    if (!filePath) {
-        goto Usage;
-    }
-#endif
     if (flags.silent) {
         FILE* nul;
         freopen_s(&nul, "NUL", "w", stdout);

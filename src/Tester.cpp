@@ -6,7 +6,7 @@
    driver which dispatches desired test based on cmd-line arguments. */
 
 #include "base/Base.h"
-#include "base/CmdLineArgsIter.h"
+#include "base/CmdLineArgs.h"
 #include "base/File.h"
 #include "base/GdiPlusUtil.h"
 #include "gui/PlatformFont.h"
@@ -32,7 +32,7 @@ static bool gSaveImages = false;
 // if true, we'll do a layout of mobi files
 static bool gLayout = false;
 // directory to which we'll save mobi html and images
-#define kMobiSaveDir "..\\ebooks-converted"
+constexpr const char* kMobiSaveDir = "..\\ebooks-converted";
 
 static int Usage() {
     printf("Tester.exe\n");
@@ -48,15 +48,15 @@ static int Usage() {
 // we assume this is called from main sumatradirectory, e.g. as:
 // ./obj-dbg/tester.exe, so we use the known files
 void ZipCreateTest() {
-    Str zipFileName = "tester-tmp.zip";
+    Str zipFileName = StrL("tester-tmp.zip");
     file::Delete(zipFileName);
     ZipCreator zc(zipFileName);
-    auto ok = zc.AddFile("premake5.lua");
+    auto ok = zc.AddFile(StrL("premake5.lua"));
     if (!ok) {
         printf("ZipCreateTest(): failed to add makefile.msvc");
         return;
     }
-    ok = zc.AddFile("premake5.files.lua");
+    ok = zc.AddFile(StrL("premake5.files.lua"));
     if (!ok) {
         printf("ZipCreateTest(): failed to add makefile.msvc");
         return;
@@ -72,26 +72,40 @@ int TesterMain() {
 
     WCHAR* cmdLine = GetCommandLine();
 
-    CmdLineArgsIter argv(cmdLine);
-    int nArgs = argv.nArgs;
+    StrNode* argv = ParseCmdLine(cmdLine);
+    defer {
+        FreeStrNode(nullptr, argv);
+    };
 
     // InitAllCommonControls();
     // ScopedGdiPlus gdi;
 
+    StrNode* argNode = argv;
+    for (int i = 0; argNode && i < 2; i++) {
+        argNode = argNode->next;
+    }
+    int nArgs = 2;
+    for (StrNode* n = argNode; n; n = n->next) {
+        nArgs++;
+    }
     int i = 2; // skip program name and "/tester"
-    while (i < nArgs) {
-        Str arg = argv.at(i);
+    while (argNode) {
+        Str arg = argNode->s;
         if (str::Eq(arg, StrL("-layout"))) {
             gLayout = true;
+            argNode = argNode->next;
             ++i;
         } else if (str::Eq(arg, StrL("-save-html"))) {
             gSaveHtml = true;
+            argNode = argNode->next;
             ++i;
         } else if (str::Eq(arg, StrL("-save-images"))) {
             gSaveImages = true;
+            argNode = argNode->next;
             ++i;
         } else if (str::Eq(arg, StrL("-zip-create"))) {
             ZipCreateTest();
+            argNode = argNode->next;
             ++i;
         } else {
             // unknown argument

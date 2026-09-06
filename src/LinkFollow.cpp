@@ -11,7 +11,7 @@
 #include "gui/PlatformFont.h"
 
 #include "Settings.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "DocController.h"
 #include "EngineBase.h"
 #include "base/GuessFileType.h"
@@ -30,9 +30,68 @@
 
 Kind kNotifLinkFollow = "notifLinkFollow";
 
-// Zathura-style keyboard link following: Shift + F numbers the links that are
-// on screen 1..9 and the matching digit follows one, so links can be reached
-// without the mouse (issue #2629).
+// Vimium-style keyboard link following: Shift + F labels the links on screen
+// with letter hints; typing a hint follows the link without the mouse (issue
+// #2629).
+
+// Vimium's default alphabet favors keys on or close to the home row. Its order
+// also matters: when more hints are needed, earlier characters become prefixes
+// of multi-letter hints first.
+static constexpr char kLinkHintChars[] = "SADFJKLEWCMPGH";
+
+struct LinkHint {
+    char s[kMaxKeyboardLinkHintLength + 1]{};
+    int len = 0;
+};
+
+static int CmpLinkHints(const LinkHint* a, const LinkHint* b) {
+    return str::Cmp(Str(a->s, a->len), Str(b->s, b->len));
+}
+
+// Build a prefix-free breadth-first hint tree, matching Vimium's AlphabetHints
+// algorithm. Expanding a leaf replaces its one-letter hint with a group of
+// longer hints, so no complete hint can also prefix another hint.
+static void AssignLinkHints(Vec<KeyboardLinkTarget>& targets) {
+    int nTargets = len(targets);
+    if (nTargets == 0) {
+        return;
+    }
+
+    Vec<LinkHint> hints;
+    VecAppend(hints, LinkHint{});
+    int offset = 0;
+    while ((len(hints) - offset < nTargets) || len(hints) == 1) {
+        LinkHint hint = hints[offset++];
+        if (hint.len >= kMaxKeyboardLinkHintLength) {
+            ReportIf(true);
+            return;
+        }
+        for (int i = 0; i < LenL(kLinkHintChars); i++) {
+            LinkHint next;
+            next.s[0] = kLinkHintChars[i];
+            memcpy(next.s + 1, hint.s, hint.len);
+            next.len = hint.len + 1;
+            VecAppend(hints, next);
+        }
+    }
+
+    Vec<LinkHint> selected;
+    for (int i = 0; i < nTargets; i++) {
+        VecAppend(selected, hints[offset + i]);
+    }
+    VecSort(selected, CmpLinkHints);
+    for (int i = 0; i < nTargets; i++) {
+        LinkHint& hint = selected[i];
+        for (int j = 0; j < hint.len / 2; j++) {
+            char tmp = hint.s[j];
+            hint.s[j] = hint.s[hint.len - j - 1];
+            hint.s[hint.len - j - 1] = tmp;
+        }
+        KeyboardLinkTarget& target = targets[i];
+        memcpy(target.hint, hint.s, hint.len);
+        target.hintLen = hint.len;
+    }
+}
 
 // only formats whose pages can carry links. image collections (comic books,
 // image folders, single images) never do, and the browser-backed controllers
@@ -41,7 +100,7 @@ bool CanFollowLinksWithKeyboard(MainWindow* win) {
     if (!win || !win->IsDocLoaded()) {
         return false;
     }
-    if (gGlobalPrefs && gGlobalPrefs->disableLinks) {
+    if (gSettings && gSettings->disableLinks) {
         return false;
     }
     DisplayModel* dm = win->AsFixed();
@@ -63,13 +122,31 @@ bool KeyboardLinkFollowingActive(MainWindow* win) {
     return win && win->linkFollowActive;
 }
 
+// Unmodified letter keys and Backspace type a hint. Callers must already have
+// filtered out Ctrl/Alt/Shift so Shift+F still toggles the mode off. Issue #6019.
+bool KeyboardLinkFollowingCapturesKey(MainWindow* win, WPARAM vk) {
+    if (!KeyboardLinkFollowingActive(win)) {
+        return false;
+    }
+    if (vk == VK_BACK) {
+        return true;
+    }
+    if (vk >= 'A' && vk <= 'Z') {
+        return true;
+    }
+    if (vk >= 'a' && vk <= 'z') {
+        return true;
+    }
+    return false;
+}
+
 struct ScreenTarget {
     Rect screenRect;
     KeyboardLinkTarget target;
 };
 
 // sort what's on screen into reading order (top to bottom, then left to right)
-// so the numbering doesn't jump around; rows are matched with a tolerance
+// so the labels don't jump around; rows are matched with a tolerance
 // because links on the same line rarely share an exact top edge
 static int CmpTargetsInReadingOrder(const ScreenTarget* a, const ScreenTarget* b) {
     const Rect& ta = a->screenRect;
@@ -85,7 +162,8 @@ static int CmpTargetsInReadingOrder(const ScreenTarget* a, const ScreenTarget* b
 }
 
 void KeyboardLinkFollowingRecompute(MainWindow* win) {
-    win->linkFollowTargets.Reset();
+    VecReset(win->linkFollowTargets);
+    win->linkFollowInputLen = 0;
     if (!KeyboardLinkFollowingActive(win) || !CanFollowLinksWithKeyboard(win)) {
         return;
     }
@@ -118,16 +196,16 @@ void KeyboardLinkFollowingRecompute(MainWindow* win) {
             st.screenRect = screenRect;
             st.target.pageNo = pageNo;
             st.target.rect = el->GetRect();
-            found.Append(st);
+            VecAppend(found, st);
         }
     }
 
     VecSort(found, CmpTargetsInReadingOrder);
 
-    int n = std::min(len(found), kMaxKeyboardLinkTargets);
-    for (int i = 0; i < n; i++) {
-        win->linkFollowTargets.Append(found[i].target);
+    for (int i = 0; i < len(found); i++) {
+        VecAppend(win->linkFollowTargets, found[i].target);
     }
+    AssignLinkHints(win->linkFollowTargets);
 }
 
 // returns true if the mode was on (and is now off), so callers can tell whether
@@ -137,7 +215,8 @@ bool StopKeyboardLinkFollowing(MainWindow* win) {
         return false;
     }
     win->linkFollowActive = false;
-    win->linkFollowTargets.Reset();
+    VecReset(win->linkFollowTargets);
+    win->linkFollowInputLen = 0;
     KillTimer(win->hwndCanvas, kLinkFollowTimerID);
     ScheduleRepaint(win, 0);
     return true;
@@ -157,7 +236,7 @@ void ToggleKeyboardLinkFollowing(MainWindow* win) {
         win->linkFollowActive = false;
         NotificationCreateArgs args;
         args.hwndParent = win->hwndCanvas;
-        args.msg = _TRA("No links on this page");
+        args.msg = Tr("No links on this page");
         args.timeoutMs = 2000;
         args.groupId = kNotifLinkFollow;
         ShowNotification(args);
@@ -206,41 +285,99 @@ static void FollowKeyboardLinkTarget(MainWindow* win, const KeyboardLinkTarget& 
     win->ctrl->HandleLink(dest, win->linkHandler);
 }
 
-// '1'..'9' pick a numbered link. Returns true if the key was consumed.
+static bool HintStartsWith(const KeyboardLinkTarget& target, const char* prefix, int prefixLen) {
+    return target.hintLen >= prefixLen && memcmp(target.hint, prefix, prefixLen) == 0;
+}
+
+// Letter hints are prefix-free, so a complete match can be followed
+// immediately even when other targets use multi-letter hints.
 bool KeyboardLinkFollowingOnChar(MainWindow* win, WPARAM key) {
     if (!KeyboardLinkFollowingActive(win)) {
         return false;
     }
-    if (key < '1' || key > '9') {
+
+    if (key == VK_BACK) {
+        if (win->linkFollowInputLen == 0) {
+            StopKeyboardLinkFollowing(win);
+        } else {
+            win->linkFollowInputLen--;
+            ScheduleRepaint(win, 0);
+        }
+        return true;
+    }
+    if (key >= 'a' && key <= 'z') {
+        key -= 'a' - 'A';
+    }
+    if (key < 'A' || key > 'Z') {
         return false;
     }
-    int idx = (int)key - '1';
-    if (idx >= len(win->linkFollowTargets)) {
-        return true; // consumed: no such number, but stay in the mode
+
+    int inputLen = win->linkFollowInputLen;
+    if (inputLen >= kMaxKeyboardLinkHintLength) {
+        StopKeyboardLinkFollowing(win);
+        return true;
     }
-    KeyboardLinkTarget target = win->linkFollowTargets[idx];
+    win->linkFollowInput[inputLen++] = (char)key;
+    win->linkFollowInputLen = inputLen;
+
+    int exactMatch = -1;
+    int nMatches = 0;
+    for (int i = 0; i < len(win->linkFollowTargets); i++) {
+        const KeyboardLinkTarget& target = win->linkFollowTargets[i];
+        if (!HintStartsWith(target, win->linkFollowInput, inputLen)) {
+            continue;
+        }
+        nMatches++;
+        if (target.hintLen == inputLen) {
+            exactMatch = i;
+        }
+    }
+    if (nMatches == 0) {
+        // Like Vimium, an input that cannot match a hint cancels the mode and
+        // is consumed instead of becoming an unrelated application shortcut.
+        StopKeyboardLinkFollowing(win);
+        return true;
+    }
+    if (exactMatch < 0) {
+        ScheduleRepaint(win, 0);
+        return true;
+    }
+
+    KeyboardLinkTarget target = win->linkFollowTargets[exactMatch];
     // leave the mode first: following the link scrolls (or opens a browser), so
-    // the numbering is stale either way
+    // the hints are stale either way
     StopKeyboardLinkFollowing(win);
     FollowKeyboardLinkTarget(win, target);
     return true;
 }
 
 // State dump for -dbg-control tests (tests/issue-2629.ts): whether the mode is
-// on, which page we're on, and the numbered links with their screen rects.
-TempStr KeyboardLinkFollowResultTemp(int* exitCodeOut) {
+// on, which page we're on, and the labeled links with their screen rects.
+// action "stop" leaves the mode; "char" types chars as hint input.
+TempStr KeyboardLinkFollowResultTemp(Str action, Str chars, int* exitCodeOut) {
     str::Builder out;
     if (len(gWindows) == 0) {
         *exitCodeOut = 2;
-        out.Append("NOTREADY no-window\n");
+        out.Append(StrL("NOTREADY no-window\n"));
         return ToStrTemp(out);
     }
     MainWindow* win = gWindows[0];
+    if (str::Eq(action, StrL("stop"))) {
+        StopKeyboardLinkFollowing(win);
+    } else if (str::Eq(action, StrL("char"))) {
+        for (int i = 0; i < len(chars); i++) {
+            KeyboardLinkFollowingOnChar(win, (u8)chars.s[i]);
+        }
+    } else if (len(action) > 0) {
+        *exitCodeOut = 1;
+        out.Append(StrL("ERROR unknown-action\n"));
+        return ToStrTemp(out);
+    }
     DisplayModel* dm = win->AsFixed();
     int currPage = win->ctrl ? win->ctrl->CurrentPageNo() : 0;
     // the keyboard shortcut can't be exercised from a test (posted key messages
     // don't carry modifier state), so report what it is bound to
-    TempStr accel = AppendAccelKeyToMenuStringTemp(nullptr, CmdToggleKeyboardLinkFollowing);
+    TempStr accel = AppendAccelKeyToMenuStringTemp({}, CmdToggleKeyboardLinkFollowing);
     if (accel.len > 1 && accel.s[0] == '\t') {
         accel = TempStr(accel.s + 1, accel.len - 1);
     }
@@ -250,7 +387,8 @@ TempStr KeyboardLinkFollowResultTemp(int* exitCodeOut) {
     for (int i = 0; i < n; i++) {
         const KeyboardLinkTarget& t = win->linkFollowTargets[i];
         Rect r = dm ? dm->CvtToScreen(t.pageNo, t.rect) : Rect{};
-        out.Append(fmt("link=%d page=%d rect=%d,%d,%d,%d\n", i + 1, t.pageNo, r.x, r.y, r.dx, r.dy));
+        Str hint(t.hint, t.hintLen);
+        out.Append(fmt("link=%d page=%d rect=%d,%d,%d,%d hint=%s\n", i + 1, t.pageNo, r.x, r.y, r.dx, r.dy, hint));
     }
     *exitCodeOut = 0;
     return ToStrTemp(out);
@@ -260,9 +398,7 @@ constexpr Color kLinkFollowHighlightCol = MkRgb(0xff, 0xf1, 0x00);
 constexpr Color kLinkFollowBadgeBgCol = MkRgb(0xd3, 0x2f, 0x2f);
 constexpr Color kLinkFollowBadgeTextCol = kColWhite;
 
-static void PaintLinkBadge(Gfx* gfx, PlatformFont* font, const Rect& linkRect, int number) {
-    char labelBuf[2] = {(char)('0' + number), 0};
-    Str label(labelBuf, 1);
+static void PaintLinkBadge(Gfx* gfx, PlatformFont* font, const Rect& linkRect, Str label) {
     Size textSize = gfx->MeasureText(label, font);
     int padX = textSize.dy / 3;
     int dx = textSize.dx + (2 * padX);
@@ -299,12 +435,20 @@ void PaintKeyboardLinkTargets(MainWindow* win, Gfx* gfx) {
     Vec<Rect> screenRects;
     for (int i = 0; i < n; i++) {
         const KeyboardLinkTarget& t = win->linkFollowTargets[i];
-        screenRects.Append(dm->CvtToScreen(t.pageNo, t.rect));
+        if (!HintStartsWith(t, win->linkFollowInput, win->linkFollowInputLen)) {
+            continue;
+        }
+        VecAppend(screenRects, dm->CvtToScreen(t.pageNo, t.rect));
     }
     PaintTransparentRectangles(gfx, win->canvasRc, screenRects, kLinkFollowHighlightCol, 90, 2, false);
 
-    PlatformFont* font = GetBoldPlatformFont(GetUserGuiFont("Segoe UI", DpiScale(11)));
+    PlatformFont* font = GetBoldPlatformFont(GetUserGuiFont(StrL("Segoe UI"), DpiScale(11)));
+    int rectIdx = 0;
     for (int i = 0; i < n; i++) {
-        PaintLinkBadge(gfx, font, screenRects[i], i + 1);
+        const KeyboardLinkTarget& t = win->linkFollowTargets[i];
+        if (!HintStartsWith(t, win->linkFollowInput, win->linkFollowInputLen)) {
+            continue;
+        }
+        PaintLinkBadge(gfx, font, screenRects[rectIdx++], Str(t.hint, t.hintLen));
     }
 }

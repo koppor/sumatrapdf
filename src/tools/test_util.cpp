@@ -29,8 +29,12 @@ extern void VecTest();
 extern void StrVecTest();
 extern void PdfDarkModeOklab_UnitTests();
 extern void PdfDarkModeImageClassifier_UnitTests();
+extern void AppendStoreTest();
+extern void ChapterTable_UnitTests();
+extern void PagePosition_UnitTests();
 #if OS_WIN
 extern void WinUtilTest();
+extern void ClipboardImageTest();
 #endif
 
 void GetPrintersInfo(struct str::Builder&) {
@@ -88,7 +92,7 @@ static LONG WINAPI ForAiCrashHandler(EXCEPTION_POINTERS* exceptionInfo) {
 int main(int argc, char** argv) {
     bool forAi = false;
     for (int i = 1; i < argc; i++) {
-        if (str::Eq(argv[i], StrL("-for-ai"))) {
+        if (str::Eq(Str(argv[i]), StrL("-for-ai"))) {
             forAi = true;
         }
     }
@@ -124,8 +128,12 @@ int main(int argc, char** argv) {
     VecTest();
     PdfDarkModeOklab_UnitTests();
     PdfDarkModeImageClassifier_UnitTests();
+    AppendStoreTest();
+    ChapterTable_UnitTests();
+    PagePosition_UnitTests();
 #if OS_WIN
     WinUtilTest();
+    ClipboardImageTest();
 #endif
     SumatraPDF_UnitTests();
 

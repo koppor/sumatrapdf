@@ -17,19 +17,20 @@
 #include "EngineBase.h"
 #include "EbookBase.h"
 #include "ChmFile.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "Theme.h"
+#include "PagePosition.h"
 #include "ChmModel.h"
 
-static IPageDestination* NewChmNamedDest(Str url, int pageNo) {
-    if (!url) {
+static IPageDestination* NewChmNamedDest(Arena* arena, Str url, int pageNo) {
+    if (len(url) == 0) {
         return nullptr;
     }
     IPageDestination* dest = nullptr;
     if (IsExternalUrl(url)) {
-        dest = new PageDestinationURL(url);
+        dest = arena ? New<PageDestinationURL>(arena, url) : new PageDestinationURL(url);
     } else {
-        auto* pdest = new PageDestination();
+        auto* pdest = arena ? New<PageDestination>(arena) : new PageDestination();
         pdest->kind = kindDestinationScrollTo;
         pdest->name = str::Dup(url);
         dest = pdest;
@@ -40,10 +41,10 @@ static IPageDestination* NewChmNamedDest(Str url, int pageNo) {
     return dest;
 }
 
-static TocItem* NewChmTocItem(TocItem* parent, Str title, int pageNo, Str url) {
-    auto* res = AllocTocItem(nullptr, title, pageNo);
+static TocItem* NewChmTocItem(Arena* arena, TocItem* parent, Str title, int pageNo, Str url) {
+    auto* res = AllocTocItem(arena, title, pageNo);
     res->parent = parent;
-    res->dest = NewChmNamedDest(url, pageNo);
+    res->dest = NewChmNamedDest(arena, url, pageNo);
     return res;
 }
 
@@ -76,14 +77,11 @@ ChmModel::ChmModel(DocControllerCallback* cb) : DocController(cb) {
 
 ChmModel::~ChmModel() {
     docAccess.Lock();
-    // TODO: deleting htmlWindow seems to spin a modal loop which
-    //       can lead to WM_PAINT being dispatched for the parent
-    //       hwnd and then crashing in SumatraPDF.cpp's DrawDocument
     delete docView;
     delete htmlWindowCb;
     delete doc;
     delete tocTrace;
-    delete tocTree;
+    DestroyTocTree(tocTree);
     DeleteVecMembers(urlDataCache);
     docAccess.Unlock();
     ArenaDelete(poolAlloc);
@@ -98,7 +96,7 @@ Str ChmModel::GetFilePath() const {
 }
 
 Str ChmModel::GetDefaultFileExt() const {
-    return ".chm";
+    return StrL(".chm");
 }
 
 int ChmModel::PageCount() const {
@@ -267,7 +265,7 @@ LRESULT ChmModel::PassUIMsg(UINT msg, WPARAM wp, LPARAM lp) const {
 }
 
 bool ChmModel::DisplayPage(Str pageUrl) {
-    if (!pageUrl) {
+    if (len(pageUrl) == 0) {
         return false;
     }
     // pageUrl may alias currentPageUrl (e.g. via GoToPage), which we overwrite
@@ -278,8 +276,7 @@ bool ChmModel::DisplayPage(Str pageUrl) {
         // open external links in an external browser
         // (same as for PDF, XPS, etc. documents)
         if (cb) {
-            // TODO: optimize, create just destination
-            auto* item = NewChmTocItem(nullptr, nullptr, 0, pageUrl);
+            auto* item = NewChmTocItem(nullptr, nullptr, {}, 0, pageUrl);
             cb->GotoLink(item->dest);
             FreeTocItemRec(nullptr, item);
         }
@@ -439,7 +436,7 @@ void ChmModel::SaveHtmlScrollPosForPage(int pageNo) {
 }
 
 void ChmModel::SaveHtmlScrollPosForUrl(Str url, PointF pos) {
-    if (!url || pos.x < 0 || pos.y < 0) {
+    if (len(url) == 0 || pos.x < 0 || pos.y < 0) {
         return;
     }
 
@@ -451,7 +448,7 @@ void ChmModel::SaveHtmlScrollPosForUrl(Str url, PointF pos) {
     }
 
     htmlScrollUrls.Append(plainUrl);
-    htmlScrollPositions.Append(pos);
+    VecAppend(htmlScrollPositions, pos);
 }
 
 bool ChmModel::GetSavedHtmlScrollPosForPage(int pageNo, PointF* pos) const {
@@ -462,7 +459,7 @@ bool ChmModel::GetSavedHtmlScrollPosForPage(int pageNo, PointF* pos) const {
 }
 
 bool ChmModel::GetSavedHtmlScrollPosForUrl(Str url, PointF* pos) const {
-    if (!url || !pos) {
+    if (len(url) == 0 || !pos) {
         return false;
     }
 
@@ -510,14 +507,13 @@ struct ChmTocBuilder : EbookTocVisitor {
     StrVec* pages = nullptr;
     Vec<ChmTocTraceItem>* tocTrace = nullptr;
     Arena* a = nullptr;
-    // TODO: could use dict::MapStrToInt instead of StrList in the caller as well
     dict::MapStrToInt urlsSet;
 
     // We fake page numbers by doing a depth-first traversal of
     // toc tree and considering each unique html page in toc tree
     // as a page
     int CreatePageNoForURL(Str url) {
-        if (!url || IsExternalUrl(url)) {
+        if (len(url) == 0 || IsExternalUrl(url)) {
             return 0;
         }
 
@@ -552,7 +548,7 @@ struct ChmTocBuilder : EbookTocVisitor {
         Str urlDup = str::Dup(a, url);
         int pageNo = CreatePageNoForURL(urlDup);
         ChmTocTraceItem item{nameDup, urlDup, level, pageNo};
-        tocTrace->Append(item);
+        VecAppend(*tocTrace, item);
     }
 };
 
@@ -564,7 +560,7 @@ bool ChmModel::Load(Str fileName) {
     }
 
     // always make the document's homepage page 1
-    TempStr page = strconv::AnsiToUtf8(doc->GetHomePath());
+    TempStr page = strconv::AnsiToUtf8Temp(doc->GetHomePath());
     pages.Append(page);
 
     // parse the ToC here, since page numbering depends on it
@@ -603,7 +599,7 @@ ChmCacheEntry* ChmModel::FindDataForUrl(Str url) const {
 // Sync the state of the ui with the page (show
 // the right page number, select the right item in toc tree)
 void ChmModel::OnDocumentComplete(Str url) {
-    if (!url || IsBlankUrl(url)) {
+    if (len(url) == 0 || IsBlankUrl(url)) {
         return;
     }
     if (url.s[0] == '/') {
@@ -671,7 +667,7 @@ bool ChmModel::OnBeforeNavigate(Str url, bool newWindow) {
     if (newWindow || IsExternalUrl(url)) {
         if (url && cb) {
             // TODO: optimize, create just destination
-            auto* item = NewChmTocItem(nullptr, nullptr, 1, url);
+            auto* item = NewChmTocItem(nullptr, nullptr, {}, 1, url);
             cb->GotoLink(item->dest);
             FreeTocItemRec(nullptr, item);
         }
@@ -695,7 +691,7 @@ static TempStr ChmThemeStyleTemp() {
     Color txtCol = ThemePageRenderColors(bgCol);
     bool isDefault = (bgCol == kColWhite) && (txtCol == kColBlack);
     if (isDefault) {
-        return nullptr;
+        return {};
     }
     bool dark = !IsLightColor(bgCol);
     TempStr bg = ColorToCssTemp(bgCol);
@@ -745,7 +741,7 @@ static Str ChmInjectStyle(Str raw, Str style) {
 // non-default page colors
 static Str ChmThemeApplyToData(Str raw) {
     TempStr style = ChmThemeStyleTemp();
-    if (!style) {
+    if (len(style) == 0) {
         return str::Dup(raw);
     }
     bool isHtml = str::IndexOfI(raw, StrL("<html")) >= 0 || str::IndexOfI(raw, StrL("<head")) >= 0 ||
@@ -768,7 +764,7 @@ Str ChmModel::GetDataForUrl(Str url) {
         Str s = str::Dup(poolAlloc, plainUrl);
         e = new ChmCacheEntry(s);
         e->data = ChmThemeApplyToData(raw);
-        urlDataCache.Append(e);
+        VecAppend(urlDataCache, e);
     }
     return e->data;
 }
@@ -780,7 +776,7 @@ void ChmModel::UpdateTheme() {
     {
         ScopedMutex scope(&docAccess);
         DeleteVecMembers(urlDataCache);
-        urlDataCache.Reset();
+        VecReset(urlDataCache);
     }
     if (docView && len(currentPageUrl) > 0) {
         SaveHtmlScrollPos();
@@ -802,22 +798,23 @@ void ChmModel::OnLButtonDown() {
     }
 }
 
-// named destinations are either in-document URLs or Alias topic IDs
+// named destinations are either in-document URLs or Alias topic IDs.
+// engine-owned; do not delete
 IPageDestination* ChmModel::GetNamedDest(Str name) {
     TempStr url = url::GetFullPathTemp(name);
     int pageNo = pages.Find(url) + 1;
     if (pageNo >= 1) {
-        return NewChmNamedDest(url, pageNo);
+        return NewChmNamedDest(poolAlloc, url, pageNo);
     }
     if (doc->HasData(url)) {
-        return NewChmNamedDest(url, 1);
+        return NewChmNamedDest(poolAlloc, url, 1);
     }
     unsigned int topicID;
     if (str::IsNull(str::Parse(name, "%u%$", &topicID))) {
         return nullptr;
     }
     TempStr topicURL = doc->ResolveTopicID(topicID);
-    if (!topicURL) {
+    if (len(topicURL) == 0) {
         return nullptr;
     }
     url = topicURL;
@@ -829,7 +826,7 @@ IPageDestination* ChmModel::GetNamedDest(Str name) {
     // return pageNo=1 for these, as HandleLink will ignore that anyway
     // but LinkHandler::ScrollTo doesn't
     pageNo = std::max(pageNo, 1);
-    return NewChmNamedDest(url, pageNo);
+    return NewChmNamedDest(poolAlloc, url, pageNo);
 }
 
 // table of contents
@@ -848,17 +845,16 @@ TocTree* ChmModel::GetToc() {
     int idCounter = 0;
 
     for (ChmTocTraceItem& ti : *tocTrace) {
-        // TODO: set parent
-        TocItem* item = NewChmTocItem(nullptr, ti.title, ti.pageNo, ti.url);
+        TocItem* item = NewChmTocItem(poolAlloc, nullptr, ti.title, ti.pageNo, ti.url);
         item->id = ++idCounter;
         // append the item at the correct level
         ReportIf(ti.level < 1);
         if (ti.level <= len(levels)) {
-            levels.RemoveAt(ti.level, len(levels) - ti.level);
-            levels.Last()->AddSiblingAtEnd(item);
+            VecRemoveAtN(levels, ti.level, len(levels) - ti.level);
+            VecLast(levels)->AddSiblingAtEnd(item);
         } else {
             *nextChild = item;
-            levels.Append(item);
+            VecAppend(levels, item);
             foundRoot = true;
         }
         nextChild = &item->child;
@@ -866,9 +862,9 @@ TocTree* ChmModel::GetToc() {
     if (!foundRoot) {
         return nullptr;
     }
-    auto* realRoot = AllocTocItem(nullptr, {}, 0);
+    auto* realRoot = AllocTocItem(poolAlloc, {}, 0);
     realRoot->child = root;
-    tocTree = new TocTree(realRoot);
+    tocTree = AllocTocTree(poolAlloc, realRoot);
     return tocTree;
 }
 
@@ -918,16 +914,16 @@ float ChmModel::GetNextZoomStep(float towardsLevel) const {
 
 void ChmModel::GetDisplayState(FileState* fs) {
     Str fileNameA = fileName;
-    if (!fs->filePath || !str::EqI(fs->filePath, fileNameA)) {
+    if (len(fs->filePath) == 0 || !str::EqI(fs->filePath, fileNameA)) {
         SetFileStatePath(fs, fileNameA);
     }
 
-    fs->useDefaultState = !gGlobalPrefs->rememberStatePerDocument;
+    fs->useDefaultState = !gSettings->rememberStatePerDocument;
 
     str::ReplaceWithCopy(&fs->displayMode, DisplayModeToString(GetDisplayMode()));
     ZoomToString(&fs->zoom, GetZoomVirtual(), fs);
 
-    fs->pageNo = CurrentPageNo();
+    str::ReplaceWithCopy(&fs->pageNo, StoredPagePosFromCtrlTemp(this));
     SaveHtmlScrollPos();
     fs->scrollPos = htmlScrollPos;
 }
@@ -997,7 +993,7 @@ Str ChmThumbnailTask::GetDataForUrl(Str url) {
     ScopedMutex scope(&docAccess);
     TempStr plainUrl = url::GetFullPathTemp(url);
     Str d = str::Dup(doc->GetDataTemp(plainUrl));
-    data.Append(d);
+    VecAppend(data, d);
     return d;
 }
 
@@ -1024,7 +1020,6 @@ void ChmThumbnailTask::OnDocumentComplete(Str url) {
     }
     // delay deleting because ~ChmThumbnailTask() deletes HtmlWindow
     // and we're currently processing HtmlWindow messages
-    // TODO: it's possible we still have timing issue
     auto fn = MkFunc0<ChmThumbnailTask>(SafeDeleteChmThumbnailTask, this);
     uitask::Post(fn, "SafeDeleteChmThumbnailTask");
 }

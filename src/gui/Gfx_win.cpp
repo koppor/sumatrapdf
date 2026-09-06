@@ -18,7 +18,16 @@
 // for Direct2D's EndDraw() and GDI+'s Graphics teardown to have completed.
 Gfx::~Gfx() {
     if (doubleBufferTarget && doubleBufferSource && !doubleBufferSize.IsEmpty()) {
+        // BitBlt onto LAYOUT_RTL mirrors glyphs; the buffer is LTR (issue #6113).
+        DWORD layout = GetLayout(doubleBufferTarget);
+        bool mirrored = layout != GDI_ERROR && (layout & LAYOUT_RTL);
+        if (mirrored) {
+            SetLayout(doubleBufferTarget, 0);
+        }
         BitBlt(doubleBufferTarget, 0, 0, doubleBufferSize.dx, doubleBufferSize.dy, doubleBufferSource, 0, 0, SRCCOPY);
+        if (mirrored) {
+            SetLayout(doubleBufferTarget, layout);
+        }
     }
 }
 
@@ -106,6 +115,28 @@ void GfxHdc::FillRects(const Rect* rects, int count, Color col, u8 alpha, int ou
         if (!rects[i].IsEmpty()) {
             path.AddRectangle(ToGdipRect(rects[i]));
         }
+    }
+    u8 r, g, b;
+    UnpackColor(col, r, g, b);
+    Gdiplus::SolidBrush brush(Gdiplus::Color(alpha, r, g, b));
+    gh.g.FillPath(&brush, &path);
+    if (outlineWidth > 0) {
+        path.Outline(nullptr, 0.2f);
+        Gdiplus::Pen pen(Gdiplus::Color(alpha, 0, 0, 0), (float)outlineWidth);
+        gh.g.DrawPath(&pen, &path);
+    }
+}
+
+void GfxHdc::FillQuads(const Point* pts, int nQuads, Color col, u8 alpha, int outlineWidth) {
+    if (ColorSkipsPaint(col) || nQuads <= 0 || !pts) {
+        return;
+    }
+    GdiplusOnHdc gh(hdc);
+    Gdiplus::GraphicsPath path(Gdiplus::FillModeWinding);
+    for (int i = 0; i < nQuads; i++) {
+        const Point* p = pts + i * 4;
+        Gdiplus::Point gp[4] = {{p[0].x, p[0].y}, {p[1].x, p[1].y}, {p[2].x, p[2].y}, {p[3].x, p[3].y}};
+        path.AddPolygon(gp, 4);
     }
     u8 r, g, b;
     UnpackColor(col, r, g, b);
@@ -288,7 +319,7 @@ void GfxHdc::DrawPixmap(Pixmap* px, const Rect& r) {
 
 void GfxHdc::PushClip(const Rect& r) {
     int saved = SaveDC(hdc);
-    savedDCs.Append(saved);
+    VecAppend(savedDCs, saved);
     IntersectClipRect(hdc, r.x, r.y, r.Right(), r.Bottom());
 }
 
@@ -298,7 +329,7 @@ void GfxHdc::PopClip() {
         ReportIf(true);
         return;
     }
-    int saved = savedDCs.Pop();
+    int saved = VecPop(savedDCs);
     RestoreDC(hdc, saved);
 }
 
@@ -318,62 +349,106 @@ bool gUseDirect2D = true;
 // actually has it. The caller owns the result.
 Gfx* GfxCreate(HDC hdc) {
     if (gUseDirect2D && Direct2DAvailable()) {
-        return new GfxDirect2D(hdc);
+        auto* d2d = new GfxDirect2D(hdc);
+        // BindDC fails on a 24-bit DDB memory DC; don't return a no-op painter
+        if (d2d->target) {
+            return d2d;
+        }
+        delete d2d;
     }
     return new GfxGdiplus(hdc);
+}
+
+void GfxDestroyDoubleBuffer(GfxDoubleBuffer* b) {
+    if (!b) {
+        return;
+    }
+    if (b->hdc && b->prevBitmap) {
+        SelectObject(b->hdc, b->prevBitmap);
+    }
+    DeleteObject(b->bitmap);
+    DeleteDC(b->hdc);
+    b->hdc = nullptr;
+    b->bitmap = nullptr;
+    b->prevBitmap = nullptr;
+    b->dx = 0;
+    b->dy = 0;
 }
 
 void GfxDestroyDoubleBuffer(HwndBase* w) {
     if (!w) {
         return;
     }
-    if (w->gfxDoubleBufferHdc && w->gfxDoubleBufferPrevBitmap) {
-        SelectObject(w->gfxDoubleBufferHdc, w->gfxDoubleBufferPrevBitmap);
-    }
-    DeleteObject(w->gfxDoubleBufferBitmap);
-    DeleteDC(w->gfxDoubleBufferHdc);
-    w->gfxDoubleBufferHdc = nullptr;
-    w->gfxDoubleBufferBitmap = nullptr;
-    w->gfxDoubleBufferPrevBitmap = nullptr;
-    w->gfxDoubleBufferDx = 0;
-    w->gfxDoubleBufferDy = 0;
+    GfxDoubleBuffer b{};
+    b.hdc = w->gfxDoubleBufferHdc;
+    b.bitmap = w->gfxDoubleBufferBitmap;
+    b.prevBitmap = w->gfxDoubleBufferPrevBitmap;
+    b.dx = w->gfxDoubleBufferDx;
+    b.dy = w->gfxDoubleBufferDy;
+    GfxDestroyDoubleBuffer(&b);
+    w->gfxDoubleBufferHdc = b.hdc;
+    w->gfxDoubleBufferBitmap = b.bitmap;
+    w->gfxDoubleBufferPrevBitmap = b.prevBitmap;
+    w->gfxDoubleBufferDx = b.dx;
+    w->gfxDoubleBufferDy = b.dy;
 }
 
-// Keep one bitmap per HwndBase. A repaint at the same client size reuses it;
-// resizing replaces it, and a failed allocation falls back to direct drawing.
-Gfx* GfxCreateWithDoubleBuffer(HwndBase* w, HDC hdc) {
-    if (!w || !w->hwnd || !hdc) {
+// Keep one bitmap. A repaint at the same client size reuses it; resizing
+// replaces it, and a failed allocation falls back to drawing on hdc.
+Gfx* GfxCreateWithDoubleBuffer(HWND hwnd, HDC hdc, GfxDoubleBuffer* b) {
+    if (!hwnd || !hdc || !b) {
         return GfxCreate(hdc);
     }
 
-    Size size = HwndClientRect(w->hwnd).Size();
-    bool sizeChanged = size.dx != w->gfxDoubleBufferDx || size.dy != w->gfxDoubleBufferDy;
-    if (sizeChanged) {
-        GfxDestroyDoubleBuffer(w);
-        w->gfxDoubleBufferDx = size.dx;
-        w->gfxDoubleBufferDy = size.dy;
+    Size size = HwndClientRect(hwnd).Size();
+    if (size.dx != b->dx || size.dy != b->dy) {
+        GfxDestroyDoubleBuffer(b);
+        b->dx = size.dx;
+        b->dy = size.dy;
         if (!size.IsEmpty()) {
-            w->gfxDoubleBufferHdc = CreateCompatibleDC(hdc);
-            w->gfxDoubleBufferBitmap = CreateCompatibleBitmap(hdc, size.dx, size.dy);
-            if (w->gfxDoubleBufferHdc && w->gfxDoubleBufferBitmap) {
-                w->gfxDoubleBufferPrevBitmap = SelectObject(w->gfxDoubleBufferHdc, w->gfxDoubleBufferBitmap);
+            b->hdc = CreateCompatibleDC(hdc);
+            // CreateCompatibleDC copies LAYOUT_RTL; keep the DIB LTR (issue #6113)
+            SetLayout(b->hdc, 0);
+            // 32-bit DIB: Direct2D BindDC rejects a 24-bit DDB from CreateCompatibleBitmap
+            b->bitmap = CreateMemoryBitmap(size);
+            if (b->hdc && b->bitmap) {
+                b->prevBitmap = SelectObject(b->hdc, b->bitmap);
             }
-            if (!w->gfxDoubleBufferHdc || !w->gfxDoubleBufferBitmap || !w->gfxDoubleBufferPrevBitmap) {
-                GfxDestroyDoubleBuffer(w);
-                w->gfxDoubleBufferDx = size.dx;
-                w->gfxDoubleBufferDy = size.dy;
+            if (!b->hdc || !b->bitmap || !b->prevBitmap) {
+                GfxDestroyDoubleBuffer(b);
+                b->dx = size.dx;
+                b->dy = size.dy;
             }
         }
     }
 
-    HDC bufferHdc = w->gfxDoubleBufferHdc;
-    if (!bufferHdc) {
+    if (!b->hdc) {
         return GfxCreate(hdc);
     }
-    SetBkMode(bufferHdc, TRANSPARENT);
-    Gfx* gfx = GfxCreate(bufferHdc);
+    SetLayout(b->hdc, 0);
+    SetBkMode(b->hdc, TRANSPARENT);
+    Gfx* gfx = GfxCreate(b->hdc);
     gfx->doubleBufferTarget = hdc;
-    gfx->doubleBufferSource = bufferHdc;
+    gfx->doubleBufferSource = b->hdc;
     gfx->doubleBufferSize = size;
+    return gfx;
+}
+
+Gfx* GfxCreateWithDoubleBuffer(HwndBase* w, HDC hdc) {
+    if (!w || !w->hwnd) {
+        return GfxCreate(hdc);
+    }
+    GfxDoubleBuffer b{};
+    b.hdc = w->gfxDoubleBufferHdc;
+    b.bitmap = w->gfxDoubleBufferBitmap;
+    b.prevBitmap = w->gfxDoubleBufferPrevBitmap;
+    b.dx = w->gfxDoubleBufferDx;
+    b.dy = w->gfxDoubleBufferDy;
+    Gfx* gfx = GfxCreateWithDoubleBuffer(w->hwnd, hdc, &b);
+    w->gfxDoubleBufferHdc = b.hdc;
+    w->gfxDoubleBufferBitmap = b.bitmap;
+    w->gfxDoubleBufferPrevBitmap = b.prevBitmap;
+    w->gfxDoubleBufferDx = b.dx;
+    w->gfxDoubleBufferDy = b.dy;
     return gfx;
 }

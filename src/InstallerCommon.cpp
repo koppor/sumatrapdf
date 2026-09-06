@@ -21,6 +21,7 @@
 #include "gui/UIModels.h"
 #include "gui/Layout.h"
 #include "gui/win/WinGui.h"
+#include "gui/Dpi.h"
 #include "gui/PlatformFont.h"
 #include "gui/Gfx.h"
 #include "gui/VirtCtrl.h"
@@ -47,6 +48,7 @@ using Gdiplus::SolidBrush;
 using Gdiplus::StringAlignmentCenter;
 using Gdiplus::StringFormat;
 using Gdiplus::StringFormatFlagsDirectionRightToLeft;
+using Gdiplus::UnitPixel;
 
 Gdiplus::Color gCol1(196, 64, 50);
 Gdiplus::Color gCol1Shadow(134, 48, 39);
@@ -59,10 +61,10 @@ Gdiplus::Color gCol4Shadow(47, 89, 127);
 Gdiplus::Color gCol5(112, 115, 207);
 Gdiplus::Color gCol5Shadow(66, 71, 118);
 
-Gdiplus::Color COLOR_MSG_WELCOME(gCol5);
-Gdiplus::Color COLOR_MSG_OK(gCol5);
-Gdiplus::Color COLOR_MSG_INSTALLATION(gCol5);
-Gdiplus::Color COLOR_MSG_FAILED(gCol1);
+Gdiplus::Color kColorMsgWelcome(gCol5);
+Gdiplus::Color kColorMsgOk(gCol5);
+Gdiplus::Color kColorMsgInstallation(gCol5);
+Gdiplus::Color kColorMsgFailed(gCol1);
 
 HWND gHwndFrame = nullptr;
 Str gFirstError;
@@ -81,7 +83,7 @@ Str gDefaultMsg; // Note: translation, not freeing
 // case-insensitive check whether dir is a ';'-delimited component of a PATH-like string
 bool IsDirInPath(Str path, Str dir) {
     StrVec parts;
-    Split(&parts, path, ";");
+    Split(&parts, path, StrL(";"));
     for (Str part : parts) {
         if (str::EqI(part, dir)) {
             return true;
@@ -129,7 +131,7 @@ TempStr GetRegPathUninstTemp(Str appName) {
 }
 
 void NotifyFailed(Str msg) {
-    if (!gFirstError) {
+    if (len(gFirstError) == 0) {
         gFirstError = str::Dup(msg);
     }
     logf("NotifyFailed: %s\n", msg);
@@ -148,10 +150,10 @@ TempStr GetExistingInstallationDirTemp() {
         // no logging if returning cached
         return gCachedExistingInstallationDir;
     }
-    log("GetExistingInstallationDir()\n");
-    TempStr regPathUninst = GetRegPathUninstTemp(kAppName);
-    TempStr dir = LoggedReadRegStr2Temp(regPathUninst, "InstallLocation");
-    if (!dir) {
+    log(StrL("GetExistingInstallationDir()\n"));
+    TempStr regPathUninst = GetRegPathUninstTemp(StrL(kAppName));
+    TempStr dir = LoggedReadRegStr2Temp(regPathUninst, StrL("InstallLocation"));
+    if (len(dir) == 0) {
         return {};
     }
     if (str::EndsWithI(dir, StrL(".exe"))) {
@@ -166,7 +168,7 @@ TempStr GetExistingInstallationDirTemp() {
 
 bool IsOurExeInstalled() {
     TempStr installedDir = GetExistingInstallationDirTemp();
-    if (!installedDir) {
+    if (len(installedDir) == 0) {
         return false;
     }
     TempStr exeDir = GetSelfExeDirTemp();
@@ -175,7 +177,7 @@ bool IsOurExeInstalled() {
 
 // Walk path and parents; true if any component equals dir (junction-aware via path::IsSame).
 static bool IsPathUnderOrEqualDir(Str path, Str dir) {
-    if (!path || !dir) {
+    if (len(path) == 0 || len(dir) == 0) {
         return false;
     }
     TempStr cur = str::DupTemp(path);
@@ -184,7 +186,7 @@ static bool IsPathUnderOrEqualDir(Str path, Str dir) {
             return true;
         }
         TempStr parent = path::GetDirTemp(cur);
-        if (!parent || len(parent) == 0 || len(parent) >= len(cur)) {
+        if (len(parent) == 0 || len(parent) >= len(cur)) {
             break;
         }
         cur = parent;
@@ -194,7 +196,7 @@ static bool IsPathUnderOrEqualDir(Str path, Str dir) {
 
 // true if path is under Program Files / Program Files (x86)
 bool IsPathUnderProgramFiles(Str path) {
-    if (!path) {
+    if (len(path) == 0) {
         return false;
     }
     TempStr pf = GetSpecialFolderTemp(CSIDL_PROGRAM_FILES);
@@ -210,18 +212,18 @@ bool IsPathUnderProgramFiles(Str path) {
 
 // Probe whether the current process can create a file under dir (or a parent that exists).
 static bool CanWriteToDirectory(Str dir) {
-    if (!dir) {
+    if (len(dir) == 0) {
         return false;
     }
     TempStr probeDir = str::DupTemp(dir);
     while (probeDir && !dir::Exists(probeDir)) {
         TempStr parent = path::GetDirTemp(probeDir);
-        if (!parent || len(parent) == 0 || len(parent) >= len(probeDir)) {
+        if (len(parent) == 0 || len(parent) >= len(probeDir)) {
             break;
         }
         probeDir = parent;
     }
-    if (!probeDir || !dir::Exists(probeDir)) {
+    if (len(probeDir) == 0 || !dir::Exists(probeDir)) {
         return false;
     }
     TempStr probe = path::JoinTemp(probeDir, fmt("sumatra-write-test-%u.tmp", GetCurrentProcessId()));
@@ -255,16 +257,16 @@ bool InstallNeedsElevation(Str installDir, bool allUsers) {
 
 void GetPreviousInstallInfo(PreviousInstallationInfo* info) {
     info->installationDir = str::Dup(GetExistingInstallationDirTemp());
-    if (!info->installationDir) {
+    if (len(info->installationDir) == 0) {
         info->typ = PreviousInstallationType::None;
-        log("GetPreviousInstallInfo: not installed\n");
+        log(StrL("GetPreviousInstallInfo: not installed\n"));
         return;
     }
     info->searchFilterInstalled = IsSearchFilterInstalled();
     info->previewInstalled = IsPreviewInstalled();
-    TempStr regPathUninst = GetRegPathUninstTemp(kAppName);
-    TempStr dirLM = LoggedReadRegStrTemp(HKEY_LOCAL_MACHINE, regPathUninst, "InstallLocation");
-    TempStr dirCU = LoggedReadRegStrTemp(HKEY_CURRENT_USER, regPathUninst, "InstallLocation");
+    TempStr regPathUninst = GetRegPathUninstTemp(StrL(kAppName));
+    TempStr dirLM = LoggedReadRegStrTemp(HKEY_LOCAL_MACHINE, regPathUninst, StrL("InstallLocation"));
+    TempStr dirCU = LoggedReadRegStrTemp(HKEY_CURRENT_USER, regPathUninst, StrL("InstallLocation"));
     if (dirLM && dirCU) {
         info->typ = PreviousInstallationType::Both;
         info->allUsers = true;
@@ -288,7 +290,7 @@ void GetPreviousInstallInfo(PreviousInstallationInfo* info) {
 
 static TempStr GetExistingInstallationFilePathTemp(Str name) {
     TempStr dir = GetExistingInstallationDirTemp();
-    if (!dir) {
+    if (len(dir) == 0) {
         return {};
     }
     return path::JoinTemp(dir, name);
@@ -302,20 +304,11 @@ TempStr GetInstallationFilePathTemp(Str installDir, Str name) {
 
 TempStr GetShortcutPathTemp(int csidl) {
     TempStr dir = GetSpecialFolderTemp(csidl, false);
-    if (!dir) {
+    if (len(dir) == 0) {
         return {};
     }
-    TempStr lnkName = str::JoinTemp(kAppName, StrL(".lnk"));
+    TempStr lnkName = str::JoinTemp(StrL(kAppName), StrL(".lnk"));
     return path::JoinTemp(dir, lnkName);
-}
-
-static TempStr GetInstalledBrowserPluginPathTemp() {
-#ifndef _WIN64
-    Str kRegPathPlugin = "Software\\MozillaPlugins\\@mozilla.zeniko.ch/SumatraPDF_Browser_Plugin";
-#else
-    Str kRegPathPlugin = "Software\\MozillaPlugins\\@mozilla.zeniko.ch/SumatraPDF_Browser_Plugin_x64";
-#endif
-    return LoggedReadRegStr2Temp(kRegPathPlugin, "Path");
 }
 
 static bool IsProcessUsingFiles(DWORD procId, Str file1, Str file2) {
@@ -323,7 +316,7 @@ static bool IsProcessUsingFiles(DWORD procId, Str file1, Str file2) {
     if (procId == 0 || procId == GetCurrentProcessId()) {
         return false;
     }
-    if (!file1 && !file2) {
+    if (len(file1) == 0 && len(file2) == 0) {
         return false;
     }
     AutoCloseHandle snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, procId);
@@ -348,77 +341,56 @@ static bool IsProcessUsingFiles(DWORD procId, Str file1, Str file2) {
     return false;
 }
 
-constexpr const char* kBrowserPluginName = "npPdfViewer.dll";
-
-void UninstallBrowserPlugin() {
-    log("UninstallBrowserPlugin()\n");
-    TempStr dllPath = GetExistingInstallationFilePathTemp(kBrowserPluginName);
-    if (!file::Exists(dllPath)) {
-        // uninstall the detected plugin, even if it isn't in the target installation path
-        dllPath = GetInstalledBrowserPluginPathTemp();
-        if (!file::Exists(dllPath)) {
-            return;
-        }
-    }
-    bool ok = UnRegisterServerDLL(dllPath);
-    if (ok) {
-        log("  did uninstall browser plugin\n");
-        return;
-    }
-    log("  failed to uninstall browser plugin\n");
-    NotifyFailed(_TRA("Couldn't uninstall browser plugin"));
-}
-
 constexpr const char* kSearchFilterDllName = "PdfFilter.dll";
 
 void RegisterSearchFilter(bool allUsers, Str installDir) {
-    TempStr dllPath = GetInstallationFilePathTemp(installDir, kSearchFilterDllName);
+    TempStr dllPath = GetInstallationFilePathTemp(installDir, Str(kSearchFilterDllName));
     logf("RegisterSearchFilter() dllPath=%s\n", dllPath);
     bool ok = InstallSearchFilter(dllPath, allUsers);
     if (ok) {
-        log("  did register\n");
+        log(StrL("  did register\n"));
         return;
     }
-    log("  failed to register\n");
-    NotifyFailed(_TRA("Couldn't install PDF search filter"));
+    log(StrL("  failed to register\n"));
+    NotifyFailed(Tr("Couldn't install PDF search filter"));
 }
 
 void UnRegisterSearchFilter() {
-    TempStr dllPath = GetExistingInstallationFilePathTemp(kSearchFilterDllName);
+    TempStr dllPath = GetExistingInstallationFilePathTemp(Str(kSearchFilterDllName));
     logf("UnRegisterSearchFilter() dllPath=%s\n", dllPath);
     bool ok = UninstallSearchFilter();
     if (ok) {
-        log("  did unregister\n");
+        log(StrL("  did unregister\n"));
         return;
     }
-    log("  failed to unregister\n");
-    NotifyFailed(_TRA("Couldn't uninstall Sumatra search filter"));
+    log(StrL("  failed to unregister\n"));
+    NotifyFailed(Tr("Couldn't uninstall Sumatra search filter"));
 }
 
 constexpr const char* kPreviewDllName = "PdfPreview.dll";
 
 void RegisterPreviewer(bool allUsers, Str installDir) {
-    TempStr dllPath = GetInstallationFilePathTemp(installDir, kPreviewDllName);
+    TempStr dllPath = GetInstallationFilePathTemp(installDir, Str(kPreviewDllName));
     logf("RegisterPreviewer() dllPath=%s\n", dllPath);
     bool ok = InstallPreviewDll(dllPath, allUsers);
     if (ok) {
-        log("  did register\n");
+        log(StrL("  did register\n"));
         return;
     }
-    log("  failed to register\n");
-    NotifyFailed(_TRA("Couldn't install PDF previewer"));
+    log(StrL("  failed to register\n"));
+    NotifyFailed(Tr("Couldn't install PDF previewer"));
 }
 
 void UnRegisterPreviewer() {
-    TempStr dllPath = GetExistingInstallationFilePathTemp(kPreviewDllName);
+    TempStr dllPath = GetExistingInstallationFilePathTemp(Str(kPreviewDllName));
     logf("UnRegisterPreviewer() dllPath=%s\n", dllPath);
     bool ok = UninstallPreviewDll();
     if (ok) {
-        log("  did unregister\n");
+        log(StrL("  did unregister\n"));
         return;
     }
-    log(" failed to unregister\n");
-    NotifyFailed(_TRA("Couldn't uninstall PDF previewer"));
+    log(StrL(" failed to unregister\n"));
+    NotifyFailed(Tr("Couldn't uninstall PDF previewer"));
 }
 
 static bool IsProcWithModule(DWORD processId, Str modulePath) {
@@ -523,21 +495,20 @@ int KillProcessesWithModule(Str modulePath, bool waitUntilTerminated) {
 }
 
 // Kill processes that have any of our install-dir modules loaded:
-// libsumatrapdf.dll, PdfFilter.dll, PdfPreview.dll, browser plugin, SumatraPDF.exe.
+// libsumatrapdf.dll, PdfFilter.dll, PdfPreview.dll, SumatraPDF.exe.
 // dllhost/prevhost/SearchFilterHost load the shell-extension DLLs; they may
 // keep PdfFilter.dll locked even after libsumatrapdf.dll was renamed aside.
 // returns false if there are processes and we failed to kill them
 static bool KillProcessesUsingInstallationDir(Str dir) {
     logf("KillProcessesUsingInstallationDir('%s')\n", dir);
-    if (!dir) {
+    if (len(dir) == 0) {
         return true;
     }
     TempStr libsumatrapdf = path::JoinTemp(dir, StrL("libsumatrapdf.dll"));
     TempStr libmupdfLegacy = path::JoinTemp(dir, StrL("libmupdf.dll")); // through 3.6
-    TempStr browserPlugin = path::JoinTemp(dir, kBrowserPluginName);
-    TempStr filterDll = path::JoinTemp(dir, kSearchFilterDllName);
-    TempStr previewDll = path::JoinTemp(dir, kPreviewDllName);
-    TempStr exePath = path::JoinTemp(dir, kExeName);
+    TempStr filterDll = path::JoinTemp(dir, Str(kSearchFilterDllName));
+    TempStr previewDll = path::JoinTemp(dir, Str(kPreviewDllName));
+    TempStr exePath = path::JoinTemp(dir, Str(kExeName));
 
     AutoCloseHandle snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (INVALID_HANDLE_VALUE == snap) {
@@ -551,8 +522,7 @@ static bool KillProcessesUsingInstallationDir(Str dir) {
     while (ok) {
         DWORD procID = proc.th32ProcessID;
         bool uses = IsProcessUsingFiles(procID, libsumatrapdf, libmupdfLegacy) ||
-                    IsProcessUsingFiles(procID, browserPlugin, filterDll) ||
-                    IsProcessUsingFiles(procID, previewDll, exePath);
+                    IsProcessUsingFiles(procID, filterDll, previewDll) || IsProcessUsingFiles(procID, exePath, {});
         if (uses) {
             TempStr s = ToUtf8Temp(proc.szExeFile);
             logf("  attempting to kill process %d '%s'\n", (int)procID, s);
@@ -567,7 +537,7 @@ static bool KillProcessesUsingInstallationDir(Str dir) {
     }
 
     // Also target by module path (covers short-lived filter hosts).
-    const TempStr modulePaths[] = {libsumatrapdf, libmupdfLegacy, filterDll, previewDll, exePath, browserPlugin};
+    const TempStr modulePaths[] = {libsumatrapdf, libmupdfLegacy, filterDll, previewDll, exePath};
     for (TempStr mod : modulePaths) {
         if (file::Exists(mod)) {
             int n = KillProcessesWithModule(mod, true);
@@ -601,20 +571,19 @@ void FreeInstallationFilesInUse(Str installDir, bool allUsers, ShellExtInstallSt
     }
 
     if (removed.searchFilter) {
-        log("  unregistering search filter before file overwrite\n");
+        log(StrL("  unregistering search filter before file overwrite\n"));
         UninstallSearchFilter();
     }
     if (removed.preview) {
-        log("  unregistering previewer before file overwrite\n");
+        log(StrL("  unregistering previewer before file overwrite\n"));
         UninstallPreviewDll();
     }
-    UninstallBrowserPlugin();
 
     if (installDir) {
         KillProcessesUsingInstallationDir(installDir);
     }
     TempStr existing = GetExistingInstallationDirTemp();
-    if (existing && (!installDir || !str::EqI(existing, installDir))) {
+    if (existing && (len(installDir) == 0 || !str::EqI(existing, installDir))) {
         KillProcessesUsingInstallationDir(existing);
     }
 
@@ -632,8 +601,8 @@ void FreeInstallationFilesInUse(Str installDir, bool allUsers, ShellExtInstallSt
 }
 
 void RestoreShellExtensions(const ShellExtInstallState& state) {
-    if (!state.installDir) {
-        log("RestoreShellExtensions: no installDir, skip\n");
+    if (len(state.installDir) == 0) {
+        log(StrL("RestoreShellExtensions: no installDir, skip\n"));
         return;
     }
     logf("RestoreShellExtensions: filter=%d preview=%d allUsers=%d dir='%s'\n", (int)state.searchFilter,
@@ -647,19 +616,18 @@ void RestoreShellExtensions(const ShellExtInstallState& state) {
 }
 
 // return names of processes that are running part of the installation
-// (i.e. have libsumatrapdf.dll, PdfFilter.dll, PdfPreview.dll, or plugin loaded)
+// (i.e. have libsumatrapdf.dll, PdfFilter.dll, or PdfPreview.dll loaded)
 static void ProcessesUsingInstallation(StrVec& names) {
-    log("ProcessesUsingInstallation()\n");
+    log(StrL("ProcessesUsingInstallation()\n"));
     TempStr dir = GetExistingInstallationDirTemp();
-    if (!dir) {
+    if (len(dir) == 0) {
         return;
     }
     TempStr libsumatrapdf = path::JoinTemp(dir, StrL("libsumatrapdf.dll"));
     TempStr libmupdfLegacy = path::JoinTemp(dir, StrL("libmupdf.dll")); // through 3.6
-    TempStr browserPlugin = path::JoinTemp(dir, kBrowserPluginName);
-    TempStr filterDll = path::JoinTemp(dir, kSearchFilterDllName);
-    TempStr previewDll = path::JoinTemp(dir, kPreviewDllName);
-    TempStr exePath = path::JoinTemp(dir, kExeName);
+    TempStr filterDll = path::JoinTemp(dir, Str(kSearchFilterDllName));
+    TempStr previewDll = path::JoinTemp(dir, Str(kPreviewDllName));
+    TempStr exePath = path::JoinTemp(dir, Str(kExeName));
 
     AutoCloseHandle snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (INVALID_HANDLE_VALUE == snap) {
@@ -672,8 +640,7 @@ static void ProcessesUsingInstallation(StrVec& names) {
     while (ok) {
         DWORD procID = proc.th32ProcessID;
         bool uses = IsProcessUsingFiles(procID, libsumatrapdf, libmupdfLegacy) ||
-                    IsProcessUsingFiles(procID, browserPlugin, filterDll) ||
-                    IsProcessUsingFiles(procID, previewDll, exePath);
+                    IsProcessUsingFiles(procID, filterDll, previewDll) || IsProcessUsingFiles(procID, exePath, {});
         if (uses) {
             // TODO: this kils ReadableProcName logic
             TempStr s = ToUtf8Temp(proc.szExeFile);
@@ -688,16 +655,14 @@ static void ProcessesUsingInstallation(StrVec& names) {
 // clang-format off
 static Str readableProcessNames[] = {
     Str(), Str(), // to be filled with our process
-    "plugin-container.exe", "Mozilla Firefox",
-    "chrome.exe", "Google Chrome",
-    "prevhost.exe", "Windows Explorer",
-    "dllhost.exe", "Windows Explorer"
+    StrL("prevhost.exe"), StrL("Windows Explorer"),
+    StrL("dllhost.exe"), StrL("Windows Explorer")
 };
 // clang-format on
 
 static Str ReadableProcName(Str procPath) {
-    readableProcessNames[0] = kExeName;
-    readableProcessNames[1] = kAppName;
+    readableProcessNames[0] = Str(kExeName);
+    readableProcessNames[1] = StrL(kAppName);
     TempStr procName = path::GetBaseNameTemp(procPath);
     for (size_t i = 0; i < dimof(readableProcessNames); i += 2) {
         if (str::EqI(procName, readableProcessNames[i])) {
@@ -718,12 +683,12 @@ static void SetCloseProcessMsg() {
             procNames = str::JoinTemp(procNames, StrL(" and "), name);
         }
     }
-    TempStr s = fmt(_TRA("Please close %s to proceed!").s, procNames);
-    SetMsg(s, COLOR_MSG_FAILED);
+    TempStr s = fmt(Tr("Please close %s to proceed!").s, procNames);
+    SetMsg(s, kColorMsgFailed);
 }
 
 void SetDefaultMsg() {
-    SetMsg(gDefaultMsg, COLOR_MSG_WELCOME);
+    SetMsg(gDefaultMsg, kColorMsgWelcome);
 }
 
 static void InvalidateFrame() {
@@ -783,29 +748,10 @@ static LetterInfo gLetters[] = {
 };
 // clang-format on
 
-#if 0
-static char RandUppercaseLetter()
-{
-    // note: clearly, not random but seems to work ok anyway
-    static char l = 'A' - 1;
-    l++;
-    if (l > 'Z')
-        l = 'A';
-    return l;
-}
-
-static void RandomizeLetters()
-{
-    for (int i = 0; i < dimof(gLetters); i++) {
-        gLetters[i].c = RandUppercaseLetter();
-    }
-}
-#endif
-
-#define kSumatraLettersCount (dimof(gLetters))
+constexpr int kSumatraLettersCount = dimofi(gLetters);
 
 static void SetLettersSumatraUpTo(size_t n) {
-    Str s = "SUMATRAPDF";
+    Str s = StrL("SUMATRAPDF");
     for (size_t i = 0; i < kSumatraLettersCount; i++) {
         char c = ' ';
         if (i < n) {
@@ -822,14 +768,14 @@ static void SetLettersSumatra() {
 // an animation that reveals letters one by one
 
 // how long the animation lasts, in seconds
-#define REVEALING_ANIM_DUR double(2)
+constexpr double kRevealingAnimDur = 2;
 
 static FrameTimeoutCalculator* gRevealingLettersAnim = nullptr;
 
 static int gRevealingLettersAnimLettersToShow;
 
 static void RevealingLettersAnimStart() {
-    int framesPerSec = (int)(double(kSumatraLettersCount) / REVEALING_ANIM_DUR);
+    int framesPerSec = (int)(double(kSumatraLettersCount) / kRevealingAnimDur);
     gRevealingLettersAnim = new FrameTimeoutCalculator(framesPerSec);
     gRevealingLettersAnimLettersToShow = 0;
     SetLettersSumatraUpTo(0);
@@ -843,7 +789,7 @@ static void RevealingLettersAnimStop() {
 }
 
 static void RevealingLettersAnim() {
-    if (gRevealingLettersAnim->ElapsedTotal() > REVEALING_ANIM_DUR) {
+    if (gRevealingLettersAnim->ElapsedTotal() > kRevealingAnimDur) {
         RevealingLettersAnimStop();
         return;
     }
@@ -862,14 +808,23 @@ void AnimStep() {
     }
 }
 
+// GDI+ Font(name, emSize) defaults to UnitPoint and converts with the Graphics
+// DPI. The installer window is already DpiScale'd; on Windows 7 GDI+ may still
+// use the real screen DPI while the process is 96-DPI virtualized, so the logo
+// is scaled twice (issue #6025). Draw in pixels at our layout DPI.
+static float ImpactPx(int sizePt) {
+    return (float)DpiGet() * (float)sizePt / 72.f;
+}
+
 static void CalcLettersLayout(Graphics& g, Font* f, int dx) {
-    static BOOL didLayout = FALSE;
-    if (didLayout) {
+    static int laidOutDx = 0;
+    if (laidOutDx == dx) {
         return;
     }
+    laidOutDx = dx;
 
     StringFormat sfmt;
-    const float letterSpacing = -12.f;
+    const float letterSpacing = -(float)DpiScale(12);
     float totalDx = -letterSpacing; // counter last iteration of the loop
     WCHAR s[2]{};
     Gdiplus::PointF origin(0.f, 0.f);
@@ -890,13 +845,12 @@ static void CalcLettersLayout(Graphics& g, Font* f, int dx) {
         x += letterSpacing;
     }
     RevealingLettersAnimStart();
-    didLayout = TRUE;
 }
 
 static float DrawMessage(Graphics& g, Str msg, float y, float dx, Gdiplus::Color color) {
     WCHAR* s = CWStrTemp(msg);
 
-    Font f(L"Impact", 16, FontStyleRegular);
+    Font f(L"Impact", ImpactPx(16), FontStyleRegular, UnitPixel);
     Gdiplus::RectF maxbox(0, y, dx, 0);
     Gdiplus::RectF bbox;
     g.MeasureString(s, -1, &f, maxbox, &bbox);
@@ -932,15 +886,16 @@ static void DrawSumatraLetters(Graphics& g, Font* f, Font* fVer, float y) {
         }
 
         g.RotateTransform(li.rotation, MatrixOrderAppend);
+        float dyOff = li.dyOff * (float)DpiGet() / 96.f;
         if (kDrawTextShadow) {
             // draw shadow first
             SolidBrush b2(li.colShadow);
-            Gdiplus::PointF o2(li.x - 3.f, y + 4.f + li.dyOff);
+            Gdiplus::PointF o2(li.x - (float)DpiScale(3), y + (float)DpiScale(4) + dyOff);
             g.DrawString(s, 1, f, o2, &b2);
         }
 
         SolidBrush b1(li.col);
-        Gdiplus::PointF o1(li.x, y + li.dyOff);
+        Gdiplus::PointF o1(li.x, y + dyOff);
         g.DrawString(s, 1, f, o1, &b1);
         g.RotateTransform(li.rotation, MatrixOrderAppend);
         g.ResetTransform();
@@ -950,13 +905,13 @@ static void DrawSumatraLetters(Graphics& g, Font* f, Font* fVer, float y) {
     float x = gLetters[dimof(gLetters) - 1].x;
     g.TranslateTransform(x, y);
     g.RotateTransform(45.f);
-    float x2 = 15;
-    float y2 = -34;
+    float x2 = (float)DpiScale(15);
+    float y2 = -(float)DpiScale(34);
 
     const WCHAR* ver_s = L"v" CURR_VERSION_STR;
     if (kDrawTextShadow) {
         SolidBrush b1(Gdiplus::Color(0, 0, 0));
-        g.DrawString(ver_s, -1, fVer, Gdiplus::PointF(x2 - 2, y2 - 1), &b1);
+        g.DrawString(ver_s, -1, fVer, Gdiplus::PointF(x2 - (float)DpiScale(2), y2 - (float)DpiScale(1)), &b1);
     }
     SolidBrush b2(Gdiplus::Color(0xff, 0xff, 0xff));
     g.DrawString(ver_s, -1, fVer, Gdiplus::PointF(x2, y2), &b2);
@@ -968,7 +923,7 @@ static void DrawFrame2(Graphics& g, Rect r, bool skipMessage) {
     g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.SetPageUnit(Gdiplus::UnitPixel);
 
-    Font f(L"Impact", 40, FontStyleRegular);
+    Font f(L"Impact", ImpactPx(40), FontStyleRegular, UnitPixel);
     CalcLettersLayout(g, &f, r.dx);
 
     Gdiplus::Color bgCol;
@@ -978,8 +933,8 @@ static void DrawFrame2(Graphics& g, Rect r, bool skipMessage) {
     r2.Inflate(1, 1);
     g.FillRectangle(&bgBrush, r2);
 
-    Font f2(L"Impact", 16, FontStyleRegular);
-    DrawSumatraLetters(g, &f, &f2, 18.f);
+    Font f2(L"Impact", ImpactPx(16), FontStyleRegular, UnitPixel);
+    DrawSumatraLetters(g, &f, &f2, (float)DpiScale(18));
 
     if (skipMessage) {
         return;
@@ -987,10 +942,10 @@ static void DrawFrame2(Graphics& g, Rect r, bool skipMessage) {
 
     float msgY = (float)(r.dy / 2);
     if (gMsg) {
-        msgY += DrawMessage(g, gMsg, msgY, (float)r.dx, gMsgColor) + 5;
+        msgY += DrawMessage(g, gMsg, msgY, (float)r.dx, gMsgColor) + (float)DpiScale(5);
     }
     if (gMsgError) {
-        DrawMessage(g, gMsgError, msgY, (float)r.dx, COLOR_MSG_FAILED);
+        DrawMessage(g, gMsgError, msgY, (float)r.dx, kColorMsgFailed);
     }
 }
 

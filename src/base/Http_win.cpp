@@ -5,7 +5,6 @@
 #include "base/File.h"
 #include "base/ScopedWin.h"
 #include "base/Win.h"
-#include "base/Http.h"
 
 // MinGW's winhttp.h redefines INTERNET_SCHEME as int after wininet.h (via Base.h)
 // already typedef'd it as an enum, which is a hard error. MSVC headers are fine
@@ -13,7 +12,7 @@
 // -lwinhttp (see cmd/helper/mingw-build.ts).
 #if defined(__MINGW32__) || defined(__MINGW64__)
 #ifndef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
-#define WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY 4
+constexpr DWORD WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY = 4;
 #endif
 #ifndef WINHTTP_NO_PROXY_NAME
 #define WINHTTP_NO_PROXY_NAME ((LPCWSTR) nullptr)
@@ -28,13 +27,13 @@
 #define WINHTTP_DEFAULT_ACCEPT_TYPES ((LPCWSTR*)nullptr)
 #endif
 #ifndef WINHTTP_FLAG_SECURE
-#define WINHTTP_FLAG_SECURE 0x00800000
+constexpr DWORD WINHTTP_FLAG_SECURE = 0x00800000;
 #endif
 #ifndef WINHTTP_QUERY_STATUS_CODE
-#define WINHTTP_QUERY_STATUS_CODE 19
+constexpr DWORD WINHTTP_QUERY_STATUS_CODE = 19;
 #endif
 #ifndef WINHTTP_QUERY_FLAG_NUMBER
-#define WINHTTP_QUERY_FLAG_NUMBER 0x20000000
+constexpr DWORD WINHTTP_QUERY_FLAG_NUMBER = 0x20000000;
 #endif
 #ifndef WINHTTP_HEADER_NAME_BY_INDEX
 #define WINHTTP_HEADER_NAME_BY_INDEX ((LPCWSTR) nullptr)
@@ -57,6 +56,8 @@ BOOL WINAPI WinHttpCloseHandle(HINTERNET);
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
 #endif
+
+#include "base/Http.h"
 
 // per RFC 1945 10.15 and 3.7, a user agent product token shouldn't contain whitespace
 constexpr const WCHAR* kUserAgent = L"SumatraPdfHTTP";
@@ -225,7 +226,8 @@ Exit:
 
 bool HttpPost(Str serverA, int port, Str urlA, str::Builder* headers, str::Builder* data, str::Builder* outResp,
               DWORD* outStatusCode) {
-    str::Builder resp(2048);
+    str::Builder resp;
+    str::BuilderReserve(resp, 2048);
     bool ok = false;
     if (outStatusCode) {
         *outStatusCode = 0;
@@ -251,8 +253,8 @@ bool HttpPost(Str serverA, int port, Str urlA, str::Builder* headers, str::Build
     // Windows Internet Options, and some corp PAC files route loopback through
     // the proxy — there the request never reaches the local server even when
     // a plain Python / curl request to the same URL succeeds.
-    bool isLoopback = str::Eq(serverA, "127.0.0.1") || str::Eq(serverA, "localhost") || str::Eq(serverA, "::1") ||
-                      str::EqI(serverA, "localhost");
+    bool isLoopback = str::Eq(serverA, StrL("127.0.0.1")) || str::Eq(serverA, StrL("localhost")) ||
+                      str::Eq(serverA, StrL("::1")) || str::EqI(serverA, StrL("localhost"));
     DWORD accessType = isLoopback ? INTERNET_OPEN_TYPE_DIRECT : INTERNET_OPEN_TYPE_PRECONFIG;
     HINTERNET hInet = InternetOpenW(kUserAgent, accessType, nullptr, nullptr, 0);
     if (!hInet) {
@@ -335,80 +337,13 @@ Exit:
 
 //--- URL encoding
 
-// url-escapes the first nChars of ws. Returns the encoded string, or empty on
-// failure. URL_ESCAPE_AS_UTF8 turns one WCHAR into at most 4 utf-8 bytes and
-// each byte into "%XX", so 12 chars per WCHAR is the true worst case.
-TempStr UrlEscapePrefixTemp(const WCHAR* ws, int nChars) {
-    if (nChars <= 0) {
-        return str::DupTemp(StrL(""));
-    }
-    WCHAR* in = AllocArrayTemp<WCHAR>(nChars + 1);
-    memcpy(in, ws, (size_t)nChars * sizeof(WCHAR));
-    in[nChars] = 0;
-    int bufCch = (nChars * 12) + 1;
-    WCHAR* buf = AllocArrayTemp<WCHAR>(bufCch);
-    auto cch = (DWORD)bufCch;
-    HRESULT hr = UrlEscapeW(in, buf, &cch, URL_ESCAPE_AS_UTF8);
-    if (FAILED(hr)) {
-        return {};
-    }
-    return ToUtf8Temp(buf);
-}
-
 // URL-encode s so it can be substituted into a URL, shortening it if the
 // encoded form would not fit in maxEncodedLen characters.
-//
-// Encoded length is wildly different from input length and depends on the
-// text: an ascii letter stays 1 char, a space becomes "%20" (3), a newline
-// "%0A" (3), and a CJK character is 3 utf-8 bytes so it becomes 9. That is why
-// we can't just cut the input at a fixed length - we binary-search for the
-// longest prefix that still fits once encoded.
-//
-// The cut is made on a character boundary (never inside a surrogate pair, and
-// never inside a %XX escape, since we shorten the *input* and re-encode rather
-// than chopping the encoded output). Callers that care pass didTruncateOut so
-// they can tell the user instead of silently sending less text than asked for.
 TempStr URLEncodeMayTruncateTemp(Str s, int maxEncodedLen, bool* didTruncateOut) {
-    if (didTruncateOut) {
-        *didTruncateOut = false;
-    }
     if (maxEncodedLen <= 0) {
         maxEncodedLen = kMaxUrlEncodedLen;
     }
-    TempWStr ws = ToWStrTemp(s);
-    int nChars = len(ws);
-    if (nChars == 0) {
-        return str::DupTemp(StrL(""));
-    }
-
-    TempStr full = UrlEscapePrefixTemp(ws.s, nChars);
-    if (full.s && len(full) <= maxEncodedLen) {
-        return full;
-    }
-
-    // longest prefix whose encoded form fits. lo always fits, hi never does.
-    int lo = 0;
-    int hi = nChars;
-    while (lo + 1 < hi) {
-        int mid = lo + ((hi - lo) / 2);
-        // don't split a surrogate pair
-        if (mid > 0 && mid < nChars && (ws.s[mid] & 0xFC00) == 0xDC00) {
-            mid--;
-        }
-        if (mid <= lo) {
-            break;
-        }
-        TempStr enc = UrlEscapePrefixTemp(ws.s, mid);
-        if (enc.s && len(enc) <= maxEncodedLen) {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    if (didTruncateOut) {
-        *didTruncateOut = true;
-    }
-    return UrlEscapePrefixTemp(ws.s, lo);
+    return url::EncodeMayTruncateTemp(s, maxEncodedLen, didTruncateOut);
 }
 
 //--- POST with custom headers (WinHTTP)
@@ -431,7 +366,7 @@ TempStr HttpNormalizeHeadersTemp(Str headers) {
             continue;
         }
         if (len(b) > 0) {
-            b.Append("\r\n");
+            b.Append(StrL("\r\n"));
         }
         b.Append(t);
     }
@@ -497,7 +432,7 @@ bool HttpPostUrl(Str url, Str contentType, Str extraHeaders, Str body, HttpRsp* 
         TempStr extra = HttpNormalizeHeadersTemp(extraHeaders);
         if (!str::IsEmptyOrWhiteSpace(extra)) {
             if (len(hdrs) > 0) {
-                hdrs.Append("\r\n");
+                hdrs.Append(StrL("\r\n"));
             }
             hdrs.Append(extra);
         }

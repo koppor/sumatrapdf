@@ -7,7 +7,7 @@
 // without pulling in the engine, HWND, or rendering layers.
 
 #include "base/Base.h"
-#include "RefHoverTextDetect.h"
+#include "RefHover.h"
 
 // === Plain-text citation detection ===
 
@@ -69,7 +69,7 @@ static Rect CitationSpanBounds(const Rect* coords, int textLen, const Vec<int>& 
 }
 
 static bool IsNamePrefix(WStr word) {
-    if (!word || !iswlower(word.s[0])) {
+    if (len(word) == 0 || !iswlower(word.s[0])) {
         return false;
     }
     for (WStr prefix : kNamePrefixes) {
@@ -97,7 +97,7 @@ bool DetectCitationInPageText(WStr text, const Rect* coords, int textLen, Point 
                               Rect* srcRectOut) {
     *surnameOut = {};
     *yearOut = 0;
-    if (!text || textLen <= 0 || !coords) {
+    if (len(text) == 0 || textLen <= 0 || !coords) {
         return false;
     }
 
@@ -141,7 +141,8 @@ bool DetectCitationInPageText(WStr text, const Rect* coords, int textLen, Point 
     // normalized text. Line breaks also become a single space.
     // 3-line band of page text; most citations fit in a few hundred WCHARs.
     WCHAR chunkScratch[512]{};
-    wstr::Builder chunk(WStr(chunkScratch, dimofi(chunkScratch)));
+    wstr::Builder chunk;
+    wstr::BuilderUseExternalBuffer(chunk, WStr(chunkScratch, dimofi(chunkScratch)));
     Vec<int> chunkGlyphs;
     int cursorChunkPos = -1;
     int prevY = INT_MIN;
@@ -160,12 +161,12 @@ bool DetectCitationInPageText(WStr text, const Rect* coords, int textLen, Point 
         if (isSpace) {
             if (!lastWasSpace) {
                 chunk.AppendChar(L' ');
-                chunkGlyphs.Append(-1);
+                VecAppend(chunkGlyphs, -1);
                 lastWasSpace = true;
             }
         } else {
             chunk.AppendChar(c);
-            chunkGlyphs.Append(i);
+            VecAppend(chunkGlyphs, i);
             lastWasSpace = false;
         }
         prevY = r.y;
@@ -347,7 +348,8 @@ bool DetectCitationInPageText(WStr text, const Rect* coords, int textLen, Point 
 
     // Build surname string (author names are short).
     WCHAR surnameScratch[128]{};
-    wstr::Builder surnameW(WStr(surnameScratch, dimofi(surnameScratch)));
+    wstr::Builder surnameW;
+    wstr::BuilderUseExternalBuffer(surnameW, WStr(surnameScratch, dimofi(surnameScratch)));
     for (int j = surnameStart; j < surnameEnd; j++) {
         surnameW.AppendChar(s.s[j]);
     }
@@ -384,7 +386,7 @@ bool DetectCitationInPageText(WStr text, const Rect* coords, int textLen, Point 
 // anchor (top-left of the matching line's first glyph).
 bool FindSurnameInPageText(WStr text, const Rect* coords, int textLen, WStr surnameW, int year, float* xOut,
                            float* yOut) {
-    if (!text || textLen <= 0 || !coords || !surnameW) {
+    if (len(text) == 0 || textLen <= 0 || !coords || len(surnameW) == 0) {
         return false;
     }
     int surnameLen = surnameW.len;
@@ -497,7 +499,7 @@ bool FindSurnameInPageText(WStr text, const Rect* coords, int textLen, WStr surn
 bool DetectNumericCitationInPageText(WStr text, const Rect* coords, int textLen, Point pagePos, int* numOut,
                                      Rect* srcRectOut) {
     *numOut = 0;
-    if (!text || textLen <= 0 || !coords) {
+    if (len(text) == 0 || textLen <= 0 || !coords) {
         return false;
     }
 
@@ -762,7 +764,7 @@ bool DetectNumericCitationInPageText(WStr text, const Rect* coords, int textLen,
 // "[num]" at the page's leftmost text column. Returns true on hit and fills
 // xOut/yOut with the entry's anchor (top-left of the "[" glyph).
 bool FindNumericReferenceInPageText(WStr text, const Rect* coords, int textLen, int num, float* xOut, float* yOut) {
-    if (!text || textLen <= 0 || !coords || num <= 0) {
+    if (len(text) == 0 || textLen <= 0 || !coords || num <= 0) {
         return false;
     }
 

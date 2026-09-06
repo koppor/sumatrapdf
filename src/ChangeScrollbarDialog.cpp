@@ -14,14 +14,13 @@
 
 #include "Settings.h"
 #include "AppSettings.h"
-#include "GlobalPrefs.h"
 #include "MainWindow.h"
 #include "Theme.h"
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
 #include "Translations.h"
 #include "DarkMode_win.h"
-#include "ChangeScrollbarDialog.h"
+#include "SumatraDialogs.h"
 
 // Mode list and buttons are VirtCtrl. Same WindowBase layout as Change Theme.
 struct ChangeScrollbarWnd : WindowBase {
@@ -44,15 +43,15 @@ static ChangeScrollbarWnd* gChangeScrollbarWnd = nullptr;
 
 static Str ScrollbarModeDisplayName(int idx) {
     if (idx == kScrollbarSmart) {
-        return _TRA("Smart Overlay");
+        return Tr("Smart Overlay");
     }
     if (idx == kScrollbarOverlay) {
-        return _TRA("Overlay");
+        return Tr("Overlay");
     }
     if (idx == kScrollbarHidden) {
-        return _TRA("Hidden");
+        return Tr("Hidden");
     }
-    return _TRA("Windows");
+    return Tr("Windows");
 }
 
 static void ClearChangeScrollbarWnd() {
@@ -71,7 +70,7 @@ void ChangeScrollbarWnd::OnOk(VirtMouseEvent*) {
     int idx = listBox ? listBox->GetCurrentSelection() : -1;
     if (idx >= 0) {
         Str val = SeqStrByIndex(gScrollbarModeNames, idx);
-        str::ReplaceWithCopy(&gGlobalPrefs->scrollbars, val);
+        str::ReplaceWithCopy(&gSettings->scrollbars, val);
         UpdateFixedPageScrollbarsVisibility();
         SaveSettings();
     }
@@ -95,7 +94,8 @@ bool ChangeScrollbarWnd::Create(MainWindow* mainWin) {
 
     {
         CreateCustomArgs args;
-        args.title = _TRA("Change Scrollbar");
+        args.owner = win ? win->hwndFrame : nullptr;
+        args.title = Tr("Change Scrollbar");
         args.visible = false;
         args.style = WS_POPUPWINDOW | WS_CAPTION;
         args.font = GetFont();
@@ -136,10 +136,10 @@ bool ChangeScrollbarWnd::Create(MainWindow* mainWin) {
         hbox->gap = font->averageCharWidth;
         auto pad = Insets{4, 0, 4, 0};
 
-        btnCancel = NewThemedButton(hwnd, _TRA("Cancel"), font, false);
+        btnCancel = NewThemedButton(hwnd, Tr("Cancel"), font, false);
         btnCancel->onClick = MkMethod1<ChangeScrollbarWnd, VirtMouseEvent*, &ChangeScrollbarWnd::OnCancel>(this);
         hbox->AddChild(new Padding(btnCancel, pad));
-        btnOk = NewThemedButton(hwnd, _TRA("OK"), font, true);
+        btnOk = NewThemedButton(hwnd, Tr("OK"), font, true);
         btnOk->onClick = MkMethod1<ChangeScrollbarWnd, VirtMouseEvent*, &ChangeScrollbarWnd::OnOk>(this);
         hbox->AddChild(new Padding(btnOk, pad));
         vbox->AddChild(hbox);
@@ -179,4 +179,5 @@ void ShowChangeScrollbarDialog(MainWindow* win) {
         return;
     }
     gChangeScrollbarWnd = wnd;
+    RunModalWindow(wnd->hwnd, win ? win->hwndFrame : nullptr);
 }

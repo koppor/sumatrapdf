@@ -13,7 +13,7 @@
 
 import { writeFileSync } from "node:fs";
 import { ControlCommand, withControlledSumatra } from "./control.ts";
-import { EXE, runStandalone, tmpPath } from "./util";
+import { EXE, runStandalone, tmpPath, assemblePdf } from "./util";
 
 const URL = "https://www.sumatrapdfreader.org";
 
@@ -35,20 +35,7 @@ function makePdf(): string {
     `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 150] /Annots [${annots}] >>`,
     `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 150] >>`,
   ];
-  let body = "%PDF-1.4\n";
-  const offsets: number[] = [];
-  for (let i = 0; i < objs.length; i++) {
-    offsets.push(body.length);
-    body += `${i + 1} 0 obj\n${objs[i]}\nendobj\n`;
-  }
-  const xrefStart = body.length;
-  const size = objs.length + 1;
-  body += `xref\n0 ${size}\n0000000000 65535 f \n`;
-  for (const off of offsets) {
-    body += off.toString().padStart(10, "0") + " 00000 n \n";
-  }
-  body += `trailer\n<< /Size ${size} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF\n`;
-  return body;
+  return assemblePdf(objs);
 }
 
 export async function testit(): Promise<void> {
@@ -58,7 +45,7 @@ export async function testit(): Promise<void> {
   await withControlledSumatra(EXE, async (client) => {
     const res = await client.request(ControlCommand.TestPageLinks, [pdf, 1]);
     const out = String(res[1] ?? res[0] ?? "");
-    const values = [...out.matchAll(/^kind=(\S+) page=(-?\d+) value=(.*)$/gm)].map((m) => ({
+    const values = [...out.matchAll(/^kind=(\S+) page=(-?\d+).* value=(.*)$/gm)].map((m) => ({
       kind: m[1]!,
       value: m[3]!.trim(),
     }));

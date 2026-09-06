@@ -9,8 +9,10 @@ void ReadAloudPlaybackBarUpdateSession(WindowTab* tab);
 void ReadAloudPlaybackBarHide(MainWindow* win);
 void ReadAloudPlaybackBarForgetTab(MainWindow* win, WindowTab* tab);
 void ReadAloudPlaybackBarRelayout(HWND hwndCanvas);
+void ReadAloudPlaybackBarTick(MainWindow* win);
 
 void ReadAloudPlaybackPauseOrResume();
 void ReadAloudPlaybackStop();
 void ReadAloudPlaybackCycleSpeed(int dir);
 void ReadAloudPlaybackBarDestroy(MainWindow* win);
+TempStr ReadAloudPlaybackBarStateTemp(int* exitCodeOut);

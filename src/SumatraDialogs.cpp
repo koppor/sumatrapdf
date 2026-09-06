@@ -2,20 +2,17 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "gui/win/DialogSizer.h"
 #include "base/Win.h"
 
 #include "Settings.h"
 #include "AppSettings.h"
 
-#include "GlobalPrefs.h"
-
 #include "SumatraPDF.h"
 #include "resource.h"
-#include "SumatraDialogs.h"
 #include "Translations.h"
 #include "Theme.h"
 #include "DarkMode_win.h"
+#include "SumatraDialogs.h"
 
 // http://msdn.microsoft.com/en-us/library/ms645398(v=VS.85).aspx
 #pragma pack(push, 1)
@@ -48,7 +45,7 @@ static DLGTEMPLATE* DupTemplate(int dlgId) {
     void* orig = LockResource(dlgTemplate);
     int size = (int)SizeofResource(nullptr, dialogRC);
     ReportIf(size <= 0);
-    DLGTEMPLATE* ret = (DLGTEMPLATE*)memdup(orig, size);
+    DLGTEMPLATE* ret = (DLGTEMPLATE*)MemDup(nullptr, orig, (size_t)size);
     UnlockResource(orig);
     return ret;
 }
@@ -167,7 +164,7 @@ static DLGTEMPLATE* GetRtLDlgTemplate(int dlgId) {
 }
 
 #ifndef ID_APPLY_NOW
-#define ID_APPLY_NOW 0x3021
+constexpr int ID_APPLY_NOW = 0x3021;
 #endif
 
 static INT_PTR CALLBACK Sheet_Print_Advanced_Proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
@@ -179,32 +176,30 @@ static INT_PTR CALLBACK Sheet_Print_Advanced_Proc(HWND hDlg, UINT msg, WPARAM wp
             data = (Print_Advanced_Data*)((PROPSHEETPAGE*)lp)->lParam;
             SetWindowLongPtr(hDlg, GWLP_USERDATA, (LONG_PTR)data);
             DarkModeApplyToWindow(hDlg);
-            HwndSetDlgItemText(hDlg, IDC_SECTION_PRINT_RANGE, _TRA("Print range"));
-            HwndSetDlgItemText(hDlg, IDC_PRINT_RANGE_ALL, _TRA("&All selected pages"));
-            HwndSetDlgItemText(hDlg, IDC_PRINT_RANGE_EVEN, _TRA("&Even pages only"));
-            HwndSetDlgItemText(hDlg, IDC_PRINT_RANGE_ODD, _TRA("&Odd pages only"));
-            HwndSetDlgItemText(hDlg, IDC_SECTION_PRINT_SCALE, _TRA("Page scaling"));
-            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_SHRINK, _TRA("&Shrink pages to printable area (if necessary)"));
-            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_FIT, _TRA("&Fit pages to printable area"));
-            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_STRETCH,
-                               _TRA("S&tretch pages to fill paper (ignore aspect ratio)"));
-            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_NONE, _TRA("&Use original page sizes"));
-            HwndSetDlgItemText(hDlg, IDC_PRINT_CENTER_HORIZONTALLY, _TRA("Center page hori&zontally on the paper"));
-            HwndSetDlgItemText(hDlg, IDC_PRINT_PAPER_SOURCE_BY_SIZE,
-                               _TRA("Choose &paper source by document page size"));
+            HwndSetDlgItemText(hDlg, IDC_SECTION_PRINT_RANGE, Tr("Print range"));
+            HwndSetDlgItemText(hDlg, IDC_PRINT_RANGE_ALL, Tr("&All selected pages"));
+            HwndSetDlgItemText(hDlg, IDC_PRINT_RANGE_EVEN, Tr("&Even pages only"));
+            HwndSetDlgItemText(hDlg, IDC_PRINT_RANGE_ODD, Tr("&Odd pages only"));
+            HwndSetDlgItemText(hDlg, IDC_SECTION_PRINT_SCALE, Tr("Page scaling"));
+            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_SHRINK, Tr("&Shrink pages to printable area (if necessary)"));
+            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_FIT, Tr("&Fit pages to printable area"));
+            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_STRETCH, Tr("S&tretch pages to fill paper (ignore aspect ratio)"));
+            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_NONE, Tr("&Use original page sizes"));
+            HwndSetDlgItemText(hDlg, IDC_PRINT_CENTER_HORIZONTALLY, Tr("Center page hori&zontally on the paper"));
+            HwndSetDlgItemText(hDlg, IDC_PRINT_PAPER_SOURCE_BY_SIZE, Tr("Choose &paper source by document page size"));
             HwndSetDlgItemText(hDlg, IDC_PRINT_PER_PAGE_PAPER_SIZE,
-                               _TRA("Print each page at its &document page size (mixed sizes)"));
-            HwndSetDlgItemText(hDlg, IDC_PRINT_ROTATE_LABEL, _TRA("&Rotate printout:"));
+                               Tr("Print each page at its &document page size (mixed sizes)"));
+            HwndSetDlgItemText(hDlg, IDC_PRINT_ROTATE_LABEL, Tr("&Rotate printout:"));
             {
                 HWND hwndCb = GetDlgItem(hDlg, IDC_PRINT_ROTATE);
-                CbAddString(hwndCb, _TRA("None"));
-                CbAddString(hwndCb, "90°");
-                CbAddString(hwndCb, "180°");
-                CbAddString(hwndCb, "270°");
+                CbAddString(hwndCb, Tr("None"));
+                CbAddString(hwndCb, StrL("90°"));
+                CbAddString(hwndCb, StrL("180°"));
+                CbAddString(hwndCb, StrL("270°"));
                 int rotIdx = (data->extraRotation / 90) % 4;
                 CbSetCurrentSelection(hwndCb, rotIdx);
             }
-            HwndSetDlgItemText(hDlg, IDC_SECTION_PRINT_COMPATIBILITY, _TRA("Compatibility"));
+            HwndSetDlgItemText(hDlg, IDC_SECTION_PRINT_COMPATIBILITY, Tr("Compatibility"));
 
             {
                 int rangeId = IDC_PRINT_RANGE_ALL;
@@ -296,7 +291,7 @@ HPROPSHEETPAGE CreatePrintAdvancedPropSheet(Print_Advanced_Data* data, ScopedMem
     psp.pszTemplate = MAKEINTRESOURCE(IDD_PROPSHEET_PRINT_ADVANCED);
     psp.pfnDlgProc = Sheet_Print_Advanced_Proc;
     psp.lParam = (LPARAM)data;
-    auto s = _TRA("Advanced");
+    auto s = Tr("Advanced");
     psp.pszTitle = CWStrTemp(s);
 
     if (IsUIRtl()) {

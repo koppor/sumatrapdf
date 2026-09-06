@@ -60,8 +60,8 @@ TryAgain64Bit:
         for (Str gsProd : gsProducts) {
             Str ver = versions[i - 1];
             TempStr keyName = fmt("Software\\%s\\%s", gsProd, ver);
-            TempStr gsDLL = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, "GS_DLL");
-            if (!gsDLL) {
+            TempStr gsDLL = ReadRegStrTemp(HKEY_LOCAL_MACHINE, keyName, StrL("GS_DLL"));
+            if (len(gsDLL) == 0) {
                 continue;
             }
             TempStr dir = path::GetDirTemp(gsDLL);
@@ -85,7 +85,7 @@ TryAgain64Bit:
     GetEnvironmentVariableW(L"PATH", envpathW.s, size);
     TempStr envPath = ToUtf8Temp(envpathW);
     StrVec paths;
-    Split(&paths, envPath, ";", true);
+    Split(&paths, envPath, StrL(";"), true);
     for (Str path : paths) {
         TempStr exe = path::JoinTemp(path, StrL("gswin32c.exe"));
         if (!file::Exists(exe)) {
@@ -111,38 +111,13 @@ struct AutoDeleteFile {
     }
 };
 
-#if 0
-static Rect ExtractDSCPageSize(const WCHAR* path) {
-    char header[1024]{};
-    file::ReadN(path, (u8*)header, sizeof(header) - 1);
-    if (!str::StartsWith((char*)header, StrL("%!PS-Adobe-"))) {
-        return {};
-    }
-
-    // PostScript creators are supposed to set the page size
-    // e.g. through a setpagedevice call in PostScript code,
-    // some creators however fail to do so and only indicate
-    // the page size in a DSC BoundingBox comment.
-    char* nl = (char*)header;
-    RectF bbox;
-    while ((nl = strchr(nl + 1, '\n')) != nullptr && '%' == nl[1]) {
-        if (str::StartsWith(nl + 1, StrL("%%BoundingBox:")) &&
-            str::Parse(nl + 1, "%%%%BoundingBox: 0 0 %f %f% ", &bbox.dx, &bbox.dy)) {
-            return ToRect(bbox);
-        }
-    }
-
-    return {};
-}
-#endif
-
 static EngineBase* ps2pdf(Str path) {
     // TODO: read from gswin32c's stdout instead of using a TEMP file
     TempStr shortPath = path::ShortPathTemp(path);
-    TempStr tmpFile = GetTempFilePathTemp("PsE");
+    TempStr tmpFile = GetTempFilePathTemp(StrL("PsE"));
     AutoDeleteFile tmpFileScope(tmpFile);
     TempStr gswin32c = GetGhostscriptPathTemp();
-    if (!shortPath || !tmpFile || !gswin32c) {
+    if (len(shortPath) == 0 || len(tmpFile) == 0 || len(gswin32c) == 0) {
         return nullptr;
     }
 
@@ -154,13 +129,13 @@ static EngineBase* ps2pdf(Str path) {
             gswin32c, tmpFile, shortPath);
 
     {
-        TempStr fileName = path::GetBaseNameTemp(__FILE__);
+        TempStr fileName = path::GetBaseNameTemp(StrL(__FILE__));
         TempStr tmpFileName = path::GetBaseNameTemp(tmpFile);
         logf("- %s:%d: using '%s' for creating '%%TEMP%%\\%s'\n", fileName, __LINE__, gswin32c, tmpFileName);
     }
 
     // TODO: the PS-to-PDF conversion can hang the UI for several seconds
-    HANDLE process = LaunchProcessInDir(cmdLine, nullptr, CREATE_NO_WINDOW);
+    HANDLE process = LaunchProcessInDir(cmdLine, {}, CREATE_NO_WINDOW);
     if (!process) {
         return nullptr;
     }
@@ -192,9 +167,9 @@ static EngineBase* ps2pdf(Str path) {
 }
 
 static EngineBase* psgz2pdf(Str fileName) {
-    TempStr tmpFile = GetTempFilePathTemp("PsE");
+    TempStr tmpFile = GetTempFilePathTemp(StrL("PsE"));
     AutoDeleteFile tmpFileScope(tmpFile);
-    if (!tmpFile) {
+    if (len(tmpFile) == 0) {
         return nullptr;
     }
 
@@ -280,7 +255,7 @@ class EnginePs : public EngineBase {
 
     bool SaveFileAs(Str dstPath) override {
         Str srcPath = FilePath();
-        if (!srcPath) {
+        if (len(srcPath) == 0) {
             return false;
         }
         return file::Copy(dstPath, srcPath, false);
@@ -318,6 +293,7 @@ class EnginePs : public EngineBase {
 
     bool HandleLink(IPageDestination* dest, ILinkHandler* lh) override { return pdfEngine->HandleLink(dest, lh); }
 
+    // engine-owned; do not delete
     IPageDestination* GetNamedDest(Str name) override { return pdfEngine->GetNamedDest(name); }
 
     TocTree* GetToc() override { return pdfEngine->GetToc(); }
@@ -327,7 +303,7 @@ class EnginePs : public EngineBase {
     bool Load(Str fileName) {
         pageCount = 0;
         ReportIf(FilePath() || pdfEngine);
-        if (!fileName) {
+        if (len(fileName) == 0) {
             return false;
         }
 

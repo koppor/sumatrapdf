@@ -5,8 +5,9 @@
 #include "base/Base.h"
 #include "base/File.h"
 
-#include "TreeModel.h"
+#include "gui/UIModels.h"
 
+#include "DocProperties.h"
 #include "EngineBase.h"
 
 Kind kindPageElementDest = "dest";
@@ -21,6 +22,7 @@ Kind kindDestinationAttachment = "launchAttachment";
 Kind kindDestinationLaunchFile = "launchFile";
 Kind kindDestinationDjVu = "destinationDjVu";
 Kind kindDestinationMupdf = "destinationMupdf";
+Kind kindDestinationJsMenu = "jsMenu";
 
 // clang-format off
 static Kind destKinds[] = {
@@ -31,7 +33,8 @@ static Kind destKinds[] = {
     kindDestinationAttachment,
     kindDestinationLaunchFile,
     kindDestinationDjVu,
-    kindDestinationMupdf
+    kindDestinationMupdf,
+    kindDestinationJsMenu
 };
 // clang-format on
 
@@ -53,8 +56,10 @@ static void EnsurePageText(PageText* pageText) {
     // TakeStr()/Vec::Take() can allocate backing storage even for empty pages.
     str::Free(pageText->text);
     free((void*)pageText->coords);
+    free((void*)pageText->quads);
     pageText->text = {};
     pageText->coords = nullptr;
+    pageText->quads = nullptr;
     pageText->len = 0;
     pageText->nCodepoints = 0;
 }
@@ -62,8 +67,10 @@ static void EnsurePageText(PageText* pageText) {
 void FreePageText(PageText* pageText) {
     str::Free(pageText->text);
     free((void*)pageText->coords);
+    free((void*)pageText->quads);
     pageText->text = {};
     pageText->coords = nullptr;
+    pageText->quads = nullptr;
     pageText->len = 0;
     pageText->nCodepoints = 0;
 }
@@ -84,16 +91,52 @@ Str PageDestination::GetName2() {
     return name;
 }
 
-IPageDestination* NewSimpleDest(int pageNo, RectF rect, float zoom, Str value) {
-    if (value) {
-        return new PageDestinationURL(value);
+PageDestinationJsMenu::PageDestinationJsMenu() {
+    kind = kindDestinationJsMenu;
+    pageNo = -1;
+}
+
+PageDestinationJsMenu::~PageDestinationJsMenu() {
+    str::Free(tooltip);
+}
+
+// Hover text: one menu line per row, skipping "-" separators.
+Str PageDestinationJsMenu::GetValue2() {
+    if (tooltip) {
+        return tooltip;
     }
-    auto* res = new PageDestination();
+    if (len(items) == 0) {
+        return {};
+    }
+    str::Builder b;
+    for (int i = 0; i < len(items); i++) {
+        Str it = items[i];
+        if (str::Eq(it, StrL("-"))) {
+            continue;
+        }
+        if (len(b) > 0) {
+            b.AppendChar('\n');
+        }
+        b.Append(it);
+    }
+    tooltip = b.TakeStr();
+    return tooltip;
+}
+
+IPageDestination* NewSimpleDest(Arena* arena, int pageNo, RectF rect, float zoom, Str value) {
+    if (value) {
+        return arena ? New<PageDestinationURL>(arena, value) : new PageDestinationURL(value);
+    }
+    auto* res = arena ? New<PageDestination>(arena) : new PageDestination();
     res->pageNo = pageNo;
     res->rect = rect;
     res->kind = kindDestinationScrollTo;
     res->zoom = zoom;
     return res;
+}
+
+IPageDestination* NewSimpleDest(int pageNo, RectF rect, float zoom, Str value) {
+    return NewSimpleDest(nullptr, pageNo, rect, zoom, value);
 }
 
 bool IPageElement::Is(Kind expectedKind) {
@@ -110,7 +153,7 @@ Kind kindTocDjvu = "tocDjvu";
 // separators into spaces, so they don't render as a stray hyphen or as
 // boxes (#2647).
 static TempStr CleanupTreeViewControlStringTemp(Str s) {
-    if (!s) {
+    if (len(s) == 0) {
         return {};
     }
     TempWStr ws = ToWStrTemp(s);
@@ -143,8 +186,14 @@ void FreeTocItemRec(Arena* arena, TocItem* item) {
         return;
     }
     FreeTocItemRec(arena, item->child);
-    if (!item->destNotOwned) {
-        delete item->dest;
+    // arena dests: destructor only; heap dests: delete
+    if (!item->destNotOwned && item->dest) {
+        if (arena) {
+            item->dest->~IPageDestination();
+        } else {
+            delete item->dest;
+        }
+        item->dest = nullptr;
     }
     FreeTocItemRec(arena, item->next);
     Free(arena, item->title.s);
@@ -235,12 +284,25 @@ bool TocItem::PageNumbersMatch() const {
     return true;
 }
 
-TocTree::TocTree(TocItem* root) {
-    this->root = root;
+TocTree* AllocTocTree(Arena* arena, TocItem* root) {
+    return New<TocTree>(arena, root, arena);
 }
 
+void DestroyTocTree(TocTree* tree) {
+    if (tree) {
+        tree->~TocTree();
+    }
+}
+
+TocTree::TocTree(TocItem* root, Arena* arena) {
+    this->root = root;
+    this->arena = arena;
+}
+
+// arena items are not heap-freed; dests still run their destructor
 TocTree::~TocTree() {
-    FreeTocItemRec(nullptr, root);
+    FreeTocItemRec(arena, root);
+    root = nullptr;
 }
 
 // TreeModel
@@ -278,16 +340,46 @@ bool TocTree::IsChecked(TreeItem ti) {
     return !tocItem->isUnchecked;
 }
 
-void TocTree::SetHandle(TreeItem ti, HTREEITEM hItem) {
+void TocTree::SetUserData(TreeItem ti, uintptr_t userData) {
     ReportIf(ti < 0);
     TocItem* tocItem = (TocItem*)ti;
-    tocItem->hItem = hItem;
+    tocItem->userData = userData;
 }
 
-HTREEITEM TocTree::GetHandle(TreeItem ti) {
+uintptr_t TocTree::GetUserData(TreeItem ti) {
     ReportIf(ti < 0);
     TocItem* tocItem = (TocItem*)ti;
-    return tocItem->hItem;
+    return tocItem->userData;
+}
+
+static void ResolveTocPagesRec(EngineBase* engine, TocItem* item) {
+    for (; item; item = item->next) {
+        if (item->pageNo < 1) {
+            IPageDestination* dest = item->GetPageDestination();
+            if (dest && dest->loc.chapter >= 1) {
+                item->loc = engine->ResolveDest(dest);
+                item->pageNo = engine->PageNoFromLocation(item->loc);
+            }
+        }
+        ResolveTocPagesRec(engine, item->child);
+    }
+}
+
+// resolves lazy chaptered TOC destinations (pageNo == -1 until clicked) to
+// real page numbers; for callers that need every item's page up front, after
+// the caller has already laid out every chapter (dump, full-document search)
+void ResolveTocPages(EngineBase* engine, TocTree* toc) {
+    if (!engine || !toc) {
+        return;
+    }
+    ResolveTocPagesRec(engine, toc->root);
+}
+
+void EnsureFullLayout(EngineBase* engine) {
+    if (!engine) {
+        return;
+    }
+    engine->EnsureAllChaptersLaidOut();
 }
 
 // TODO: speed up by removing recursion
@@ -338,6 +430,62 @@ RenderPageArgs::RenderPageArgs(int pageNo, float zoom, int rotation, RectF* page
     this->cookie_out = cookie_out;
 }
 
+// per-chapter cached text, indexed [chapter - 1][page - 1]. A chapter's
+// vectors are (re)sized to ChapterPageCount(chapter) on first use for that
+// chapter, so a chapter laid out later never re-associates cached text with
+// the wrong page.
+struct ChapterTextCache {
+    Vec<PageText> text;
+    Vec<TextExtractionState> state;
+};
+
+struct PageTextCache {
+    Vec<ChapterTextCache*> chapters; // index = chapter - 1; entries lazily created
+
+    ~PageTextCache() {
+        for (int i = 0; i < len(chapters); i++) {
+            ChapterTextCache* ct = chapters[i];
+            if (!ct) {
+                continue;
+            }
+            for (int j = 0; j < len(ct->text); j++) {
+                FreePageText(&ct->text[j]);
+            }
+            delete ct;
+        }
+    }
+
+    // existing chapter cache, or nullptr if the chapter has never been touched
+    ChapterTextCache* Peek(int chapter) {
+        int idx = chapter - 1;
+        if (idx < 0 || idx >= len(chapters)) {
+            return nullptr;
+        }
+        return chapters[idx];
+    }
+
+    // creates the chapter's cache if needed and grows it to at least count
+    // entries; nullptr for an out-of-range chapter
+    ChapterTextCache* Ensure(int chapter, int count) {
+        if (chapter < 1) {
+            return nullptr;
+        }
+        if (chapter > len(chapters)) {
+            VecResize(chapters, chapter);
+        }
+        ChapterTextCache*& ct = chapters[chapter - 1];
+        if (!ct) {
+            ct = new ChapterTextCache();
+        }
+        count = count < 1 ? 1 : count;
+        if (len(ct->text) < count) {
+            VecResize(ct->text, count);
+            VecResize(ct->state, count);
+        }
+        return ct;
+    }
+};
+
 int EngineBase::AddRef() {
     return AtomicRefCountAdd(&refCount);
 }
@@ -354,6 +502,185 @@ bool EngineBase::Release() {
 
 EngineBase::EngineBase() {
     arena = ArenaNew();
+    pageTextCache = new PageTextCache();
+}
+
+// EnsureChapterTable() is called by every non-virtual chapter method below. It
+// lazily Init()s the table on first use, and for a plain (non-chaptered)
+// engine that just sets pageCount directly, keeps chapter 1's count in sync
+// with it so ChapterCount() == 1, LocationFromPageNo(n) == {1, n} always hold.
+void EngineBase::EnsureChapterTable() {
+    if (chapters.ChapterCount() == 0) {
+        chapters.Init(1);
+        chapters.SetPageCount(1, pageCount < 1 ? 1 : pageCount);
+        return;
+    }
+    if (!HasChapters() && pageCount >= 1 && chapters.PageCount(1) != pageCount) {
+        chapters.SetPageCount(1, pageCount);
+    }
+}
+
+// keeps the flat pageCount total in sync with the chapter table and notifies
+// onLayoutChanged (if set) when the generation actually moved, so a
+// DisplayModel resyncs even when the layout happened on a render thread
+void EngineBase::SetPageCountFromChapters() {
+    pageCount = chapters.TotalPages();
+    int gen = chapters.Generation();
+    if (gen == notifiedGeneration) {
+        return;
+    }
+    notifiedGeneration = gen;
+    onLayoutChanged.Call();
+}
+
+int EngineBase::ChapterCount() {
+    EnsureChapterTable();
+    return chapters.ChapterCount();
+}
+
+bool EngineBase::HasChapters() {
+    return chapters.ChapterCount() > 1;
+}
+
+int EngineBase::ChapterPageCount(int chapter) {
+    EnsureChapterTable();
+    if (chapter < 1 || chapter > chapters.ChapterCount()) {
+        ReportIf(true);
+        return 0;
+    }
+    if (!chapters.IsLaidOut(chapter)) {
+        LayOutChapter(chapter);
+        SetPageCountFromChapters();
+    }
+    return chapters.PageCount(chapter);
+}
+
+bool EngineBase::IsChapterLaidOut(int chapter) {
+    EnsureChapterTable();
+    return chapters.IsLaidOut(chapter);
+}
+
+Location EngineBase::LocationFromPageNo(int pageNo) {
+    EnsureChapterTable();
+    return chapters.LocationFromPageNo(pageNo);
+}
+
+int EngineBase::PageNoFromLocation(Location loc) {
+    EnsureChapterTable();
+    if (loc.chapter >= 1 && loc.chapter <= chapters.ChapterCount()) {
+        ChapterPageCount(loc.chapter); // lay out loc.chapter first
+    }
+    return chapters.PageNoFromLocation(loc);
+}
+
+// next page, crossing into the following chapter at a chapter's last page;
+// unchanged at the last page of the last chapter
+Location EngineBase::NextLocation(Location loc) {
+    loc = ClampLocation(loc);
+    int n = ChapterPageCount(loc.chapter);
+    if (loc.page < n) {
+        return {loc.chapter, loc.page + 1};
+    }
+    if (loc.chapter < ChapterCount()) {
+        return {loc.chapter + 1, 1};
+    }
+    return loc;
+}
+
+// previous page, crossing into the prior chapter's last page (laying it out
+// if needed); unchanged at page 1 of chapter 1
+Location EngineBase::PrevLocation(Location loc) {
+    loc = ClampLocation(loc);
+    if (loc.page > 1) {
+        return {loc.chapter, loc.page - 1};
+    }
+    if (loc.chapter > 1) {
+        int n = ChapterPageCount(loc.chapter - 1);
+        return {loc.chapter - 1, n};
+    }
+    return loc;
+}
+
+Location EngineBase::FirstLocation() {
+    EnsureChapterTable();
+    return {1, 1};
+}
+
+Location EngineBase::LastLocation() {
+    EnsureChapterTable();
+    int c = ChapterCount();
+    int n = ChapterPageCount(c);
+    return {c, n};
+}
+
+Location EngineBase::ClampLocation(Location loc) {
+    EnsureChapterTable();
+    int c = limitValue(loc.chapter, 1, ChapterCount());
+    int n = ChapterPageCount(c);
+    int p = limitValue(loc.page, 1, n);
+    return {c, p};
+}
+
+int EngineBase::LayoutGeneration() {
+    EnsureChapterTable();
+    return chapters.Generation();
+}
+
+// print / dump / full-document search / PDF export / stress test: today's open
+// cost, paid only when the caller actually needs every chapter laid out
+void EngineBase::EnsureAllChaptersLaidOut() {
+    EnsureChapterTable();
+    int n = ChapterCount();
+    for (int c = 1; c <= n; c++) {
+        ChapterPageCount(c);
+    }
+}
+
+// default: single-chapter (or already laid-out) engines have nothing to do
+int EngineBase::LayOutChapter(int chapter) {
+    int n = chapters.PageCount(chapter);
+    chapters.SetPageCount(chapter, n);
+    return n;
+}
+
+TempStr EngineBase::MakeBookmarkTemp(Location loc) {
+    int n = ChapterPageCount(loc.chapter);
+    return fmt("%d:%d:%d", loc.chapter, loc.page, n);
+}
+
+// "chapter:page:pagesInChapterWhenSaved"; scales page proportionally when the
+// chapter's page count changed since the bookmark was made (re-pagination)
+Location EngineBase::LookupBookmark(Str s) {
+    int chapter = 0;
+    int page = 0;
+    int savedCount = 0;
+    Str end = str::Parse(s, "%d:%d:%d%$", &chapter, &page, &savedCount);
+    if (str::IsNull(end) || chapter < 1 || page < 1 || savedCount < 1) {
+        return kInvalidLocation;
+    }
+    // the document may have changed since the bookmark was made and lost chapters
+    int cnt = ChapterCount();
+    chapter = chapter > cnt ? cnt : chapter;
+    int newCount = ChapterPageCount(chapter);
+    if (newCount >= 1 && savedCount != newCount) {
+        page = (int)roundf((float)page * (float)newCount / (float)savedCount);
+        page = page < 1 ? 1 : page;
+    }
+    return ClampLocation({chapter, page});
+}
+
+Location EngineBase::ResolveDest(IPageDestination* dest) {
+    if (!dest) {
+        return kInvalidLocation;
+    }
+    if (dest->loc.IsValid()) {
+        return dest->loc;
+    }
+    if (dest->pageNo >= 1) {
+        dest->loc = LocationFromPageNo(dest->pageNo);
+        return dest->loc;
+    }
+    return kInvalidLocation;
 }
 
 // document errors (mupdf warnings/errors may arrive from render threads)
@@ -364,7 +691,7 @@ void EngineBase::AppendError(Str msg) {
 
 bool EngineBase::HasErrors() {
     ScopedMutex scope(&errorsLock);
-    return !errors.IsEmpty();
+    return len(errors) > 0;
 }
 
 // internal builder buffer (no copy); valid until next AppendError or engine
@@ -375,15 +702,7 @@ TempStr EngineBase::GetErrorsTextTemp() {
 }
 
 EngineBase::~EngineBase() {
-    if (pagesText) {
-        for (int i = 0; i < pageCount; i++) {
-            PageText* pt = &pagesText[i];
-            free(pt->coords);
-            str::Free(pt->text);
-        }
-        free(pagesText);
-    }
-    free(pagesTextState);
+    delete pageTextCache;
     str::Free(defaultExt);
     LogArenaStats(StrL("engine"), arena);
     ArenaDelete(arena);
@@ -410,12 +729,16 @@ bool EngineBase::HasTextForPage(int pageNo) {
     if (pageNo < 1 || pageNo > pageCount) {
         return false;
     }
-    ScopedMutex scope(&textCacheLock);
-    if (!pagesText) {
+    Location loc = LocationFromPageNo(pageNo);
+    if (!loc.IsValid()) {
         return false;
     }
-    PageText* pt = &pagesText[pageNo - 1];
-    return (bool)pt->text;
+    ScopedMutex scope(&textCacheLock);
+    ChapterTextCache* ct = pageTextCache->Peek(loc.chapter);
+    if (!ct || loc.page > len(ct->text)) {
+        return false;
+    }
+    return (bool)ct->text[loc.page - 1].text;
 }
 
 TextExtractionState EngineBase::GetTextExtractionState(int pageNo) {
@@ -423,11 +746,16 @@ TextExtractionState EngineBase::GetTextExtractionState(int pageNo) {
     if (pageNo < 1 || pageNo > pageCount) {
         return TextExtractionState::Finished;
     }
-    ScopedMutex scope(&textCacheLock);
-    if (!pagesTextState) {
+    Location loc = LocationFromPageNo(pageNo);
+    if (!loc.IsValid()) {
         return TextExtractionState::NotExtracted;
     }
-    return pagesTextState[pageNo - 1];
+    ScopedMutex scope(&textCacheLock);
+    ChapterTextCache* ct = pageTextCache->Peek(loc.chapter);
+    if (!ct || loc.page > len(ct->state)) {
+        return TextExtractionState::NotExtracted;
+    }
+    return ct->state[loc.page - 1];
 }
 
 void EngineBase::RequestTextExtraction(int pageNo) {
@@ -435,20 +763,24 @@ void EngineBase::RequestTextExtraction(int pageNo) {
     if (pageNo < 1 || pageNo > pageCount) {
         return;
     }
+    Location loc = LocationFromPageNo(pageNo);
+    if (!loc.IsValid()) {
+        return;
+    }
+    int count = ChapterPageCount(loc.chapter);
 
     {
         ScopedMutex scope(&textCacheLock);
-        if (!pagesText) {
-            pagesText = AllocArray<PageText>(pageCount);
-        }
-        if (!pagesTextState) {
-            pagesTextState = AllocArray<TextExtractionState>(pageCount);
-        }
-        PageText* pt = &pagesText[pageNo - 1];
-        if (pt->text || pagesTextState[pageNo - 1] != TextExtractionState::NotExtracted) {
+        ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
+        if (!ct || loc.page > len(ct->text)) {
             return;
         }
-        pagesTextState[pageNo - 1] = TextExtractionState::Pending;
+        PageText* pt = &ct->text[loc.page - 1];
+        TextExtractionState* state = &ct->state[loc.page - 1];
+        if (pt->text || *state != TextExtractionState::NotExtracted) {
+            return;
+        }
+        *state = TextExtractionState::Pending;
     }
 
     AddRef();
@@ -457,7 +789,7 @@ void EngineBase::RequestTextExtraction(int pageNo) {
     data->engine = this;
     data->pageNo = pageNo;
     auto fn = MkFunc0<TextExtractionThreadData>(ExtractTextThread, data);
-    ThreadHandle thread = StartThread(fn, "ExtractPageText");
+    ThreadHandle thread = StartThread(fn, StrL("ExtractPageText"));
     if (thread) {
         SafeCloseThreadHandle(&thread);
         return;
@@ -465,8 +797,9 @@ void EngineBase::RequestTextExtraction(int pageNo) {
 
     {
         ScopedMutex scope(&textCacheLock);
-        if (pagesTextState && !pagesText[pageNo - 1].text) {
-            pagesTextState[pageNo - 1] = TextExtractionState::NotExtracted;
+        ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
+        if (ct && loc.page <= len(ct->text) && len(ct->text[loc.page - 1].text) == 0) {
+            ct->state[loc.page - 1] = TextExtractionState::NotExtracted;
         }
     }
     AtomicIntDec(&gDangerousThreadCount);
@@ -488,12 +821,15 @@ bool EngineBase::TryGetElements(int pageNo, Vec<IPageElement*>* out) {
     return true;
 }
 
-static Str ReturnCachedPageText(PageText* pt, int* lenOut, Rect** coordsOut) {
+static Str ReturnCachedPageText(PageText* pt, int* lenOut, Rect** coordsOut, QuadF** quadsOut) {
     if (lenOut) {
         *lenOut = pt->nCodepoints;
     }
     if (coordsOut) {
         *coordsOut = pt->coords;
+    }
+    if (quadsOut) {
+        *quadsOut = pt->quads;
     }
     Str text = pt->text;
     if (text.s) {
@@ -508,7 +844,7 @@ static Str ReturnCachedPageText(PageText* pt, int* lenOut, Rect** coordsOut) {
 
 // like GetTextForPage but returns false (and empty text) if the engine
 // can't acquire locks without blocking (e.g. render thread is busy)
-bool EngineBase::TryGetTextForPage(int pageNo, int* lenOut, Rect** coordsOut) {
+bool EngineBase::TryGetTextForPage(int pageNo, int* lenOut, Rect** coordsOut, QuadF** quadsOut) {
     ReportIf(pageNo < 1 || pageNo > pageCount);
     if (pageNo < 1 || pageNo > pageCount) {
         if (lenOut) {
@@ -517,19 +853,31 @@ bool EngineBase::TryGetTextForPage(int pageNo, int* lenOut, Rect** coordsOut) {
         if (coordsOut) {
             *coordsOut = nullptr;
         }
+        if (quadsOut) {
+            *quadsOut = nullptr;
+        }
         return true;
     }
+    Location loc = LocationFromPageNo(pageNo);
+    if (!loc.IsValid()) {
+        if (lenOut) {
+            *lenOut = 0;
+        }
+        if (coordsOut) {
+            *coordsOut = nullptr;
+        }
+        if (quadsOut) {
+            *quadsOut = nullptr;
+        }
+        return true;
+    }
+    int count = ChapterPageCount(loc.chapter);
 
     bool extract = false;
     {
         ScopedMutex scope(&textCacheLock);
-        if (!pagesText) {
-            pagesText = AllocArray<PageText>(pageCount);
-        }
-        if (!pagesTextState) {
-            pagesTextState = AllocArray<TextExtractionState>(pageCount);
-        }
-        if (pagesTextState[pageNo - 1] != TextExtractionState::Finished) {
+        ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
+        if (ct->state[loc.page - 1] != TextExtractionState::Finished) {
             extract = true;
         }
     }
@@ -543,28 +891,33 @@ bool EngineBase::TryGetTextForPage(int pageNo, int* lenOut, Rect** coordsOut) {
             if (coordsOut) {
                 *coordsOut = nullptr;
             }
+            if (quadsOut) {
+                *quadsOut = nullptr;
+            }
             return false;
         }
         EnsurePageText(&extracted);
 
         ScopedMutex scope(&textCacheLock);
-        PageText* pt = &pagesText[pageNo - 1];
-        if (pagesTextState[pageNo - 1] != TextExtractionState::Finished) {
+        ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
+        PageText* pt = &ct->text[loc.page - 1];
+        if (ct->state[loc.page - 1] != TextExtractionState::Finished) {
             FreePageText(pt);
             *pt = extracted;
             extracted = PageText();
-            pagesTextState[pageNo - 1] = TextExtractionState::Finished;
+            ct->state[loc.page - 1] = TextExtractionState::Finished;
         }
         FreePageText(&extracted);
     }
 
     ScopedMutex scope(&textCacheLock);
-    PageText* pt = &pagesText[pageNo - 1];
-    ReturnCachedPageText(pt, lenOut, coordsOut);
+    ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
+    PageText* pt = &ct->text[loc.page - 1];
+    ReturnCachedPageText(pt, lenOut, coordsOut, quadsOut);
     return true;
 }
 
-Str EngineBase::GetTextForPage(int pageNo, int* lenOut, Rect** coordsOut) {
+Str EngineBase::GetTextForPage(int pageNo, int* lenOut, Rect** coordsOut, QuadF** quadsOut) {
     ReportIf(pageNo < 1 || pageNo > pageCount);
     if (pageNo < 1 || pageNo > pageCount) {
         if (lenOut) {
@@ -573,23 +926,35 @@ Str EngineBase::GetTextForPage(int pageNo, int* lenOut, Rect** coordsOut) {
         if (coordsOut) {
             *coordsOut = nullptr;
         }
+        if (quadsOut) {
+            *quadsOut = nullptr;
+        }
         return {};
     }
+    Location loc = LocationFromPageNo(pageNo);
+    if (!loc.IsValid()) {
+        if (lenOut) {
+            *lenOut = 0;
+        }
+        if (coordsOut) {
+            *coordsOut = nullptr;
+        }
+        if (quadsOut) {
+            *quadsOut = nullptr;
+        }
+        return {};
+    }
+    int count = ChapterPageCount(loc.chapter);
 
     bool extract = false;
     {
         ScopedMutex scope(&textCacheLock);
-        if (!pagesText) {
-            pagesText = AllocArray<PageText>(pageCount);
-        }
-        if (!pagesTextState) {
-            pagesTextState = AllocArray<TextExtractionState>(pageCount);
-        }
+        ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
         // Finished covers textless pages too (the page's text can stay empty). Pending
         // means a background thread was started by RequestTextExtraction but
         // selection still needs a synchronous extract here.
-        if (pagesTextState[pageNo - 1] != TextExtractionState::Finished) {
-            pagesTextState[pageNo - 1] = TextExtractionState::Pending;
+        if (ct->state[loc.page - 1] != TextExtractionState::Finished) {
+            ct->state[loc.page - 1] = TextExtractionState::Pending;
             extract = true;
         }
     }
@@ -599,31 +964,73 @@ Str EngineBase::GetTextForPage(int pageNo, int* lenOut, Rect** coordsOut) {
         EnsurePageText(&extracted);
 
         ScopedMutex scope(&textCacheLock);
-        PageText* pt = &pagesText[pageNo - 1];
-        if (pagesTextState[pageNo - 1] != TextExtractionState::Finished) {
+        ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
+        PageText* pt = &ct->text[loc.page - 1];
+        if (ct->state[loc.page - 1] != TextExtractionState::Finished) {
             FreePageText(pt);
             *pt = extracted;
             extracted = PageText();
-            pagesTextState[pageNo - 1] = TextExtractionState::Finished;
+            ct->state[loc.page - 1] = TextExtractionState::Finished;
         }
         FreePageText(&extracted);
     }
 
     ScopedMutex scope(&textCacheLock);
-    PageText* pt = &pagesText[pageNo - 1];
-    return ReturnCachedPageText(pt, lenOut, coordsOut);
+    ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
+    PageText* pt = &ct->text[loc.page - 1];
+    return ReturnCachedPageText(pt, lenOut, coordsOut, quadsOut);
 }
 
-// number of pages the loaded document contains
-int EngineBase::PageCount() const {
-    ReportIf(pageCount < 0);
-    return pageCount;
+void EngineBase::InvalidateTextForPage(int pageNo) {
+    if (pageNo < 1 || pageNo > pageCount) {
+        return;
+    }
+    Location loc = LocationFromPageNo(pageNo);
+    if (!loc.IsValid()) {
+        return;
+    }
+    ScopedMutex scope(&textCacheLock);
+    ChapterTextCache* ct = pageTextCache->Peek(loc.chapter);
+    if (!ct || loc.page > len(ct->text)) {
+        return;
+    }
+    FreePageText(&ct->text[loc.page - 1]);
+    ct->state[loc.page - 1] = TextExtractionState::NotExtracted;
+}
+
+// number of pages the loaded document contains. Comes from the chapter table
+// (same source as LayoutGeneration()), so a caller that reads count then
+// generation never sees them disagree about a concurrent chapter layout.
+int EngineBase::PageCount() {
+    EnsureChapterTable();
+    return chapters.TotalPages();
 }
 
 // the box inside PageMediabox that actually contains any relevant content
 // (used for auto-cropping in Fit Content mode, can be PageMediabox)
 RectF EngineBase::PageContentBox(int pageNo, RenderTarget /*target*/) {
     return PageMediabox(pageNo);
+}
+
+const char* PdfPageBoxName(PdfPageBoxKind kind) {
+    switch (kind) {
+        case PdfPageBoxKind::Media:
+            return "media";
+        case PdfPageBoxKind::Crop:
+            return "crop";
+        case PdfPageBoxKind::Bleed:
+            return "bleed";
+        case PdfPageBoxKind::Trim:
+            return "trim";
+        case PdfPageBoxKind::Art:
+            return "art";
+    }
+    return "";
+}
+
+// Non-PDF engines have no page boxes.
+void EngineBase::GetPdfPageBoxes(int /*pageNo*/, Vec<PdfPageBox>& out) {
+    VecReset(out);
 }
 
 // the layout type this document's author suggests (if the user doesn't care)
@@ -650,8 +1057,7 @@ float EngineBase::GetFileDPI() const {
     return fileDPI;
 }
 
-// creates a PageDestination from a name (or nullptr for invalid names)
-// caller must delete the result
+// named dest; engine-owned, do not delete
 IPageDestination* EngineBase::GetNamedDest(Str /*name*/) {
     return nullptr;
 }
@@ -667,8 +1073,6 @@ bool EngineBase::HasToc() {
 TocTree* EngineBase::GetToc() {
     return nullptr;
 }
-
-#include "DocProperties.h"
 
 // default implementation that just sets wanted keys
 // keys are names of properties the caller wants. If given, we append those
@@ -694,6 +1098,13 @@ void EngineBase::GetProperties(Props& propsOut) {
 // roman numerals) instead of the default plain arabic numbering
 bool EngineBase::HasPageLabels() const {
     return hasPageLabels;
+}
+
+int EngineBase::LogicalPageCount() {
+    if (logicalPageCount > 0) {
+        return logicalPageCount;
+    }
+    return PageCount();
 }
 
 // returns a label to be displayed instead of the page number

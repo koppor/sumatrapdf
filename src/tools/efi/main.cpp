@@ -161,16 +161,16 @@ static int InternString(const char* s) {
 }
 
 static void GetInternedStringsReport(StrBuilder& resOut) {
-    resOut.Append("Strings:\n");
+    resOut.Append(StrL("Strings:\n"));
     size_t n = g_strInterner.StringsCount();
     for (size_t i = 0; i < n; i++) {
         resOut.AppendFmt("%d|%s\n", i, g_strInterner.GetByIndex(i));
     }
-    resOut.Append("\n");
+    resOut.Append(StrL("\n"));
 }
 
 static void AddReportSepLine() {
-    if (g_report.size() > 0) g_report.Append("\n");
+    if (g_report.size() > 0) g_report.Append(StrL("\n"));
 }
 
 static char g_spacesBuf[256];
@@ -229,30 +229,8 @@ static const char* GetObjFileName(IDiaSectionContrib* item) {
 }
 
 // doesn't seem to exit
-#if 0
-static const char *GetLibraryName(IDiaSymbol *symbol)
-{
-    static StrBuilder strTmp;
-    BSTR   name = 0;
-    symbol->get_libraryName(&name);
-    BStrToString(strTmp, name, "<nolibfile>");
-    SysFreeStringSafe(name);
-    return strTmp.Get();
-}
-#endif
 
 // always returns <nosrcfile>
-#if 0
-static const char *GetSourceFileName(IDiaSymbol *symbol)
-{
-    static StrBuilder strTmp;
-    BSTR   name = 0;
-    symbol->get_sourceFileName(&name);
-    BStrToString(strTmp, name, "<nosrcfile>");
-    SysFreeStringSafe(name);
-    return strTmp.Get();
-}
-#endif
 
 // the result doesn't have to be free()d but is only valid until the next call to this function
 static const char* GetTypeName(IDiaSymbol* symbol) {
@@ -281,7 +259,7 @@ static const char* GetUndecoratedSymbolName(IDiaSymbol* symbol, const char* defN
 
     if (S_OK == symbol->get_undecoratedNameEx(undecorateOptions, &name)) {
         BStrToString(strTmp, name, "", true);
-        if (str::Eq(strTmp.Get(), "`string'")) return "*str";
+        if (str::Eq(strTmp.Get(), StrL("`string'"))) return "*str";
         strTmp.Set(str::ReplaceTemp(strTmp.Get(), "(void)", "()"));
         // more ideas for undecoration:
         // http://google-breakpad.googlecode.com/svn/trunk/src/common/windows/pdb_source_line_writer.cc
@@ -384,7 +362,7 @@ static void DumpTypes(IDiaSession* session) {
     if (FAILED(hr)) return;
 
     AddReportSepLine();
-    g_report.Append("Types:\n");
+    g_report.Append(StrL("Types:\n"));
 
     DWORD flags = nsfCaseInsensitive | nsfUndecoratedName; // nsNone ?
     ULONG celt = 0;
@@ -480,7 +458,7 @@ static void DumpSymbols(IDiaSession* session) {
     if (!SUCCEEDED(hr)) goto Exit;
 
     AddReportSepLine();
-    g_report.Append("Symbols:\n");
+    g_report.Append(StrL("Symbols:\n"));
 
     ULONG numFetched;
     for (;;) {
@@ -506,7 +484,7 @@ static void DumpSections(IDiaSession* session) {
     if (S_OK != hr) return;
 
     AddReportSepLine();
-    g_report.Append("Sections:\n");
+    g_report.Append(StrL("Sections:\n"));
 
     VARIANT vIndex;
     vIndex.vt = VT_BSTR;
@@ -553,7 +531,7 @@ static void ProcessPdbFile(const char* fileNameA) {
 
     hr = dia->openSession(&session);
     if (FAILED(hr)) {
-        log("  failed to open DIA session\n");
+        log(StrL("  failed to open DIA session\n"));
         goto Exit;
     }
 
@@ -581,13 +559,13 @@ static bool ParseCommandLine(int argc, char** argv) {
     char* s;
     for (int i = 0; i < argc; i++) {
         s = argv[i];
-        if (str::EqI(s, "-compact"))
+        if (str::EqI(s, StrL("-compact")))
             g_compact = true;
-        else if (str::EqI(s, "-sections"))
+        else if (str::EqI(s, StrL("-sections")))
             g_dumpSections = true;
-        else if (str::EqI(s, "-symbols"))
+        else if (str::EqI(s, StrL("-symbols")))
             g_dumpSymbols = true;
-        else if (str::EqI(s, "-types"))
+        else if (str::EqI(s, StrL("-types")))
             g_dumpTypes = true;
         else {
             if (g_fileName != NULL) goto InvalidCmdLine;

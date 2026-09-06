@@ -15,9 +15,9 @@
 #include "EbookBase.h"
 #include "GumboHelpers.h"
 #include "GumboHtmlParser.h"
-#include "EbookDoc.h"
 #include "PalmDbReader.h"
 #include "MobiDoc.h"
+#include "EbookDoc.h"
 
 #if !OS_WIN
 static uint GuessTextCodepage(Str, uint defVal) {
@@ -89,7 +89,7 @@ static uint GetCodepageFromPI(Str xmlPI) {
         return CP_ACP;
     }
     TempStr encoding = GetXmlPIAttrTemp(Str(xmlPI.s, xmlPIEnd + 2), StrL("encoding"));
-    if (!encoding) {
+    if (len(encoding) == 0) {
         return CP_ACP;
     }
 
@@ -97,10 +97,10 @@ static uint GetCodepageFromPI(Str xmlPI) {
         Str namePart;
         uint codePage;
     } static encodings[] = {
-        {"UTF", CP_UTF8},
-        {"utf", CP_UTF8},
-        {"1252", 1252},
-        {"1251", 1251},
+        {StrL("UTF"), CP_UTF8},
+        {StrL("utf"), CP_UTF8},
+        {StrL("1252"), 1252},
+        {StrL("1251"), 1251},
         // TODO: any other commonly used codepages?
     };
     for (auto& enc : encodings) {
@@ -139,14 +139,14 @@ static bool IsValidUtf8(Str string) {
 }
 
 static TempStr DecodeTextToUtf8Temp(Str s, bool isXML = false) {
-    if (str::TrimPrefix(s, UTF8_BOM)) {
+    if (str::TrimPrefix(s, StrL(kUtf8Bom))) {
         return str::DupTemp(s);
     }
-    if (str::TrimPrefix(s, UTF16_BOM)) {
+    if (str::TrimPrefix(s, StrL(kUtf16Bom))) {
         WStr ws = str::CastStrToWStr(s);
         return ToUtf8Temp(ws);
     }
-    if (str::TrimPrefix(s, UTF16BE_BOM)) {
+    if (str::TrimPrefix(s, StrL(kUtf16BeBom))) {
         // convert from utf16 big endian to utf16
         int n = str::CastStrToWStr(s).len;
         for (int i = 0; i < n; i++) {
@@ -167,7 +167,7 @@ static TempStr DecodeTextToUtf8Temp(Str s, bool isXML = false) {
 }
 
 TempStr NormalizeURLTemp(Str url, Str base) {
-    if (!url || !base) {
+    if (len(url) == 0 || len(base) == 0) {
         // nothing to resolve against; url is already as normalized as it gets
         ReportIf(true);
         return str::DupTemp(url);
@@ -286,13 +286,13 @@ static TempStr Base64DecodeTemp(Str data) {
 static inline void AppendChar(str::Builder& htmlData, char c) {
     switch (c) {
         case '&':
-            htmlData.Append("&amp;");
+            htmlData.Append(StrL("&amp;"));
             break;
         case '<':
-            htmlData.Append("&lt;");
+            htmlData.Append(StrL("&lt;"));
             break;
         case '"':
-            htmlData.Append("&quot;");
+            htmlData.Append(StrL("&quot;"));
             break;
         default:
             htmlData.AppendChar(c);
@@ -302,7 +302,7 @@ static inline void AppendChar(str::Builder& htmlData, char c) {
 
 static TempStr DecodeDataURITemp(Str url) {
     Str comma = str::SliceFromChar(url, ',');
-    if (!comma) {
+    if (len(comma) == 0) {
         return {};
     }
     Str data = Str(comma.s + 1, (int)(url.s + url.len - (comma.s + 1)));
@@ -318,7 +318,7 @@ struct GumboDoc {
 
     GumboDoc(Str data, bool xmlFragment) {
         opts = xmlFragment ? GumboMakeXmlFragmentOptions() : GumboMakeOptions();
-        if (!data) {
+        if (len(data) == 0) {
             return;
         }
         output = gumbo_parse_with_options(&opts, data.s, (size_t)data.len);
@@ -411,9 +411,9 @@ static void ParseMetadata(Str content, Props& props);
 
 static void CollectEncryptedEpubPaths(const GumboNode* root, StrVec& encList) {
     Vec<const GumboNode*> toVisit;
-    toVisit.Append(root);
+    VecAppend(toVisit, root);
     while (len(toVisit) > 0) {
-        const GumboNode* node = toVisit.Pop();
+        const GumboNode* node = VecPop(toVisit);
         if (!node) {
             continue;
         }
@@ -429,7 +429,7 @@ static void CollectEncryptedEpubPaths(const GumboNode* root, StrVec& encList) {
             continue;
         }
         for (unsigned int i = children->length; i > 0; i--) {
-            toVisit.Append((const GumboNode*)children->data[i - 1]);
+            VecAppend(toVisit, (const GumboNode*)children->data[i - 1]);
         }
     }
 }
@@ -438,7 +438,7 @@ bool EpubDoc::Load() {
     if (!archive) {
         return false;
     }
-    auto* containerFi = archive->GetFileDataByName("META-INF/container.xml");
+    auto* containerFi = archive->GetFileDataByName(StrL("META-INF/container.xml"));
     if (!containerFi || !containerFi->data) {
         return false;
     }
@@ -455,14 +455,14 @@ bool EpubDoc::Load() {
         return false;
     }
     TempStr contentPath = GumboAttributeValueTemp(node, "full-path");
-    if (!contentPath) {
+    if (len(contentPath) == 0) {
         return false;
     }
     contentPath = url::DecodeTemp(contentPath);
 
     // encrypted files will be ignored (TODO: support decryption)
     StrVec encList;
-    auto* encryptionFi = archive->GetFileDataByName("META-INF/encryption.xml");
+    auto* encryptionFi = archive->GetFileDataByName(StrL("META-INF/encryption.xml"));
     if (encryptionFi && encryptionFi->data) {
         Str encryption = Str((char*)((u8*)encryptionFi->data), encryptionFi->fileSizeUncompressed);
         GumboDoc encryptionDoc(encryption, true);
@@ -504,7 +504,7 @@ bool EpubDoc::Load() {
         TempStr mediaType = GumboAttributeValueTemp(node, "media-type");
         if (isImageMediaType(mediaType)) {
             TempStr imgPath = GumboAttributeValueTemp(node, "href");
-            if (!imgPath) {
+            if (len(imgPath) == 0) {
                 continue;
             }
             imgPath = url::DecodeTemp(imgPath);
@@ -516,10 +516,10 @@ bool EpubDoc::Load() {
             ImageData data;
             data.fileName = str::Dup(imgPath);
             data.fileId = archive->GetFileId(data.fileName);
-            images.Append(data);
+            VecAppend(images, data);
         } else if (isHtmlMediaType(mediaType)) {
             TempStr htmlPath = GumboAttributeValueTemp(node, "href");
-            if (!htmlPath) {
+            if (len(htmlPath) == 0) {
                 continue;
             }
             htmlPath = url::DecodeTemp(htmlPath);
@@ -571,7 +571,7 @@ bool EpubDoc::Load() {
             continue;
         }
         TempStr idref = GumboAttributeValueTemp(node, "idref");
-        if (!idref) {
+        if (len(idref) == 0) {
             continue;
         }
         int idx = idList.Find(idref);
@@ -586,7 +586,7 @@ bool EpubDoc::Load() {
         }
         Str html = Str((char*)((u8*)htmlFi->data), htmlFi->fileSizeUncompressed);
         TempStr decoded = DecodeTextToUtf8Temp(html, true);
-        if (!decoded) {
+        if (len(decoded) == 0) {
             continue;
         }
         // insert explicit page-breaks between sections including
@@ -670,7 +670,7 @@ Str EpubDoc::GetHtmlData() const {
 Str EpubDoc::GetImageData(Str fileName, Str pagePath) {
     ScopedMutex scope(&zipAccess);
 
-    if (!pagePath) {
+    if (len(pagePath) == 0) {
         ReportIf(true);
         // if we're reparsing, we might not have pagePath, which is needed to
         // build the exact url so try to find a partial match
@@ -727,8 +727,8 @@ Str EpubDoc::GetImageData(Str fileName, Str pagePath) {
             data.base = Str((char*)((u8*)fi->data), fi->fileSizeUncompressed);
             fi->data = nullptr;
             data.fileName = str::Dup(url);
-            images.Append(data);
-            return images.Last().base;
+            VecAppend(images, data);
+            return VecLast(images).base;
         }
     }
 
@@ -736,7 +736,7 @@ Str EpubDoc::GetImageData(Str fileName, Str pagePath) {
 }
 
 Str EpubDoc::GetFileData(Str relPath, Str pagePath) {
-    if (!pagePath) {
+    if (len(pagePath) == 0) {
         ReportIf(true);
         return {};
     }
@@ -780,7 +780,7 @@ static bool ParseNavToc(Str data, Str pagePath, EbookTocVisitor* visitor) {
     while ((tok = parser.Next()) != nullptr && !tok->IsError()) {
         if (tok->IsStartTag() && Tag_Nav == tok->tag) {
             AttrInfo* attr = tok->GetAttrByName(StrL("epub:type"));
-            if (attr && attr->ValIs("toc")) {
+            if (attr && attr->ValIs(StrL("toc"))) {
                 break;
             }
         }
@@ -810,14 +810,14 @@ static bool ParseNavToc(Str data, Str pagePath, EbookTocVisitor* visitor) {
         while ((tok = parser.Next()) != nullptr && !tok->IsError() && (!tok->IsEndTag() || itemTag != tok->tag)) {
             if (tok->IsText()) {
                 TempStr part = str::DupTemp(tok->s);
-                if (!text) {
+                if (len(text) == 0) {
                     text = part;
                 } else {
                     text = str::JoinTemp(text, part);
                 }
             }
         }
-        if (!text) {
+        if (len(text) == 0) {
             continue;
         }
         TempStr itemText = str::DupTemp(text);
@@ -893,7 +893,7 @@ bool EpubDoc::ParseToc(EbookTocVisitor* visitor) {
             tocDataStr = Str(fi->data, fi->fileSizeUncompressed);
         }
     }
-    if (!tocDataStr) {
+    if (len(tocDataStr) == 0) {
         return false;
     }
 
@@ -1060,7 +1060,7 @@ static Str loadFromData(Fb2Doc* doc, Str srcData) {
 }
 
 bool Fb2Doc::Load(Str srcData) {
-    ReportIf(!srcData && len(fileName) == 0);
+    ReportIf(len(srcData) == 0 && len(fileName) == 0);
 
     Str data;
     if (len(fileName) > 0) {
@@ -1073,7 +1073,7 @@ bool Fb2Doc::Load(Str srcData) {
     }
     TempStr tmp = DecodeTextToUtf8Temp(data, true);
     str::Free(data);
-    if (!tmp) {
+    if (len(tmp) == 0) {
         return false;
     }
 
@@ -1083,6 +1083,7 @@ bool Fb2Doc::Load(Str srcData) {
     HtmlToken* tok;
     int inBody = 0, inTitleInfo = 0, inDocInfo = 0;
     Str bodyStart;
+    TempStr titleAuthors; // every <author> in <title-info>, joined
     while ((tok = parser.Next()) != nullptr && !tok->IsError()) {
         if (!inTitleInfo && !inDocInfo && tok->IsStartTag() && Tag_Body == tok->tag) {
             if (!inBody++) {
@@ -1091,7 +1092,7 @@ bool Fb2Doc::Load(Str srcData) {
         } else if (inBody && tok->IsEndTag() && Tag_Body == tok->tag) {
             if (!--inBody) {
                 if (len(xmlData) > 0) {
-                    xmlData.Append("<pagebreak />");
+                    xmlData.Append(StrL("<pagebreak />"));
                 }
                 xmlData.AppendChar('<');
                 xmlData.Append(Str(bodyStart.s, (int)(tok->s.s - bodyStart.s) + tok->s.len));
@@ -1115,24 +1116,53 @@ bool Fb2Doc::Load(Str srcData) {
                 AddPropOwned(props, DocProp::Title, val);
             }
         } else if ((inTitleInfo || inDocInfo) && tok->IsStartTag() && tok->NameIsNS(StrL("author"), FB2_MAIN_NS())) {
-            TempStr docAuthor = nullptr;
+            // an FB2 <author> is structured: first-name / middle-name / last-name
+            // next to home-page / email / id, which are not part of the name.
+            // Taking every text node would give "Ivan Petrov https://... ivan@..."
+            // (issue #2254)
+            TempStr docAuthor;
+            TempStr nickname;
+            bool inNamePart = false;
+            bool inNickname = false;
+            auto appendTo = [](TempStr cur, TempStr add) -> TempStr {
+                return cur ? str::JoinTemp(cur, StrL(" "), add) : add;
+            };
             while ((tok = parser.Next()) != nullptr && !tok->IsError() &&
                    !(tok->IsEndTag() && tok->NameIsNS(StrL("author"), FB2_MAIN_NS()))) {
-                if (tok->IsText()) {
-                    TempStr author = ResolveHtmlEntitiesTemp(tok->s);
-                    if (docAuthor) {
-                        docAuthor = str::JoinTemp(docAuthor, StrL(" "), author);
-                    } else {
-                        docAuthor = author;
+                if (tok->IsStartTag() || tok->IsEndTag()) {
+                    bool isName = tok->NameIsNS(StrL("first-name"), FB2_MAIN_NS()) ||
+                                  tok->NameIsNS(StrL("middle-name"), FB2_MAIN_NS()) ||
+                                  tok->NameIsNS(StrL("last-name"), FB2_MAIN_NS());
+                    if (isName) {
+                        inNamePart = tok->IsStartTag();
+                    } else if (tok->NameIsNS(StrL("nickname"), FB2_MAIN_NS())) {
+                        inNickname = tok->IsStartTag();
                     }
+                    continue;
                 }
+                if (!tok->IsText()) {
+                    continue;
+                }
+                if (inNamePart) {
+                    docAuthor = appendTo(docAuthor, ResolveHtmlEntitiesTemp(tok->s));
+                } else if (inNickname) {
+                    nickname = appendTo(nickname, ResolveHtmlEntitiesTemp(tok->s));
+                }
+            }
+            if (len(docAuthor) == 0) {
+                // some files give only a nickname
+                docAuthor = nickname;
             }
             if (docAuthor) {
                 docAuthor.len -= str::NormalizeWSInPlace(docAuthor);
                 if (len(docAuthor) > 0) {
-                    TempStr val = docAuthor;
-                    bool replaceIfExists = inTitleInfo != 0;
-                    AddPropOwned(props, DocProp::Author, val, replaceIfExists);
+                    if (inTitleInfo) {
+                        // a book can list several authors; report all of them
+                        titleAuthors = titleAuthors ? str::JoinTemp(titleAuthors, StrL(", "), docAuthor) : docAuthor;
+                        AddPropOwned(props, DocProp::Author, titleAuthors, true);
+                    } else {
+                        AddPropOwned(props, DocProp::Author, docAuthor, false);
+                    }
                 }
             }
         } else if (inTitleInfo && tok->IsStartTag() && tok->NameIsNS(StrL("date"), FB2_MAIN_NS())) {
@@ -1222,7 +1252,7 @@ void Fb2Doc::ExtractImage(GumboHtmlParser* parser, HtmlToken* tok) {
     data.base = str::Dup(decoded);
     data.fileName = str::Join(StrL("#"), id);
     data.fileId = len(images);
-    images.Append(data);
+    VecAppend(images, data);
 }
 
 Str Fb2Doc::GetXmlData() const {
@@ -1283,7 +1313,7 @@ bool Fb2Doc::ParseToc(EbookTocVisitor* visitor) const {
             // NormalizeWSInPlace shortens the buffer in place; adjust len to match
             itemText.len -= str::NormalizeWSInPlace(itemText);
             if (len(itemText) > 0) {
-                TempStr url = fmt(FB2_TOC_ENTRY_MARK "%d", titleCount);
+                TempStr url = fmt(kFb2TocEntryMark "%d", titleCount);
                 visitor->Visit(itemText, url, level);
                 itemText = {};
             }
@@ -1293,7 +1323,7 @@ bool Fb2Doc::ParseToc(EbookTocVisitor* visitor) const {
             if (len(itemText) == 0) {
                 itemText = text;
             } else {
-                itemText = str::JoinTemp(itemText, " ", text);
+                itemText = str::JoinTemp(itemText, StrL(" "), text);
             }
         }
     }
@@ -1333,13 +1363,13 @@ PalmDoc::~PalmDoc() {
     str::Free(fileName);
 }
 
-#define PDB_TOC_ENTRY_MARK "ToC!Entry!"
+#define kPdbTocEntryMark "ToC!Entry!"
 
 // http://wiki.mobileread.com/wiki/TealDoc
 static Str HandleTealDocTag(str::Builder& builder, StrVec& tocEntries, Str text, int n, uint /*codePage*/) {
     if (n < 9) {
     Fallback:
-        builder.Append("&lt;");
+        builder.Append(StrL("&lt;"));
         return text;
     }
     if (!str::StartsWithI(text, StrL("<BOOKMARK")) && !str::StartsWithI(text, StrL("<HEADER")) &&
@@ -1359,7 +1389,7 @@ static Str HandleTealDocTag(str::Builder& builder, StrVec& tocEntries, Str text,
         if (attr && attr->val) {
             TempStr s = strconv::HtmlUtf8ToStrTemp(attr->val);
             tocEntries.Append(s);
-            builder.Append(fmt("<a name=" PDB_TOC_ENTRY_MARK "%d>", ::len(tocEntries)));
+            builder.Append(fmt("<a name=" kPdbTocEntryMark "%d>", ::len(tocEntries)));
             return Str(tok->s.s + tok->s.len, (int)(text.s + text.len - (tok->s.s + tok->s.len)));
         }
     } else if (tok->NameIs(StrL("HEADER"))) {
@@ -1384,15 +1414,15 @@ static Str HandleTealDocTag(str::Builder& builder, StrVec& tocEntries, Str text,
         }
     } else if (tok->NameIs(StrL("HRULE"))) {
         // <HRULE STYLE=OUTLINE>
-        builder.Append("<hr>");
+        builder.Append(StrL("<hr>"));
         return Str(tok->s.s + tok->s.len, (int)(text.s + text.len - (tok->s.s + tok->s.len)));
     } else if (tok->NameIs(StrL("LABEL"))) {
         // <LABEL NAME="Contents">
         AttrInfo* attr = tok->GetAttrByName(StrL("NAME"));
         if (attr && attr->val) {
-            builder.Append("<a name=\"");
+            builder.Append(StrL("<a name=\""));
             builder.Append(attr->val);
-            builder.Append("\">");
+            builder.Append(StrL("\">"));
             return Str(tok->s.s + tok->s.len, (int)(text.s + text.len - (tok->s.s + tok->s.len)));
         }
     } else if (tok->NameIs(StrL("LINK"))) {
@@ -1404,11 +1434,11 @@ static Str HandleTealDocTag(str::Builder& builder, StrVec& tocEntries, Str text,
                 // skip links to other files
                 return Str(tok->s.s + tok->s.len, (int)(text.s + text.len - (tok->s.s + tok->s.len)));
             }
-            builder.Append("<a href=\"#");
+            builder.Append(StrL("<a href=\"#"));
             builder.Append(attrTag->val);
-            builder.Append("\">");
+            builder.Append(StrL("\">"));
             builder.Append(attrText->val);
-            builder.Append("</a>");
+            builder.Append(StrL("</a>"));
             return Str(tok->s.s + tok->s.len, (int)(text.s + text.len - (tok->s.s + tok->s.len)));
         }
     } else if (tok->NameIs(StrL("TEALPAINT"))) {
@@ -1440,14 +1470,14 @@ bool PalmDoc::Load() {
     for (int i = 0; i < rest.len; i++) {
         char c = rest.s[i];
         if ('&' == c) {
-            htmlData.Append("&amp;");
+            htmlData.Append(StrL("&amp;"));
         } else if ('<' == c) {
             Str after = HandleTealDocTag(htmlData, tocEntries, Str(rest.s + i, rest.len - i), rest.len - i, codePage);
             if (after) {
                 i += (int)(after.s - (rest.s + i)) - 1;
             }
         } else if ('\n' == c || ('\r' == c && i + 1 < rest.len && '\n' != rest.s[i + 1])) {
-            htmlData.Append("\n<br>");
+            htmlData.Append(StrL("\n<br>"));
         } else {
             htmlData.AppendChar(c);
         }
@@ -1475,7 +1505,7 @@ bool PalmDoc::HasToc() const {
 
 bool PalmDoc::ParseToc(EbookTocVisitor* visitor) {
     for (int i = 0; i < len(tocEntries); i++) {
-        TempStr url = fmt(PDB_TOC_ENTRY_MARK "%d", i + 1);
+        TempStr url = fmt(kPdbTocEntryMark "%d", i + 1);
         Str name = tocEntries[i];
         visitor->Visit(name, url, 1);
     }
@@ -1513,11 +1543,11 @@ HtmlDoc::~HtmlDoc() {
 bool HtmlDoc::Load() {
     {
         Str data = file::ReadFile(fileName);
-        if (!data) {
+        if (len(data) == 0) {
             return false;
         }
         TempStr decoded = DecodeTextToUtf8Temp(data, true);
-        if (!decoded) {
+        if (len(decoded) == 0) {
             return false;
         }
         Str dup = str::Dup(decoded);
@@ -1543,13 +1573,13 @@ bool HtmlDoc::Load() {
             AttrInfo* attrValue = tok->GetAttrByName(StrL("content"));
             if (!attrName || !attrValue) {
                 /* ignore this tag */;
-            } else if (attrName->ValIs("author")) {
+            } else if (attrName->ValIs(StrL("author"))) {
                 TempStr val = ResolveHtmlEntitiesTemp(attrValue->val);
                 AddPropOwned(props, DocProp::Author, val);
-            } else if (attrName->ValIs("date")) {
+            } else if (attrName->ValIs(StrL("date"))) {
                 TempStr val = ResolveHtmlEntitiesTemp(attrValue->val);
                 AddPropOwned(props, DocProp::CreationDate, val);
-            } else if (attrName->ValIs("copyright")) {
+            } else if (attrName->ValIs(StrL("copyright"))) {
                 TempStr val = ResolveHtmlEntitiesTemp(attrValue->val);
                 AddPropOwned(props, DocProp::Copyright, val);
             }
@@ -1579,8 +1609,8 @@ Str HtmlDoc::GetImageData(Str fileName) {
         return {};
     }
     data.fileName = str::Dup(url);
-    images.Append(data);
-    return images.Last().base;
+    VecAppend(images, data);
+    return VecLast(images).base;
 }
 
 Str HtmlDoc::GetFileData(Str relPath) {
@@ -1589,13 +1619,14 @@ Str HtmlDoc::GetFileData(Str relPath) {
 }
 
 Str HtmlDoc::LoadURL(Str url) {
+    AutoArenaSavepoint tempScope;
     if (str::StartsWith(url, StrL("data:"))) {
         return str::Dup(DecodeDataURITemp(url));
     }
     if (str::ContainsChar(url, ':')) {
         return {};
     }
-    Str path = str::Dup(url);
+    TempStr path = str::DupTemp(url);
     str::TransCharsInPlace(path, StrL("/"), StrL("\\"));
     return file::ReadFile(path);
 }
@@ -1632,11 +1663,11 @@ TxtDoc::~TxtDoc() {
 }
 
 // cf. http://www.cix.co.uk/~gidds/Software/TCR.html
-#define TCR_HEADER "!!8-Bit!!"
+#define kTcrHeader "!!8-Bit!!"
 
 static TempStr DecompressTcrTextTemp(Str data) {
-    ReportIf(!str::StartsWith(data, TCR_HEADER));
-    int hdrLen = LenL(TCR_HEADER);
+    ReportIf(!str::StartsWith(data, StrL(kTcrHeader)));
+    int hdrLen = LenL(kTcrHeader);
     Str curr = Str(data.s + hdrLen, data.len - hdrLen);
     Str end = Str(data.s + data.len, 0);
 
@@ -1653,7 +1684,8 @@ static TempStr DecompressTcrTextTemp(Str data) {
         curr = Str(curr.s + step, curr.len - step);
     }
 
-    str::Builder text(data.len * 2);
+    str::Builder text;
+    str::BuilderReserve(text, data.len * 2);
     AtomicIntInc(&gAllowAllocFailure);
     AutoCall decAllowAlloc(AtomicIntDec, &gAllowAllocFailure);
 
@@ -1701,14 +1733,14 @@ static Str TextFindLinkEnd(str::Builder& htmlData, Str curr, char prevChar, bool
         }
     }
 
-    htmlData.Append("<a href=\"");
+    htmlData.Append(StrL("<a href=\""));
     if (fromWww) {
-        htmlData.Append("http://");
+        htmlData.Append(StrL("http://"));
     }
     for (int i = 0; i < endIdx; i++) {
         AppendChar(htmlData, curr.s[i]);
     }
-    htmlData.Append("\">");
+    htmlData.Append(StrL("\">"));
 
     return Str(curr.s + endIdx, curr.len - endIdx);
 }
@@ -1737,8 +1769,9 @@ static Str TextFindEmailEnd(str::Builder& htmlData, Str curr) {
         // copy (not a view): htmlData is mutated below before beforeAt is appended back
         beforeAt = str::DupTemp(Str(&htmlData[idx]));
     } else {
-        ReportIf(!str::StartsWith(curr, StrL("mailto:")));
-        rest = Str(curr.s + 7, curr.len - 7);
+        bool isMailto = str::TrimPrefix(curr, StrL("mailto:"));
+        ReportIf(!isMailto);
+        rest = curr;
         if (!rest.len || !IsEmailUsernameChar(rest.s[0])) {
             return {};
         }
@@ -1775,12 +1808,12 @@ static Str TextFindEmailEnd(str::Builder& htmlData, Str curr) {
         int idx = len(htmlData) - beforeAt.len;
         htmlData.RemoveAt(idx, len(htmlData) - idx);
     }
-    htmlData.Append("<a href=\"mailto:");
+    htmlData.Append(StrL("<a href=\"mailto:"));
     htmlData.Append(beforeAt);
     for (int i = 0; i < (int)(end.s - linkStart.s); i++) {
         AppendChar(htmlData, linkStart.s[i]);
     }
-    htmlData.Append("\">");
+    htmlData.Append(StrL("\">"));
     htmlData.Append(beforeAt);
 
     return end;
@@ -1801,18 +1834,18 @@ static Str TextFindRfcEnd(str::Builder& htmlData, Str curr, char prevChar) {
 
 bool TxtDoc::Load() {
     Str fileContent = file::ReadFile(fileName);
-    if (!fileContent) {
+    if (len(fileContent) == 0) {
         return false;
     }
 
     TempStr text;
     Str raw = fileContent;
-    if (str::EndsWithI(fileName, StrL(".tcr")) && str::StartsWith(raw, TCR_HEADER)) {
+    if (str::EndsWithI(fileName, StrL(".tcr")) && str::StartsWith(raw, StrL(kTcrHeader))) {
         text = DecompressTcrTextTemp(raw);
     } else {
         text = DecodeTextToUtf8Temp(raw);
     }
-    if (!text) {
+    if (len(text) == 0) {
         return false;
     }
 
@@ -1823,13 +1856,13 @@ bool TxtDoc::Load() {
     bool rfcHeader = false;
     int sectionCount = 0;
 
-    htmlData.Append("<pre>");
+    htmlData.Append(StrL("<pre>"));
     for (int i = 0; i < text.len; i++) {
         Str curr = Str(text.s + i, text.len - i);
         char c = text.s[i];
         // similar logic to LinkifyText in PdfEngine.cpp
         if (linkEndPos == i) {
-            htmlData.Append("</a>");
+            htmlData.Append(StrL("</a>"));
             linkEndPos = -1;
         } else if (linkEndPos >= 0) { // NOLINT(bugprone-branch-clone): each empty branch has its own reason
             /* don't check for hyperlinks inside a link */;
@@ -1866,7 +1899,7 @@ bool TxtDoc::Load() {
         if ('\f' == c && (i == 0 || '\n' == text.s[i - 1]) &&
             (i + 1 >= text.len || '\r' == text.s[i + 1] || '\n' == text.s[i + 1])) {
             if (i > 0 && i + 2 < text.len && (i + 3 < text.len || text.s[i + 2] != '\n')) {
-                htmlData.Append("<pagebreak />");
+                htmlData.Append(StrL("<pagebreak />"));
             }
             continue;
         }
@@ -1882,21 +1915,21 @@ bool TxtDoc::Load() {
                     }
                     AppendChar(htmlData, ch);
                 }
-                htmlData.Append("\">");
+                htmlData.Append(StrL("\">"));
                 rfcHeader = true;
             }
         }
         if (rfcHeader && ('\r' == c || '\n' == c)) {
-            htmlData.Append("</b>");
+            htmlData.Append(StrL("</b>"));
             rfcHeader = false;
         }
 
         AppendChar(htmlData, c);
     }
     if (linkEndPos >= 0) {
-        htmlData.Append("</a>");
+        htmlData.Append(StrL("</a>"));
     }
-    htmlData.Append("</pre>");
+    htmlData.Append(StrL("</pre>"));
 
     return true;
 }
@@ -1935,16 +1968,16 @@ bool TxtDoc::ParseToc(EbookTocVisitor* visitor) {
 
     GumboDoc doc(ToStr(htmlData), false);
     Vec<const GumboNode*> toVisit;
-    toVisit.Append(doc.Document());
+    VecAppend(toVisit, doc.Document());
     while (len(toVisit) > 0) {
-        const GumboNode* node = toVisit.Pop();
+        const GumboNode* node = VecPop(toVisit);
         if (!node) {
             continue;
         }
         const GumboVector* children = GumboChildrenOf(node);
         if (children) {
             for (unsigned int i = children->length; i > 0; i--) {
-                toVisit.Append((const GumboNode*)children->data[i - 1]);
+                VecAppend(toVisit, (const GumboNode*)children->data[i - 1]);
             }
         }
         if (!GumboTagNameIs(node, StrL("b"))) {
@@ -1979,48 +2012,51 @@ TxtDoc* TxtDoc::CreateFromFile(Str path) {
     return doc;
 }
 
-#if defined(DEBUG)
+#if IS_DEBUG
 // issue #5846: consecutive ../../ must fully resolve
 bool EbookDoc_UnitTestNormalizeURL() {
     auto eq = [](Str url, Str base, Str expected) -> bool { return str::Eq(NormalizeURLTemp(url, base), expected); };
+    auto eql = [&](const char* url, const char* base, const char* expected) -> bool {
+        return eq(Str(url), Str(base), Str(expected));
+    };
     // consecutive parent segments from OEBPS/html/ (EPUB cover layout)
-    if (!eq("../../cover.jpg", "OEBPS/html/titlepage.xhtml", "cover.jpg")) {
+    if (!eql("../../cover.jpg", "OEBPS/html/titlepage.xhtml", "cover.jpg")) {
         return false;
     }
-    if (!eq("../../root.jpg", "OEBPS/html/page.xhtml", "root.jpg")) {
+    if (!eql("../../root.jpg", "OEBPS/html/page.xhtml", "root.jpg")) {
         return false;
     }
-    if (!eq("../../img/c.jpg", "a/b/p.xhtml", "img/c.jpg")) {
+    if (!eql("../../img/c.jpg", "a/b/p.xhtml", "img/c.jpg")) {
         return false;
     }
-    if (!eq("../../../c.jpg", "a/b/x/p.xhtml", "c.jpg")) {
+    if (!eql("../../../c.jpg", "a/b/x/p.xhtml", "c.jpg")) {
         return false;
     }
     // single ../ still works
-    if (!eq("../ok.jpg", "OEBPS/html/page.xhtml", "OEBPS/ok.jpg")) {
+    if (!eql("../ok.jpg", "OEBPS/html/page.xhtml", "OEBPS/ok.jpg")) {
         return false;
     }
-    if (!eq("../Images/x.jpg", "OEBPS/Text/y.xhtml", "OEBPS/Images/x.jpg")) {
+    if (!eql("../Images/x.jpg", "OEBPS/Text/y.xhtml", "OEBPS/Images/x.jpg")) {
         return false;
     }
-    if (!eq("text/../cover.jpg", "page.xhtml", "cover.jpg")) {
+    if (!eql("text/../cover.jpg", "page.xhtml", "cover.jpg")) {
         return false;
     }
     // ./ collapse and over-pop
-    if (!eq("./y", "x/z", "x/y")) {
+    if (!eql("./y", "x/z", "x/y")) {
         return false;
     }
-    if (!eq("../../b", "a/c.xhtml", "b")) {
+    if (!eql("../../b", "a/c.xhtml", "b")) {
         return false;
     }
     // absolute / scheme URLs left alone
-    if (!eq("/abs/path", "OEBPS/html/p.xhtml", "/abs/path")) {
+    if (!eql("/abs/path", "OEBPS/html/p.xhtml", "/abs/path")) {
         return false;
     }
-    if (!eq("http://example.com/x", "OEBPS/html/p.xhtml", "http://example.com/x")) {
+    if (!eql("http://example.com/x", "OEBPS/html/p.xhtml", "http://example.com/x")) {
         return false;
     }
-    if (!eq("#frag", "OEBPS/html/p.xhtml#old", "OEBPS/html/p.xhtml#frag")) {
+    if (!eql("#frag", "OEBPS/html/p.xhtml#old", "OEBPS/html/p.xhtml#frag")) {
         return false;
     }
     return true;

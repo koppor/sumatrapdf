@@ -36,8 +36,10 @@
 #include "SumatraPDF.h"
 #include "AIChatCommon.h"
 #include "AIChatPanel.h"
-#include "MainWindow.h"
 #include "SelectionToolbar.h"
+#include "AnnotEditToolbar.h"
+#include "AnnotTextPopup.h"
+#include "AnnotFilterToolbar.h"
 #include "FindBar.h"
 #include "FindWindow.h"
 #include "SearchAndDDE.h"
@@ -46,14 +48,15 @@
 #include "TableOfContents.h"
 #include "StressTesting.h"
 #include "uia/Provider.h"
+#include "Theme.h"
+#include "Canvas.h"
+#include "HomePage.h"
+#include "MainWindow.h"
 
 static void SafeDeleteTabsCtrl(TabsCtrl* tabsCtrl) {
     logf("SafeDeleteTabsCtrl: 0x%p\n", tabsCtrl);
     delete tabsCtrl;
 }
-#include "Theme.h"
-#include "Canvas.h"
-#include "HomePage.h"
 
 struct LinkHandler : ILinkHandler {
     MainWindow* win = nullptr;
@@ -82,10 +85,36 @@ LinkHandler::~LinkHandler() {
 
 Vec<MainWindow*> gWindows;
 
+static void OverlayScrollbarsOnWindowMoved(MainWindow* win) {
+    OverlayScrollbarUpdatePos(win->overlayScrollV);
+    OverlayScrollbarUpdatePos(win->overlayScrollH);
+}
+
 MainWindow::MainWindow(HWND hwnd) {
     hwndFrame = hwnd;
     linkHandler = new LinkHandler(this);
     cbHandler = CreateControllerCallbackHandler(this);
+    overlayScrollOnMoved = MkFunc1Void(OverlayScrollbarsOnWindowMoved);
+    RegisterOnWindowMoved(&overlayScrollOnMoved);
+}
+
+void MainWindow::RegisterOnWindowMoved(Func1List<MainWindow*>* cb) {
+    ReportIf(!cb);
+    cb->Register(&onWindowMoved);
+}
+
+void MainWindow::UnregisterOnWindowMoved(Func1List<MainWindow*>* cb) {
+    if (!cb) {
+        return;
+    }
+    cb->Unregister(&onWindowMoved);
+}
+
+// fire onWindowMoved: popups placed in screen coords don't follow the frame on their own
+void MainWindow::NotifyWindowMoved() {
+    if (onWindowMoved) {
+        onWindowMoved->CallAll(this);
+    }
 }
 
 static WORD dotPatternBmp[8] = {0x00aa, 0x0055, 0x00aa, 0x0055, 0x00aa, 0x0055, 0x00aa, 0x0055};
@@ -101,6 +130,7 @@ void CreateMovePatternLazy(MainWindow* win) {
 }
 
 MainWindow::~MainWindow() {
+    CancelAnnotationResizeRerender(this);
     KillTimer(hwndCanvas, kSmoothScrollTimerID);
     if (scrollAnimHiResTimer) {
         timeEndPeriod(1);
@@ -118,6 +148,7 @@ MainWindow::~MainWindow() {
     str::Free(homeSearchQuery);
 
     UnsubclassToc(this);
+    HomePageDestroySearch(this);
     HomePageDestroyChrome(this);
 
     OverlayScrollbarDestroy(overlayScrollV);
@@ -166,6 +197,10 @@ MainWindow::~MainWindow() {
     ClearFindMatches(this);
 
     DeleteSelectionToolbar(this);
+    DeleteAnnotEditToolbar(this);
+    DeleteAnnotFilterToolbar(this);
+    DeleteAnnotationHoverOverlay(this);
+    DeleteAnnotationTextPopup(this);
 
     delete linkHandler;
     delete buffer;
@@ -191,6 +226,8 @@ MainWindow::~MainWindow() {
 
     delete frameRateWnd;
     ReadAloudPlaybackBarDestroy(this);
+    UnregisterOnWindowMoved(&overlayScrollOnMoved);
+    ReportIf(onWindowMoved);
     delete infotip;
     // tocLayout (VBox) owns the header, tocFilterEdit and tocTreeView; the
     // root only points at the header's virtual controls, so it outlives them
@@ -213,6 +250,8 @@ MainWindow::~MainWindow() {
 }
 
 void ClearMouseState(MainWindow* win) {
+    CancelAnnotationResizeRerender(win);
+    HideAnnotationHoverOverlay(win);
     win->dragStartPending = false;
     win->textDragPending = false;
     win->imageDragPending = false;
@@ -247,7 +286,7 @@ bool MainWindow::IsDocLoaded() const {
     bool isLoaded = (ctrl != nullptr);
     bool isTabLoaded = (CurrentTab() && CurrentTab()->ctrl != nullptr);
     if (isLoaded != isTabLoaded) {
-        logfa("MainWindow::IsDocLoaded(): isLoaded: %d, isTabLoaded: %d\n", (int)isLoaded, (int)isTabLoaded);
+        logf("MainWindow::IsDocLoaded(): isLoaded: %d, isTabLoaded: %d\n", (int)isLoaded, (int)isTabLoaded);
         ReportIf(!gPluginMode);
     }
     return isLoaded;
@@ -305,7 +344,7 @@ Vec<WindowTab*> MainWindow::Tabs() const {
     int nTabs = tabsCtrl->TabCount();
     for (int i = 0; i < nTabs; i++) {
         WindowTab* tab = GetTabsUserData<WindowTab*>(tabsCtrl, i);
-        res.Append(tab);
+        VecAppend(res, tab);
     }
     return res;
 }
@@ -325,6 +364,9 @@ MarkdownModel* MainWindow::AsMarkdown() const {
 // Notify both display model and double-buffer (if they exist)
 // about a potential change of available canvas size
 void MainWindow::UpdateCanvasSize() {
+    if (suppressCanvasSizeUpdate) {
+        return;
+    }
     Rect rc = HwndClientRect(hwndCanvas);
     if (buffer && canvasRc == rc) {
         return;
@@ -495,8 +537,13 @@ static void LaunchEmbeddedDestination(MainWindow* win, PageDestination* pd) {
     Str fileName = pd->GetValue2();
     logf("GotoLink: opening file attachment annotation '%s', objNum: %d, size: %d\n", fileName, pd->embedObjNum,
          (int)data.len);
+    // PDF (and other types we can open): load from memory into a tab
+    if (OpenDocumentFromMemory(win, data, fileName)) {
+        str::Free(data);
+        return;
+    }
     TempStr tmpDir = GetTempDirTemp();
-    if (!tmpDir) {
+    if (len(tmpDir) == 0) {
         str::Free(data);
         return;
     }
@@ -544,6 +591,44 @@ void LinkHandler::GotoLink(IPageDestination* dest) {
         return;
     }
 
+    if (kindDestinationJsMenu == kind) {
+        auto* menuDest = (PageDestinationJsMenu*)dest;
+        if (len(menuDest->items) == 0) {
+            return;
+        }
+        HMENU menu = CreatePopupMenu();
+        if (!menu) {
+            return;
+        }
+        for (int i = 0; i < len(menuDest->items); i++) {
+            Str item = menuDest->items[i];
+            if (str::Eq(item, StrL("-"))) {
+                AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+                continue;
+            }
+            AppendMenuW(menu, MF_STRING, (UINT)(i + 1), CWStrTemp(MenuToSafeStringTemp(item)));
+        }
+        POINT pt{};
+        GetCursorPos(&pt);
+        int cmd =
+            TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN, pt.x, pt.y, 0, win->hwndFrame, nullptr);
+        DestroyMenu(menu);
+        if (cmd < 1 || cmd > len(menuDest->items)) {
+            return;
+        }
+        Str chosen = menuDest->items[cmd - 1];
+        Str url = chosen;
+        int colon = str::IndexOf(chosen, StrL(": "));
+        if (colon >= 0) {
+            url = Str(chosen.s + colon + 2, chosen.len - colon - 2);
+            str::TrimWs(url);
+        }
+        if (IsExternalUrl(url) || str::StartsWithI(url, StrL("ftp://"))) {
+            LaunchURL(url);
+        }
+        return;
+    }
+
     if (kindDestinationLaunchURL == kind) {
         return;
     }
@@ -569,7 +654,11 @@ void LinkHandler::ScrollTo(IPageDestination* dest) {
         md->HandleLink(dest, nullptr);
         return;
     }
-    int pageNo = PageDestGetPageNo(dest);
+    Location loc = win->ctrl->ResolveDest(dest);
+    if (!loc.IsValid()) {
+        return;
+    }
+    int pageNo = win->ctrl->PageNoFromLocation(loc);
     if (!win->ctrl->ValidPageNo(pageNo)) {
         return;
     }
@@ -608,16 +697,16 @@ void LinkHandler::ScrollTo(int pageNo, RectF rect, float zoom) {
         return;
     }
     win->ctrl->ScrollTo(pageNo, rect, zoom);
+    ShowLinkDestHighlight(win, pageNo, rect);
 }
 
 // Convert file:// / file:/// / file: URIs to a local path (+ optional #fragment).
 // Returns false if uri is not a file: scheme.
 static bool PathFromFileUriTemp(Str uri, TempStr* pathOut, Str* fragmentOut) {
-    if (!str::StartsWithI(uri, StrL("file:"))) {
+    Str rest = uri;
+    if (!str::TrimPrefixI(rest, StrL("file:"))) {
         return false;
     }
-    // Skip "file:" case-insensitively (str::TrimPrefix is case-sensitive).
-    Str rest = Str(uri.s + 5, uri.len - 5);
     // file://host/path or file:///path → drop authority (// or ///)
     if (str::TrimPrefix(rest, StrL("//"))) {
         // empty host: next char is / of absolute path
@@ -645,7 +734,7 @@ static bool PathFromFileUriTemp(Str uri, TempStr* pathOut, Str* fragmentOut) {
 }
 
 void LinkHandler::LaunchURL(Str uri) {
-    if (!uri) {
+    if (len(uri) == 0) {
         /* ignore missing URLs */;
         return;
     }
@@ -693,13 +782,9 @@ static bool IsFileSupportedByContent(Str filePath) {
 // fragment, but EngineBase::GetNamedDest prepends "#nameddest=" itself -- so the
 // prefix must be stripped or the lookup becomes "#nameddest=nameddest=<name>"
 // and fails, leaving the remote PDF on page 1 (issue #5642).
-// strips mupdf's "nameddest=" prefix from a remote link's destination name
-// so it can be passed to GetNamedDest (issue #5642)
-Str CleanRemoteDestName(Str destName) {
-    if (destName && str::StartsWithI(destName, StrL("nameddest="))) {
-        return Str(destName.s + 10, destName.len - 10);
-    }
-    return destName;
+// Strips mupdf's "nameddest=" prefix so the name can be passed to GetNamedDest.
+void CleanRemoteDestNameInPlace(Str& destName) {
+    str::TrimPrefixI(destName, StrL("nameddest="));
 }
 
 // for safety, only handle relative paths and only open them in SumatraPDF
@@ -738,13 +823,13 @@ void LinkHandler::LaunchFile(Str pathOrig, IPageDestination* remoteLink) {
         return;
     }
     if (pathType == path::Type::Dir) {
-        SumatraOpenPathInDefaultFileManager(fullPath);
+        OpenPathInDefaultFileManager(fullPath);
         return;
     }
 
     bool canWeOpenIt = IsFileSupportedByContent(fullPath);
     if (!canWeOpenIt) {
-        SumatraOpenPathInDefaultFileManager(fullPath);
+        OpenPathInDefaultFileManager(fullPath);
         return;
     }
 
@@ -797,10 +882,10 @@ void LinkHandler::LaunchFile(Str pathOrig, IPageDestination* remoteLink) {
 
     Str destName = PageDestGetName(remoteLink);
     if (destName) {
-        IPageDestination* dest = targetWin->ctrl->GetNamedDest(CleanRemoteDestName(destName));
+        CleanRemoteDestNameInPlace(destName);
+        IPageDestination* dest = targetWin->ctrl->GetNamedDest(destName);
         if (dest) {
             targetWin->linkHandler->ScrollTo(dest);
-            delete dest;
         }
     } else {
         targetWin->linkHandler->ScrollTo(remoteLink);
@@ -889,7 +974,6 @@ void LinkHandler::GotoNamedDest(Str name) {
     bool hasDest = dest != nullptr;
     if (dest) {
         ScrollTo(dest);
-        delete dest;
     } else if (ctrl->HasToc()) {
         auto* docTree = ctrl->GetToc();
         TocItem* root = docTree->root;
@@ -948,7 +1032,7 @@ void UpdateControlsColors(MainWindow* win) {
     Color bgCol = ThemeControlBackgroundColor();
     Color txtCol = ThemeWindowTextColor();
 
-    // logfa("retrieved doc colors in tree control: 0x%x 0x%x\n", treeTxtCol, treeBgCol);
+    // logf("retrieved doc colors in tree control: 0x%x 0x%x\n", treeTxtCol, treeBgCol);
 
     // the panel labels and the splitters are virtual controls: they follow the
     // gui/ color defaults, which SumatraUpdateTheme() already refreshed
@@ -979,11 +1063,20 @@ bool IsRightDragging(MainWindow* win) {
     return win->dragRightClick;
 }
 
-// sometimes we stash MainWindow pointer, do something on a thread and
-// then go back on main thread to finish things. At that point MainWindow
-// could have been destroyed so we need to check if it's still valid
+// True if `win` is still in gWindows (the object has not been deleted).
+// Does not look at isBeingClosed: CloseWindow sets that flag first and then
+// pumps messages (save-annotations dialog, ShowWindow), using this to detect
+// whether the window was destroyed during that pumping. Folding isBeingClosed
+// in here would make CloseWindow abort immediately after setting the flag.
 bool IsMainWindowValid(MainWindow* win) {
-    return win && gWindows.Contains(win);
+    return win && VecContains(gWindows, win);
+}
+
+// True if `win` still exists and CloseWindow has not started. Use this for
+// deferred work (load finish, timers, find/print threads, UI updates) that
+// must not touch a window that is tearing down.
+bool IsMainWindowValidAndNotClosing(MainWindow* win) {
+    return IsMainWindowValid(win) && !win->isBeingClosed;
 }
 
 MainWindow* FindMainWindowByHwnd(HWND hwnd) {
@@ -994,6 +1087,24 @@ MainWindow* FindMainWindowByHwnd(HWND hwnd) {
         if ((win->hwndFrame == hwnd) || ::IsChild(win->hwndFrame, hwnd)) {
             return win;
         }
+    }
+    // Owned popups (find bar / find window) and their children are WS_POPUP, not
+    // WS_CHILD of the frame, so IsChild misses them. ComboLBox (dropped history)
+    // is owned by the combo, so climb owner then parent until we hit a frame.
+    HWND cur = hwnd;
+    for (int i = 0; i < 16 && cur; i++) {
+        HWND owner = GetWindow(cur, GW_OWNER);
+        HWND parent = ::GetParent(cur);
+        HWND next = owner ? owner : parent;
+        if (!next || next == cur) {
+            break;
+        }
+        for (MainWindow* win : gWindows) {
+            if (next == win->hwndFrame) {
+                return win;
+            }
+        }
+        cur = next;
     }
     return nullptr;
 }

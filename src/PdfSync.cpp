@@ -14,13 +14,13 @@
 #include "PdfSync.h"
 
 // size of the mark highlighting the location calculated by forward-search
-#define MARK_SIZE 10
+constexpr int kMarkSize = 10;
 // maximum error in the source file line number when doing forward-search
-#define EPSILON_LINE 5
+constexpr int kEpsilonLine = 5;
 // Minimal error distance^2 between a point clicked by the user and a PDF mark
-#define PDFSYNC_EPSILON_SQUARE 800
+constexpr int kPdfsyncEpsilonSquare = 800;
 // Minimal vertical distance
-#define PDFSYNC_EPSILON_Y 20
+constexpr int kPdfsyncEpsilonY = 20;
 
 struct PdfsyncFileIndex {
     int start, end; // first and one-after-last index of lines associated with a file
@@ -218,7 +218,7 @@ int Pdfsync::RebuildIndexIfNeeded() {
     }
 
     Str data = file::ReadFile(syncFilePath);
-    if (!data) {
+    if (len(data) == 0) {
         return PDFSYNCERR_SYNCFILE_CANNOT_BE_OPENED;
     }
 
@@ -242,20 +242,20 @@ int Pdfsync::RebuildIndexIfNeeded() {
 
     // reset synchronizer database
     srcfiles.Reset();
-    lines.Reset();
-    points.Reset();
-    fileIndex.Reset();
-    sheetIndex.Reset();
+    VecReset(lines);
+    VecReset(points);
+    VecReset(fileIndex);
+    VecReset(sheetIndex);
 
     Vec<int> filestack;
     int page = 1;
-    sheetIndex.Append(0);
+    VecAppend(sheetIndex, 0);
 
     // add the initial tex file to the source file stack
-    filestack.Append(len(srcfiles));
+    VecAppend(filestack, len(srcfiles));
     srcfiles.Append(jobName);
     PdfsyncFileIndex findex{};
-    fileIndex.Append(findex);
+    VecAppend(fileIndex, findex);
 
     PdfsyncLine psline;
     PdfsyncPoint pspoint;
@@ -270,19 +270,19 @@ int Pdfsync::RebuildIndexIfNeeded() {
         Str line = SyncLineAt(data, lineOff);
         switch (line.s[0]) {
             case 'l':
-                psline.file = filestack.Last();
+                psline.file = VecLast(filestack);
                 if (!str::IsNull(str::Parse(line, "l %u %u %u", &psline.record, &psline.line, &psline.column))) {
-                    lines.Append(psline);
+                    VecAppend(lines, psline);
                 } else if (!str::IsNull(str::Parse(line, "l %u %u", &psline.record, &psline.line))) {
                     psline.column = 0;
-                    lines.Append(psline);
+                    VecAppend(lines, psline);
                 }
                 // else dbg("Bad 'l' line in the pdfsync file");
                 break;
 
             case 's':
                 if (!str::IsNull(str::Parse(line, "s %u", &page))) {
-                    sheetIndex.Append(len(points));
+                    VecAppend(sheetIndex, len(points));
                 }
                 // else dbg("Bad 's' line in the pdfsync file");
                 // if (0 == page || page > maxPageNo)
@@ -295,7 +295,7 @@ int Pdfsync::RebuildIndexIfNeeded() {
                     /* ignore point for invalid page number */;
                 } else if (!str::IsNull(str::Parse(line, "p %u %u %u", &pspoint.record, &pspoint.x, &pspoint.y)) ||
                            !str::IsNull(str::Parse(line, "p* %u %u %u", &pspoint.record, &pspoint.x, &pspoint.y))) {
-                    points.Append(pspoint);
+                    VecAppend(points, pspoint);
                 }
                 // else dbg("Bad 'p' line in the pdfsync file");
                 break;
@@ -319,15 +319,15 @@ int Pdfsync::RebuildIndexIfNeeded() {
                     filename = PrependDirTemp(filename);
                 }
 
-                filestack.Append(len(srcfiles));
+                VecAppend(filestack, len(srcfiles));
                 srcfiles.Append(filename);
                 findex.start = findex.end = len(lines);
-                fileIndex.Append(findex);
+                VecAppend(fileIndex, findex);
             } break;
 
             case ')':
                 if (len(filestack) > 1) {
-                    fileIndex[filestack.Pop()].end = len(lines);
+                    fileIndex[VecPop(filestack)].end = len(lines);
                 }
                 // else dbg("Unbalanced ')' line in the pdfsync file");
                 break;
@@ -345,7 +345,7 @@ int Pdfsync::RebuildIndexIfNeeded() {
 }
 
 // convert a coordinate from the sync file into a PDF coordinate
-#define SYNC_TO_PDF_COORDINATE(c) ((c) / 65781.76)
+constexpr double kSyncToPdfCoordinateDiv = 65781.76;
 
 static int cmpLineRecords(const void* a, const void* b) {
     return (int)((PdfsyncLine*)a)->record - (int)((PdfsyncLine*)b)->record;
@@ -380,10 +380,10 @@ int Pdfsync::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
     Rect mbox = engine->PageMediabox(pageNo).Round();
     pt.y = mbox.dy - pt.y;
 
-    // distance to the closest pdf location (in the range <PDFSYNC_EPSILON_SQUARE)
+    // distance to the closest pdf location (in the range <kPdfsyncEpsilonSquare)
     UINT closest_xydist = UINT_MAX;
     UINT selected_record = UINT_MAX;
-    // If no record is found within a distance^2 of PDFSYNC_EPSILON_SQUARE
+    // If no record is found within a distance^2 of kPdfsyncEpsilonSquare
     // (selected_record == -1) then we pick up the record that is closest
     // vertically to the hit-point.
     UINT closest_ydist = UINT_MAX;        // vertical distance between the hit point and the vertically-closest record
@@ -393,13 +393,13 @@ int Pdfsync::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
     // read all the sections of 'p' declarations for this pdf sheet
     for (int i = sheetIndex[pageNo]; i < len(points) && points[i].page == (uint)pageNo; i++) {
         // check whether it is closer than the closest point found so far
-        UINT dx = abs(pt.x - (int)SYNC_TO_PDF_COORDINATE(points[i].x));
-        UINT dy = abs(pt.y - (int)SYNC_TO_PDF_COORDINATE(points[i].y));
+        UINT dx = abs(pt.x - (int)(points[i].x / kSyncToPdfCoordinateDiv));
+        UINT dy = abs(pt.y - (int)(points[i].y / kSyncToPdfCoordinateDiv));
         UINT dist = (dx * dx) + (dy * dy);
-        if (dist < PDFSYNC_EPSILON_SQUARE && dist < closest_xydist) {
+        if (dist < kPdfsyncEpsilonSquare && dist < closest_xydist) {
             selected_record = points[i].record;
             closest_xydist = dist;
-        } else if ((closest_xydist == UINT_MAX) && dy < PDFSYNC_EPSILON_Y &&
+        } else if ((closest_xydist == UINT_MAX) && dy < kPdfsyncEpsilonY &&
                    (dy < closest_ydist || (dy == closest_ydist && dx < closest_xdist))) {
             closest_ydist_record = points[i].record;
             closest_ydist = dy;
@@ -417,7 +417,7 @@ int Pdfsync::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
     // We have a record number, we need to find its declaration ('l ...') in the syncfile
     PdfsyncLine cmp;
     cmp.record = selected_record;
-    PdfsyncLine* found = (PdfsyncLine*)bsearch(&cmp, lines.LendData(), len(lines), sizeof(PdfsyncLine), cmpLineRecords);
+    PdfsyncLine* found = (PdfsyncLine*)bsearch(&cmp, VecData(lines), len(lines), sizeof(PdfsyncLine), cmpLineRecords);
     ReportIf(!found);
     if (!found) {
         return PDFSYNCERR_NO_SYNC_AT_LOCATION;
@@ -441,17 +441,17 @@ int Pdfsync::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
 // The list of records is added to the vector 'records'
 //
 // If there is no record for that line, the record corresponding to the nearest line is selected
-// (within a range of EPSILON_LINE)
+// (within a range of kEpsilonLine)
 //
 // The function returns PDFSYNCERR_SUCCESS if a matching record was found.
 UINT Pdfsync::SourceToRecord(Str srcfilename, int line, int /*col*/, Vec<int>& records) {
-    if (!srcfilename) {
+    if (len(srcfilename) == 0) {
         return PDFSYNCERR_INVALID_ARGUMENT;
     }
 
     // convert the source file to an absolute path
     TempStr srcfilepath = path::IsAbsolute(srcfilename) ? srcfilename : PrependDirTemp(srcfilename);
-    if (!srcfilepath) {
+    if (len(srcfilepath) == 0) {
         return PDFSYNCERR_OUTOFMEMORY;
     }
 
@@ -473,7 +473,7 @@ UINT Pdfsync::SourceToRecord(Str srcfilename, int line, int /*col*/, Vec<int>& r
 
     // look for sections belonging to the specified file
     // starting with the first section that is declared within the scope of the file.
-    UINT min_distance = EPSILON_LINE; // distance to the closest record
+    UINT min_distance = kEpsilonLine; // distance to the closest record
     int lineIx = -1;                  // closest record-line index
 
     for (int isec = fileIndex[isrc].start; isec < fileIndex[isrc].end; isec++) {
@@ -497,7 +497,7 @@ UINT Pdfsync::SourceToRecord(Str srcfilename, int line, int /*col*/, Vec<int>& r
 
     // we read all the consecutive records until we reach a record belonging to another line
     for (int i = lineIx; i < len(lines) && lines[i].line == lines[lineIx].line; i++) {
-        records.Append((int)lines[i].record);
+        VecAppend(records, (int)lines[i].record);
     }
 
     return PDFSYNCERR_SUCCESS;
@@ -515,24 +515,24 @@ int Pdfsync::SourceToDoc(Str srcfilename, int line, int col, int* page, Vec<Rect
         return (int)ret;
     }
 
-    rects.Reset();
+    VecReset(rects);
 
     // records have been found for the desired source position:
     // we now find the page and positions in the PDF corresponding to these found records
     int firstPage = UINT_MAX;
     for (PdfsyncPoint& p : points) {
-        if (!found_records.Contains((int)p.record)) {
+        if (!VecContains(found_records, (int)p.record)) {
             continue;
         }
         if (firstPage != UINT_MAX && firstPage != (int)p.page) {
             continue;
         }
         firstPage = *page = (int)p.page;
-        RectF rc((float)SYNC_TO_PDF_COORDINATE(p.x), (float)SYNC_TO_PDF_COORDINATE(p.y), MARK_SIZE, MARK_SIZE);
+        RectF rc((float)(p.x / kSyncToPdfCoordinateDiv), (float)(p.y / kSyncToPdfCoordinateDiv), kMarkSize, kMarkSize);
         // PdfSync coordinates are y-inversed
         RectF mbox = engine->PageMediabox(firstPage);
         rc.y = mbox.dy - (rc.y + rc.dy);
-        rects.Append(rc.Round());
+        VecAppend(rects, rc.Round());
     }
 
     if (len(rects) > 0) {
@@ -543,7 +543,7 @@ int Pdfsync::SourceToDoc(Str srcfilename, int line, int col, int* page, Vec<Rect
 }
 
 static bool PathHasNonAscii(Str s) {
-    if (!s) {
+    if (len(s) == 0) {
         return false;
     }
     for (int i = 0; i < s.len; i++) {
@@ -561,7 +561,7 @@ static bool PathHasNonAscii(Str s) {
  * @return          A heap-allocated UTF-8 string (caller must free via str::Free), or empty on failure
  */
 static Str ConvertLocalToUTF8(Str localStr) {
-    if (!localStr) {
+    if (len(localStr) == 0) {
         return {};
     }
     UINT acp = GetACP();
@@ -592,25 +592,25 @@ static Str ConvertLocalToUTF8(Str localStr) {
 }
 
 static TempStr CopyPlainSyncToTempFile(TempStr pathSync) {
-    if (!pathSync) {
+    if (len(pathSync) == 0) {
         return {};
     }
     // use file::ReadFile which uses CreateFileW (handles Unicode)
     Str data = file::ReadFile(pathSync);
     if (len(data) == 0) {
-        logfa("CopyPlainSyncToTempFile: source file '.synctex' '%s' is empty.\n", pathSync);
+        logf("CopyPlainSyncToTempFile: source file '.synctex' '%s' is empty.\n", pathSync);
         // return {};
     }
-    TempStr tempPath = GetTempFilePathTemp("stx"); // stxabcdef.tmp
-    if (!tempPath) {
+    TempStr tempPath = GetTempFilePathTemp(StrL("stx")); // stxabcdef.tmp
+    if (len(tempPath) == 0) {
         str::Free(data);
-        logfa("CopyPlainSyncToTempFile: unable to get temp file path. error: %d.\n", errno);
+        logf("CopyPlainSyncToTempFile: unable to get temp file path. error: %d.\n", errno);
         return {};
     }
     bool ok = file::WriteFile(tempPath, data);
     str::Free(data);
     if (!ok) {
-        logfa("CopyPlainSyncToTempFile: unable to write temp file '%s'. error: %d.\n", tempPath, errno);
+        logf("CopyPlainSyncToTempFile: unable to write temp file '%s'. error: %d.\n", tempPath, errno);
         return {};
     }
 
@@ -618,16 +618,16 @@ static TempStr CopyPlainSyncToTempFile(TempStr pathSync) {
     TempStr tempPathSync = str::JoinTemp(tempPathNoExt, StrL(".synctex")); // stxabcdef.synctex
     int ret = rename(tempPath.s, tempPathSync.s);
     if (ret) {
-        logfa("CopyPlainSyncToTempFile: unable rename from '%s' to '%s'. error: %d.\n", tempPath, tempPathSync, errno);
+        logf("CopyPlainSyncToTempFile: unable rename from '%s' to '%s'. error: %d.\n", tempPath, tempPathSync, errno);
         return {};
     }
 
-    logfa("CopyPlainSyncToTempFile: copied '%s' to '%s'\n", pathSync, tempPathSync);
+    logf("CopyPlainSyncToTempFile: copied '%s' to '%s'\n", pathSync, tempPathSync);
     return tempPathSync;
 }
 
 static TempStr DealPlainSync(TempStr pathSync) {
-    if (!pathSync) {
+    if (len(pathSync) == 0) {
         return {};
     }
     Str src = file::ReadFile(pathSync);
@@ -643,38 +643,38 @@ static TempStr DealPlainSync(TempStr pathSync) {
     }
     logf("DealPlainSync: '%s' NOT utf-8, decode by local ansi and write utf-8 to temp file\n", pathSync);
     Str converted = ConvertLocalToUTF8(srcZ);
-    if (!converted) {
-        logfa("DealPlainSync: unable to convert '%s' from local ansi to utf-8.\n", pathSync);
+    if (len(converted) == 0) {
+        logf("DealPlainSync: unable to convert '%s' from local ansi to utf-8.\n", pathSync);
         return {};
     }
     Str dst = converted;
 
     if (len(dst) == 0) {
-        logfa("DealPlainSync: decoded content is empty.\n", pathSync);
+        logf("DealPlainSync: decoded content is empty.\n", pathSync);
         return {};
     }
-    TempStr tempPath = GetTempFilePathTemp("stx"); // stxabcdef.tmp
-    if (!tempPath) {
+    TempStr tempPath = GetTempFilePathTemp(StrL("stx")); // stxabcdef.tmp
+    if (len(tempPath) == 0) {
         str::Free(dst);
-        logfa("DealPlainSync: unable to get temp file path. error: %d.\n", errno);
+        logf("DealPlainSync: unable to get temp file path. error: %d.\n", errno);
         return {};
     }
     bool ok = file::WriteFile(tempPath, dst);
     str::Free(dst);
     if (!ok) {
-        logfa("DealPlainSync: unable to write temp file '%s'. error: %d.\n", tempPath, errno);
+        logf("DealPlainSync: unable to write temp file '%s'. error: %d.\n", tempPath, errno);
         return {};
     }
-    logfa("DealPlainSync: utf-8 written to temp file '%s'.\n", tempPath);
+    logf("DealPlainSync: utf-8 written to temp file '%s'.\n", tempPath);
 
     TempStr tempPathNoExt = path::GetPathNoExtTemp(tempPath);              // stxabcdef
     TempStr tempPathSync = str::JoinTemp(tempPathNoExt, StrL(".synctex")); // stxabcdef.synctex
     int ret = rename(tempPath.s, tempPathSync.s);
     if (ret) {
-        logfa("DealPlainSync: unable rename from '%s' to '%s'. error: %d.\n", tempPath, tempPathSync, errno);
+        logf("DealPlainSync: unable rename from '%s' to '%s'. error: %d.\n", tempPath, tempPathSync, errno);
         return {};
     }
-    logfa("DealPlainSync: copied '%s' to '%s'\n", pathSync, tempPathSync);
+    logf("DealPlainSync: copied '%s' to '%s'\n", pathSync, tempPathSync);
     return tempPathSync;
 }
 
@@ -687,7 +687,7 @@ static bool IsGzipFile(Str path) {
 
 // returns path of ungzipped file
 static TempStr ungzipToTempSync(Str gzPath) {
-    if (!gzPath) {
+    if (len(gzPath) == 0) {
         return {};
     }
     Str compr = file::ReadFile(gzPath);
@@ -704,16 +704,16 @@ static TempStr ungzipToTempSync(Str gzPath) {
         return {};
     }
 
-    TempStr tempPath = GetTempFilePathTemp("stx"); // stxabcdef.tmp
-    if (!tempPath) {
+    TempStr tempPath = GetTempFilePathTemp(StrL("stx")); // stxabcdef.tmp
+    if (len(tempPath) == 0) {
         str::Free(uncompr);
-        logfa("ungzipToTempSync: unable to get temp file path. error: %d.\n", errno);
+        logf("ungzipToTempSync: unable to get temp file path. error: %d.\n", errno);
         return {};
     }
     bool ok = file::WriteFile(tempPath, uncompr);
     str::Free(uncompr);
     if (!ok) {
-        logfa("ungzipToTempSync: unable to write temp file '%s'. error: %d.\n", tempPath, errno);
+        logf("ungzipToTempSync: unable to write temp file '%s'. error: %d.\n", tempPath, errno);
         return {};
     }
 
@@ -721,18 +721,18 @@ static TempStr ungzipToTempSync(Str gzPath) {
     TempStr tempPathSync = str::JoinTemp(tempPathNoExt, StrL(".synctex")); // stxabcdef.synctex
     int ret = rename(tempPath.s, tempPathSync.s);
     if (ret) {
-        logfa("ungzipToTempSync: unable rename from '%s' to '%s'. error: %d.\n", tempPath, tempPathSync, errno);
+        logf("ungzipToTempSync: unable rename from '%s' to '%s'. error: %d.\n", tempPath, tempPathSync, errno);
         return {};
     }
 
-    logfa("ungzipToTempSync: ungzip '%s' to '%s'\n", gzPath, tempPathSync);
+    logf("ungzipToTempSync: ungzip '%s' to '%s'\n", gzPath, tempPathSync);
     return tempPathSync;
 }
 
 // SYNCTEX synchronizer
 int SyncTex::RebuildIndexIfNeeded() {
     if (!NeedsToRebuildIndex()) {
-        logfa("SyncTex::RebuildIndexIfNeeded: no need to rebuild\n");
+        logf("SyncTex::RebuildIndexIfNeeded: no need to rebuild\n");
         return PDFSYNCERR_SUCCESS;
     }
     synctex_scanner_free(scanner);
@@ -782,10 +782,10 @@ int SyncTex::RebuildIndexIfNeeded() {
             return PDFSYNCERR_SYNCFILE_NOTFOUND;
         }
     }
-    logfa("[dbg]: tempsync1: %s\n", tempsync1 ? tempsync1 : StrL("[NULL]"));
-    logfa("[dbg]: tempsync2: %s\n", tempsync2 ? tempsync2 : StrL("[NULL]"));
-    if (!tempsync2) {
-        logfa("SyncTex::RebuildIndexIfNeeded: temp file for origin file '%s' not found\n", pathSync);
+    logf("[dbg]: tempsync1: %s\n", tempsync1 ? tempsync1 : StrL("[NULL]"));
+    logf("[dbg]: tempsync2: %s\n", tempsync2 ? tempsync2 : StrL("[NULL]"));
+    if (len(tempsync2) == 0) {
+        logf("SyncTex::RebuildIndexIfNeeded: temp file for origin file '%s' not found\n", pathSync);
         return PDFSYNCERR_SYNCFILE_NOTFOUND;
     }
     fsize = file::GetSize(tempsync2);
@@ -794,7 +794,7 @@ int SyncTex::RebuildIndexIfNeeded() {
 
     scanner = synctex_scanner_new_with_output_file(CStrTemp(tempsync2), nullptr, 1);
     if (scanner) {
-        logfa("SyncTex::RebuildIndexIfNeeded: file '%s' is ok.\n", pathSync);
+        logf("SyncTex::RebuildIndexIfNeeded: file '%s' is ok.\n", pathSync);
     } else {
         return PDFSYNCERR_SYNCFILE_NOTFOUND;
     }
@@ -812,7 +812,7 @@ int SyncTex::RebuildIndexIfNeeded() {
 // which happens when the PDF lives on a Windows drive but was compiled from
 // inside WSL
 static bool IsUnixSourcePath(Str syncFilePath, Str resolvedSrcPath) {
-    if (!syncFilePath || !resolvedSrcPath) {
+    if (len(syncFilePath) == 0 || len(resolvedSrcPath) == 0) {
         return false;
     }
 
@@ -824,7 +824,7 @@ static bool IsUnixSourcePath(Str syncFilePath, Str resolvedSrcPath) {
 }
 
 int SyncTex::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* col) {
-    logfa("SyncTex::DocToSource: '%s', pageNo: %d\n", syncFilePath, pageNo);
+    logf("SyncTex::DocToSource: '%s', pageNo: %d\n", syncFilePath, pageNo);
     int res = RebuildIndexIfNeeded();
     if (res != PDFSYNCERR_SUCCESS) {
         ReportDebugIf(true);
@@ -844,7 +844,7 @@ int SyncTex::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
     }
 
     Str name = Str(synctex_scanner_get_name(this->scanner, synctex_node_tag(node)));
-    if (!name) {
+    if (len(name) == 0) {
         return PDFSYNCERR_UNKNOWN_SOURCEFILE;
     }
 
@@ -862,7 +862,7 @@ int SyncTex::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
     }
 
     filename = str::Dup(name);
-    if (!filename) {
+    if (len(filename) == 0) {
         return PDFSYNCERR_OUTOFMEMORY;
     }
 
@@ -912,10 +912,10 @@ static int SynctexDisplayQueryWithVariants(synctex_scanner_p scanner, Str srcPat
         path::WindowsToWslMountTemp(srcPath),
     };
     for (TempStr variant : variants) {
-        if (!variant) {
+        if (len(variant) == 0) {
             continue;
         }
-        logfa("SynctexDisplayQueryWithVariants: '%s' failed, retrying with '%s'\n", srcPath, variant);
+        logf("SynctexDisplayQueryWithVariants: '%s' failed, retrying with '%s'\n", srcPath, variant);
         int ret2 = synctex_display_query(scanner, CStrTemp(variant), line, col, 0);
         if (ret2 > 0) {
             return ret2;
@@ -925,7 +925,7 @@ static int SynctexDisplayQueryWithVariants(synctex_scanner_p scanner, Str srcPat
 }
 
 int SyncTex::SourceToDoc(Str srcfilename, int line, int col, int* page, Vec<Rect>& rects) {
-    logfa("SyncTex::SourceToDoc: '%s', line: %d, col: %d\n", srcfilename, line, col);
+    logf("SyncTex::SourceToDoc: '%s', line: %d, col: %d\n", srcfilename, line, col);
     int res = RebuildIndexIfNeeded();
     if (res != PDFSYNCERR_SUCCESS) {
         return res;
@@ -937,7 +937,7 @@ int SyncTex::SourceToDoc(Str srcfilename, int line, int col, int* page, Vec<Rect
     if (!path::IsAbsolute(srcfilename)) {
         srcfilepath = PrependDir(srcfilename);
     }
-    if (!srcfilepath) {
+    if (len(srcfilepath) == 0) {
         return PDFSYNCERR_OUTOFMEMORY;
     }
 
@@ -952,7 +952,7 @@ int SyncTex::SourceToDoc(Str srcfilename, int line, int col, int* page, Vec<Rect
 
     synctex_node_p node;
     int firstpage = -1;
-    rects.Reset();
+    VecReset(rects);
 
     while ((node = synctex_scanner_next_result(this->scanner)) != nullptr) {
         if (firstpage == -1) {
@@ -971,7 +971,7 @@ int SyncTex::SourceToDoc(Str srcfilename, int line, int col, int* page, Vec<Rect
         rc.y = (float)((double)synctex_node_box_visible_v(node) - (double)synctex_node_box_visible_height(node));
         rc.dx = synctex_node_box_visible_width(node),
         rc.dy = (float)((double)synctex_node_box_visible_height(node) + (double)synctex_node_box_visible_depth(node));
-        rects.Append(rc.Round());
+        VecAppend(rects, rc.Round());
     }
 
     if (firstpage <= 0) {

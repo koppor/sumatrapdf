@@ -1,6 +1,6 @@
 // Regression test for issue #5697: internationalize error/crash UI strings.
 //
-// Verifies _TRA resolves runtime error strings through the translation table.
+// Verifies Tr resolves runtime error strings through the translation table.
 
 import { ControlClient, ControlCommand, withControlledSumatra } from "./control.ts";
 import { EXE, runStandalone } from "./util.ts";
@@ -13,7 +13,7 @@ async function requestWithRetry(client: ControlClient): Promise<string> {
     const raw = (res[1] as string) ?? "";
     if (!raw.includes("NOTREADY")) {
       if (exitCode !== 0) {
-        throw new Error(`issue-5697: _TRA strings not resolved: ${raw.trim()}`);
+        throw new Error(`issue-5697: Tr strings not resolved: ${raw.trim()}`);
       }
       return raw.trim();
     }

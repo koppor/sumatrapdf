@@ -121,7 +121,7 @@ static void DirTraverseThread(DirTraverseThreadData* td) {
 void StartDirTraverseAsync(StrQueue* queue, Str dir, bool recurse) {
     auto* td = new DirTraverseThreadData{queue, str::Dup(dir), recurse};
     auto fn = MkFunc0(DirTraverseThread, td);
-    RunAsync(fn, "DirTraverseThread");
+    RunAsync(fn, StrL("DirTraverseThread"));
 }
 
 // Find entry by name in a DirEntries
@@ -282,7 +282,7 @@ void AskDirScanThreadToQuit(DirScanCtx* ctx) {
 // compares them, and only at a separator, so "C:\foo" doesn't swallow
 // "C:\foobar".
 static bool IsUnderDir(Str path, Str dir) {
-    if (dir.len == 0 || path.len < dir.len) {
+    if (len(dir) == 0 || path.len < dir.len) {
         return false;
     }
     if (!str::StartsWithI(path, dir)) {

@@ -6,6 +6,9 @@
 #include "base/Win.h"
 
 #include "gui/Layout.h"
+#if IS_DEBUG
+#include "base/UtAssert.h"
+#endif
 #include "gui/Layout_win.h"
 
 void LayoutAndSizeToContent(ILayout* layout, int minDx, int minDy, HWND hwnd) {
@@ -59,6 +62,12 @@ void HwndSlot::SetBounds(Rect bounds) {
         HWND parent = GetParent(hwnd);
         bounds.x = HwndMapChildXForRtlParent(parent, bounds.x, bounds.dx);
     }
+    // A no-op SetWindowPos still sends WM_WINDOWPOSCHANGED and the TOC tree
+    // shimmers 1-2px. Window resize must not touch the sidebar when its
+    // client rect did not change (width is independent of the frame).
+    if (ChildPosWithinParent(hwnd) == bounds) {
+        return;
+    }
     if (winPos) {
         winPos->MoveWindow(hwnd, bounds);
         return;
@@ -66,9 +75,7 @@ void HwndSlot::SetBounds(Rect bounds) {
     HwndMoveWindow(hwnd, &bounds);
 }
 
-#if defined(DEBUG)
-// must be last: UtAssert.h over-writes assert()
-#include "base/UtAssert.h"
+#if IS_DEBUG
 
 void LayoutWin_UnitTests() {
     // A slot without an HWND still records its bounds for lazily-created windows.

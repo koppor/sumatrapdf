@@ -41,6 +41,10 @@ using cairo_t = struct _cairo;
 #endif
 
 // how text is placed in the rect it is drawn into
+// gfxTextLeft / gfxTextRight are physical edges (GDI DT_LEFT / DT_RIGHT).
+// gfxTextRtl is only the reading direction. DirectWrite and GDI+ Near/Far
+// follow reading direction, so with gfxTextRtl they would swap unless we map
+// physical right to the reading-direction start (LEADING/Near).
 enum GfxTextFlags : u32 {
     gfxTextLeft = 0,
     gfxTextCenter = 1 << 0,
@@ -62,6 +66,12 @@ enum GfxTextFlags : u32 {
     gfxTextWrap = 1 << 8,
 };
 
+inline bool GfxTextAlignToReadingStart(u32 flags) {
+    bool rtl = (flags & gfxTextRtl) != 0;
+    bool right = (flags & gfxTextRight) != 0;
+    return rtl == right;
+}
+
 struct Gfx {
     Gfx() = default;
 #if OS_WIN
@@ -77,6 +87,8 @@ struct Gfx {
     virtual void FillRect(const Rect&, Color) = 0;
     // fills the union of the rectangles; the optional outline follows its outside edge
     virtual void FillRects(const Rect*, int count, Color, u8 alpha = 255, int outlineWidth = 0) = 0;
+    // nQuads groups of 4 points (ul, ur, lr, ll)
+    virtual void FillQuads(const Point* pts, int nQuads, Color, u8 alpha = 255, int outlineWidth = 0) = 0;
     // 1px-per-thickness outline drawn inside the rect
     virtual void DrawRect(const Rect&, Color, int thickness = 1) = 0;
     virtual void DrawDashedRect(const Rect&, Color) = 0;
@@ -122,6 +134,7 @@ struct GfxHdc : Gfx {
 
     void FillRect(const Rect&, Color) override;
     void FillRects(const Rect*, int count, Color, u8 alpha = 255, int outlineWidth = 0) override;
+    void FillQuads(const Point* pts, int nQuads, Color, u8 alpha = 255, int outlineWidth = 0) override;
     void DrawRect(const Rect&, Color, int thickness = 1) override;
     void DrawDashedRect(const Rect&, Color) override;
     void FillRoundedRect(const Rect&, int radius, Color fill, Color border = kColorTransparent) override;
@@ -156,6 +169,7 @@ struct GfxGdiplus : Gfx {
 
     void FillRect(const Rect&, Color) override;
     void FillRects(const Rect*, int count, Color, u8 alpha = 255, int outlineWidth = 0) override;
+    void FillQuads(const Point* pts, int nQuads, Color, u8 alpha = 255, int outlineWidth = 0) override;
     void DrawRect(const Rect&, Color, int thickness = 1) override;
     void DrawDashedRect(const Rect&, Color) override;
     void FillRoundedRect(const Rect&, int radius, Color fill, Color border = kColorTransparent) override;
@@ -184,7 +198,8 @@ struct ID2D1StrokeStyle;
 // Everything is a no-op when Direct2DAvailable() is false.
 struct GfxDirect2D : Gfx {
     HDC hdc = nullptr;
-    ID2D1DCRenderTarget* target = nullptr; // owned; null when d2d isn't there
+    ID2D1DCRenderTarget* target = nullptr; // null when d2d isn't there
+    bool ownsTarget = true;                // false when borrowed from the DC-target pool
     ID2D1SolidColorBrush* brush = nullptr; // owned, re-colored per draw
     ID2D1StrokeStyle* dottedStroke = nullptr;
     bool drawing = false; // between BeginDraw() and EndDraw()
@@ -198,6 +213,7 @@ struct GfxDirect2D : Gfx {
 
     void FillRect(const Rect&, Color) override;
     void FillRects(const Rect*, int count, Color, u8 alpha = 255, int outlineWidth = 0) override;
+    void FillQuads(const Point* pts, int nQuads, Color, u8 alpha = 255, int outlineWidth = 0) override;
     void DrawRect(const Rect&, Color, int thickness = 1) override;
     void DrawDashedRect(const Rect&, Color) override;
     void FillRoundedRect(const Rect&, int radius, Color fill, Color border = kColorTransparent) override;
@@ -221,8 +237,20 @@ bool Direct2DAvailable();
 // flip to draw with Direct2D instead of gdiplus, for comparing the two
 extern bool gUseDirect2D;
 
+// Persistent 32-bit DIB for GfxCreateWithDoubleBuffer. A new memory DC every
+// paint makes d3d11 throw a first-chance C++ EH on BindDC.
+struct GfxDoubleBuffer {
+    HDC hdc = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ prevBitmap = nullptr;
+    int dx = 0;
+    int dy = 0;
+};
+
 Gfx* GfxCreate(HDC);
+Gfx* GfxCreateWithDoubleBuffer(HWND, HDC, GfxDoubleBuffer*);
 Gfx* GfxCreateWithDoubleBuffer(HwndBase*, HDC);
+void GfxDestroyDoubleBuffer(GfxDoubleBuffer*);
 void GfxDestroyDoubleBuffer(HwndBase*);
 #endif
 

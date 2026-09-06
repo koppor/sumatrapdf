@@ -8,6 +8,7 @@ struct SimpleBrowserCreateArgs {
     Str dataDir;
     WebViewResourceProvider resourceProvider;
     WStr resourceUriPrefix;
+    Color backgroundColor = kColorTransparent;
 };
 
 struct VirtButton;
@@ -22,6 +23,8 @@ struct SimpleBrowserWindow : WindowBase {
     VirtText* urlText = nullptr;
     PlatformFont* font = nullptr; // not owned, interned
     bool webViewFocusSet = false;
+    // WM_EXITSIZEMOVE: caller can persist the window rect
+    Func0 onPosChanged;
 
     HWND Create(const SimpleBrowserCreateArgs&);
     void OnFocus(WindowBase::FocusEvent*);

@@ -19,6 +19,7 @@ struct VirtRoot;
 struct Gfx;
 struct PlatformFont;
 struct VirtHost;
+struct GfxDoubleBuffer;
 
 // the platform's window handle; only the platform-specific files touch it
 #if OS_WIN
@@ -68,6 +69,9 @@ struct VirtHost {
     };
 
     NativeWnd native = nullptr;
+#if OS_WIN
+    GfxDoubleBuffer* gfxBuf = nullptr;
+#endif
     // the tree of controls the host shows; owned
     ILayout* layout = nullptr;
     // the virtual controls of the tree, created on demand by Relayout(); owned
@@ -81,8 +85,8 @@ struct VirtHost {
     Func1<VirtHostPaintEvent*> onPaintBackground;
     // draws on top of the tree
     Func1<VirtHostPaintEvent*> onPaint;
-    // the mouse moved over the host, or left it
-    Func0 onMouseMove;
+    // the mouse moved over the host (client coords, RTL-unmirrored) or left it
+    Func1<Point> onMouseMove;
     Func0 onMouseLeave;
     // a timer started with SetTimer() fired; the argument is the timer's id
     Func1<int> onTimer;
@@ -141,6 +145,8 @@ struct VirtHost {
 
 // where the mouse cursor is, in screen coordinates
 Point UiCursorScreenPos();
+// how long the mouse has to rest on something before its tooltip appears
+int UiTooltipDelayMs();
 // height of a horizontal scrollbar the OS draws
 int UiHScrollbarDy();
 // width of the 3d border the OS draws around a sunken control

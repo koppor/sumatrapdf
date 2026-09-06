@@ -14,6 +14,7 @@
 // To get 'A' need explicitly use FSHIFT.
 // https://learn.microsoft.com/en-us/windows/win32/menurc/using-keyboard-accelerators?referrer=grok.com
 // https://grok.com/share/bGVnYWN5_d83c2956-4ce2-4c74-ba4d-9794d1760ccb?rid=746312cc-7d0f-4479-abec-25c394652cac
+// NOLINTBEGIN(modernize-use-designated-initializers)
 static ACCEL gBuiltInAccelerators[] = {
     // Citation push to JabRef (Ctrl+J) registered as accelerator so it fires
     // regardless of which child holds focus — alt-tabbing back to SumatraPDF
@@ -35,7 +36,6 @@ static ACCEL gBuiltInAccelerators[] = {
     {FSHIFT | FVIRTKEY, VK_LEFT, CmdScrollLeftPage},
     {FSHIFT | FVIRTKEY, VK_RIGHT, CmdScrollRightPage},
 
-    // TODO: maybe CmdGoToNextPage / CmdGoToPrevPage is better
     {FVIRTKEY, VK_NEXT, CmdScrollDownPage},
     {FVIRTKEY, VK_PRIOR, CmdScrollUpPage},
 
@@ -79,6 +79,9 @@ static ACCEL gBuiltInAccelerators[] = {
     {FCONTROL | FVIRTKEY, 'C', CmdCopySelection},
     {FCONTROL | FVIRTKEY, VK_INSERT, CmdCopySelection},
     {FCONTROL | FVIRTKEY, 'V', CmdPasteClipboardImage},
+    {FCONTROL | FVIRTKEY, 'X', CmdCutAnnotation},
+    {FCONTROL | FVIRTKEY, 'Z', CmdUndo},
+    {FSHIFT | FCONTROL | FVIRTKEY, 'Z', CmdRedo},
     {FCONTROL | FVIRTKEY, 'D', CmdProperties},
     {FCONTROL | FVIRTKEY, 'F', CmdFindFirst},
     {FCONTROL | FVIRTKEY, 'G', CmdGoToPage},
@@ -140,8 +143,6 @@ static ACCEL gBuiltInAccelerators[] = {
     // '?' i.e. Shift + '/'
     {FSHIFT | FVIRTKEY, VK_OEM_2, CmdToggleKeyboardHelp},
 
-    // need 2 entries for 'a' and 'Shift + a'
-    // TODO: maybe add CmdCreateAnnotHighlightAndOpenWindow (kind of clumsy)
     {FVIRTKEY, 'A', CmdCreateAnnotHighlight},
     {FVIRTKEY | FSHIFT, 'A', CmdCreateAnnotHighlight},
 
@@ -169,6 +170,7 @@ static ACCEL gBuiltInAccelerators[] = {
     {0, '.', CmdPresentationBlackBackground},
     {FVIRTKEY, 'C', CmdToggleContinuousView},
 };
+// NOLINTEND(modernize-use-designated-initializers)
 
 static ACCEL* gAccels = nullptr;
 static int gAccelsCount = 0;
@@ -179,7 +181,7 @@ TempStr AppendAccelKeyToMenuStringTemp(TempStr menuStr, int cmdId) {
     ACCEL a;
     for (int i = 0; i < gAccelsCount; i++) {
         a = gAccels[i];
-        if (a.cmd == cmdId) {
+        if (a.cmd == (WORD)cmdId) {
             TempStr res = AppendAccelKeyToMenuStringTemp(menuStr, a);
             return res;
         }
@@ -193,19 +195,19 @@ TempStr AppendAccelKeyToMenuStringTemp(TempStr menuStr, int cmdId) {
 // Reads the effective, user-override-aware table, so it shows what actually
 // works right now.
 TempStr ShortcutsForCmdTemp(int cmdId, int maxCount) {
-    TempStr res = str::DupTemp("");
+    TempStr res = str::DupTemp(StrL(""));
     int n = 0;
     for (int i = 0; i < gAccelsCount && n < maxCount; i++) {
         ACCEL a = gAccels[i];
-        if (a.cmd != cmdId) {
+        if (a.cmd != (WORD)cmdId) {
             continue;
         }
-        TempStr withTab = AppendAccelKeyToMenuStringTemp("", a);
-        if (!withTab || withTab.s[0] != '\t') {
+        TempStr withTab = AppendAccelKeyToMenuStringTemp(StrL(""), a);
+        if (len(withTab) == 0 || withTab.s[0] != '\t') {
             continue;
         }
         TempStr key = Str(withTab.s + 1); // drop the leading '\t'
-        if (key.len == 0) {
+        if (len(key) == 0) {
             continue;
         }
         // skip a duplicate that formats to the same text (e.g. '+' and numpad '+')
@@ -213,7 +215,7 @@ TempStr ShortcutsForCmdTemp(int cmdId, int maxCount) {
             continue;
         }
         if (n > 0) {
-            res = str::JoinTemp(res, ", ");
+            res = str::JoinTemp(res, StrL(", "));
         }
         res = str::JoinTemp(res, key);
         n++;
@@ -244,6 +246,11 @@ static WORD gNotSafeKeys[] = {
     VK_BACK,
     VK_HOME,
     VK_END,
+    // like Home/End: a list or tree with the focus pages through its own items.
+    // The find window's results list only got them once they stopped
+    // accelerating to CmdScrollUpPage / CmdScrollDownPage (issue #6117)
+    VK_PRIOR,
+    VK_NEXT,
     VK_OEM_4,
     VK_OEM_6,
     VK_OEM_2 // '?' opens keyboard help, but must still type into edit controls
@@ -297,6 +304,60 @@ static bool isSafeAccel(const ACCEL& a) {
     return true;
 }
 
+// Folder browsing (Ctrl+Shift+arrows) is meaningless to a tree view or to a
+// document shown in the WebView2, but an edit control uses those keys to select
+// by word. So it's safe everywhere except the edit table: after clicking a link
+// in a .md / .html file the arrows stopped browsing the folder (issue #6089).
+static bool isSafeOutsideEditAccel(const ACCEL& a) {
+    if (isSafeAccel(a)) {
+        return true;
+    }
+    // a plain arrow rebound to the command still has to move in the tree
+    bool isChord = (a.fVirt & (FCONTROL | FALT)) != 0;
+    if (!isChord) {
+        return false;
+    }
+    switch (a.cmd) {
+        case CmdOpenNextFileInFolder:
+        case CmdOpenPrevFileInFolder:
+        case CmdNavigateFilesInFolder:
+            return true;
+    }
+    return false;
+}
+
+// keys the tree uses to move / activate; those stay with the control even
+// when a command is bound to them. Ctrl/Alt chords are still accelerators.
+static bool isTreeNavKey(WORD k) {
+    switch (k) {
+        case VK_LEFT:
+        case VK_RIGHT:
+        case VK_UP:
+        case VK_DOWN:
+        case VK_HOME:
+        case VK_END:
+        case VK_PRIOR:
+        case VK_NEXT:
+        case VK_SPACE:
+        case VK_RETURN:
+        case VK_TAB:
+        case VK_ADD:
+        case VK_SUBTRACT:
+        case VK_MULTIPLY:
+            return true;
+    }
+    return false;
+}
+
+// tree: letter shortcuts (and everything else) run the command; only the
+// navigation keys above, without Ctrl/Alt, are left for the tree
+static bool isSafeTreeAccel(const ACCEL& a) {
+    if ((a.fVirt & (FCONTROL | FALT)) != 0) {
+        return true;
+    }
+    return !isTreeNavKey(a.key);
+}
+
 // Command bound to vk + modifiers among the "safe" accelerators (those allowed
 // while a custom control has focus). 0 if none. Lets custom controls (e.g. the
 // WebView2-hosted CHM) forward app shortcuts they'd otherwise swallow.
@@ -317,7 +378,7 @@ int SafeAcceleratorCmd(u16 vk, bool ctrl, bool shift, bool alt) {
     }
     for (int i = 0; i < gAccelsCount; i++) {
         const ACCEL& a = gAccels[i];
-        if (a.key == vk && a.fVirt == fVirt && isSafeAccel(a)) {
+        if (a.key == vk && a.fVirt == fVirt && isSafeOutsideEditAccel(a)) {
             return a.cmd;
         }
     }
@@ -359,11 +420,8 @@ void AccelTablesBuilder::Add(ACCEL accel) {
     accels[nAccels++] = accel;
     if (isSafeAccel(accel)) {
         editAccels[nEditAccels++] = accel;
-        treeViewAccels[nTreeViewAccels++] = accel;
-        return;
     }
-    if ((int)accel.cmd == (int)CmdToggleBookmarks) {
-        // https://github.com/sumatrapdfreader/sumatrapdf/issues/2832
+    if (isSafeTreeAccel(accel)) {
         treeViewAccels[nTreeViewAccels++] = accel;
     }
 }
@@ -372,7 +430,8 @@ void AccelTablesBuilder::Add(ACCEL accel) {
 static int CountCustomShortcuts() {
     int n = 0;
     for (auto* curr = gFirstCustomCommand; curr; curr = curr->next) {
-        if ((curr->id > 0) && !str::IsEmptyOrWhiteSpace(curr->key)) {
+        if ((curr->id > 0) && !str::IsEmptyOrWhiteSpace(curr->key) && !IsGlobalShortcut(curr->key) &&
+            curr->origId != CmdScreenshot) {
             n++;
         }
     }
@@ -384,8 +443,8 @@ static void AddCustomShortcuts(AccelTablesBuilder& b) {
         if ((curr->id <= 0) || str::IsEmptyOrWhiteSpace(curr->key)) {
             continue;
         }
-        // CmdScreenshot shortcuts are registered as global hotkeys, not accelerators
-        if (curr->origId == CmdScreenshot) {
+        // global shortcuts are registered with the OS, not accelerators
+        if (IsGlobalShortcut(curr->key) || curr->origId == CmdScreenshot) {
             continue;
         }
         ACCEL accel{};
@@ -441,6 +500,69 @@ void FreeAcceleratorTables() {
     free(gAccels);
     gAccels = nullptr;
 }
+
+#if IS_DEBUG
+// Folder browsing has to keep working when focus is inside the document (the
+// WebView2 that shows .md / .html) or the bookmarks tree (issue #6089)
+bool Accelerators_UnitTestFolderNavIsSafe() {
+    GetAcceleratorTables(); // builds gAccels if it isn't built yet
+    if (SafeAcceleratorCmd(VK_RIGHT, true, true, false) != CmdOpenNextFileInFolder) {
+        return false;
+    }
+    if (SafeAcceleratorCmd(VK_LEFT, true, true, false) != CmdOpenPrevFileInFolder) {
+        return false;
+    }
+    if (SafeAcceleratorCmd(VK_UP, true, true, false) != CmdNavigateFilesInFolder) {
+        return false;
+    }
+    // a bare arrow still belongs to the control, so it can scroll / move the selection
+    if (SafeAcceleratorCmd(VK_RIGHT, false, false, false) != 0) {
+        return false;
+    }
+    return true;
+}
+
+// bookmarks / favorites tree: letter shortcuts run the command (e.g. t bound
+// to CmdToggleBookmarks); arrows stay on the tree
+bool Accelerators_UnitTestTreeTakesLetters() {
+    ACCEL letter{};
+    letter.fVirt = FVIRTKEY;
+    letter.key = 'T';
+    letter.cmd = (WORD)CmdToggleBookmarks;
+    if (!isSafeTreeAccel(letter)) {
+        return false;
+    }
+    ACCEL up{};
+    up.fVirt = FVIRTKEY;
+    up.key = VK_UP;
+    up.cmd = (WORD)CmdScrollUp;
+    if (isSafeTreeAccel(up)) {
+        return false;
+    }
+    ACCEL pgDn{};
+    pgDn.fVirt = FVIRTKEY;
+    pgDn.key = VK_NEXT;
+    pgDn.cmd = (WORD)CmdScrollDownPage;
+    if (isSafeTreeAccel(pgDn)) {
+        return false;
+    }
+    ACCEL enter{};
+    enter.fVirt = FVIRTKEY;
+    enter.key = VK_RETURN;
+    enter.cmd = (WORD)CmdScrollDownPage;
+    if (isSafeTreeAccel(enter)) {
+        return false;
+    }
+    ACCEL ctrlUp{};
+    ctrlUp.fVirt = FCONTROL | FVIRTKEY;
+    ctrlUp.key = VK_UP;
+    ctrlUp.cmd = (WORD)CmdScrollUpPage;
+    if (!isSafeTreeAccel(ctrlUp)) {
+        return false;
+    }
+    return true;
+}
+#endif
 
 HACCEL* GetAcceleratorTables() {
     if (gAccelTables[0] == nullptr) {

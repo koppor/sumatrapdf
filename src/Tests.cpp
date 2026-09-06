@@ -13,6 +13,7 @@
 #include "base/GuessFileType.h"
 #include "EngineAll.h"
 #include "Flags.h"
+#include "Tests.h"
 
 void TestRenderPage(const Flags& i) {
     if (i.showConsole) {
@@ -57,10 +58,10 @@ void TestRenderPage(const Flags& i) {
 
 static void extractPageText(EngineBase* engine, int pageNo) {
     PageText pageText = engine->ExtractPageText(pageNo);
-    if (!pageText.text) {
+    if (len(pageText.text) == 0) {
         return;
     }
-    TempStr s = str::ReplaceTemp(pageText.text.s, StrL("\n"), StrL("_"));
+    TempStr s = str::ReplaceTemp(Str(pageText.text.s), StrL("\n"), StrL("_"));
     printf("text on page %d: '", pageNo);
     // print characters as hex because I don't know what kind of locale-specific mangling
     // printf() might do

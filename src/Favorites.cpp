@@ -14,10 +14,11 @@
 #include "gui/VirtCtrl.h"
 
 #include "Settings.h"
+#include "DisplayMode.h"
 #include "DocController.h"
 #include "EngineBase.h"
+#include "DisplayModel.h"
 #include "FileHistory.h"
-#include "GlobalPrefs.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
 #include "WindowTab.h"
@@ -25,12 +26,14 @@
 #include "Commands.h"
 #include "AppSettings.h"
 #include "Menu.h"
-#include "AddFavoriteDialog.h"
+#include "SumatraDialogs.h"
 #include "Translations.h"
 #include "Accelerators.h"
 #include "Tabs.h"
 #include "Theme.h"
 #include "FilterHighlightDraw.h"
+#include "PagePosition.h"
+#include "Favorites.h"
 
 static void RememberFavTreeExpansionStateForAllWindows();
 void LayoutFavoritesContainer(MainWindow* win);
@@ -40,10 +43,12 @@ void UpdateFavoritesTreeForAllWindows();
 struct FavTreeItem {
     ~FavTreeItem();
 
-    HTREEITEM hItem = nullptr;
+    uintptr_t userData = 0;
     FavTreeItem* parent = nullptr;
     Str text;
     bool isExpanded = false;
+    int fileNameOffset = -1;
+    int fileNameLen = 0;
 
     // not owned by us
     Favorite* favorite = nullptr;
@@ -67,8 +72,8 @@ struct FavTreeModel : TreeModel {
     TreeItem ChildAt(TreeItem ti, int idx) override;
     bool IsExpanded(TreeItem ti) override;
     bool IsChecked(TreeItem ti) override;
-    void SetHandle(TreeItem ti, HTREEITEM hItem) override;
-    HTREEITEM GetHandle(TreeItem ti) override;
+    void SetUserData(TreeItem ti, uintptr_t userData) override;
+    uintptr_t GetUserData(TreeItem ti) override;
 
     FavTreeItem* root = nullptr;
 };
@@ -115,16 +120,16 @@ bool FavTreeModel::IsChecked(TreeItem /*ti*/) {
     return false;
 }
 
-void FavTreeModel::SetHandle(TreeItem ti, HTREEITEM hItem) {
+void FavTreeModel::SetUserData(TreeItem ti, uintptr_t userData) {
     ReportIf(ti < 0);
     FavTreeItem* treeItem = (FavTreeItem*)ti;
-    treeItem->hItem = hItem;
+    treeItem->userData = userData;
 }
 
-HTREEITEM FavTreeModel::GetHandle(TreeItem ti) {
+uintptr_t FavTreeModel::GetUserData(TreeItem ti) {
     ReportIf(ti < 0);
     FavTreeItem* treeItem = (FavTreeItem*)ti;
-    return treeItem->hItem;
+    return treeItem->userData;
 }
 
 static Favorite* GetFavByMenuId(int menuId, FileState** dsOut) {
@@ -145,7 +150,7 @@ static Favorite* GetFavByMenuId(int menuId, FileState** dsOut) {
 static FileState* GetByFavorite(Favorite* fn) {
     FileState* ds;
     for (int i = 0; (ds = FileHistoryGet(i)) != nullptr; i++) {
-        if (ds->favorites->Contains(fn)) {
+        if (VecContains(*ds->favorites, fn)) {
             return ds;
         }
     }
@@ -186,17 +191,93 @@ static FileState* GetFavByFilePath(Str filePath) {
     return fs;
 }
 
-bool IsPageInFavorites(Str filePath, int pageNo) {
+static PointF CurrentFavoriteScrollPos(MainWindow* win, int pageNo) {
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    if (!dm) {
+        return PointF(-1, -1);
+    }
+    ScrollState ss = dm->GetScrollState();
+    if (ss.page != pageNo) {
+        return PointF(-1, -1);
+    }
+    return PointF((float)ss.x, (float)ss.y);
+}
+
+// Restore the favorite's page and the stored position on it. addNavPt so
+// Navigate Back returns to wherever we jumped from.
+static void ApplyFavoriteView(MainWindow* win, Str pageNoStr, PointF scrollPos, bool addNavPt) {
+    if (!win || !win->IsDocLoaded() || !win->ctrl) {
+        return;
+    }
+    StoredPagePos pos = ParseStoredPagePos(pageNoStr);
+    if (pos.bookmark) {
+        Location loc = win->ctrl->LookupBookmark(pos.bookmark);
+        if (loc.IsValid()) {
+            win->ctrl->GoToLocation(loc, addNavPt);
+            return;
+        }
+    }
+    if (win->ctrl->HasChapters()) {
+        Location loc = LocationFromFlatPageNo(win->ctrl, pos.pageNo);
+        if (loc.IsValid()) {
+            win->ctrl->GoToLocation(loc, addNavPt);
+            return;
+        }
+    }
+    int pageNo = pos.pageNo;
+    if (!win->ctrl->ValidPageNo(pageNo)) {
+        return;
+    }
+    DisplayModel* dm = win->AsFixed();
+    if (dm) {
+        if (addNavPt) {
+            dm->AddNavPoint();
+        }
+        dm->SetScrollState(ScrollState(pageNo, scrollPos.x, scrollPos.y));
+        return;
+    }
+    win->ctrl->GoToPage(pageNo, addNavPt);
+}
+
+void JumpToFavorite(MainWindow* win, Favorite* fav) {
+    if (!win || !fav) {
+        return;
+    }
+    ApplyFavoriteView(win, fav->pageNo, fav->scrollPos, true);
+    win->Focus();
+}
+
+// identity for a chaptered doc's favorite: a flat pageNo shifts as chapters
+// lay out, so a bookmarked favorite is matched by its (chapter, page) hint
+// instead, when the caller has a Location to compare against
+bool IsPageInFavorites(Str filePath, int pageNo, DocController* ctrl) {
     FileState* fav = GetFavByFilePath(filePath);
-    if (!fav) {
+    if (!fav || !fav->favorites) {
         return false;
     }
+    Location loc = (ctrl && ctrl->HasChapters() && pageNo >= 1) ? ctrl->LocationFromPageNo(pageNo) : kInvalidLocation;
     for (int i = 0; i < len(*fav->favorites); i++) {
-        if (pageNo == (*fav->favorites)[i]->pageNo) {
+        Favorite* fn = (*fav->favorites)[i];
+        StoredPagePos pos = ParseStoredPagePos(fn->pageNo);
+        if (pos.bookmark && loc.IsValid()) {
+            if (BookmarkLocationHint(pos.bookmark) == loc) {
+                return true;
+            }
+            continue;
+        }
+        if (pageNo == pos.pageNo) {
             return true;
         }
     }
     return false;
+}
+
+// tuple order: chapter first, then page within chapter
+static bool LocLess(Location a, Location b) {
+    if (a.chapter != b.chapter) {
+        return a.chapter < b.chapter;
+    }
+    return a.page < b.page;
 }
 
 // navigate to the nearest favorite (bookmark) page after / before the current
@@ -209,29 +290,62 @@ void GoToNextFavorite(MainWindow* win, bool forward) {
     if (!fs || len(*fs->favorites) == 0) {
         return;
     }
+    DocController* ctrl = win->ctrl;
     int cur = win->currPageNo;
+    // chaptered docs: compare by (chapter, page) hint, not the flat pageNo,
+    // which shifts as chapters lay out
+    if (ctrl->HasChapters()) {
+        Location curLoc = ctrl->CurrentLocation();
+        Favorite* bestFav = nullptr;
+        Location bestLoc{};
+        for (Favorite* fav : *fs->favorites) {
+            StoredPagePos pos = ParseStoredPagePos(fav->pageNo);
+            Location favLoc = pos.bookmark ? BookmarkLocationHint(pos.bookmark) : ctrl->LocationFromPageNo(pos.pageNo);
+            if (!favLoc.IsValid()) {
+                continue;
+            }
+            if (forward) {
+                if (LocLess(curLoc, favLoc) && (!bestFav || LocLess(favLoc, bestLoc))) {
+                    bestFav = fav;
+                    bestLoc = favLoc;
+                }
+            } else {
+                if (LocLess(favLoc, curLoc) && (!bestFav || LocLess(bestLoc, favLoc))) {
+                    bestFav = fav;
+                    bestLoc = favLoc;
+                }
+            }
+        }
+        if (bestFav) {
+            JumpToFavorite(win, bestFav);
+        }
+        return;
+    }
     // pick the favorite page closest to the current page in the requested
     // direction (no wrap-around)
-    int best = -1;
+    Favorite* bestFav = nullptr;
+    int bestPage = 0;
     for (int i = 0; i < len(*fs->favorites); i++) {
-        int p = (*fs->favorites)[i]->pageNo;
+        Favorite* fav = (*fs->favorites)[i];
+        int p = ParseStoredPagePos(fav->pageNo).pageNo;
         if (forward) {
-            if (p > cur && (best == -1 || p < best)) {
-                best = p;
+            if (p > cur && (!bestFav || p < bestPage)) {
+                bestFav = fav;
+                bestPage = p;
             }
         } else {
-            if (p < cur && (best == -1 || p > best)) {
-                best = p;
+            if (p < cur && (!bestFav || p > bestPage)) {
+                bestFav = fav;
+                bestPage = p;
             }
         }
     }
-    if (best != -1 && win->ctrl->ValidPageNo(best)) {
-        win->ctrl->GoToPage(best, true);
-        win->Focus();
+    if (bestFav) {
+        JumpToFavorite(win, bestFav);
     }
 }
 
-static Favorite* FindByPage(FileState* ds, int pageNo, Str pageLabel = {}) {
+static Favorite* FindByPage(FileState* ds, Str storedPagePos, Location loc = kInvalidLocation, Str pageLabel = {}) {
     if (!ds || !ds->favorites) {
         return nullptr;
     }
@@ -245,9 +359,23 @@ static Favorite* FindByPage(FileState* ds, int pageNo, Str pageLabel = {}) {
             }
         }
     }
+    StoredPagePos pos = ParseStoredPagePos(storedPagePos);
     for (int i = 0; i < n; i++) {
         auto* fav = (*favs)[i];
-        if (pageNo == fav->pageNo) {
+        StoredPagePos favPos = ParseStoredPagePos(fav->pageNo);
+        if (favPos.bookmark && loc.IsValid()) {
+            if (BookmarkLocationHint(favPos.bookmark) == loc) {
+                return fav;
+            }
+            continue;
+        }
+        if (pos.bookmark && favPos.bookmark) {
+            if (str::Eq(pos.bookmark, favPos.bookmark)) {
+                return fav;
+            }
+            continue;
+        }
+        if (pos.pageNo == favPos.pageNo) {
             return fav;
         }
     }
@@ -257,8 +385,16 @@ static Favorite* FindByPage(FileState* ds, int pageNo, Str pageLabel = {}) {
 static int SortByPageNo(Favorite* const* a, Favorite* const* b) {
     Favorite* na = *a;
     Favorite* nb = *b;
-    // sort lower page numbers first
-    return na->pageNo - nb->pageNo;
+    StoredPagePos pa = ParseStoredPagePos(na->pageNo);
+    StoredPagePos pb = ParseStoredPagePos(nb->pageNo);
+    if (pa.bookmark && pb.bookmark) {
+        Location la = BookmarkLocationHint(pa.bookmark);
+        Location lb = BookmarkLocationHint(pb.bookmark);
+        if (la != lb) {
+            return LocLess(la, lb) ? -1 : 1;
+        }
+    }
+    return pa.pageNo - pb.pageNo;
 }
 
 // Sort by user name if set, else page label; page number breaks ties and is
@@ -267,18 +403,18 @@ static int SortByName(Favorite* const* a, Favorite* const* b) {
     Favorite* na = *a;
     Favorite* nb = *b;
     Str sa = na->name;
-    if (!sa) {
+    if (len(sa) == 0) {
         sa = na->pageLabel;
     }
     Str sb = nb->name;
-    if (!sb) {
+    if (len(sb) == 0) {
         sb = nb->pageLabel;
     }
     if (sa || sb) {
-        if (!sa) {
+        if (len(sa) == 0) {
             return 1;
         }
-        if (!sb) {
+        if (len(sb) == 0) {
             return -1;
         }
         int n = str::CmpNatural(sa, sb);
@@ -286,14 +422,14 @@ static int SortByName(Favorite* const* a, Favorite* const* b) {
             return n;
         }
     }
-    return na->pageNo - nb->pageNo;
+    return SortByPageNo(a, b);
 }
 
 static void SortFileFavorites(FileState* fs) {
     if (!fs || !fs->favorites || len(*fs->favorites) < 2) {
         return;
     }
-    if (gGlobalPrefs->sortFavoritesByName) {
+    if (gSettings->sortFavoritesByName) {
         VecSort(*fs->favorites, SortByName);
     } else {
         VecSort(*fs->favorites, SortByPageNo);
@@ -309,14 +445,15 @@ static void SortAllFavorites() {
 
 // toggle SortFavoritesByName, re-sort, refresh trees, and save settings
 void ToggleSortFavoritesByName() {
-    gGlobalPrefs->sortFavoritesByName = !gGlobalPrefs->sortFavoritesByName;
+    gSettings->sortFavoritesByName = !gSettings->sortFavoritesByName;
     SortAllFavorites();
     RememberFavTreeExpansionStateForAllWindows();
     UpdateFavoritesTreeForAllWindows();
     SaveSettings();
 }
 
-static void AddOrReplaceFav(Str filePath, int pageNo, Str name, Str pageLabel) {
+static void AddOrReplaceFav(Str filePath, Str storedPagePos, Str name, Str pageLabel, PointF scrollPos,
+                            Location loc = kInvalidLocation) {
     FileState* fav = GetFavByFilePath(filePath);
     if (!fav) {
         // we were asked to add a favorite for current file but couldn't find
@@ -325,14 +462,17 @@ static void AddOrReplaceFav(Str filePath, int pageNo, Str name, Str pageLabel) {
         FileHistoryAppend(fav);
     }
 
-    Favorite* fn = FindByPage(fav, pageNo, pageLabel);
+    Favorite* fn = FindByPage(fav, storedPagePos, loc, pageLabel);
     if (fn) {
         str::ReplaceWithCopy(&fn->name, name);
         ReportIf(fn->pageLabel && !str::Eq(fn->pageLabel, pageLabel));
+        fn->scrollPos = scrollPos;
+        str::ReplaceWithCopy(&fn->pageNo, storedPagePos);
         SortFileFavorites(fav);
     } else {
-        fn = NewFavorite(pageNo, name, pageLabel);
-        fav->favorites->Append(fn);
+        fn = NewFavorite(storedPagePos, name, pageLabel);
+        fn->scrollPos = scrollPos;
+        VecAppend(*fav->favorites, fn);
         SortFileFavorites(fav);
     }
 }
@@ -343,7 +483,7 @@ static Str SearchStartFavName() {
 }
 
 static Favorite* FindByName(FileState* ds, Str name) {
-    if (!ds || !ds->favorites || !name) {
+    if (!ds || !ds->favorites || len(name) == 0) {
         return nullptr;
     }
     for (Favorite* fav : *ds->favorites) {
@@ -363,7 +503,7 @@ void SetSearchStartFavorite(MainWindow* win) {
         return;
     }
     WindowTab* tab = win->CurrentTab();
-    if (!tab || !tab->filePath) {
+    if (!tab || len(tab->filePath) == 0) {
         return;
     }
     int pageNo = win->currPageNo;
@@ -377,7 +517,7 @@ void SetSearchStartFavorite(MainWindow* win) {
     Str path = tab->filePath;
     TempStr pageLabel = win->ctrl->GetPageLabeTemp(pageNo);
     TempStr plainLabel = fmt("%d", pageNo);
-    bool needsLabel = pageLabel && !str::Eq(plainLabel, pageLabel);
+    bool needsLabel = pageLabel && !str::Eq(plainLabel, pageLabel) && !win->ctrl->HasChapters();
     Str pl = needsLabel ? pageLabel : Str{};
 
     FileState* fs = GetFavByFilePath(path);
@@ -388,41 +528,71 @@ void SetSearchStartFavorite(MainWindow* win) {
 
     Str markName = SearchStartFavName();
     Favorite* fn = FindByName(fs, markName);
+    PointF scrollPos = CurrentFavoriteScrollPos(win, pageNo);
+    TempStr storedPos = StoredPagePosForPageTemp(win->ctrl, pageNo);
     if (fn) {
-        if (fn->isTemporary && fn->pageNo == pageNo && str::Eq(fn->pageLabel, pl)) {
-            return; // already marks this page
+        if (fn->isTemporary && str::Eq(fn->pageNo, storedPos) && str::Eq(fn->pageLabel, pl) &&
+            fn->scrollPos.x == scrollPos.x && fn->scrollPos.y == scrollPos.y) {
+            return; // already marks this view
         }
-        fn->pageNo = pageNo;
+        str::ReplaceWithCopy(&fn->pageNo, storedPos);
         str::ReplaceWithCopy(&fn->pageLabel, pl);
+        fn->scrollPos = scrollPos;
         // mark as session-only even if a prior build persisted a "/" entry
         fn->isTemporary = true;
         SortFileFavorites(fs);
     } else {
-        fn = NewFavorite(pageNo, markName, pl);
+        fn = NewFavorite(storedPos, markName, pl);
         fn->isTemporary = true;
-        fs->favorites->Append(fn);
+        fn->scrollPos = scrollPos;
+        VecAppend(*fs->favorites, fn);
         SortFileFavorites(fs);
     }
     UpdateFavoritesTreeForAllWindows();
 }
 
-static void RemoveFav(Str filePath, int pageNo) {
+static void RemoveFav(Str filePath, int pageNo, Location loc = kInvalidLocation) {
     FileState* fav = GetFavByFilePath(filePath);
-    if (!fav) {
+    if (!fav || !fav->favorites) {
         return;
     }
-    Favorite* fn = FindByPage(fav, pageNo);
-    if (!fn) {
-        return;
+    for (int i = 0; i < len(*fav->favorites); i++) {
+        Favorite* fn = (*fav->favorites)[i];
+        StoredPagePos pos = ParseStoredPagePos(fn->pageNo);
+        if (pos.bookmark && loc.IsValid()) {
+            if (BookmarkLocationHint(pos.bookmark) == loc) {
+                VecRemove(*fav->favorites, fn);
+                DeleteFavorite(fn);
+                break;
+            }
+            continue;
+        }
+        if (pageNo == pos.pageNo) {
+            VecRemove(*fav->favorites, fn);
+            DeleteFavorite(fn);
+            break;
+        }
     }
-
-    fav->favorites->Remove(fn);
-    DeleteFavorite(fn);
 
     if (!SettingsRememberOpenedFiles() && 0 == len(*fav->favorites)) {
         FileHistoryRemove(fav);
         DeleteFileState(fav);
     }
+}
+
+void DelFavorite(FileState* fs, Favorite* fav) {
+    if (!fs || !fs->favorites || !fav) {
+        return;
+    }
+    RememberFavTreeExpansionStateForAllWindows();
+    VecRemove(*fs->favorites, fav);
+    DeleteFavorite(fav);
+    if (!SettingsRememberOpenedFiles() && 0 == len(*fs->favorites)) {
+        FileHistoryRemove(fs);
+        DeleteFileState(fs);
+    }
+    UpdateFavoritesTreeForAllWindows();
+    SaveSettings();
 }
 
 static void RemoveAllFavForFile(Str filePath) {
@@ -434,7 +604,7 @@ static void RemoveAllFavForFile(Str filePath) {
     for (int i = 0; i < len(*fav->favorites); i++) {
         DeleteFavorite((*fav->favorites)[i]);
     }
-    fav->favorites->Reset();
+    VecReset(*fav->favorites);
 
     if (!SettingsRememberOpenedFiles()) {
         FileHistoryRemove(fav);
@@ -443,8 +613,8 @@ static void RemoveAllFavForFile(Str filePath) {
 }
 
 // Note: those might be too big
-#define MAX_FAV_SUBMENUS 10
-#define MAX_FAV_MENUS 10
+constexpr int kMaxFavSubmenus = 10;
+constexpr int kMaxFavMenus = 10;
 
 bool HasFavorites() {
     FileState* ds;
@@ -459,28 +629,53 @@ bool HasFavorites() {
 // caller has to free() the result
 // shared with CommandPalette.cpp (favorites mode)
 TempStr FavReadableNameTemp(Favorite* fn) {
+    StoredPagePos pos = ParseStoredPagePos(fn->pageNo);
+    bool isChaptered = len(pos.bookmark) > 0;
+    int chapter = 0, page = 0;
+    if (isChaptered) {
+        Location loc = BookmarkLocationHint(pos.bookmark);
+        chapter = loc.chapter;
+        page = loc.page;
+    }
+
     Str label = fn->pageLabel;
-    if (!label) {
-        label = fmt("%d", fn->pageNo);
+    if (len(label) == 0 && !isChaptered) {
+        label = fmt("%d", pos.pageNo);
     }
+
     if (fn->name) {
-        TempStr pageNo = fmt(_TRA("(page %s)").s, label);
-        return str::JoinTemp(fn->name, StrL(" "), pageNo);
+        TempStr loc;
+        if (isChaptered) {
+            loc = fmt(Tr("(chapter %d page %d)").s, chapter, page);
+        } else {
+            loc = fmt(Tr("(page %s)").s, label);
+        }
+        return str::JoinTemp(fn->name, StrL(" "), loc);
     }
-    return fmt(_TRA("Page %s").s, label);
+    if (isChaptered) {
+        return fmt(Tr("Chapter %d Page %d").s, chapter, page);
+    }
+    return fmt(Tr("Page %s").s, label);
 }
 
 // caller has to free() the result
 static TempStr FavCompactReadableNameTemp(FileState* fav, Favorite* fn, bool isCurrent = false) {
     TempStr rn = FavReadableNameTemp(fn);
     if (isCurrent) {
-        return fmt("%s : %s", _TRA("Current file"), rn);
+        return fmt("%s : %s", Tr("Current file"), rn);
     }
     TempStr fp = path::GetBaseNameTemp(fav->filePath);
-    // show the favorite's name first, then the file name, so that a long file
-    // name doesn't push the user's description out of view in the favorites
-    // pane / menu (fixes #829, #2236)
+    // Keep the favorite's name first in compact menu entries so a long file
+    // name doesn't push the user's description out of view (fixes #829, #2236).
     return fmt("%s : %s", rn, fp);
+}
+
+// Compact rows in the Favorites tree lead with the bold source filename so
+// single-favorite files line up with the file nodes used for grouped entries.
+static TempStr FavTreeCompactReadableNameTemp(FileState* fav, Favorite* fn) {
+    TempStr fp = path::GetBaseNameTemp(fav->filePath);
+    TempStr rn = FavReadableNameTemp(fn);
+    return fmt("%s : %s", fp, rn);
 }
 
 static void AppendFavMenuItems(HMENU m, FileState* f, int& idx, bool combined, bool isCurrent) {
@@ -489,7 +684,7 @@ static void AppendFavMenuItems(HMENU m, FileState* f, int& idx, bool combined, b
         return;
     }
     for (int i = 0; i < len(*f->favorites); i++) {
-        if (i >= MAX_FAV_MENUS) {
+        if (i >= kMaxFavMenus) {
             return;
         }
         Favorite* fn = (*f->favorites)[i];
@@ -534,10 +729,10 @@ static void GetSortedFilePaths(StrVec& filePathsSortedOut, FileState* toIgnore =
 
 // For easy access, we try to show favorites in the menu, similar to a list of
 // recently opened files.
-// The first menu items are for currently opened file (up to MAX_FAV_MENUS), based
+// The first menu items are for currently opened file (up to kMaxFavMenus), based
 // on the assumption that user is usually interested in navigating current file.
 // Then we have a submenu for each file for which there are bookmarks (up to
-// MAX_FAV_SUBMENUS), each having up to MAX_FAV_MENUS menu items.
+// kMaxFavSubmenus), each having up to kMaxFavMenus menu items.
 // If not all favorites can be shown, we also enable "Show all favorites" menu which
 // will provide a way to see all favorites.
 // Note: not sure if that's the best layout. Maybe we should always use submenu and
@@ -571,7 +766,7 @@ static void AppendFavMenus(HMENU m, Str currFilePath) {
     int menuId = CmdFavoriteFirst;
 
     int menusCount = len(filePathsSorted);
-    menusCount = std::min(menusCount, MAX_FAV_MENUS);
+    menusCount = std::min(menusCount, kMaxFavMenus);
 
     for (int i = 0; i < menusCount; i++) {
         Str filePath = filePathsSorted[i];
@@ -587,7 +782,7 @@ static void AppendFavMenus(HMENU m, Str currFilePath) {
         }
         AppendFavMenuItems(sub, f, menuId, combined, f == currFileFav);
         if (!combined) {
-            Str s = _TRA("Current file");
+            Str s = Tr("Current file");
             if (f != currFileFav) {
                 s = MenuToSafeStringTemp(path::GetBaseNameTemp(filePath));
             }
@@ -609,19 +804,31 @@ void RebuildFavMenu(MainWindow* win, HMENU menu) {
         MenuSetEnabled(menu, CmdFavoriteDel, false);
         AppendFavMenus(menu, {});
     } else {
-        TempStr label = win->ctrl->GetPageLabeTemp(win->currPageNo);
-        bool isBookmarked = IsPageInFavorites(win->ctrl->GetFilePath(), win->currPageNo);
+        DocController* ctrl = win->ctrl;
+        int pageNo = win->currPageNo;
+        bool isBookmarked = IsPageInFavorites(ctrl->GetFilePath(), pageNo, ctrl);
+
+        TempStr addText;
+        TempStr delText;
+        if (ctrl->HasChapters()) {
+            Location loc = ctrl->LocationFromPageNo(pageNo);
+            addText = fmt(Tr("Add chapter %d page %d to favorites").s, loc.chapter, loc.page);
+            delText = fmt(Tr("Remove chapter %d page %d from favorites").s, loc.chapter, loc.page);
+        } else {
+            TempStr label = ctrl->GetPageLabeTemp(pageNo);
+            addText = fmt(Tr("Add page %s to favorites").s, label);
+            delText = fmt(Tr("Remove page %s from favorites").s, label);
+        }
+
         if (isBookmarked) {
             MenuSetEnabled(menu, CmdFavoriteAdd, false);
-            TempStr s = fmt(_TRA("Remove page %s from favorites").s, label);
-            MenuSetText(menu, CmdFavoriteDel, s);
+            MenuSetText(menu, CmdFavoriteDel, delText);
         } else {
             MenuSetEnabled(menu, CmdFavoriteDel, false);
-            TempStr s = fmt(_TRA("Add page %s to favorites").s, label);
-            s = AppendAccelKeyToMenuStringTemp(s, CmdFavoriteAdd);
+            TempStr s = AppendAccelKeyToMenuStringTemp(addText, CmdFavoriteAdd);
             MenuSetText(menu, CmdFavoriteAdd, s);
         }
-        AppendFavMenus(menu, win->ctrl->GetFilePath());
+        AppendFavMenus(menu, ctrl->GetFilePath());
     }
     MenuSetEnabled(menu, CmdFavoriteToggle, HasFavorites());
 }
@@ -639,13 +846,11 @@ WindowTab* FindFavoritesTab(MainWindow* win) {
     return nullptr;
 }
 
-static void GoToFavoritePage(MainWindow* win, int pageNo) {
-    if (!IsMainWindowValid(win)) {
+static void GoToFavoritePage(MainWindow* win, Str pageNo, PointF scrollPos) {
+    if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
-    if (win->IsDocLoaded() && win->ctrl->ValidPageNo(pageNo)) {
-        win->ctrl->GoToPage(pageNo, true);
-    }
+    ApplyFavoriteView(win, pageNo, scrollPos, true);
     // we might have been invoked by clicking on a tree view
     // switch focus so that keyboard navigation works, which enables
     // a fluid experience
@@ -654,11 +859,13 @@ static void GoToFavoritePage(MainWindow* win, int pageNo) {
 
 struct GoToFavoritePageData {
     MainWindow* win;
-    int pageNo;
+    Str pageNo; // owned
+    PointF scrollPos;
 };
 
 static void GoToFavoritePage(GoToFavoritePageData* d) {
-    GoToFavoritePage(d->win, d->pageNo);
+    GoToFavoritePage(d->win, d->pageNo, d->scrollPos);
+    str::Free(d->pageNo);
     delete d;
 }
 
@@ -675,7 +882,8 @@ void GoToFavorite(MainWindow* win, FileState* fs, Favorite* fav) {
     MainWindow* existingWin = FindMainWindowByFile(fp, true);
     if (existingWin) {
         auto* data = new GoToFavoritePageData;
-        data->pageNo = fav->pageNo;
+        data->pageNo = str::Dup(fav->pageNo);
+        data->scrollPos = fav->scrollPos;
         data->win = existingWin;
         auto fn = MkFunc0<GoToFavoritePageData>(GoToFavoritePage, data);
         uitask::Post(fn, "TaskGoToFavorite");
@@ -690,19 +898,21 @@ void GoToFavorite(MainWindow* win, FileState* fs, Favorite* fav) {
     // first showing last seen page stored in file history
     // A hacky solution because I don't want to add even more parameters to
     // LoadDocument() and LoadDocumentInto()
-    int pageNo = fav->pageNo;
+    Str pageNo = fav->pageNo;
+    PointF scrollPos = fav->scrollPos;
     FileState* ds = FileHistoryFindByPath(fs->filePath);
-    if (ds && !ds->useDefaultState && gGlobalPrefs->rememberStatePerDocument) {
-        ds->pageNo = fav->pageNo;
-        ds->scrollPos = PointF(-1, -1); // don't scroll the page
-        pageNo = -1;
+    if (ds && !ds->useDefaultState && gSettings->rememberStatePerDocument) {
+        str::ReplaceWithCopy(&ds->pageNo, fav->pageNo);
+        ds->scrollPos = fav->scrollPos;
+        pageNo = {};
     }
 
     LoadArgs args(fs->filePath, win);
     win = LoadDocument(&args);
-    if (win) {
+    if (win && pageNo) {
         auto* data = new GoToFavoritePageData;
-        data->pageNo = pageNo;
+        data->pageNo = str::Dup(pageNo);
+        data->scrollPos = scrollPos;
         data->win = win;
         auto fn = MkFunc0<GoToFavoritePageData>(GoToFavoritePage, data);
         uitask::Post(fn, "TaskGoToFavorite2");
@@ -733,18 +943,6 @@ static void GoToFavForTreeItem(MainWindow* win, TreeItem ti) {
     GoToFavorite(win, f, fn);
 }
 
-#if 0
-static void GoToFavForTVItem(MainWindow* win, TreeCtrl* treeView, HTREEITEM hItem = nullptr) {
-    TreeItem ti = nullptr;
-    if (nullptr == hItem) {
-        ti = treeView->GetSelection();
-    } else {
-        ti = treeView->GetTreeItemByHandle(hItem);
-    }
-    GoToFavForTreeItem(win, ti);
-}
-#endif
-
 static FavTreeItem* MakeFavTopLevelItem(FileState* fs, bool isExpanded) {
     if (!fs->favorites || len(*fs->favorites) == 0) {
         return nullptr;
@@ -759,13 +957,16 @@ static FavTreeItem* MakeFavTopLevelItem(FileState* fs, bool isExpanded) {
     }
     res->isExpanded = isExpanded;
 
-    TempStr text = nullptr;
+    TempStr baseName = path::GetBaseNameTemp(fs->filePath);
+    TempStr text;
     if (isCollapsed) {
-        text = FavCompactReadableNameTemp(fs, fn);
+        text = FavTreeCompactReadableNameTemp(fs, fn);
     } else {
-        text = path::GetBaseNameTemp(fs->filePath);
+        text = baseName;
     }
     res->text = str::Dup(text);
+    res->fileNameOffset = 0;
+    res->fileNameLen = len(baseName);
     return res;
 }
 
@@ -817,7 +1018,7 @@ static FavTreeModel* BuildFavTreeModel(MainWindow* win, Str filter) {
             }
             FavTreeItem* ti = MakeFavTopLevelItem(fs, false);
             if (ti) {
-                res->root->children.Append(ti);
+                VecAppend(res->root->children, ti);
             }
             continue;
         }
@@ -827,16 +1028,18 @@ static FavTreeModel* BuildFavTreeModel(MainWindow* win, Str filter) {
             auto* parent = new FavTreeItem();
             parent->favorite = (*fs->favorites)[0];
             parent->text = str::Dup(baseName);
-            parent->isExpanded = win->expandedFavorites.Contains(fs);
+            parent->fileNameOffset = 0;
+            parent->fileNameLen = len(baseName);
+            parent->isExpanded = VecContains(win->expandedFavorites, fs);
             for (int j = 0; j < nFavs; j++) {
                 Favorite* fn = (*fs->favorites)[j];
                 auto* ti = new FavTreeItem();
                 ti->text = str::Dup(FavReadableNameTemp(fn));
                 ti->parent = parent;
                 ti->favorite = fn;
-                parent->children.Append(ti);
+                VecAppend(parent->children, ti);
             }
-            res->root->children.Append(parent);
+            VecAppend(res->root->children, parent);
             continue;
         }
 
@@ -850,9 +1053,11 @@ static FavTreeModel* BuildFavTreeModel(MainWindow* win, Str filter) {
             }
             auto* ti = new FavTreeItem();
             ti->favorite = fn;
-            ti->text = str::Dup(FavCompactReadableNameTemp(fs, fn));
+            ti->text = str::Dup(FavTreeCompactReadableNameTemp(fs, fn));
+            ti->fileNameOffset = 0;
+            ti->fileNameLen = len(baseName);
             ti->isExpanded = false;
-            res->root->children.Append(ti);
+            VecAppend(res->root->children, ti);
         }
     }
     return res;
@@ -877,11 +1082,11 @@ static void ExpandAllFavTree(MainWindow* win) {
 }
 
 static void FocusFavFilterEdit(MainWindow* win) {
-    if (!win || !win->favFilterEdit || !win->favFilterEdit->hwnd) {
+    if (!win) {
         return;
     }
-    HwndSetFocus(win->favFilterEdit->hwnd);
-    win->favFilterEdit->SetCursorPositionAtEnd();
+    EditSetFocus(win->favFilterEdit);
+    EditSetCursorPosAtEnd(win->favFilterEdit);
 }
 
 // Select first top-level item's first child when it has children; otherwise the
@@ -959,7 +1164,7 @@ static LRESULT CALLBACK WndProcFavFilterEdit(HWND hwnd, UINT msg, WPARAM wp, LPA
             if (edit) {
                 TempStr txt = edit->GetTextTemp();
                 if (txt && len(txt) > 0) {
-                    edit->SetText("");
+                    edit->SetText(StrL(""));
                     // onTextChanged restores the full tree
                     return 0;
                 }
@@ -995,10 +1200,10 @@ void PopulateFavTreeIfNeeded(MainWindow* win) {
 
 void ToggleFavorites(MainWindow* win) {
     // Sidebar Favorites panel (independent of the Favorites tab)
-    if (gGlobalPrefs->showFavorites) {
-        SetSidebarVisibility(win, win->uiState.tocVisible, false);
+    if (gSettings->showFavorites) {
+        SetSidebarVisibility(win, win->uiState.tocVisible, false, SidebarResizeFrame::Adjust);
     } else {
-        SetSidebarVisibility(win, win->uiState.tocVisible, true);
+        SetSidebarVisibility(win, win->uiState.tocVisible, true, SidebarResizeFrame::Adjust);
         HwndSetFocus(win->favTreeView->hwnd);
     }
 }
@@ -1048,7 +1253,7 @@ void UpdateFavoritesTree(MainWindow* win) {
         if (WindowTab* favTab = FindFavoritesTab(win)) {
             CloseTab(favTab, false);
         }
-        if (gGlobalPrefs->showFavorites) {
+        if (gSettings->showFavorites) {
             SetSidebarVisibility(win, win->uiState.tocVisible, false);
         } else {
             ScheduleUiUpdate(win, kUiForceRelayout | kUiSidebarDirty);
@@ -1056,7 +1261,7 @@ void UpdateFavoritesTree(MainWindow* win) {
         return;
     }
     // refresh sidebar visibility only when the sidebar panel is supposed to be open
-    if (gGlobalPrefs->showFavorites) {
+    if (gSettings->showFavorites) {
         SetSidebarVisibility(win, win->uiState.tocVisible, true);
     } else if (FindFavoritesTab(win)) {
         ScheduleUiUpdate(win, kUiForceRelayout | kUiSidebarDirty);
@@ -1092,26 +1297,30 @@ static TocItem* TocItemForPageNo(TocItem* item, int pageNo) {
 
 // Persist a favorite after the Add Favorite dialog's OK (name may be empty).
 void ApplyAddFavorite(MainWindow* win, Str filePath, int pageNo, Str pageLabel, Str name) {
-    if (!filePath || !IsMainWindowValid(win)) {
+    if (len(filePath) == 0 || !IsMainWindowValidAndNotClosing(win)) {
         return;
     }
+    DocController* ctrl = win->ctrl;
     TempStr plainLabel = fmt("%d", pageNo);
-    bool needsLabel = !str::Eq(plainLabel, pageLabel);
+    bool needsLabel = !str::Eq(plainLabel, pageLabel) && !(ctrl && ctrl->HasChapters());
 
     RememberFavTreeExpansionStateForAllWindows();
     Str pl = needsLabel ? pageLabel : Str{};
-    AddOrReplaceFav(filePath, pageNo, name, pl);
+    TempStr storedPos = StoredPagePosForPageTemp(ctrl, pageNo);
+    Location loc = (ctrl && ctrl->HasChapters()) ? ctrl->LocationFromPageNo(pageNo) : kInvalidLocation;
+
+    AddOrReplaceFav(filePath, storedPos, name, pl, CurrentFavoriteScrollPos(win, pageNo), loc);
     // expand newly added favorites by default
     FileState* fav = GetFavByFilePath(filePath);
     if (fav && len(*fav->favorites) == 2) {
-        win->expandedFavorites.Append(fav);
+        VecAppend(win->expandedFavorites, fav);
     }
     UpdateFavoritesTreeForAllWindows();
     SaveSettings();
 }
 
 void AddFavoriteWithLabelAndName(MainWindow* win, int pageNo, Str pageLabel, Str nameIn) {
-    if (!IsMainWindowValid(win) || !win->CurrentTab()) {
+    if (!IsMainWindowValidAndNotClosing(win) || !win->CurrentTab()) {
         return;
     }
     ShowAddFavoriteDialog(win, win->CurrentTab()->filePath, pageNo, pageLabel, nameIn);
@@ -1130,7 +1339,13 @@ void AddFavoriteForPage(MainWindow* win, int pageNo) {
             name = item->title;
         }
     }
-    TempStr pageLabel = ctrl->GetPageLabeTemp(pageNo);
+    TempStr pageLabel;
+    if (ctrl->HasChapters()) {
+        Location loc = ctrl->LocationFromPageNo(pageNo);
+        pageLabel = fmt("%d/%d", loc.chapter, loc.page);
+    } else {
+        pageLabel = ctrl->GetPageLabeTemp(pageNo);
+    }
     AddFavoriteWithLabelAndName(win, pageNo, pageLabel, name);
 }
 
@@ -1142,18 +1357,19 @@ void AddFavoriteForCurrentPage(MainWindow* win) {
     AddFavoriteForPage(win, pageNo);
 }
 
-void DelFavorite(Str filePath, int pageNo) {
-    if (!filePath) {
+void DelFavorite(Str filePath, int pageNo, DocController* ctrl) {
+    if (len(filePath) == 0) {
         return;
     }
     RememberFavTreeExpansionStateForAllWindows();
-    RemoveFav(filePath, pageNo);
+    Location loc = (ctrl && ctrl->HasChapters() && pageNo >= 1) ? ctrl->LocationFromPageNo(pageNo) : kInvalidLocation;
+    RemoveFav(filePath, pageNo, loc);
     UpdateFavoritesTreeForAllWindows();
     SaveSettings();
 }
 
 void RememberFavTreeExpansionState(MainWindow* win) {
-    win->expandedFavorites.Reset();
+    VecReset(win->expandedFavorites);
     TreeView* treeView = win->favTreeView;
     TreeModel* tm = treeView ? treeView->treeModel : nullptr;
     if (!tm) {
@@ -1169,7 +1385,7 @@ void RememberFavTreeExpansionState(MainWindow* win) {
             FavTreeItem* fti = (FavTreeItem*)ti;
             Favorite* fn = fti->favorite;
             FileState* f = GetByFavorite(fn);
-            win->expandedFavorites.Append(f);
+            VecAppend(win->expandedFavorites, f);
         }
     }
 }
@@ -1194,15 +1410,17 @@ static bool HasFavFilter(MainWindow* win) {
     return len(words) > 0;
 }
 
-// multi-word yellow/accent highlights via shared command-palette helpers
-static void DrawFavItemHighlight(TreeView::CustomDrawEvent* ev, MainWindow* win) {
+// Repaint favorite labels that contain a source file name so only that span is
+// bold. The same pass preserves multi-word search highlights when filtering.
+static void DrawFavItemText(TreeView::CustomDrawEvent* ev, MainWindow* win) {
     FavTreeItem* fti = (FavTreeItem*)ev->treeItem;
-    if (!fti || !fti->text) {
+    if (!fti || len(fti->text) == 0) {
         return;
     }
     StrVec words;
     GetFavFilterWords(win, words);
-    if (len(words) == 0) {
+    bool hasFileName = fti->fileNameOffset >= 0 && fti->fileNameLen > 0;
+    if (len(words) == 0 && !hasFileName) {
         return;
     }
 
@@ -1217,6 +1435,11 @@ static void DrawFavItemHighlight(TreeView::CustomDrawEvent* ev, MainWindow* win)
     NMTVCUSTOMDRAW* tvcd = ev->nm;
     HDC hdc = tvcd->nmcd.hdc;
     NMCUSTOMDRAW* cd = &tvcd->nmcd;
+    int right = std::min(itemRect.x + itemRect.dx, (int)cd->rc.right);
+    labelRect.dx = std::max(0, right - labelRect.x);
+    if (labelRect.IsEmpty()) {
+        return;
+    }
     // POSTPAINT often omits CDIS_SELECTED; also check the control selection.
     bool isSelected = (cd->uItemState & CDIS_SELECTED) != 0;
     if (!isSelected) {
@@ -1228,7 +1451,11 @@ static void DrawFavItemHighlight(TreeView::CustomDrawEvent* ev, MainWindow* win)
     Color bgCol, txtCol;
     ResolveTreeFilterItemColors(hdc, itemRect, tv->bgColor, tv->textColor, isSelected, hasFocus, &bgCol, &txtCol);
     GfxHdc gfx(hdc);
-    DrawTreeItemFilterHighlight(&gfx, labelRect, fti->text, words, bgCol, txtCol, tv->GetFont());
+    DrawTreeItemFilterHighlight(&gfx, labelRect, fti->text, words, bgCol, txtCol, tv->GetFont(), fti->fileNameOffset,
+                                fti->fileNameLen);
+    if ((cd->uItemState & CDIS_FOCUS) && isSelected && hasFocus) {
+        gfx.DrawFocusRect(labelRect);
+    }
 }
 
 static void OnFavCustomDraw(TreeView::CustomDrawEvent* ev) {
@@ -1248,8 +1475,10 @@ static void OnFavCustomDraw(TreeView::CustomDrawEvent* ev) {
         if (!ev->treeItem) {
             return;
         }
+        FavTreeItem* fti = (FavTreeItem*)ev->treeItem;
+        bool hasFileName = fti->fileNameOffset >= 0 && fti->fileNameLen > 0;
         LRESULT res = 0;
-        if (filterActive) {
+        if (filterActive || hasFileName) {
             res |= CDRF_NOTIFYPOSTPAINT;
         }
         ev->result = res;
@@ -1257,8 +1486,10 @@ static void OnFavCustomDraw(TreeView::CustomDrawEvent* ev) {
     }
 
     if (cd->dwDrawStage == CDDS_ITEMPOSTPAINT) {
-        if (filterActive && win) {
-            DrawFavItemHighlight(ev, win);
+        FavTreeItem* fti = (FavTreeItem*)ev->treeItem;
+        bool hasFileName = fti->fileNameOffset >= 0 && fti->fileNameLen > 0;
+        if ((filterActive || hasFileName) && win) {
+            DrawFavItemText(ev, win);
         }
         ev->result = CDRF_DODEFAULT;
         return;
@@ -1316,7 +1547,7 @@ static void FavTreeKeyDown(TreeView::KeyDownEvent* ev) {
     // Esc: clear search and focus the filter (Favorites tab and sidebar)
     if (ev->keyCode == VK_ESCAPE) {
         if (win && win->favFilterEdit) {
-            win->favFilterEdit->SetText("");
+            win->favFilterEdit->SetText(StrL(""));
             FocusFavFilterEdit(win);
             ev->result = 1;
             return;
@@ -1340,19 +1571,19 @@ static void FavTreeKeyDown(TreeView::KeyDownEvent* ev) {
 // clang-format off
 static MenuDef menuDefContextFav[] = {
     {
-        _TRN("Sort By Name"),
+        TrN("Sort By Name"),
         CmdToggleFavoritesSort,
     },
     {
-        kMenuSeparator,
+        StrL(kMenuSeparator),
         0,
     },
     {
-        _TRN("Remove from favorites"),
+        TrN("Remove from favorites"),
         CmdFavoriteDel,
     },
     {
-        nullptr,
+        {},
         0,
     },
 };
@@ -1370,7 +1601,7 @@ static void FavTreeContextMenu(ContextMenuEvent* ev) {
         pt = {ev->mouseScreen.x, ev->mouseScreen.y};
     }
     HMENU popup = BuildMenuFromDef(menuDefContextFav, CreatePopupMenu(), nullptr);
-    MenuSetChecked(popup, CmdToggleFavoritesSort, gGlobalPrefs->sortFavoritesByName);
+    MenuSetChecked(popup, CmdToggleFavoritesSort, gSettings->sortFavoritesByName);
     if (!ti) {
         // Sort By Name works with no selection; Remove needs a favorite row.
         MenuRemove(popup, CmdFavoriteDel);
@@ -1390,19 +1621,17 @@ static void FavTreeContextMenu(ContextMenuEvent* ev) {
         return;
     }
     if (CmdFavoriteDel == cmd && ti) {
-        RememberFavTreeExpansionStateForAllWindows();
         FavTreeItem* fti = (FavTreeItem*)ti;
         Favorite* toDelete = fti->favorite;
         FileState* f = GetByFavorite(toDelete);
-        Str fp = f->filePath;
         if (fti->parent) {
-            RemoveFav(fp, toDelete->pageNo);
+            DelFavorite(f, toDelete);
         } else {
-            // this is a top-level node which represents all bookmarks for a given file
-            RemoveAllFavForFile(fp);
+            RememberFavTreeExpansionStateForAllWindows();
+            RemoveAllFavForFile(f->filePath);
+            UpdateFavoritesTreeForAllWindows();
+            SaveSettings();
         }
-        UpdateFavoritesTreeForAllWindows();
-        SaveSettings();
     }
 }
 
@@ -1417,6 +1646,9 @@ void LayoutFavoritesContainer(MainWindow* win) {
     // HwndClientRect: layout is in parent client coordinates
     Rect rc = HwndClientRect(win->hwndFavBox);
     if (rc.IsEmpty()) {
+        return;
+    }
+    if (win->favLayout->lastBounds.dx == rc.dx && win->favLayout->lastBounds.dy == rc.dy) {
         return;
     }
     LayoutTreeToSize(win->hwndFavBox, win->favLayout, {rc.dx, rc.dy}, &win->favRoot);
@@ -1458,23 +1690,22 @@ static void FavCloseClicked(MainWindow* win, VirtMouseEvent*) {
 
 void CreateFavorites(MainWindow* win) {
     HMODULE h = GetModuleHandleW(nullptr);
-    int dx = gGlobalPrefs->sidebarDx;
+    int dx = gSettings->sidebarDx;
     DWORD dwStyle = WS_CHILD | WS_CLIPCHILDREN;
     win->hwndFavBox = CreateWindowW(WC_STATICW, L"", dwStyle, 0, 0, dx, 0, win->hwndFrame, (HMENU) nullptr, h, nullptr);
 
     PlatformFont* labelFont = GetAppSidebarLabelFont();
     auto header = NewLabelWithClose(win->hwndFavBox, labelFont, MkFunc1(FavCloseClicked, win));
     win->favLabel = header.label;
+    win->favCloseBtn = header.closeBtn;
     // label text is set in UpdateToolbarSidebarText()
 
     auto* filterEdit = new Edit();
     {
         Edit::CreateArgs eargs;
         eargs.parent = win->hwndFavBox;
-        eargs.withBorder = false;
-        // underline so the filter field is visible on flat sidebar/tab backgrounds
-        eargs.withBottomBorder = true;
-        eargs.cueText = _TRA("Search Favorites");
+        eargs.withBorder = true;
+        eargs.cueText = Tr("Search Favorites");
         eargs.font = GetAppFont();
         filterEdit->Create(eargs);
     }

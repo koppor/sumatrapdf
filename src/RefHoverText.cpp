@@ -12,9 +12,7 @@
 
 #include "DocController.h"
 #include "EngineBase.h"
-#include "RefHoverInternal.h"
-#include "RefHoverText.h"
-#include "RefHoverTextDetect.h"
+#include "RefHover.h"
 
 TempWStr RefHoverPageTextToWStrTemp(Str text) {
     int nCodepoints = Utf8CodepointCount(text);
@@ -71,7 +69,7 @@ static void CacheInsert(RefLookupCache* c, Str surname, int year, int srcPage, i
     e.destPage = destPage;
     e.destX = destX;
     e.destY = destY;
-    c->entries.Append(e);
+    VecAppend(c->entries, e);
 }
 
 static void CacheFree(RefLookupCache* c) {
@@ -122,7 +120,7 @@ static bool DetectCitationAtCursor(EngineBase* engine, int srcPage, Point pagePo
 // matches the surname + year. Returns true on hit.
 static bool FindReferenceLocation(EngineBase* engine, int srcPage, Str surname, int year, int* destPageOut,
                                   float* destXOut, float* destYOut) {
-    if (!engine || !surname) {
+    if (!engine || len(surname) == 0) {
         return false;
     }
     int pageCount = engine->PageCount();
@@ -131,8 +129,8 @@ static bool FindReferenceLocation(EngineBase* engine, int srcPage, Str surname, 
     }
 
     // Convert surname to wide string for engine text matching.
-    WStr surnameW = ToWStr(surname);
-    if (!surnameW || len(surnameW) < 2) {
+    TempWStr surnameW = ToWStrTemp(surname);
+    if (len(surnameW) == 0 || len(surnameW) < 2) {
         return false;
     }
     bool found = false;
@@ -150,7 +148,6 @@ static bool FindReferenceLocation(EngineBase* engine, int srcPage, Str surname, 
             break;
         }
     }
-    wstr::Free(surnameW);
     return found;
 }
 
@@ -292,7 +289,7 @@ bool RefHoverTryPlainText(RefHoverState* s, EngineBase* engine, int srcPage, Poi
             while (p && *p.s == ' ') {
                 p = Str(p.s + 1, p.len - 1);
             }
-            if (!p) {
+            if (len(p) == 0) {
                 break;
             }
             Str start = p;
@@ -327,10 +324,10 @@ bool RefHoverTryPlainText(RefHoverState* s, EngineBase* engine, int srcPage, Poi
     return result;
 }
 
-// When a link destination is page-level (no specific destY), extract the
-// source link's text from srcRect on srcPage and search destPage for a
-// matching entry anchor. Returns -1 if no match.
-float RefHoverResolveDestYFromSourceText(EngineBase* engine, int srcPage, RectF srcRect, int destPage) {
+// Extract the source link text and find its matching anchor on destPage.
+// Best only tries the highest-ranked candidate to avoid common-word matches.
+float RefHoverResolveDestYFromSourceText(EngineBase* engine, int srcPage, RectF srcRect, int destPage,
+                                         RefHoverTextMatch match) {
     if (srcPage <= 0 || destPage <= 0 || srcRect.dx <= 0.f || srcRect.dy <= 0.f) {
         return -1.f;
     }
@@ -338,7 +335,7 @@ float RefHoverResolveDestYFromSourceText(EngineBase* engine, int srcPage, RectF 
     Rect* srcCoords = nullptr;
     Str srcTextUtf8 = engine->GetTextForPage(srcPage, &srcLen, &srcCoords);
     TempWStr srcText = RefHoverPageTextToWStrTemp(srcTextUtf8);
-    if (!srcText || srcLen <= 0 || !srcCoords) {
+    if (len(srcText) == 0 || srcLen <= 0 || !srcCoords) {
         return -1.f;
     }
     int srcL = (int)srcRect.x - 2;
@@ -408,7 +405,7 @@ float RefHoverResolveDestYFromSourceText(EngineBase* engine, int srcPage, RectF 
     Rect* destCoords = nullptr;
     Str destTextUtf8 = engine->GetTextForPage(destPage, &destLen, &destCoords);
     TempWStr destText = RefHoverPageTextToWStrTemp(destTextUtf8);
-    if (!destText || destLen <= 0 || !destCoords) {
+    if (len(destText) == 0 || destLen <= 0 || !destCoords) {
         return -1.f;
     }
     auto isLineStartMatch = [&](int idx) -> bool {
@@ -483,6 +480,9 @@ float RefHoverResolveDestYFromSourceText(EngineBase* engine, int srcPage, RectF 
         int bestY = (bestY_lineStart >= 0) ? bestY_lineStart : bestY_any;
         if (bestY >= 0) {
             return (float)bestY;
+        }
+        if (match == RefHoverTextMatch::Best) {
+            break;
         }
     }
     return -1.f;

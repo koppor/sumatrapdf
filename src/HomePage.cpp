@@ -2,26 +2,26 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/GdiPlusUtil.h"
 #include "base/ScopedWin.h"
-#include "gui/Dpi.h"
 #include "base/File.h"
 #include "base/Pixmap.h"
 #include "base/Win.h"
+#include "gui/Dpi.h"
 
 #include "gui/UIModels.h"
 #include "gui/Layout.h"
 #include "gui/win/WinGui.h"
+#include "gui/win/WebView.h"
 #include "gui/PlatformFont.h"
 #include "gui/Gfx.h"
 #include "gui/GuiColors.h"
 #include "gui/VirtCtrl.h"
+#include "gui/VirtHost.h"
 
 #include "Settings.h"
 #include "DocController.h"
 #include "SumatraConfig.h"
 #include "FileHistory.h"
-#include "GlobalPrefs.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
 #include "Commands.h"
@@ -30,13 +30,14 @@
 #include "FilterHighlightDraw.h"
 #include "FileThumbnails.h"
 #include "Menu.h"
-#include "HomePage.h"
 #include "Translations.h"
 #include "Version.h"
 #include "Theme.h"
 #include "AppSettings.h"
+#include "AppTools.h"
 #include "DarkMode_win.h"
 #include "SvgIcons.h"
+#include "HomePage.h"
 
 // how the shared tip code (TipText.cpp) opens a url link
 static void OpenTipUrl(Str url) {
@@ -55,8 +56,8 @@ struct SumatraCommandsContext : CommandsContext {
         if (cmdId <= 0) {
             return {}; // not a command: the markup stays literal text
         }
-        TempStr accel = AppendAccelKeyToMenuStringTemp("", cmdId);
-        if (!accel || !*accel.s) {
+        TempStr accel = AppendAccelKeyToMenuStringTemp(StrL(""), cmdId);
+        if (len(accel) == 0 || !*accel.s) {
             return str::DupTemp(cmdName); // a command, but unbound
         }
         // AppendAccelKeyToMenuStringTemp prepends 	, skip it
@@ -92,11 +93,11 @@ struct TipHookInstaller {
 static TipHookInstaller gTipHookInstaller;
 
 #ifndef ABOUT_USE_LESS_COLORS
-#define ABOUT_LINE_OUTER_SIZE 2
+constexpr int kAboutLineOuterSize = 2;
 #else
-#define ABOUT_LINE_OUTER_SIZE 1
+constexpr int kAboutLineOuterSize = 1;
 #endif
-#define ABOUT_LINE_SEP_SIZE 1
+constexpr int kAboutLineSepSize = 1;
 
 static Str sumatraTips = StrL(R"tips(You can [customize scrollbar](CmdChangeScrollbar).
 You can [customize keyboard shortcuts](Help/Customize-keyboard-shortcuts).
@@ -107,7 +108,7 @@ You can [extract text from PDF file](Help/Tool-x-extract-text-from-pdf).
 You can [toggle menu bar](CmdToggleMenuBar) with (Key/CmdToggleMenuBar).
 You can [toggle toolbar](CmdToggleToolbar) with (Key/CmdToggleToolbar).
 You can [edit PDF annotations](Help/Editing-annotations).
-You can preview where a citation, figure or footnote link points by hovering it — [Toggle Hover Preview](CmdToggleHoverPreview) or set CitationHoverDelay in [advanced settings](CmdAdvancedSettings).
+You can preview where a citation, figure or footnote link points by hovering it — [Toggle Citation Hover Preview](CmdToggleHoverPreview) or set CitationHoverDelay in [advanced settings](CmdAdvancedSettings).
 )tips");
 
 static Str sumatraPromos = StrL(R"promos(Try [Edna](https://edna.arslexis.io): a note taking web app for power users.
@@ -127,7 +128,7 @@ static int gSelectedTipIdx = -1;
 
 static void CollectTipsFromString(Str src, Str prefix, StrVec* out) {
     StrVec lines;
-    Split(&lines, src, "\n");
+    Split(&lines, src, StrL("\n"));
     for (int i = 0; i < len(lines); i++) {
         Str line = lines[i];
         if (str::IsEmptyOrWhiteSpace(line)) {
@@ -143,7 +144,7 @@ static void CollectTipsFromString(Str src, Str prefix, StrVec* out) {
 
 // the markup of the tip currently on show, {} when there is none
 static Str SelectedTipLine() {
-    if (!gGlobalPrefs->showTips || gSelectedTipIdx < 0) {
+    if (!gSettings->showTips || gSelectedTipIdx < 0) {
         return {};
     }
     StrVec& v = gSelectedIsPromo ? gPromoLines : gTipLines;
@@ -168,7 +169,7 @@ static void EnsureTipsParsed() {
     if (gTipsParsed) {
         return;
     }
-    CollectTipsFromString(sumatraTips, "Tip: ", &gTipLines);
+    CollectTipsFromString(sumatraTips, StrL("Tip: "), &gTipLines);
     CollectTipsFromString(sumatraPromos, {}, &gPromoLines);
     gTipsParsed = true;
     PickRandomTipOrPromo();
@@ -213,7 +214,7 @@ constexpr int kInnerPadding = 8;
 static const Str kSumatraTxtFont = StrL("Arial Black");
 constexpr int kSumatraTxtFontSize = 24;
 
-#define LAYOUT_LTR 0
+constexpr int kLayoutLtr = 0;
 
 static ATOM gAtomAbout;
 static HWND gHwndAbout;
@@ -231,24 +232,25 @@ struct AboutRow {
 static AboutRow gAboutRows[] = {
     // a null rightTxt means "the app version", filled in by Sync() because it
     // isn't known until runtime (32/64-bit, debug)
-    {"version", nullptr, nullptr},
-    {"build", "Built: " __DATE__ " " __TIME__, nullptr},
-    {"website", "SumatraPDF website", kWebsiteURL},
-    {"manual", "SumatraPDF manual", kManualURL},
-    {"forums", "SumatraPDF forums", "https://github.com/sumatrapdfreader/sumatrapdf/discussions"},
-    {"programming", "The Programmers", "https://github.com/sumatrapdfreader/sumatrapdf/blob/master/AUTHORS"},
-    {"licenses", "Various Open Source", "https://github.com/sumatrapdfreader/sumatrapdf/blob/master/AUTHORS"},
-#if defined(GIT_COMMIT_ID_STR)
-    {"last change", "git commit " GIT_COMMIT_ID_STR,
-     "https://github.com/sumatrapdfreader/sumatrapdf/commit/" GIT_COMMIT_ID_STR},
+    {StrL("version"), {}, {}},
+    {StrL("built on"), StrL(__DATE__ " " __TIME__), {}},
+    {StrL("manual"), StrL("SumatraPDF manual"), StrL("https://www.sumatrapdfreader.org/docs/SumatraPDF-documentation")},
+    {StrL("version history"), StrL("What's new"), StrL("https://www.sumatrapdfreader.org/docs/Version-history")},
+    {StrL("website"), StrL("SumatraPDF website"), Str(kWebsiteURL)},
+    {StrL("forums"), StrL("SumatraPDF forums"), StrL("https://github.com/sumatrapdfreader/sumatrapdf/discussions")},
+    {StrL("licenses"), StrL("Various Open Source"),
+     StrL("https://github.com/sumatrapdfreader/sumatrapdf/blob/master/AUTHORS")},
+#ifdef GIT_COMMIT_ID_STR
+    {StrL("last change"), StrL("git commit " GIT_COMMIT_ID_STR),
+     StrL("https://github.com/sumatrapdfreader/sumatrapdf/commit/" GIT_COMMIT_ID_STR)},
 #endif
-#if defined(PRE_RELEASE_VER)
-    {"a note", "Pre-release version, for testing only!", nullptr},
+#ifdef PRE_RELEASE_VER
+    {StrL("a note"), StrL("Pre-release version, for testing only!"), {}},
 #endif
-#ifdef DEBUG
-    {"a note", "Debug version, for testing only!", nullptr},
+#if IS_DEBUG
+    {StrL("a note"), StrL("Debug version, for testing only!"), {}},
 #endif
-    {nullptr, nullptr, nullptr}};
+    {{}, {}, {}}};
 
 // The About screen's two text columns: a Table (ILayout) whose left column
 // is right-aligned and right column left-aligned. Rows with a url become
@@ -263,8 +265,11 @@ struct AboutCtrl : VirtCtrl {
     Table* table = nullptr;
     // "Show frequently read", bottom right of the About page (not the window)
     VirtLink* showFreqRead = nullptr;
-    // the colored app name on top of the box
+    // the colored app name on top of the box; hidden in the home-page dropdown
     SumatraLogo* logo = nullptr;
+    // copies version / OS / machine info for bug reports (dialog and dropdown)
+    VirtButton* copyInfoBtn = nullptr;
+    bool hideLogo = false;
 
     // geometry, computed by UpdateLayout()
     Rect aboutRect;  // the framed box
@@ -277,6 +282,7 @@ struct AboutCtrl : VirtCtrl {
     void UpdateLayout(Rect clientRc);
     VirtText* LeftAt(int i);
     VirtText* RightAt(int i);
+    void Paint(VirtPaintCtx&) override;
     void PaintChildren(VirtPaintCtx&) override;
     int LayoutChildCount() override;
     ILayout* LayoutChildAt(int) override;
@@ -284,18 +290,16 @@ struct AboutCtrl : VirtCtrl {
 
 static void OpenAboutUrl(VirtMouseEvent* ev) {
     auto* link = (VirtLink*)ev->target;
-    if (len(link->target) > 0) {
-        SumatraLaunchBrowser(link->target);
-    }
+    OpenTipUrl(link->target);
 }
 
 void SetPromoString(Str s) {
-    if (!s) return;
+    if (len(s) == 0) return;
     str::ReplaceWithCopy(&promoFromServer, s);
 }
 
 static TempStr GetAppVersionTemp() {
-    TempStr s = str::DupTemp("v" CURR_VERSION_STRA);
+    TempStr s = str::DupTemp(StrL("v" CURR_VERSION_STRA));
     if (IsProcess64()) {
         s = str::JoinTemp(s, StrL(" 64-bit"));
     } else {
@@ -332,7 +336,7 @@ SumatraLogo::SumatraLogo() {
 }
 
 Size SumatraLogo::GetIdealSize() {
-    Size sz = PlatformFontMeasureText(font, kAppName);
+    Size sz = PlatformFontMeasureText(font, StrL(kAppName));
     HWND hwnd = GetHwnd();
     sz.dy += DpiScale(kAboutBoxMarginDy * 2);
     sz.dx += 2 * DpiScale(kInnerPadding);
@@ -341,7 +345,7 @@ Size SumatraLogo::GetIdealSize() {
 
 void SumatraLogo::Paint(VirtPaintCtx& ctx) {
     static Color cols[] = {kCol1, kCol2, kCol3, kCol4, kCol5, kCol5, kCol4, kCol3, kCol2, kCol1};
-    Size txtSize = PlatformFontMeasureText(font, kAppName);
+    Size txtSize = PlatformFontMeasureText(font, StrL(kAppName));
     Rect r = ctx.bounds;
     Point pt{r.x + ((r.dx - txtSize.dx) / 2), r.y + ((r.dy - txtSize.dy) / 2)};
     char buf[2] = {};
@@ -410,20 +414,47 @@ VirtText* AboutCtrl::RightAt(int i) {
     return (VirtText*)table->GetCell(i, 1);
 }
 
+// framed box: title band, body, then children, then the column divider
+void AboutCtrl::Paint(VirtPaintCtx& ctx) {
+    Rect rect = aboutRect;
+    if (rect.IsEmpty()) {
+        return;
+    }
+    Color lineCol = ThemeWindowTextColor();
+    Color bgCol = ThemeMainWindowBackgroundColor();
+    ctx.gfx->FillRect(rect, bgCol);
+
+#ifndef ABOUT_USE_LESS_COLORS
+    if (headerSize.dy > 0) {
+        Rect titleRect(rect.TL(), headerSize);
+        ctx.gfx->DrawRect({rect.x, rect.y + kAboutLineOuterSize, rect.dx, titleRect.dy}, lineCol, kAboutLineOuterSize);
+        ctx.gfx->DrawRect({rect.x, rect.y + titleRect.dy, rect.dx, rect.dy - titleRect.dy}, lineCol,
+                          kAboutLineOuterSize);
+    } else {
+        ctx.gfx->DrawRect(rect, lineCol, kAboutLineOuterSize);
+    }
+#endif
+}
+
 // paint logo (VirtCtrl children) and the table's VirtText / VirtLink cells
 void AboutCtrl::PaintChildren(VirtPaintCtx& ctx) {
     VirtCtrl::PaintChildren(ctx);
-    if (!table) {
-        return;
-    }
-    for (int i = 0; i < table->LayoutChildCount(); i++) {
-        VirtCtrl* v = table->LayoutChildAt(i)->AsVirtCtrl();
-        if (!v) {
-            continue;
+    if (table) {
+        for (int i = 0; i < table->LayoutChildCount(); i++) {
+            VirtCtrl* v = table->LayoutChildAt(i)->AsVirtCtrl();
+            if (!v) {
+                continue;
+            }
+            v->SetRoot(root);
+            // cells were given absolute window coords by Table::SetBounds
+            v->PaintTree(ctx.gfx, {0, 0}, ctx.clip);
         }
-        v->SetRoot(root);
-        // cells were given absolute window coords by Table::SetBounds
-        v->PaintTree(ctx.gfx, {0, 0}, ctx.clip);
+    }
+
+    if (table && !table->lastBounds.IsEmpty()) {
+        Color lineCol = ThemeWindowTextColor();
+        Rect t = table->lastBounds;
+        ctx.gfx->DrawLine({dividerX, t.y, 0, t.dy}, lineCol, kAboutLineSepSize);
     }
 }
 
@@ -474,8 +505,8 @@ void AboutCtrl::Sync() {
 
     logo->font = GetUserGuiFont(kSumatraTxtFont, DpiScale(kSumatraTxtFontSize));
 
-    PlatformFont* fontLeftTxt = GetUserGuiFont(kLeftTextFont, DpiScale(kLeftTextFontSize));
-    PlatformFont* fontRightTxt = GetUserGuiFont(kRightTextFont, DpiScale(kRightTextFontSize));
+    PlatformFont* fontLeftTxt = GetUserGuiFont(Str(kLeftTextFont), DpiScale(kLeftTextFontSize));
+    PlatformFont* fontRightTxt = GetUserGuiFont(Str(kRightTextFont), DpiScale(kRightTextFontSize));
     Color colText = ThemeWindowTextColor();
     Color colLink = ThemeWindowLinkColor();
 
@@ -499,7 +530,9 @@ void AboutCtrl::Sync() {
 // the About box is the title band above the two-column table. This sizes it from
 // the table, centers it in clientRc and positions the table inside it
 void AboutCtrl::UpdateLayout(Rect clientRc) {
-    headerSize = logo->GetIdealSize();
+    bool showLogo = logo && logo->GetVisibility() != Visibility::Collapse;
+    bool showCopy = copyInfoBtn && copyInfoBtn->GetVisibility() != Visibility::Collapse;
+    headerSize = showLogo ? logo->GetIdealSize() : Size{};
 
     int leftRightSpaceDx = DpiScale(kAboutLeftRightSpaceDx);
     int marginDx = DpiScale(kAboutMarginDx);
@@ -509,27 +542,157 @@ void AboutCtrl::UpdateLayout(Rect clientRc) {
     table->rowGap = aboutTxtDy;
     Size tableSize = table->Layout(ExpandInf());
 
+    Size btnSz{};
+    int gap = DpiScale(12);
+    int padBottom = DpiScale(kAboutRectPadding);
+    int copyBlockDy = 0;
+    if (showCopy) {
+        btnSz = copyInfoBtn->GetIdealSize();
+        copyBlockDy = gap + btnSz.dy + padBottom;
+    }
+
     Rect r;
     // the divider line is drawn inside the gap between the two columns
-    r.dx = std::max(tableSize.dx + ABOUT_LINE_SEP_SIZE, headerSize.dx) + (2 * ABOUT_LINE_OUTER_SIZE) + (2 * marginDx);
+    r.dx = std::max(tableSize.dx + kAboutLineSepSize, headerSize.dx) + (2 * kAboutLineOuterSize) + (2 * marginDx);
+    if (showCopy) {
+        r.dx = std::max(r.dx, btnSz.dx + (2 * marginDx) + (2 * kAboutLineOuterSize));
+    }
     // one extra row gap so the last row isn't flush against the frame
-    r.dy = headerSize.dy + tableSize.dy + aboutTxtDy + (2 * ABOUT_LINE_OUTER_SIZE) + 4;
+    r.dy = headerSize.dy + tableSize.dy + aboutTxtDy + (2 * kAboutLineOuterSize) + 4 + copyBlockDy;
     r.x = clientRc.x + ((clientRc.dx - r.dx) / 2);
-    r.y = clientRc.y + ((clientRc.dy - r.dy) / 2);
+    if (hideLogo) {
+        r.y = clientRc.y;
+    } else if (showCopy) {
+        r.y = clientRc.y + DpiScale(kAboutRectPadding);
+    } else {
+        r.y = clientRc.y + ((clientRc.dy - r.dy) / 2);
+    }
     aboutRect = r;
 
-    logo->SetBounds({r.x + ((r.dx - headerSize.dx) / 2), r.y, headerSize.dx, headerSize.dy});
+    if (showLogo) {
+        logo->SetBounds({r.x + ((r.dx - headerSize.dx) / 2), r.y, headerSize.dx, headerSize.dy});
+    }
 
-    int x = r.x + ABOUT_LINE_OUTER_SIZE + marginDx;
-    int y = r.y + headerSize.dy + 4;
+    int x = r.x + kAboutLineOuterSize + marginDx;
+    int y = r.y + (showLogo ? headerSize.dy : kAboutLineOuterSize) + 4;
     table->SetBounds({x, y, tableSize.dx, tableSize.dy});
     dividerX = table->CellRect(0, 1).x - leftRightSpaceDx;
+
+    if (showCopy) {
+        int btnX = r.x + ((r.dx - btnSz.dx) / 2);
+        int btnY = r.y + r.dy - padBottom - btnSz.dy;
+        copyInfoBtn->SetBounds({btnX, btnY, btnSz.dx, btnSz.dy});
+    }
+}
+
+// Version, OS, WebView2, memory and similar facts for a bug report.
+static void AppendBugReportInfo(str::Builder& s) {
+    s.Append(fmt("SumatraPDF %s\n", GetAppVersionTemp()));
+    s.Append(fmt("Built on: %s %s\n", StrL(__DATE__), StrL(__TIME__)));
+    if (gitCommidId) {
+        s.Append(fmt("Git: %s\n", gitCommidId));
+    }
+    Str exeType = IsDllBuild() ? StrL("dll") : StrL("static");
+    Str instType = IsRunningInPortableMode() ? StrL("portable") : StrL("installed");
+    s.Append(fmt("Type: %s, %s\n", exeType, instType));
+    if (gIsPreReleaseBuild) {
+        s.Append(StrL("Pre-release: yes\n"));
+    }
+    if (gIsAsanBuild) {
+        s.Append(StrL("ASan: yes\n"));
+    }
+
+    OSVERSIONINFOEX ver{};
+    if (GetOsVersion(ver)) {
+        TempStr os = OsNameFromVerTemp(ver);
+        int buildNumber = (int)ver.dwBuildNumber & 0xFFFF;
+        Str arch = StrL("64-bit");
+        if (IsProcess32()) {
+            arch = IsRunningInWow64() ? StrL("32-bit (Wow64)") : StrL("32-bit");
+        }
+        s.Append(fmt("OS: Windows %s, build %d, %s\n", os, buildNumber, arch));
+    }
+    if (IsOs64()) {
+        s.Append(StrL("OS architecture: 64-bit\n"));
+    } else {
+        s.Append(StrL("OS architecture: 32-bit\n"));
+    }
+
+    TempStr wv = GetWebView2VersionTemp();
+    if (len(wv) == 0) {
+        s.Append(StrL("WebView2: not installed\n"));
+    } else {
+        s.Append(fmt("WebView2: %s\n", wv));
+    }
+
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof(ms);
+    if (GlobalMemoryStatusEx(&ms)) {
+        float physMemGB = (float)ms.ullTotalPhys / (float)(1024 * 1024 * 1024);
+        s.Append(fmt("Physical memory: %.2f GB (%d%% in use)\n", physMemGB, (int)ms.dwMemoryLoad));
+    }
+
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    s.Append(fmt("Processors: %d\n", (int)si.dwNumberOfProcessors));
+    TempStr cpuName = ReadRegStrTemp(HKEY_LOCAL_MACHINE, StrL(R"(HARDWARE\DESCRIPTION\System\CentralProcessor\0)"),
+                                     StrL("ProcessorNameString"));
+    if (cpuName) {
+        s.Append(fmt("Processor: %s\n", cpuName));
+    }
+
+    int screenDx = GetSystemMetrics(SM_CXSCREEN);
+    int screenDy = GetSystemMetrics(SM_CYSCREEN);
+    int dpi = DpiGet();
+    s.Append(fmt("Screen: %dx%d, DPI %d (%d%%)\n", screenDx, screenDy, dpi, MulDiv(dpi, 100, 96)));
+
+    char country[32] = {}, lang[32]{};
+    GetLocaleInfoA(LOCALE_USER_DEFAULT, LOCALE_SISO3166CTRYNAME, country, dimof(country) - 1);
+    GetLocaleInfoA(LOCALE_USER_DEFAULT, LOCALE_SISO639LANGNAME, lang, dimof(lang) - 1);
+    s.Append(fmt("Locale: %s-%s\n", Str(lang), Str(country)));
+
+    Str theme = ThemeGetNameAt(ThemeGetCurrentIndex());
+    if (theme) {
+        s.Append(fmt("Theme: %s\n", theme));
+    }
+    if (IsRunningOnWine()) {
+        s.Append(StrL("Wine: yes\n"));
+    }
+}
+
+static void CopyAboutInfoToClipboard() {
+    str::Builder info;
+    str::BuilderReserve(info, 1024);
+    AppendBugReportInfo(info);
+    CopyTextToClipboard(ToStr(info));
+}
+
+static void OnCopyProgramInfo(VirtMouseEvent*) {
+    CopyAboutInfoToClipboard();
 }
 
 // prepares the About tree for hwnd and computes its geometry
-static AboutCtrl* UpdateAboutLayout(VirtRoot** rootPtr, HWND hwnd, Rect clientRc) {
+static AboutCtrl* UpdateAboutLayout(VirtRoot** rootPtr, HWND hwnd, Rect clientRc, bool hover = false) {
+    DpiSetFromHwnd(hwnd);
     AboutCtrl* about = EnsureAboutCtrl(rootPtr, hwnd, clientRc);
+    about->hideLogo = hover;
+    if (about->logo) {
+        about->logo->SetVisibility(hover ? Visibility::Collapse : Visibility::Visible);
+    }
     about->Sync();
+    bool showCopy = hover || (hwnd == gHwndAbout);
+    if (showCopy) {
+        if (!about->copyInfoBtn) {
+            about->copyInfoBtn =
+                NewThemedButton(hwnd, Tr("Copy program and machine info to clipboard"), GetAppFont(), false);
+            about->copyInfoBtn->onClick = MkFunc1Void(OnCopyProgramInfo);
+            about->AddChild(about->copyInfoBtn);
+        }
+        about->copyInfoBtn->font = GetAppFont();
+        about->copyInfoBtn->SetVisibility(Visibility::Visible);
+    } else if (about->copyInfoBtn) {
+        about->copyInfoBtn->SetVisibility(Visibility::Collapse);
+    }
     about->UpdateLayout(clientRc);
     return about;
 }
@@ -539,68 +702,31 @@ static AboutCtrl* UpdateAboutLayout(VirtRoot** rootPtr, HWND hwnd, Rect clientRc
    software - hopeless to understand without seeing the design. */
 static void DrawAbout(Gfx* gfx, VirtRoot* root, Rect clientRc) {
     auto* about = (AboutCtrl*)root->owned;
-    Rect rect = about->aboutRect;
-    Color lineCol = ThemeWindowTextColor();
     Color bgCol = ThemeMainWindowBackgroundColor();
     gfx->FillRect(clientRc, bgCol);
 
-    /* render title */
-    Rect titleRect(rect.TL(), about->headerSize);
-
-#ifndef ABOUT_USE_LESS_COLORS
-    gfx->DrawRect({rect.x, rect.y + ABOUT_LINE_OUTER_SIZE, rect.dx, titleRect.dy}, lineCol, ABOUT_LINE_OUTER_SIZE);
-#else
-    Rect titleBgBand(0, rect.y, clientRc.dx, titleRect.dy);
+#ifdef ABOUT_USE_LESS_COLORS
+    Color lineCol = ThemeWindowTextColor();
+    Rect titleRect(about->aboutRect.TL(), about->headerSize);
+    Rect titleBgBand(0, about->aboutRect.y, clientRc.dx, titleRect.dy);
     gfx->FillRect(titleBgBand, bgCol);
-    gfx->DrawLine(Rect(0, rect.y, clientRc.dx, 0), lineCol);
-    gfx->DrawLine(Rect(0, rect.y + titleRect.dy, clientRc.dx, 0), lineCol);
+    gfx->DrawLine(Rect(0, about->aboutRect.y, clientRc.dx, 0), lineCol);
+    gfx->DrawLine(Rect(0, about->aboutRect.y + titleRect.dy, clientRc.dx, 0), lineCol);
 #endif
 
-    /* render attribution box */
-#ifndef ABOUT_USE_LESS_COLORS
-    gfx->DrawRect({rect.x, rect.y + titleRect.dy, rect.dx, rect.dy - titleRect.dy}, lineCol, ABOUT_LINE_OUTER_SIZE);
-#endif
-
-    /* render both text columns */
     root->Paint(gfx, clientRc);
-
-    Rect divideLine(about->dividerX, rect.y + titleRect.dy + 4, 0, rect.dy - titleRect.dy - 8);
-    gfx->DrawLine(divideLine, lineCol, ABOUT_LINE_SEP_SIZE);
 }
 
 static void OnPaintAbout(HWND hwnd) {
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd, &ps);
-    SetLayout(hdc, LAYOUT_LTR);
+    SetLayout(hdc, kLayoutLtr);
     Rect clientRc = HwndClientRect(hwnd);
     UpdateAboutLayout(&gAboutRoot, hwnd, clientRc);
     Gfx* gfx = GfxCreate(hdc);
     DrawAbout(gfx, gAboutRoot, clientRc);
     delete gfx;
     EndPaint(hwnd, &ps);
-}
-
-static void CopyAboutInfoToClipboard() {
-    str::Builder info(512);
-    TempStr ver = GetAppVersionTemp();
-    info.Append(fmt("%s %s\r\n", Str(kAppName), ver));
-    for (int i = len(info) - 2; i > 0; i--) {
-        info.AppendChar('-');
-    }
-    info.Append("\r\n");
-    // concatenate all the information into a single string
-    // (cf. CopyPropertiesToClipboard in SumatraProperties.cpp)
-    int maxLen = 0;
-    for (AboutRow* el = gAboutRows; el->leftTxt; el++) {
-        maxLen = std::max(maxLen, len(el->leftTxt));
-    }
-    for (AboutRow* el = gAboutRows; el->leftTxt; el++) {
-        for (int i = maxLen - len(el->leftTxt); i > 0; i--) {
-            info.AppendChar(' ');
-        }
-        info.Append(fmt("%s: %s\r\n", el->leftTxt, el->url ? el->url.s : el->rightTxt));
-    }
-    CopyTextToClipboard(ToStr(info));
 }
 
 static void CreateInfotipForLink(Str tooltip, const Rect& rc) {
@@ -686,6 +812,12 @@ static LRESULT CALLBACK WndProcAbout(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             }
             break;
 
+        case WM_KEYDOWN:
+            if ('C' == wp && IsCtrlPressed()) {
+                CopyAboutInfoToClipboard();
+            }
+            break;
+
         case WM_COMMAND:
             if (CmdCopySelection == LOWORD(wp)) {
                 CopyAboutInfoToClipboard();
@@ -723,7 +855,7 @@ void ShowAboutWindow(MainWindow* win) {
         ReportIf(!gAtomAbout);
     }
 
-    WCHAR* title = CWStrTemp(_TRA("About SumatraPDF"));
+    WCHAR* title = CWStrTemp(Tr("About SumatraPDF"));
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
     int x = CW_USEDEFAULT;
     int y = CW_USEDEFAULT;
@@ -739,15 +871,15 @@ void ShowAboutWindow(MainWindow* win) {
 
     // get the dimensions required for the about box's content
     AboutCtrl* about = UpdateAboutLayout(&gAboutRoot, gHwndAbout, HwndClientRect(gHwndAbout));
-    Rect rc = about->aboutRect;
     int rectPadding = DpiScale(kAboutRectPadding);
-    rc.Inflate(rectPadding, rectPadding);
+    dx = about->aboutRect.dx + (2 * rectPadding);
+    dy = about->aboutRect.dy + (2 * rectPadding);
 
     // resize the new window to just match these dimensions
     Rect wRc = HwndWindowRect(gHwndAbout);
     Rect cRc = HwndClientRect(gHwndAbout);
-    wRc.dx += rc.dx - cRc.dx;
-    wRc.dy += rc.dy - cRc.dy;
+    wRc.dx += dx - cRc.dx;
+    wRc.dy += dy - cRc.dy;
     MoveWindow(gHwndAbout, wRc.x, wRc.y, wRc.dx, wRc.dy, FALSE);
 
     HwndPositionInCenterOf(gHwndAbout, win->hwndFrame);
@@ -756,7 +888,8 @@ void ShowAboutWindow(MainWindow* win) {
 
 static void ShowFrequentlyRead(VirtMouseEvent* ev) {
     auto* win = (MainWindow*)ev->target->userData;
-    gGlobalPrefs->showStartPage = true;
+    gSettings->showStartPage = true;
+    HomePageRelayout(win);
     win->RedrawAll(true);
 }
 
@@ -767,7 +900,7 @@ void DrawAboutPage(MainWindow* win, Gfx* gfx) {
 
     bool showLink = HasPermission(Perm::SavePreferences | Perm::DiskAccess) && SettingsRememberOpenedFiles();
     if (showLink && !about->showFreqRead) {
-        auto* link = new VirtLink(_TRA("Show frequently read"));
+        auto* link = new VirtLink(Tr("Show frequently read"));
         link->withUnderline = true;
         link->isRtl = IsUIRtl();
         link->userData = (uintptr_t)win;
@@ -778,7 +911,7 @@ void DrawAboutPage(MainWindow* win, Gfx* gfx) {
     if (about->showFreqRead) {
         VirtLink* link = about->showFreqRead;
         link->visibility = showLink ? Visibility::Visible : Visibility::Collapse;
-        link->font = GetUserGuiFont("MS Shell Dlg", DpiScale(16));
+        link->font = GetUserGuiFont(StrL("MS Shell Dlg"), DpiScale(16));
         link->sz = {0, 0}; // re-measure: the font may have changed with the DPI
         Size txtSize = link->GetIdealSize(true);
         Rect r = {0, 0, txtSize.dx, txtSize.dy};
@@ -848,12 +981,12 @@ static bool IsHomeThumbOnScreen(const Rect& r, const Rect& thumbsArea, int margi
 
 // HomePageViewMode setting ("thumbnails" or "list")
 bool HomePageIsListView() {
-    return gGlobalPrefs && str::EqI(gGlobalPrefs->homePageViewMode, StrL("list"));
+    return gSettings && str::EqI(gSettings->homePageViewMode, StrL("list"));
 }
 
 void SetHomePageListView(bool listView) {
     Str mode = listView ? StrL("list") : StrL("thumbnails");
-    str::ReplaceWithCopy(&gGlobalPrefs->homePageViewMode, mode);
+    str::ReplaceWithCopy(&gSettings->homePageViewMode, mode);
 }
 
 struct HomePageLayout {
@@ -865,6 +998,7 @@ struct HomePageLayout {
     Rect rcIconOpen;
     Rect rcIconListView;
     Rect rcIconThumbnailView;
+    Rect rcLogo;
 
     VirtText* freqRead = nullptr;
     VirtText* openDoc = nullptr;
@@ -892,10 +1026,11 @@ struct HomePageLayout {
 HomePageLayout::~HomePageLayout() = default;
 
 // --- home page chrome as a VirtCtrl tree ---
-// The chrome (header, view-mode buttons, "Open a document..." link, help
-// button) lives for as long as the window, so hover / pressed state survives
-// the repaints that scrolling and filtering cause. Geometry still comes from
-// LayoutHomePage(): HomePageSyncChrome() just feeds it into the tree.
+// The chrome (header, view-mode buttons, "Open a document..." link, logo row)
+// lives for as long as the window, so hover / pressed state survives the
+// repaints that scrolling and filtering cause. Geometry still comes from
+// LayoutHomePage(): HomePageSyncChrome() just feeds it into the tree. The
+// [palette] logo [help] row is an HBox of virt controls.
 
 // Leaf home-page controls: no MainWindow*. Wire onClick / hwndForCmds when
 // building the chrome so the same VirtCtrl types stay reusable.
@@ -919,9 +1054,28 @@ struct HomeOpenDocCtrl : VirtCtrl {
     void Paint(VirtPaintCtx&) override;
 };
 
-struct HomeHelpBtnCtrl : VirtCtrl {
-    HomeHelpBtnCtrl();
+// white-circle home-page buttons: "?" keyboard help and the command palette
+struct HomeCircleBtnCtrl : VirtCtrl {
+    Pixmap* pixmap = nullptr; // not owned, from GetCachedPixmapForSvg(); null → glyph
+    Str glyph;                // not owned; used when pixmap is null ("?")
+
+    HomeCircleBtnCtrl();
+    Size GetIdealSize() override;
     void Paint(VirtPaintCtx&) override;
+};
+
+// [command palette] SumatraPDF [keyboard shortcuts] along the top of the home
+// page. An HBox sizes and places the three virt controls; they are also our
+// VirtCtrl children so paint / hit-test / delete stay on this tree.
+struct HomeLogoRow : VirtCtrl {
+    HBox* box = nullptr;
+
+    HomeLogoRow();
+    ~HomeLogoRow() override;
+
+    void AddItem(VirtCtrl*);
+    Size GetIdealSize() override;
+    void SetBounds(Rect) override;
 };
 
 struct HomeEntryCtrl;
@@ -943,9 +1097,7 @@ struct HomeEntryCtrl : VirtCtrl {
     VirtCloseButton* closeBtn = nullptr;
     VirtCloseButton* removeBtn = nullptr;
     HomeListIconCtrl* pinBtn = nullptr;
-    // per-paint: points into the HomePageLayout being painted. Set by
-    // HomePageSyncChrome right before every paint; only valid during the
-    // homeRoot->Paint() that follows
+    // points into gHomeLayoutCache.thumbs; set by HomePageRelayout
     ThumbnailLayout* layout = nullptr;
 
     HomeEntryCtrl();
@@ -961,8 +1113,6 @@ struct HomeEntriesCtrl : VirtCtrl {
     // selection, which follows the mouse
     int activeIdx = -1;
     Point lastHoverPt{-1, -1};
-    // per-paint search-filter state, owned by the HomePageLayout being painted
-    // (same lifetime rules as HomeEntryCtrl::layout)
     const StrVec* filterWords = nullptr;
     Vec<u8>* highlighted = nullptr;
 
@@ -1006,19 +1156,30 @@ struct HomeChromeCtrl : VirtCtrl {
     HomeSearchBorderCtrl* searchBorder = nullptr;
     HomeEntriesCtrl* entries = nullptr;
     VirtText* hdr = nullptr;
+    HomeLogoRow* logoRow = nullptr;
+    SumatraLogo* logo = nullptr;
     HomeViewIconCtrl* thumbView = nullptr;
     HomeViewIconCtrl* listView = nullptr;
     HomeOpenDocCtrl* openDoc = nullptr;
-    HomeHelpBtnCtrl* helpBtn = nullptr;
+    HomeCircleBtnCtrl* paletteBtn = nullptr;
+    HomeCircleBtnCtrl* helpBtn = nullptr;
+    // chrome-less About dropdown under the logo; shown after the tooltip delay
+    VirtHost* aboutHover = nullptr;
+
+    ~HomeChromeCtrl() override;
 };
 
 static HomeChromeCtrl* EnsureHomeChrome(MainWindow* win);
+static HomeChromeCtrl* HomeChrome(MainWindow* win);
 static HomeEntriesCtrl* HomeEntries(MainWindow* win);
+static void HideHomeAboutHover(MainWindow* win);
+static void ShowHomeAboutHover(MainWindow* win);
 static void HomePageSyncChrome(HomePageLayout& l);
 static Rect HomeSelectionOutlineRect(const ThumbnailLayout& t);
+static Rect HomeOutlinePaintClip(const Rect& thumbsArea, const Rect& searchBorder, const Rect& tip, bool hasTip);
 
 static int HomePageIconSize() {
-    int sz = DpiScale(gGlobalPrefs->toolbarSize);
+    int sz = DpiScale(gSettings->toolbarSize);
     if (sz < 1) {
         sz = DpiScale(16);
     }
@@ -1029,11 +1190,10 @@ constexpr int kThumbsMiddleMargin = 32;
 // draw a gray separator line between list-view rows
 static bool gShowListSeparatorLine = false;
 constexpr int kSearchEditDy = 28;
-constexpr int kHeaderSearchGapY = 12;
 constexpr int kSearchThumbnailsGapY = 12;
 
 static PlatformFont* HomePageFont(int size) {
-    return GetUserGuiFont("MS Shell Dlg", DpiScale(size));
+    return GetUserGuiFont(StrL("MS Shell Dlg"), DpiScale(size));
 }
 
 static void HomeSelectFromSearchReturnCol(MainWindow* win);
@@ -1057,7 +1217,7 @@ struct HomeSearchEdit : Edit {
             return;
         }
         if (ev->msg == WM_KEYDOWN && ev->wparam == VK_ESCAPE) {
-            SetText("");
+            SetText(StrL(""));
             if (win) {
                 HwndSetFocus(win->hwndCanvas);
                 win->RedrawAll(true);
@@ -1079,7 +1239,7 @@ struct HomeSearchEdit : Edit {
 // Home-list entries with a path (same set as thumbnails when search is empty).
 static int CountHomePageFiles() {
     Vec<FileState*> all;
-    if (gGlobalPrefs && gGlobalPrefs->homePageSortByFrequentlyRead) {
+    if (gSettings && gSettings->homePageSortByFrequentlyRead) {
         FileHistoryGetFrequencyOrder(all);
     } else {
         FileHistoryGetRecentlyOpenedOrder(all);
@@ -1098,21 +1258,32 @@ static void UpdateHomeSearchCueBanner(MainWindow* win) {
     if (!win || !win->homeSearch) {
         return;
     }
-    // _TRA returns Str; pass .s into type-safe fmt for the format string.
-    TempStr cue = fmt(_TRA("Search %d files (Ctrl + F)").s, CountHomePageFiles());
-    win->homeSearch->SetCue(cue);
+    // Tr returns Str; pass .s into type-safe fmt for the format string.
+    TempStr cue = fmt(Tr("Search %d files (Ctrl + F)").s, CountHomePageFiles());
+    EditSetCueText(win->homeSearch, cue);
 }
 
 static void HomeSearchTextChanged(MainWindow* win) {
     win->homePageScrollY = 0;
     // the filter changed the list, so select its first entry (#1136)
     HomePageSelectFirst(win);
+    HomePageRelayout(win);
     HwndInvalidate(win->hwndCanvas);
 }
 
 // the keyboard selection outline is hidden while the search box has the focus
 static void HomeSearchFocusChanged(MainWindow* win) {
     HwndInvalidate(win->hwndCanvas);
+}
+
+static void PlaceHomeSearchEdit(MainWindow* win, const Rect& rcSearchBorder) {
+    if (!win || !win->homeSearchLayout || rcSearchBorder.IsEmpty()) {
+        return;
+    }
+    int searchEditDy = DpiScale(kSearchEditDy);
+    Rect rcEdit = {rcSearchBorder.x + 1, rcSearchBorder.y + 1, rcSearchBorder.dx - 2, searchEditDy};
+    LayoutToSize(win->homeSearchLayout, rcEdit.Size());
+    win->homeSearchLayout->SetBounds(rcEdit);
 }
 
 static void EnsureHomeSearchCreated(MainWindow* win) {
@@ -1140,7 +1311,7 @@ static void EnsureHomeSearchCreated(MainWindow* win) {
     UpdateHomeSearchCueBanner(win);
     // add left/right padding so text doesn't overlap the border
     int margin = DpiScale(6);
-    e->SetMargins(margin, margin);
+    EditSetMargins(e, margin, margin);
     // restore the query from before the edit control was destroyed
     // (e.g. by switching to a document tab and back)
     if (len(win->homeSearchQuery) > 0) {
@@ -1152,10 +1323,17 @@ static void EnsureHomeSearchCreated(MainWindow* win) {
     box->alignCross = CrossAxisAlign::CrossCenter;
     box->AddChild(e, 1);
     win->homeSearchLayout = box;
+    e->SetIsVisible(false);
+}
+
+void HomePageHideSearch(MainWindow* win) {
+    if (win && win->homeSearch) {
+        win->homeSearch->SetIsVisible(false);
+    }
 }
 
 void HomePageDestroySearch(MainWindow* win) {
-    if (!win->homeSearch) {
+    if (!win || !win->homeSearch) {
         return;
     }
     TempStr query = win->homeSearch->GetTextTemp();
@@ -1178,10 +1356,25 @@ void HomePageUpdateSearchColors(MainWindow* win) {
     }
 }
 
-void HomePageFocusSearch(MainWindow* win) {
-    EnsureHomeSearchCreated(win);
-    win->homeSearch->SetIsVisible(true);
-    HwndSetFocus(win->homeSearch->hwnd);
+// The search edit survives while the frame moves between monitors. Its HFONT
+// and text margins do not follow WM_DPICHANGED automatically, and the page's
+// cached rectangles were measured at the previous DPI.
+void HomePageOnDpiChanged(MainWindow* win, int dpi) {
+    HideHomeAboutHover(win);
+    ClearHomeLayoutCache();
+    if (!win || dpi <= 0) {
+        return;
+    }
+    if (win->homeSearch) {
+        int fontSize = DpiScaleByDpi(dpi, 14);
+        win->homeSearch->SetFont(GetUserGuiFont(StrL("MS Shell Dlg"), fontSize));
+        int margin = DpiScaleByDpi(dpi, 6);
+        EditSetMargins(win->homeSearch, margin, margin);
+    }
+    HomePageRelayout(win);
+    if (win->hwndCanvas) {
+        HwndInvalidate(win->hwndCanvas, true);
+    }
 }
 
 void PickAnotherRandomPromotion() {
@@ -1192,12 +1385,14 @@ void PickAnotherRandomPromotion() {
 // filter changes; pure scrollY changes just offset stored thumb rects ---
 struct HomePageLayoutCache {
     bool valid = false;
+    int dpi = 0;
     Rect canvasRc;
     int scrollY = 0;
     int nFiles = 0;
     bool listView = false;
     bool sortByFreq = false;
     bool showTips = false;
+    bool isRtl = false;
     int tipIdx = -1;
     bool tipIsPromo = false;
     Str filterText; // owned
@@ -1207,6 +1402,7 @@ struct HomePageLayoutCache {
     Rect rcIconOpen;
     Rect rcIconListView;
     Rect rcIconThumbnailView;
+    Rect rcLogo;
     Rect rcTip;
     Rect rcFreqRead;
     Rect rcOpenDoc;
@@ -1216,6 +1412,7 @@ struct HomePageLayoutCache {
     bool hasTip = false;
     Vec<ThumbnailLayout> thumbs;
     StrVec filterWords;
+    Vec<u8> highlighted;
 };
 
 static HomePageLayoutCache gHomeLayoutCache;
@@ -1224,20 +1421,30 @@ static void ClearHomeLayoutCache() {
     gHomeLayoutCache.valid = false;
     str::Free(gHomeLayoutCache.filterText);
     gHomeLayoutCache.filterText = {};
-    gHomeLayoutCache.thumbs.Reset();
+    VecReset(gHomeLayoutCache.thumbs);
     gHomeLayoutCache.filterWords.Reset();
+    VecReset(gHomeLayoutCache.highlighted);
     gHomeLayoutCache.hasTip = false;
     gHomeLayoutCache.nFiles = 0;
     gHomeLayoutCache.scrollY = 0;
 }
 
-// The cache holds raw FileState* (ThumbnailLayout::fs) owned by gGlobalPrefs.
+// The cache holds raw FileState* (ThumbnailLayout::fs) owned by gSettings.
 // Reloading settings frees and rebuilds those, so the cache has to be dropped
 // first or hover / selection reads freed memory (crash 8c34d7eda). It is
-// rebuilt on the next paint.
+// rebuilt on the next HomePageRelayout.
 // must be called before the FileState objects the cache points at are freed
 void HomePageInvalidateLayoutCache() {
     ClearHomeLayoutCache();
+}
+
+void HomePageFocusSearch(MainWindow* win) {
+    EnsureHomeSearchCreated(win);
+    HomePageRelayout(win);
+    if (win->homeSearch) {
+        win->homeSearch->SetIsVisible(true);
+        EditSetFocus(win->homeSearch);
+    }
 }
 
 static void OffsetThumbnailLayouts(Vec<ThumbnailLayout>& thumbs, int dy) {
@@ -1258,15 +1465,19 @@ static void OffsetThumbnailLayouts(Vec<ThumbnailLayout>& thumbs, int dy) {
 }
 
 static TempStr HomeSearchQueryTemp(MainWindow* win) {
-    if (!win->homeSearch) {
-        return {};
+    if (win->homeSearch) {
+        return win->homeSearch->GetTextTemp();
     }
-    return win->homeSearch->GetTextTemp();
+    // edit is created after paint; keep filtering with the remembered query
+    return win->homeSearchQuery;
 }
 
 static bool HomeLayoutCacheMatches(const Rect& rc, Str filterText) {
     auto& c = gHomeLayoutCache;
     if (!c.valid) {
+        return false;
+    }
+    if (c.dpi != DpiGet()) {
         return false;
     }
     if (c.canvasRc != rc) {
@@ -1275,10 +1486,13 @@ static bool HomeLayoutCacheMatches(const Rect& rc, Str filterText) {
     if (c.listView != HomePageIsListView()) {
         return false;
     }
-    if (c.sortByFreq != (gGlobalPrefs && gGlobalPrefs->homePageSortByFrequentlyRead)) {
+    if (c.sortByFreq != (gSettings && gSettings->homePageSortByFrequentlyRead)) {
         return false;
     }
-    if (c.showTips != (gGlobalPrefs && gGlobalPrefs->showTips)) {
+    if (c.showTips != (gSettings && gSettings->showTips)) {
+        return false;
+    }
+    if (c.isRtl != IsUIRtl()) {
         return false;
     }
     if (c.tipIdx != gSelectedTipIdx || c.tipIsPromo != gSelectedIsPromo) {
@@ -1308,7 +1522,7 @@ static bool HomeLayoutCacheFilesMatch(const Vec<FileState*>& files) {
 
 static void CollectHomePageFiles(MainWindow* win, Vec<FileState*>& fileStates, StrVec& filterWords) {
     Vec<FileState*> allFileStates;
-    if (gGlobalPrefs->homePageSortByFrequentlyRead) {
+    if (gSettings->homePageSortByFrequentlyRead) {
         FileHistoryGetFrequencyOrder(allFileStates);
     } else {
         FileHistoryGetRecentlyOpenedOrder(allFileStates);
@@ -1330,19 +1544,21 @@ static void CollectHomePageFiles(MainWindow* win, Vec<FileState*>& fileStates, S
                 continue;
             }
         }
-        fileStates.Append(fs);
+        VecAppend(fileStates, fs);
     }
 }
 
 static void SaveHomeLayoutCache(const HomePageLayout& l, Str filterText, int scrollY) {
     auto& c = gHomeLayoutCache;
     c.valid = true;
+    c.dpi = DpiGet();
     c.canvasRc = l.rc;
     c.scrollY = scrollY;
     c.nFiles = len(l.thumbnails);
     c.listView = HomePageIsListView();
-    c.sortByFreq = gGlobalPrefs && gGlobalPrefs->homePageSortByFrequentlyRead;
-    c.showTips = gGlobalPrefs && gGlobalPrefs->showTips;
+    c.sortByFreq = gSettings && gSettings->homePageSortByFrequentlyRead;
+    c.showTips = gSettings && gSettings->showTips;
+    c.isRtl = IsUIRtl();
     c.tipIdx = gSelectedTipIdx;
     c.tipIsPromo = gSelectedIsPromo;
     str::ReplaceWithCopy(&c.filterText, filterText);
@@ -1351,6 +1567,7 @@ static void SaveHomeLayoutCache(const HomePageLayout& l, Str filterText, int scr
     c.rcIconOpen = l.rcIconOpen;
     c.rcIconListView = l.rcIconListView;
     c.rcIconThumbnailView = l.rcIconThumbnailView;
+    c.rcLogo = l.rcLogo;
     c.rcTip = l.rcTip;
     c.rcFreqRead = l.freqRead ? l.freqRead->lastBounds : Rect{};
     c.rcOpenDoc = l.openDoc ? l.openDoc->lastBounds : Rect{};
@@ -1360,6 +1577,7 @@ static void SaveHomeLayoutCache(const HomePageLayout& l, Str filterText, int scr
     c.hasTip = l.hasTip;
     c.thumbs = l.thumbnails;
     c.filterWords = l.filterWords;
+    c.highlighted = l.highlighted;
 }
 
 // rebuild chrome VirtText + copy cached geometry into l (no full layout)
@@ -1388,6 +1606,7 @@ static void ApplyHomeLayoutCache(HomePageLayout& l, int scrollY) {
     l.rcIconOpen = c.rcIconOpen;
     l.rcIconListView = c.rcIconListView;
     l.rcIconThumbnailView = c.rcIconThumbnailView;
+    l.rcLogo = c.rcLogo;
     l.rcTip = c.rcTip;
     l.totalContentDy = c.totalContentDy;
     l.thumbsVisibleDy = c.thumbsVisibleDy;
@@ -1395,13 +1614,14 @@ static void ApplyHomeLayoutCache(HomePageLayout& l, int scrollY) {
     l.hasTip = c.hasTip;
     l.thumbnails = c.thumbs;
     l.filterWords = c.filterWords;
+    l.highlighted = c.highlighted;
 
     PlatformFont* hdrFont = HomePageFont(24);
     PlatformFont* fontText = HomePageFont(14);
 
-    Str txt = _TRA("Recently Opened");
-    if (gGlobalPrefs->homePageSortByFrequentlyRead) {
-        txt = _TRA("Frequently Read");
+    Str txt = Tr("Recently Opened");
+    if (gSettings->homePageSortByFrequentlyRead) {
+        txt = Tr("Frequently Read");
     }
     HomeChromeCtrl* chrome = EnsureHomeChrome(win);
     VirtText* hdr = chrome->hdr;
@@ -1411,8 +1631,10 @@ static void ApplyHomeLayoutCache(HomePageLayout& l, int scrollY) {
     hdr->SetBounds(c.rcFreqRead);
     l.freqRead = hdr;
 
+    TempStr openTxt = str::DupTemp(Tr("&Open..."));
+    str::RemoveCharsInPlace(openTxt, StrL("&"));
     VirtText* openDoc = chrome->openDoc->text;
-    openDoc->SetText(_TRA("Open a document..."));
+    openDoc->SetText(openTxt);
     openDoc->font = fontText;
     openDoc->isRtl = isRtl;
     openDoc->withUnderline = true;
@@ -1420,28 +1642,11 @@ static void ApplyHomeLayoutCache(HomePageLayout& l, int scrollY) {
     l.openDoc = openDoc;
 }
 
-// after paint, keep lazy fileSize values in the cache for the next frame
-static void SyncHomeLayoutCacheFileSizes(const HomePageLayout& l) {
-    auto& c = gHomeLayoutCache;
-    if (!c.valid || len(c.thumbs) != len(l.thumbnails)) {
-        return;
-    }
-    for (int i = 0; i < len(c.thumbs); i++) {
-        c.thumbs[i].fileSize = l.thumbnails[i].fileSize;
-        // geometry may have been filled for newly visible list rows
-        c.thumbs[i].rcListFileName = l.thumbnails[i].rcListFileName;
-        c.thumbs[i].rcListPath = l.thumbnails[i].rcListPath;
-        c.thumbs[i].rcListSize = l.thumbnails[i].rcListSize;
-        c.thumbs[i].listTextMeasured = l.thumbnails[i].listTextMeasured;
-        c.thumbs[i].szThumb = l.thumbnails[i].szThumb;
-    }
-}
-
 static void LayoutHomePage(HomePageLayout& l) {
     EnsureTipsParsed();
 
     Vec<FileState*> allFileStates;
-    if (gGlobalPrefs->homePageSortByFrequentlyRead) {
+    if (gSettings->homePageSortByFrequentlyRead) {
         FileHistoryGetFrequencyOrder(allFileStates);
     } else {
         FileHistoryGetRecentlyOpenedOrder(allFileStates);
@@ -1449,11 +1654,7 @@ static void LayoutHomePage(HomePageLayout& l) {
     auto rc = l.rc;
     auto* win = l.win;
 
-    // filter by search query if present
-    TempStr searchQuery = nullptr;
-    if (win->homeSearch) {
-        searchQuery = win->homeSearch->GetTextTemp();
-    }
+    TempStr searchQuery = HomeSearchQueryTemp(win);
     bool hasFilter = searchQuery && searchQuery.s[0];
     if (hasFilter) {
         SplitFilterToWords(searchQuery, l.filterWords);
@@ -1471,12 +1672,11 @@ static void LayoutHomePage(HomePageLayout& l) {
                 continue;
             }
         }
-        fileStates.Append(fs);
+        VecAppend(fileStates, fs);
     }
 
     bool isRtl = IsUIRtl();
     PlatformFont* fontText = HomePageFont(14);
-    PlatformFont* hdrFont = HomePageFont(24);
 
     // --- Pre-compute thumbnail grid x offset so header can align with it ---
     // use unfiltered count so layout stays stable when search filters results
@@ -1495,93 +1695,87 @@ static void LayoutHomePage(HomePageLayout& l) {
     }
     int thumbsContentWidth = (thumbsColsForLayout * kThumbnailDx) + ((thumbsColsForLayout - 1) * kThumbsSpaceBetweenX);
 
-    // --- Step 1: layout header at the top ---
+    // --- Step 1: two header rows: [palette] SumatraPDF [help] on top, then
+    // [open link] [search edit] [view icons] ---
     Rect rcIconView(0, 0, 0, 0);
     rcIconView.dx = rcIconView.dy = HomePageIconSize();
 
-    Str txt = _TRA("Recently Opened");
-    if (gGlobalPrefs->homePageSortByFrequentlyRead) {
-        txt = _TRA("Frequently Read");
-    }
     HomeChromeCtrl* chrome = EnsureHomeChrome(win);
+    // the section title is no longer shown; empty bounds keep it unpainted
     VirtText* hdr = chrome->hdr;
-    hdr->SetText(txt);
-    hdr->font = hdrFont;
+    hdr->SetBounds({});
     l.freqRead = hdr;
-    hdr->isRtl = isRtl;
-    Size txtSize = hdr->GetIdealSize(true);
 
-    int hdrY = DpiScale(8);
-    int iconGap = DpiScale(4);
-    int titleGap = DpiScale(8);
-    int viewIconsDx = (2 * rcIconView.dx) + iconGap;
-    Rect rcHdr(thumbsStartX + viewIconsDx + titleGap, hdrY, txtSize.dx, txtSize.dy);
-    l.rcIconThumbnailView = {thumbsStartX, rcHdr.y + ((rcHdr.dy - rcIconView.dy) / 2), rcIconView.dx, rcIconView.dy};
-    l.rcIconListView = {l.rcIconThumbnailView.x + rcIconView.dx + iconGap, l.rcIconThumbnailView.y, rcIconView.dx,
-                        rcIconView.dy};
-    if (isRtl) {
-        int groupDx = viewIconsDx + titleGap + rcHdr.dx;
-        int groupX = rc.dx - thumbsStartX - groupDx;
-        rcHdr.x = groupX;
-        l.rcIconListView = {rcHdr.x + rcHdr.dx + titleGap, l.rcIconListView.y, rcIconView.dx, rcIconView.dy};
-        l.rcIconThumbnailView = {l.rcIconListView.x + rcIconView.dx + iconGap, l.rcIconThumbnailView.y, rcIconView.dx,
-                                 rcIconView.dy};
+    int searchEditDy = DpiScale(kSearchEditDy);
+    int searchThumbsGap = DpiScale(kSearchThumbnailsGapY);
+    int borderDy = searchEditDy + 2; // 1px border on each side
+
+    // [command palette] SumatraPDF [keyboard shortcuts], centered like the old
+    // title. The HBox in logoRow sizes the three virt controls.
+    chrome->logo->font = GetUserGuiFont(kSumatraTxtFont, DpiScale(kSumatraTxtFontSize));
+    Size logoRowSize = chrome->logoRow->GetIdealSize();
+    int logoY = DpiScale(8);
+    int logoX = thumbsStartX + ((thumbsContentWidth - logoRowSize.dx) / 2);
+    if (logoX < DpiScale(kInnerPadding)) {
+        logoX = DpiScale(kInnerPadding);
     }
-    hdr->SetBounds(rcHdr);
+    l.rcLogo = {logoX, logoY, logoRowSize.dx, logoRowSize.dy};
 
-    /* "Open a document" link next to header */
+    int hdrY = logoY + logoRowSize.dy + DpiScale(8);
+    int iconGap = DpiScale(4);
+    int rowDy = std::max(rcIconView.dy, borderDy);
+    // every row item (link, search box, view icons) is centered on the row's
+    // vertical centerline
+    int centerY = hdrY + (rowDy / 2);
+    int viewIconsDx = (2 * rcIconView.dx) + iconGap;
+
+    /* "Open..." link at the left edge */
     Rect rcIconOpen(0, 0, 0, 0);
     rcIconOpen.dx = rcIconOpen.dy = HomePageIconSize();
 
-    txt = _TRA("Open a document...");
+    TempStr openTxt = str::DupTemp(Tr("&Open..."));
+    str::RemoveCharsInPlace(openTxt, StrL("&"));
     VirtText* openDoc = chrome->openDoc->text;
-    openDoc->SetText(txt);
+    openDoc->SetText(openTxt);
     openDoc->font = fontText;
     openDoc->isRtl = isRtl;
     openDoc->withUnderline = true;
-    txtSize = openDoc->GetIdealSize(true);
+    Size txtSize = openDoc->GetIdealSize(true);
+    int openGroupDx = rcIconOpen.dx + 3 + txtSize.dx;
 
-    int openDocSpacing = DpiScale(16);
-    rcIconOpen.x = rcHdr.x + rcHdr.dx + openDocSpacing;
-    // every header item (view icons, title, folder icon, link) is centered on
-    // the header's vertical centerline
-    rcIconOpen.y = rcHdr.y + ((rcHdr.dy - rcIconOpen.dy) / 2);
+    rcIconOpen.x = thumbsStartX;
+    rcIconOpen.y = centerY - (rcIconOpen.dy / 2);
+    Rect rcOpenDoc(rcIconOpen.x + rcIconOpen.dx + 3, centerY - (txtSize.dy / 2), txtSize.dx, txtSize.dy);
+
+    /* view-mode icons at the right edge */
+    l.rcIconThumbnailView = {thumbsStartX + thumbsContentWidth - viewIconsDx, centerY - (rcIconView.dy / 2),
+                             rcIconView.dx, rcIconView.dy};
+    l.rcIconListView = {l.rcIconThumbnailView.x + rcIconView.dx + iconGap, l.rcIconThumbnailView.y, rcIconView.dx,
+                        rcIconView.dy};
+
+    // the search box takes what is left between the link and the icons; both
+    // sides are padded to the wider of the two, so the box sits centered
+    int rowGapX = DpiScale(16);
+    int flankDx = std::max(viewIconsDx, openGroupDx) + rowGapX;
+    int borderDx = thumbsContentWidth - (2 * flankDx);
+    borderDx = std::max(borderDx, DpiScale(200));
+    int borderX = thumbsStartX + ((thumbsContentWidth - borderDx) / 2);
+    l.rcSearchBorder = {borderX, hdrY + ((rowDy - borderDy) / 2), borderDx, borderDy};
+
     if (isRtl) {
-        rcIconOpen.x = rcHdr.x - openDocSpacing - rcIconOpen.dx;
+        auto mirrorX = [&rc](Rect& r) { r.x = rc.dx - r.x - r.dx; };
+        mirrorX(l.rcLogo);
+        mirrorX(l.rcIconThumbnailView);
+        mirrorX(l.rcIconListView);
+        mirrorX(rcIconOpen);
+        mirrorX(rcOpenDoc);
+        mirrorX(l.rcSearchBorder);
     }
     l.rcIconOpen = rcIconOpen;
-
-    Rect rcOpenDoc(rcIconOpen.x + rcIconOpen.dx + 3, rcHdr.y + ((rcHdr.dy - txtSize.dy) / 2), txtSize.dx, txtSize.dy);
-    if (isRtl) {
-        rcOpenDoc.x = rcIconOpen.x - rcOpenDoc.dx - 3;
-    }
     openDoc->SetBounds(rcOpenDoc);
-
     l.openDoc = openDoc;
 
-    int headerBottomY = rcHdr.y + rcHdr.dy;
-
-    // --- Position search edit below header ---
-    EnsureHomeSearchCreated(win);
-    int searchEditDy = DpiScale(kSearchEditDy);
-    int headerSearchGap = DpiScale(kHeaderSearchGapY);
-    int searchThumbsGap = DpiScale(kSearchThumbnailsGapY);
-    {
-        int borderDx = thumbsContentWidth * 3 / 4;
-        borderDx = std::max(borderDx, DpiScale(200));
-        int borderX = thumbsStartX + ((thumbsContentWidth - borderDx) / 2);
-        int borderY = headerBottomY + headerSearchGap;
-        int borderDy = searchEditDy + 2; // 1px border on each side
-        l.rcSearchBorder = {borderX, borderY, borderDx, borderDy};
-        // inside the 1px border: the layout gives the edit the full width and
-        // its own (text-sized) height, centered vertically
-        Rect rcEdit = {borderX + 1, borderY + 1, borderDx - 2, searchEditDy};
-        LayoutToSize(win->homeSearchLayout, rcEdit.Size());
-        win->homeSearchLayout->SetBounds(rcEdit);
-    }
-    // border is 1px top + 1px bottom = 2px
-    int searchAreaDy = headerSearchGap + searchEditDy + 2 + searchThumbsGap;
-    headerBottomY += searchAreaDy;
+    int headerBottomY = hdrY + rowDy + searchThumbsGap;
 
     // --- Step 2: calculate tip area at the bottom (before thumbnails) ---
     int tipHeight = 0;
@@ -1645,7 +1839,7 @@ static void LayoutHomePage(HomePageLayout& l) {
         // one-row margin so a quick scroll still has measured name/path splits ready
         int listPrefetchY = kHomeListRowDy;
         for (int row = 0; row < nFiles; row++) {
-            ThumbnailLayout& thumb = *l.thumbnails.AppendBlanks(1);
+            ThumbnailLayout& thumb = *VecAppendBlanks(l.thumbnails, 1);
             thumb.fileSize = kSizeNotFetched;
             FileState* fs = fileStates[row];
             thumb.fs = fs;
@@ -1693,7 +1887,7 @@ static void LayoutHomePage(HomePageLayout& l) {
                     thumbsRows = col > 0 ? row + 1 : row;
                     break;
                 }
-                ThumbnailLayout& thumb = *l.thumbnails.AppendBlanks(1);
+                ThumbnailLayout& thumb = *VecAppendBlanks(l.thumbnails, 1);
                 thumb.fileSize = kSizeNotFetched;
                 FileState* fs = fileStates[(row * thumbsColsForLayout) + col];
                 thumb.fs = fs;
@@ -1787,10 +1981,7 @@ static Pixmap* GetFileStateIconPixmap(FileState* fs) {
     HICON hicon = ImageList_GetIcon(fs->himl, fs->iconIdx, ILD_TRANSPARENT);
     Pixmap* pixmap = nullptr;
     if (hicon) {
-        {
-            Gdiplus::Bitmap bmp(hicon);
-            pixmap = PixmapFromGdiplus(&bmp);
-        }
+        pixmap = PixmapFromHICON(hicon);
         DestroyIcon(hicon);
     }
     auto* icon = new HomeFileIcon();
@@ -1842,7 +2033,7 @@ static Rect FitRectInRect(Size src, Rect dst) {
 
 static TempStr FileSizeForHomeListTemp(i64 size) {
     if (size < 0) {
-        return str::DupTemp("");
+        return str::DupTemp(StrL(""));
     }
     return str::FormatSizeShortTemp(size, nullptr);
 }
@@ -1957,7 +2148,7 @@ static void DrawHomeListRow(Gfx* gfx, ThumbnailLayout& thumb, const StrVec& filt
     {
         int pinDx = thumb.rcListPin.dx > 0 ? thumb.rcListPin.dx : DpiScale(16);
         int pinDy = thumb.rcListPin.dy > 0 ? thumb.rcListPin.dy : pinDx;
-        Pixmap* pin = GetCachedPixmapForSvg(gIconPin, pinDx, pinDy);
+        Pixmap* pin = GetCachedPixmapForSvg(Str(gIconPin), pinDx, pinDy);
         if (pin) {
             gfx->DrawPixmap(pin, thumb.rcListPin);
         }
@@ -1996,13 +2187,90 @@ static void DrawHomeThumbnail(Gfx* gfx, ThumbnailLayout& thumb, const StrVec& fi
     }
 }
 
-// a white circle with a black "?" inside: the home page's affordance for the
-// keyboard-shortcuts sheet. The disc is drawn with GDI+ so its edge is smooth;
-// nothing is painted outside it, so the page background shows through.
-static void DrawHomeHelpButton(Gfx* gfx, Rect r) {
+// a white circle with either a centered SVG or a black glyph ("?"). Drawn with
+// GDI+ so the disc edge is smooth; nothing is painted outside it, so the page
+// background shows through.
+static void DrawHomeCircleButton(Gfx* gfx, Rect r, Pixmap* icon, Str glyph) {
     gfx->FillEllipse(r, kColWhite);
+    if (icon) {
+        int x = r.x + ((r.dx - icon->width) / 2);
+        int y = r.y + ((r.dy - icon->height) / 2);
+        gfx->DrawPixmap(icon, {x, y, icon->width, icon->height});
+        return;
+    }
     PlatformFont* font = HomePageFont(14);
-    gfx->DrawText("?", r, gfxTextCenter | gfxTextVCenter, font, kColBlack);
+    gfx->DrawText(glyph, r, gfxTextCenter | gfxTextVCenter, font, kColBlack);
+}
+
+// Slack so the first/last row's rounded outline isn't cut by rcThumbsArea.
+// The search field and tip band stay outside this clip (issue #5978).
+static Rect HomeOutlinePaintClip(const Rect& thumbsArea, const Rect& searchBorder, const Rect& tip, bool hasTip) {
+    if (thumbsArea.IsEmpty()) {
+        return {};
+    }
+    Rect clip = thumbsArea;
+    clip.Inflate(0, DpiScale(8));
+    if (!searchBorder.IsEmpty() && clip.y < searchBorder.Bottom()) {
+        int d = searchBorder.Bottom() - clip.y;
+        clip.y += d;
+        clip.dy -= d;
+    }
+    if (hasTip && !tip.IsEmpty() && clip.y + clip.dy > tip.y) {
+        clip.dy = tip.y - clip.y;
+    }
+    if (clip.dx <= 0 || clip.dy <= 0) {
+        return {};
+    }
+    return clip;
+}
+
+static TempStr RectCsvTemp(const Rect& r) {
+    return fmt("%d,%d,%d,%d", r.x, r.y, r.dx, r.dy);
+}
+
+// The home page's keyboard state: which entry the arrows have selected, how
+// many entries are currently shown (the search box filters them) and whether
+// the search box has the focus. A test driving the home page with keys waits on
+// this instead of sleeping after each key, which is what made tests/issue-1136
+// flaky: a key posted while focus was still moving went to the wrong window.
+// search / outline / outlineFull are canvas rects so a test can check that the
+// hover outline does not paint over the search field (issue #5978).
+TempStr HomeSelectionResultTemp(int* exitCodeOut) {
+    auto finish = [&](int code, TempStr s) -> TempStr {
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        return s;
+    };
+    auto& c = gHomeLayoutCache;
+    if (!c.valid) {
+        return finish(2, str::DupTemp(StrL("NOTREADY no-layout")));
+    }
+    MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+    if (!win) {
+        return finish(2, str::DupTemp(StrL("NOTREADY no-window")));
+    }
+    int sel = win->homePageSelIdx;
+    Str path;
+    if (sel >= 0 && sel < len(c.thumbs) && c.thumbs[sel].fs) {
+        path = c.thumbs[sel].fs->filePath;
+    }
+    int searchFocus = HomeSearchHasFocus(win) ? 1 : 0;
+    // the search box is created while the home page lays out; until it exists
+    // Up from the first row has nowhere to move the focus to
+    int searchBox = win->homeSearch ? 1 : 0;
+    Rect search = c.rcSearchBorder;
+    Rect outlineFull;
+    Rect outline;
+    bool showSel = !HomePageIsListView() && !searchFocus && sel >= 0 && sel < len(c.thumbs);
+    if (showSel) {
+        outlineFull = HomeSelectionOutlineRect(c.thumbs[sel]);
+        outline = outlineFull.Intersect(HomeOutlinePaintClip(c.rcThumbsArea, c.rcSearchBorder, c.rcTip, c.hasTip));
+    }
+    return finish(0, fmt("OK sel=%d entries=%d searchFocus=%d searchBox=%d search=%s outline=%s outlineFull=%s path=%s "
+                         "listView=%d listIcon=%s",
+                         sel, len(c.thumbs), searchFocus, searchBox, RectCsvTemp(search), RectCsvTemp(outline),
+                         RectCsvTemp(outlineFull), path, HomePageIsListView() ? 1 : 0, RectCsvTemp(c.rcIconListView)));
 }
 
 // What the home page list drew for each row: the path, the size text as drawn,
@@ -2022,11 +2290,11 @@ TempStr HomeListRowsResultTemp(int* exitCodeOut) {
 
     auto& c = gHomeLayoutCache;
     if (!c.valid) {
-        out.Append("NOTREADY no-layout\n");
+        out.Append(StrL("NOTREADY no-layout\n"));
         return finish(2);
     }
     if (!c.listView) {
-        out.Append("ERROR not-list-view\n");
+        out.Append(StrL("ERROR not-list-view\n"));
         return finish(1);
     }
     out.Append(fmt("OK rows=%d\n", len(c.thumbs)));
@@ -2065,13 +2333,50 @@ void HomeOpenDocCtrl::Paint(VirtPaintCtx& ctx) {
     ctx.gfx->DrawPixmap(pixmap, r);
 }
 
-HomeHelpBtnCtrl::HomeHelpBtnCtrl() {
+HomeCircleBtnCtrl::HomeCircleBtnCtrl() {
     cursor = CursorId::Hand;
-    SetTooltip(_TRA("Keyboard Shortcuts"));
 }
 
-void HomeHelpBtnCtrl::Paint(VirtPaintCtx& ctx) {
-    DrawHomeHelpButton(ctx.gfx, ctx.bounds);
+Size HomeCircleBtnCtrl::GetIdealSize() {
+    int d = DpiScale(30);
+    return {d, d};
+}
+
+void HomeCircleBtnCtrl::Paint(VirtPaintCtx& ctx) {
+    DrawHomeCircleButton(ctx.gfx, ctx.bounds, pixmap, glyph);
+}
+
+HomeLogoRow::HomeLogoRow() {
+    flags |= vwfNoHitTest;
+    box = new HBox();
+    box->alignMain = MainAxisAlign::MainStart;
+    box->alignCross = CrossAxisAlign::CrossCenter;
+}
+
+HomeLogoRow::~HomeLogoRow() {
+    // the buttons and logo are VirtCtrl children; don't let HBox delete them
+    if (box) {
+        VecClear(box->children);
+        delete box;
+        box = nullptr;
+    }
+}
+
+void HomeLogoRow::AddItem(VirtCtrl* c) {
+    AddChild(c);
+    box->AddChild(c);
+}
+
+Size HomeLogoRow::GetIdealSize() {
+    box->gap = DpiScale(10);
+    return {box->MinIntrinsicWidth(0), box->MinIntrinsicHeight(0)};
+}
+
+void HomeLogoRow::SetBounds(Rect r) {
+    VirtCtrl::SetBounds(r);
+    box->gap = DpiScale(10);
+    box->Layout(Tight(r.Size()));
+    box->SetBounds(r);
 }
 
 HomeSearchBorderCtrl::HomeSearchBorderCtrl() {
@@ -2104,7 +2409,7 @@ void HomeTipCtrl::SetTipLine(Str line, PlatformFont* font) {
         rich = nullptr;
     }
     str::ReplaceWithCopy(&richFor, line);
-    if (!line) {
+    if (len(line) == 0) {
         return;
     }
     rich = ParseTip(line);
@@ -2162,8 +2467,9 @@ static void HomePinEntryClicked(MainWindow* win, VirtMouseEvent* ev) {
         return;
     }
     fs->isPinned = !fs->isPinned;
-    SaveSettings();
+    ScheduleSaveSettings();
     win->DeleteToolTip();
+    HomePageRelayout(win);
     win->RedrawAll(true);
 }
 
@@ -2189,7 +2495,8 @@ static void HomeViewModeClicked(MainWindow* win, VirtMouseEvent* ev) {
         win->DeleteToolTip();
     }
     win->homePageScrollY = 0;
-    SaveSettings();
+    ScheduleSaveSettings();
+    HomePageRelayout(win);
     win->RedrawAll(true);
 }
 
@@ -2199,6 +2506,10 @@ static void HomeOpenDocClicked(MainWindow* win, VirtMouseEvent*) {
 
 static void HomeHelpClicked(MainWindow* win, VirtMouseEvent*) {
     HwndSendCommand(win->hwndFrame, CmdToggleKeyboardHelp);
+}
+
+static void HomePaletteClicked(MainWindow* win, VirtMouseEvent*) {
+    HwndSendCommand(win->hwndFrame, CmdCommandPalette);
 }
 
 static void HomeTipBandClicked(MainWindow* win, VirtMouseEvent*) {
@@ -2215,7 +2526,7 @@ void HomeListIconCtrl::OnGetTooltip(VirtTooltipEvent* ev) {
     auto* entry = (HomeEntryCtrl*)parent;
     FileState* fs = FileHistoryFindByPath(entry->filePath);
     bool pinned = fs && fs->isPinned;
-    ev->tip = str::DupTemp(pinned ? _TRA("Unpin") : _TRA("Pin"));
+    ev->tip = str::DupTemp(pinned ? Tr("Unpin") : Tr("Pin"));
 }
 
 HomeEntryCtrl::~HomeEntryCtrl() {
@@ -2285,7 +2596,7 @@ void HomeEntriesCtrl::SetEntryCount(int n) {
         e->AddChild(e->closeBtn);
 
         e->removeBtn = new VirtCloseButton();
-        e->removeBtn->SetTooltip(_TRA("Remove from Frequently Read"));
+        e->removeBtn->SetTooltip(Tr("Remove from Frequently Read"));
         e->removeBtn->onClick = MkFunc1(HomeForgetEntryClicked, win);
         e->removeBtn->visibility = Visibility::Collapse;
         e->AddChild(e->removeBtn);
@@ -2348,6 +2659,162 @@ void HomeEntriesCtrl::OnMouseMove(VirtMouseEvent* ev) {
     return;
 }
 
+// TOOLTIPS_CLASS default for TTDT_INITIAL
+static int TooltipInitialDelayMs() {
+    int ms = (int)GetDoubleClickTime();
+    return ms > 0 ? ms : 500;
+}
+
+constexpr UINT_PTR kHomeAboutHoverTimerID = 100;
+
+static HomeChromeCtrl* HomeChrome(MainWindow* win) {
+    if (!win || !win->homeRoot) {
+        return nullptr;
+    }
+    if (!IsVirtCtrlOfKind(win->homeRoot->owned, kindHomeChromeCtrl)) {
+        return nullptr;
+    }
+    return (HomeChromeCtrl*)win->homeRoot->owned;
+}
+
+static Rect HomeLogoScreenRect(HomeChromeCtrl* chrome) {
+    if (!chrome || !chrome->logo) {
+        return {};
+    }
+    HWND hwnd = chrome->GetHwnd();
+    if (!hwnd) {
+        return {};
+    }
+    Rect logo = chrome->logo->BoundsInWindow();
+    Point origin = HwndClientToScreen(hwnd, Point());
+    return {origin.x + logo.x, origin.y + logo.y, logo.dx, logo.dy};
+}
+
+static bool CursorOverHomeLogo(HomeChromeCtrl* chrome) {
+    return HomeLogoScreenRect(chrome).Contains(GetCursorPosition());
+}
+
+static bool CursorOverAboutHover(HomeChromeCtrl* chrome) {
+    return chrome && chrome->aboutHover && chrome->aboutHover->IsVisible() &&
+           chrome->aboutHover->ScreenRect().Contains(GetCursorPosition());
+}
+
+static void CancelHomeAboutHoverTimer(MainWindow* win) {
+    if (win && win->hwndCanvas) {
+        KillTimer(win->hwndCanvas, kHomeAboutHoverTimerID);
+    }
+}
+
+static void HideHomeAboutHover(MainWindow* win) {
+    CancelHomeAboutHoverTimer(win);
+    HomeChromeCtrl* chrome = HomeChrome(win);
+    if (chrome && chrome->aboutHover) {
+        chrome->aboutHover->Show(false);
+    }
+}
+
+static void OnHomeAboutHoverLeave(MainWindow* win) {
+    // left the dropdown; keep it only if the cursor is back on the title
+    if (CursorOverHomeLogo(HomeChrome(win))) {
+        return;
+    }
+    HideHomeAboutHover(win);
+}
+
+static void CALLBACK HomeAboutHoverTimerProc(HWND hwnd, UINT, UINT_PTR id, DWORD) {
+    KillTimer(hwnd, id);
+    MainWindow* win = FindMainWindowByHwnd(hwnd);
+    if (!win || !IsMainWindowValidAndNotClosing(win)) {
+        return;
+    }
+    ShowHomeAboutHover(win);
+}
+
+static void OnHomeLogoEnter(MainWindow* win) {
+    if (!win || !win->hwndCanvas || !win->IsCurrentTabAbout()) {
+        return;
+    }
+    HomeChromeCtrl* chrome = HomeChrome(win);
+    if (chrome && chrome->aboutHover && chrome->aboutHover->IsVisible()) {
+        return;
+    }
+    CancelHomeAboutHoverTimer(win);
+    SetTimer(win->hwndCanvas, kHomeAboutHoverTimerID, (UINT)TooltipInitialDelayMs(), HomeAboutHoverTimerProc);
+}
+
+static void OnHomeLogoLeave(MainWindow* win) {
+    // still on the title→dropdown path (cursor already over the popup)
+    if (CursorOverAboutHover(HomeChrome(win))) {
+        return;
+    }
+    HideHomeAboutHover(win);
+}
+
+// chrome-less About box under the home-page logo; links stay clickable
+static void ShowHomeAboutHover(MainWindow* win) {
+    if (!win || !IsMainWindowValidAndNotClosing(win) || !win->IsCurrentTabAbout()) {
+        return;
+    }
+    HomeChromeCtrl* chrome = HomeChrome(win);
+    if (!chrome || !chrome->logo || !CursorOverHomeLogo(chrome)) {
+        return;
+    }
+
+    if (!chrome->aboutHover) {
+        VirtHost::CreateArgs args;
+        args.parent = win->hwndFrame;
+        args.className = WStrL(L"SUMATRA_ABOUT_HOVER");
+        args.isPopup = true;
+        args.noActivate = true;
+        args.visible = false;
+        args.bgColor = ThemeMainWindowBackgroundColor();
+        args.userData = win;
+        chrome->aboutHover = VirtHost::Create(args);
+        if (!chrome->aboutHover) {
+            return;
+        }
+        chrome->aboutHover->onMouseLeave = MkFunc0(OnHomeAboutHoverLeave, win);
+        LONG_PTR cls = GetClassLongPtrW(chrome->aboutHover->native, GCL_STYLE);
+        SetClassLongPtrW(chrome->aboutHover->native, GCL_STYLE, cls | CS_DROPSHADOW);
+    }
+
+    VirtHost* host = chrome->aboutHover;
+    host->bgColor = ThemeMainWindowBackgroundColor();
+    DpiSetFromHwnd(host->native);
+
+    Rect measureRc{0, 0, 2000, 2000};
+    AboutCtrl* about = UpdateAboutLayout(&host->vroot, host->native, measureRc, true);
+    Size box = about->aboutRect.Size();
+    if (box.IsEmpty()) {
+        return;
+    }
+
+    Rect logoScreen = HomeLogoScreenRect(chrome);
+    Rect pos{logoScreen.x + ((logoScreen.dx - box.dx) / 2), logoScreen.Bottom(), box.dx, box.dy};
+    pos = ShiftRectToWorkArea(pos, win->hwndCanvas, true);
+    host->SetPos(pos, true);
+    UpdateAboutLayout(&host->vroot, host->native, {0, 0, box.dx, box.dy}, true);
+    host->Invalidate();
+}
+
+HomeChromeCtrl::~HomeChromeCtrl() {
+    HWND hwnd = GetHwnd();
+    if (hwnd) {
+        KillTimer(hwnd, kHomeAboutHoverTimerID);
+    }
+    delete aboutHover;
+    aboutHover = nullptr;
+}
+
+// e.g. "Command Palette (Ctrl + K)"
+static TempStr AppendCmdAccel(Str base, int cmd) {
+    TempStr accel = AppendAccelKeyToMenuStringTemp({}, cmd);
+    if (len(accel) == 0) {
+        return base;
+    }
+    return str::JoinTemp(base, fmt(" (%s)", Str(accel.s + 1, len(accel) - 1))); // +1 skips the leading \t
+}
+
 // created once per window so that hover / pressed state survives the repaints
 // that scrolling and filtering cause
 static HomeChromeCtrl* EnsureHomeChrome(MainWindow* win) {
@@ -2365,9 +2832,8 @@ static HomeChromeCtrl* EnsureHomeChrome(MainWindow* win) {
     chrome->kind = kindHomeChromeCtrl;
     chrome->flags |= vwfNoHitTest;
 
-    // first, so that the rest of the chrome (notably the help button, which can
-    // overlap the thumbnails) hit-tests and paints on top of the entries
-    // below everything else: the tip band sits at the bottom of the page
+    // first, so that the rest of the chrome hit-tests and paints on top of the
+    // entries. Below everything else: the tip band sits at the bottom of the page
     chrome->tip = new HomeTipCtrl();
     chrome->tip->hwndForCmds = win->hwndFrame;
     chrome->tip->onClick = MkFunc1(HomeTipBandClicked, win);
@@ -2385,18 +2851,38 @@ static HomeChromeCtrl* EnsureHomeChrome(MainWindow* win) {
 
     chrome->thumbView = new HomeViewIconCtrl();
     chrome->thumbView->listView = false;
-    chrome->thumbView->SetTooltip(_TRA("Show as thumbnails"));
+    chrome->thumbView->SetTooltip(Tr("Show as thumbnails"));
     chrome->thumbView->onClick = MkFunc1(HomeViewModeClicked, win);
     chrome->AddChild(chrome->thumbView);
 
     chrome->listView = new HomeViewIconCtrl();
     chrome->listView->listView = true;
-    chrome->listView->SetTooltip(_TRA("Show as list"));
+    chrome->listView->SetTooltip(Tr("Show as list"));
     chrome->listView->onClick = MkFunc1(HomeViewModeClicked, win);
     chrome->AddChild(chrome->listView);
 
     chrome->hdr = new VirtText(StrL(""));
     chrome->AddChild(chrome->hdr);
+
+    // [command palette] SumatraPDF [keyboard shortcuts] in one HBox at the top.
+    // The title is hit-testable so hovering it can open the About dropdown.
+    chrome->logoRow = new HomeLogoRow();
+    chrome->paletteBtn = new HomeCircleBtnCtrl();
+    chrome->paletteBtn->glyph = StrL(">");
+    chrome->paletteBtn->SetTooltip(AppendCmdAccel(Tr("Command Palette"), CmdCommandPalette));
+    chrome->paletteBtn->onClick = MkFunc1(HomePaletteClicked, win);
+    chrome->logo = new SumatraLogo();
+    chrome->logo->SetFlag(vwfNoHitTest, false);
+    chrome->logo->onMouseEnter = MkFunc0(OnHomeLogoEnter, win);
+    chrome->logo->onMouseLeave = MkFunc0(OnHomeLogoLeave, win);
+    chrome->helpBtn = new HomeCircleBtnCtrl();
+    chrome->helpBtn->glyph = StrL("?");
+    chrome->helpBtn->SetTooltip(AppendCmdAccel(Tr("Keyboard Shortcuts"), CmdToggleKeyboardHelp));
+    chrome->helpBtn->onClick = MkFunc1(HomeHelpClicked, win);
+    chrome->logoRow->AddItem(chrome->paletteBtn);
+    chrome->logoRow->AddItem(chrome->logo);
+    chrome->logoRow->AddItem(chrome->helpBtn);
+    chrome->AddChild(chrome->logoRow);
 
     chrome->openDoc = new HomeOpenDocCtrl();
     chrome->openDoc->text = new VirtText(StrL(""));
@@ -2405,15 +2891,12 @@ static HomeChromeCtrl* EnsureHomeChrome(MainWindow* win) {
     chrome->openDoc->onClick = MkFunc1(HomeOpenDocClicked, win);
     chrome->AddChild(chrome->openDoc);
 
-    chrome->helpBtn = new HomeHelpBtnCtrl();
-    chrome->helpBtn->onClick = MkFunc1(HomeHelpClicked, win);
-    chrome->AddChild(chrome->helpBtn);
-
     win->homeRoot->SetChild(chrome);
     return chrome;
 }
 
 void HomePageDestroyChrome(MainWindow* win) {
+    CancelHomeAboutHoverTimer(win);
     delete win->homeRoot;
     win->homeRoot = nullptr;
 }
@@ -2433,6 +2916,20 @@ bool HomePageOnCanvasMessage(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, LR
     // a background window is meant to activate it.
     bool isHoverMsg = (msg == WM_MOUSEMOVE) || (msg == WM_SETCURSOR);
     if (isHoverMsg && GetForegroundWindow() != win->hwndFrame) {
+        // thumbnail hover / tooltips stay quiet so they don't steal activation
+        // from e.g. the command palette. The About dropdown is WS_EX_NOACTIVATE,
+        // so hovering the logo still shows it.
+        if (msg == WM_MOUSEMOVE) {
+            Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ILayout* el = ElementFromPoint(root, pt, nullptr);
+            VirtCtrl* w = el ? el->AsVirtCtrl() : nullptr;
+            if (w && IsVirtCtrlOfKind(w, kindSumatraLogo)) {
+                LRESULT ignored = 0;
+                root->OnMessage(msg, wp, lp, ignored);
+            } else {
+                HideHomeAboutHover(win);
+            }
+        }
         return false;
     }
     if (msg != WM_SETCURSOR) {
@@ -2444,6 +2941,10 @@ bool HomePageOnCanvasMessage(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, LR
             if (entries) {
                 entries->SetActiveEntry(-1);
             }
+        }
+        // canvas got the mouse and it is not on the title: left the SumatraPDF area
+        if (msg == WM_MOUSEMOVE && !IsVirtCtrlOfKind(root->hovered, kindSumatraLogo)) {
+            HideHomeAboutHover(win);
         }
         return didHandle;
     }
@@ -2489,14 +2990,14 @@ static void HomePageSyncChrome(HomePageLayout& l) {
     // file entries: clipped to the thumbnails band, like the static links were
     HomeEntriesCtrl* entries = chrome->entries;
     entries->SetBounds(l.rcThumbsArea);
-    // what the entries paint with; owned by l, which outlives the paint
-    entries->filterWords = &l.filterWords;
-    entries->highlighted = &l.highlighted;
-    int nEntries = len(l.thumbnails);
+    auto& cache = gHomeLayoutCache;
+    entries->filterWords = &cache.filterWords;
+    entries->highlighted = &cache.highlighted;
+    int nEntries = len(cache.thumbs);
     entries->SetEntryCount(nEntries);
     bool listView = HomePageIsListView();
     for (int i = 0; i < nEntries; i++) {
-        ThumbnailLayout& t = l.thumbnails[i];
+        ThumbnailLayout& t = cache.thumbs[i];
         HomeEntryCtrl* e = entries->EntryAt(i);
         e->idx = i;
         e->layout = &t;
@@ -2523,35 +3024,41 @@ static void HomePageSyncChrome(HomePageLayout& l) {
     entries->UpdateCloseBtnVisibility();
 
     Size iconSize = l.rcIconThumbnailView.Size();
-    chrome->thumbView->pixmap = GetCachedPixmapForSvg(gIconHomeThumbnails, iconSize.dx, iconSize.dy);
+    chrome->thumbView->pixmap = GetCachedPixmapForSvg(Str(gIconHomeThumbnails), iconSize.dx, iconSize.dy);
     chrome->thumbView->SetBounds(l.rcIconThumbnailView);
-    chrome->listView->pixmap = GetCachedPixmapForSvg(gIconHomeList, iconSize.dx, iconSize.dy);
+    chrome->listView->pixmap = GetCachedPixmapForSvg(Str(gIconHomeList), iconSize.dx, iconSize.dy);
     chrome->listView->SetBounds(l.rcIconListView);
 
     // re-apply: the bounds were set before the parent was positioned
     chrome->hdr->SetBounds(l.freqRead->lastBounds);
 
+    // font also set here so the cached-layout path (ApplyHomeLayoutCache)
+    // repaints the logo without a full relayout
+    chrome->logo->font = GetUserGuiFont(kSumatraTxtFont, DpiScale(kSumatraTxtFontSize));
+    int iconSz = DpiScale(16);
+    chrome->paletteBtn->pixmap = GetCachedPixmapForSvg(Str(gIconCommandPalette), iconSz, iconSz, kColBlack, kColWhite);
+    chrome->logoRow->SetBounds(l.rcLogo);
+    if (chrome->aboutHover && chrome->aboutHover->IsVisible()) {
+        Size sz = chrome->aboutHover->ScreenRect().Size();
+        Rect logoScreen = HomeLogoScreenRect(chrome);
+        Rect want{logoScreen.x + ((logoScreen.dx - sz.dx) / 2), logoScreen.Bottom(), sz.dx, sz.dy};
+        want = ShiftRectToWorkArea(want, l.win->hwndCanvas, true);
+        if (want != chrome->aboutHover->ScreenRect()) {
+            chrome->aboutHover->SetPos(want, true);
+        }
+    }
+
     // one click target covering the icon and the link text
     Rect rcOpen = l.rcIconOpen.Union(l.openDoc->lastBounds);
     rcOpen.Inflate(10, 10);
     HomeOpenDocCtrl* od = chrome->openDoc;
-    od->pixmap = GetCachedPixmapForSvg(gIconFileOpen, l.rcIconOpen.dx, l.rcIconOpen.dy);
+    od->pixmap = GetCachedPixmapForSvg(Str(gIconFileOpen), l.rcIconOpen.dx, l.rcIconOpen.dy);
     od->SetBounds(rcOpen);
     od->rcIconLocal = {l.rcIconOpen.x - rcOpen.x, l.rcIconOpen.y - rcOpen.y, l.rcIconOpen.dx, l.rcIconOpen.dy};
     // "Open a document" acts as a link, so it is drawn in the link color
     od->text->SetColor(kColText, gColsLink[kColText]);
     // re-apply now that the parent moved: bounds are relative to it
     od->text->SetBounds(l.openDoc->lastBounds);
-
-    // "?" help button in the bottom-right corner, opening the keyboard
-    // shortcuts sheet; sits above the tip band when a tip is showing
-    {
-        int diam = DpiScale(30);
-        int margin = DpiScale(16);
-        int bottom = l.hasTip ? l.rcTip.y : l.rc.dy;
-        Rect btn{l.rc.dx - margin - diam, bottom - margin - diam, diam, diam};
-        chrome->helpBtn->SetBounds(btn);
-    }
 }
 
 static void DrawHomePageLayout(HomePageLayout& l) {
@@ -2567,59 +3074,50 @@ static void DrawHomePageLayout(HomePageLayout& l) {
     }
 
     // the chrome tree paints everything else: search border, file entries
-    // (thumbnails / list rows), tip band, header, view buttons, "Open a
-    // document..." and the help button (which has to land on top of the tip
-    // band, so the chrome keeps it as the last child)
+    // (thumbnails / list rows), tip band, header (palette / logo / help),
+    // view buttons, and "Open a document..."
     win->homeRoot->Paint(gfx, l.rc);
 
-    // thumbnails selection outline: over the chrome and unclipped, so its top
-    // edge isn't cut off on the first row (list rows draw their own outline,
-    // under the row content, in HomeEntryCtrl::Paint)
+    // thumbnails selection outline: after the entries so it sits on top of the
+    // thumbnail, clipped so it cannot paint over the search field or the tip
+    // band (issue #5978). A little slack above/below the thumbs band keeps the
+    // first row's top curve from being cut off.
     int selIdx = win->homePageSelIdx;
     bool showSel = !HomePageIsListView() && !HomeSearchHasFocus(win) && selIdx >= 0 && selIdx < nThumbs;
     if (showSel) {
         ThumbnailLayout& t = l.thumbnails[selIdx];
         if (IsHomeThumbOnScreen(t.rcPage.Union(t.rcText), l.rcThumbsArea)) {
-            DrawHomeSelectionOutline(gfx, HomeSelectionOutlineRect(t), 10);
+            Rect clip = HomeOutlinePaintClip(l.rcThumbsArea, l.rcSearchBorder, l.rcTip, l.hasTip);
+            if (!clip.IsEmpty()) {
+                gfx->PushClip(clip);
+                DrawHomeSelectionOutline(gfx, HomeSelectionOutlineRect(t), 10);
+                gfx->PopClip();
+            }
+        }
+        // the edit HWND is on top of the canvas; this is the canvas-drawn
+        // border/fill around it. Repaint so a 1px antialiased leak cannot
+        // show through the field.
+        HomeChromeCtrl* chrome = HomeChrome(win);
+        if (chrome && chrome->searchBorder) {
+            chrome->searchBorder->PaintStandalone(gfx);
         }
     }
 }
 
-void DrawHomePage(MainWindow* win, Gfx* gfx) {
-    HomePageLayout l;
-    l.rc = HwndClientRect(win->hwndCanvas);
-    l.gfx = gfx;
-    l.win = win;
-
-    TempStr filterText = HomeSearchQueryTemp(win);
-    int scrollY = win->homePageScrollY;
-
-    // Prefer the scroll-friendly path: when only scrollY changed, offset cached
-    // thumb rects instead of re-running full LayoutHomePage (was ~30% of scroll CPU).
-    bool usedCache = false;
-    if (HomeLayoutCacheMatches(l.rc, filterText)) {
-        Vec<FileState*> files;
-        StrVec filterWords;
-        CollectHomePageFiles(win, files, filterWords);
-        if (HomeLayoutCacheFilesMatch(files)) {
-            ApplyHomeLayoutCache(l, scrollY);
-            usedCache = true;
-        }
+static bool HomePageShouldShow(MainWindow* win) {
+    if (!win || !win->IsCurrentTabAbout()) {
+        return false;
     }
-    if (!usedCache) {
-        LayoutHomePage(l);
-        SaveHomeLayoutCache(l, filterText, win->homePageScrollY);
+    if (!HasPermission(Perm::SavePreferences | Perm::DiskAccess)) {
+        return false;
     }
-    // Keep cue "Search N files …" in sync when history changes without recreating the edit.
-    UpdateHomeSearchCueBanner(win);
+    return gSettings && SettingsRememberOpenedFiles() && gSettings->showStartPage;
+}
 
-    HomePageSyncChrome(l);
-    DrawHomePageLayout(l);
-    SyncHomeLayoutCacheFileSizes(l);
-
-    // update overlay scrollbar for home page if thumbnails overflow visible area
-    bool showScrollbarV = ScrollbarsUseOverlay() && l.totalContentDy > l.thumbsVisibleDy;
-    if (showScrollbarV) {
+static void UpdateHomeOverlayScrollbar(MainWindow* win) {
+    auto& c = gHomeLayoutCache;
+    bool show = c.valid && ScrollbarsUseOverlay() && c.totalContentDy > c.thumbsVisibleDy;
+    if (show) {
         if (!win->overlayScrollV) {
             win->overlayScrollV =
                 OverlayScrollbarCreate(win->hwndCanvas, OverlayScrollbar::Type::Vert, ScrollbarsOverlayMode());
@@ -2628,20 +3126,90 @@ void DrawHomePage(MainWindow* win, Gfx* gfx) {
         si.cbSize = sizeof(si);
         si.fMask = SIF_ALL;
         si.nMin = 0;
-        si.nMax = l.totalContentDy - 1;
-        si.nPage = l.thumbsVisibleDy;
+        si.nMax = c.totalContentDy - 1;
+        si.nPage = c.thumbsVisibleDy;
         si.nPos = win->homePageScrollY;
         OverlayScrollbarShow(win->overlayScrollV, true);
         OverlayScrollbarSetInfo(win->overlayScrollV, &si, TRUE);
     }
-    // show thin scrollbar briefly to indicate content is scrollable
-    OverlayScrollbarShow(win->overlayScrollV, showScrollbarV);
+    OverlayScrollbarShow(win->overlayScrollV, show);
+}
+
+void HomePageCreate(MainWindow* win) {
+    if (!win || !win->hwndCanvas) {
+        return;
+    }
+    EnsureHomeChrome(win);
+    EnsureHomeSearchCreated(win);
+}
+
+void HomePageRelayout(MainWindow* win) {
+    if (!win || !win->hwndCanvas) {
+        return;
+    }
+    if (!HomePageShouldShow(win)) {
+        HomePageHideSearch(win);
+        return;
+    }
+    EnsureHomeChrome(win);
+    EnsureHomeSearchCreated(win);
+
+    HomePageLayout l;
+    l.rc = HwndClientRect(win->hwndCanvas);
+    l.win = win;
+    if (l.rc.IsEmpty()) {
+        HomePageHideSearch(win);
+        return;
+    }
+
+    TempStr filterText = HomeSearchQueryTemp(win);
+    bool usedCache = false;
+    if (HomeLayoutCacheMatches(l.rc, filterText)) {
+        Vec<FileState*> files;
+        StrVec filterWords;
+        CollectHomePageFiles(win, files, filterWords);
+        if (HomeLayoutCacheFilesMatch(files)) {
+            ApplyHomeLayoutCache(l, win->homePageScrollY);
+            usedCache = true;
+        }
+    }
+    if (!usedCache) {
+        LayoutHomePage(l);
+        SaveHomeLayoutCache(l, filterText, win->homePageScrollY);
+    }
+    HomePageSyncChrome(l);
+    PlaceHomeSearchEdit(win, l.rcSearchBorder);
+    if (win->homeSearch) {
+        win->homeSearch->SetIsVisible(true);
+    }
+    UpdateHomeSearchCueBanner(win);
+    UpdateHomeOverlayScrollbar(win);
+}
+
+void DrawHomePage(MainWindow* win, Gfx* gfx) {
+    if (!gHomeLayoutCache.valid || !win->homeRoot) {
+        HomePageRelayout(win);
+    }
+    if (!gHomeLayoutCache.valid || !win->homeRoot) {
+        return;
+    }
+
+    auto& c = gHomeLayoutCache;
+    HomePageLayout l;
+    l.win = win;
+    l.gfx = gfx;
+    l.rc = c.canvasRc;
+    l.rcThumbsArea = c.rcThumbsArea;
+    l.rcSearchBorder = c.rcSearchBorder;
+    l.rcTip = c.rcTip;
+    l.hasTip = c.hasTip;
+    l.thumbnails = c.thumbs;
+    DrawHomePageLayout(l);
 }
 
 // --- keyboard navigation of the file list (issue #1136) ---
 
-// Selection works off the layout cache, which is filled by the last paint, so
-// the entries are exactly what's on screen (same order, same filtering).
+// Selection works off the layout cache, filled by HomePageRelayout.
 static int HomeSelectableCount() {
     return gHomeLayoutCache.valid ? len(gHomeLayoutCache.thumbs) : 0;
 }
@@ -2788,7 +3356,7 @@ static void HomePageShowSelectionTooltip(MainWindow* win) {
     HomeSyncLayoutCacheScroll(win);
     ThumbnailLayout& t = c.thumbs[idx];
     FileState* fs = t.fs;
-    if (!fs || !fs->filePath) {
+    if (!fs || len(fs->filePath) == 0) {
         win->DeleteToolTip();
         return;
     }
@@ -2843,6 +3411,7 @@ void HomePageOnWindowActivate(MainWindow* win, bool active) {
         // Also when the frame is iconic: activate can fire while minimized and
         // ClientToScreen then pins the tip at the top-left of the desktop (#5928).
         win->DeleteToolTip();
+        HideHomeAboutHover(win);
         return;
     }
     // only restore the selection tip (positioned at the active entry, not cursor)
@@ -2853,13 +3422,8 @@ void HomePageOnWindowActivate(MainWindow* win, bool active) {
 
 // the entries wnd of the chrome tree, if the home page is showing
 static HomeEntriesCtrl* HomeEntries(MainWindow* win) {
-    if (!win || !win->homeRoot) {
-        return nullptr;
-    }
-    if (!IsVirtCtrlOfKind(win->homeRoot->owned, kindHomeChromeCtrl)) {
-        return nullptr; // the About page is showing, not the home page
-    }
-    return ((HomeChromeCtrl*)win->homeRoot->owned)->entries;
+    HomeChromeCtrl* chrome = HomeChrome(win);
+    return chrome ? chrome->entries : nullptr;
 }
 
 // mouse left the canvas (or the page scrolled): drop the active entry so the
@@ -2960,7 +3524,7 @@ void HomePageMoveSelection(MainWindow* win, int dCol, int dRow) {
         if (dRow < 0 && win->homeSearch) {
             win->homePageSearchReturnCol = HomePageIsListView() ? 0 : (idx % nCols);
             win->DeleteToolTip();
-            HwndSetFocus(win->homeSearch->hwnd);
+            EditSetFocus(win->homeSearch);
             HwndInvalidate(win->hwndCanvas); // drop selection outline while typing
             return;
         }
@@ -2974,6 +3538,7 @@ void HomePageMoveSelection(MainWindow* win, int dCol, int dRow) {
     }
     win->homePageSelIdx = newIdx;
     HomeScrollSelectionIntoView(win);
+    HomePageRelayout(win);
     HwndInvalidate(win->hwndCanvas);
     HomePageShowSelectionTooltip(win);
 }
@@ -3017,6 +3582,7 @@ void HomePageOnVScroll(MainWindow* win, WPARAM wp) {
     newScrollY = std::max(newScrollY, 0);
     if (newScrollY != win->homePageScrollY) {
         win->homePageScrollY = newScrollY;
+        HomePageRelayout(win);
         HwndInvalidate(win->hwndCanvas);
     }
 }
@@ -3032,6 +3598,7 @@ void HomePageOnMouseWheel(MainWindow* win, int delta) {
     newScrollY = std::max(newScrollY, 0);
     if (newScrollY != win->homePageScrollY) {
         win->homePageScrollY = newScrollY;
+        HomePageRelayout(win);
         HwndInvalidate(win->hwndCanvas);
     }
 }

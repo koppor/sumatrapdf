@@ -43,7 +43,7 @@ class FilterClassFactory : public IClassFactory {
 
     // IClassFactory
     IFACEMETHODIMP CreateInstance(IUnknown* punkOuter, REFIID riid, void** ppv) {
-        log("FilterClassFactory::CreateInstance()\n");
+        log(StrL("FilterClassFactory::CreateInstance()\n"));
 
         *ppv = nullptr;
         if (punkOuter) {
@@ -53,14 +53,14 @@ class FilterClassFactory : public IClassFactory {
         ScopedComPtr<IFilter> pFilter;
 
         CLSID clsid;
-        if (SUCCEEDED(CLSIDFromString(kPdfFilterClsid, &clsid)) && IsEqualCLSID(m_clsid, clsid)) {
+        if (SUCCEEDED(CLSIDFromString(StrL(kPdfFilterClsid), &clsid)) && IsEqualCLSID(m_clsid, clsid)) {
             pFilter = new PdfFilter(&g_lRefCount);
 #ifdef BUILD_TEX_IFILTER
-        } else if (SUCCEEDED(CLSIDFromString(kTexFilterClsid, &clsid)) && IsEqualCLSID(m_clsid, clsid)) {
+        } else if (SUCCEEDED(CLSIDFromString(StrL(kTexFilterClsid), &clsid)) && IsEqualCLSID(m_clsid, clsid)) {
             pFilter = new TeXFilter(&g_lRefCount);
 #endif
 #ifdef BUILD_EPUB_IFILTER
-        } else if (SUCCEEDED(CLSIDFromString(kEpubFilterClsid, &clsid)) && IsEqualCLSID(m_clsid, clsid)) {
+        } else if (SUCCEEDED(CLSIDFromString(StrL(kEpubFilterClsid), &clsid)) && IsEqualCLSID(m_clsid, clsid)) {
             pFilter = new EpubFilter(&g_lRefCount);
 #endif
         } else {
@@ -87,13 +87,23 @@ class FilterClassFactory : public IClassFactory {
     CLSID m_clsid;
 };
 
-STDAPI_(BOOL) DllMain(__unused HINSTANCE hInstance, DWORD dwReason, __unused LPVOID lpReserved) {
+STDAPI_(BOOL) DllMain(HINSTANCE hInstance, DWORD dwReason, LPVOID lpReserved) {
     if (dwReason == DLL_PROCESS_ATTACH) {
         ReportIf(hInstance != GetInstance());
+        gLogAppName = StrL("PdfFilter");
+        gLogToConsole = false;
+        log(StrL("DllMain\n"));
+    } else if (dwReason == DLL_PROCESS_DETACH) {
+        // lpReserved is non-null when the process is exiting; skip teardown
+        // then so we don't take locks under the loader as other DLLs die.
+        // FreeLibrary unload (ifilttst, SearchFilterHost) is lpReserved == 0
+        // and that's the leak the CRT dump sees (#4859).
+        if (!lpReserved) {
+            DestroyLogging();
+            DestroyTempArena();
+            DestroyPermArena();
+        }
     }
-    gLogAppName = StrL("PdfFilter");
-    gLogToConsole = false;
-    log("DllMain\n");
     return TRUE;
 }
 
@@ -111,9 +121,9 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv) {
 }
 
 STDAPI DllRegisterServer() {
-    log("DllRegisterServer\n");
+    log(StrL("DllRegisterServer\n"));
     TempStr dllPath = GetSelfExePathTemp();
-    if (!dllPath) {
+    if (len(dllPath) == 0) {
         return HRESULT_FROM_WIN32(GetLastError());
     }
     bool ok = InstallSearchFilter(dllPath, false);
@@ -121,10 +131,10 @@ STDAPI DllRegisterServer() {
 }
 
 STDAPI DllUnregisterServer() {
-    log("DllUnregisterServer\n");
+    log(StrL("DllUnregisterServer\n"));
     bool ok = UninstallSearchFilter();
     if (!ok) {
-        log("DllUnregisterServer failed\n");
+        log(StrL("DllUnregisterServer failed\n"));
     }
     return ok ? S_OK : E_FAIL;
 }

@@ -6,7 +6,7 @@
 #include "gui/UIModels.h"
 
 #include "Settings.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "DocController.h"
 #include "Theme.h"
 #include "EngineBase.h"
@@ -104,7 +104,12 @@ void BuildViewDarkModeProfile(EngineBase* engine, DarkModeProfile* profile) {
         return;
     }
 
-    if (EngineUsesDocumentColorsFollowTheme(engine)) {
+    if (EngineUsesReflowThemeCss(engine)) {
+        // EPUB/HTML/FB2/MOBI/TXT go through MuPDF's HTML engine: page colors
+        // are applied as user CSS (images stay as in the file). Bitmap recolor
+        // inverted some of those images (#6050).
+        profile->mode = PageColorMode::Normal;
+    } else if (EngineUsesDocumentColorsFollowTheme(engine)) {
         if (GetDocumentColorsFollowTheme() == DocumentColorsFollowTheme::Legacy) {
             profile->mode = PageColorMode::LegacyInvert;
         } else {
@@ -123,5 +128,20 @@ void BuildViewDarkModeProfile(EngineBase* engine, DarkModeProfile* profile) {
 }
 
 bool EngineUsesDocumentColorsFollowTheme(EngineBase* engine) {
-    return engine && (engine->kind == kindEngineMupdf || engine->kind == kindEngineDjVu);
+    if (!engine || engine->IsImageCollection()) {
+        return false;
+    }
+    if (engine->kind == kindEngineMupdf || engine->kind == kindEngineDjVu) {
+        return true;
+    }
+    // Native HTML-layout engines paint black-on-white pages. Recolor them with
+    // FixedPageUI colors the same way as PDF (issue #6030: CHM went white when
+    // recolor was narrowed to MuPDF+DjVu).
+    return engine->kind == kindEngineChm || engine->kind == kindEngineEpub || engine->kind == kindEngineFb2 ||
+           engine->kind == kindEngineMobi || engine->kind == kindEnginePdb || engine->kind == kindEngineHtml ||
+           engine->kind == kindEngineTxt;
+}
+
+bool EngineUsesReflowThemeCss(EngineBase* engine) {
+    return engine && engine->kind == kindEngineMupdf && engine->isReflowable;
 }

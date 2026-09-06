@@ -148,6 +148,10 @@ void SimpleBrowserWindow::OnFocus(WindowBase::FocusEvent*) {
 }
 
 void SimpleBrowserWindow::OnSize(WindowBase::SizeEvent* ev) {
+    if (ev->msg == WM_EXITSIZEMOVE) {
+        onPosChanged.Call();
+        return;
+    }
     if (ev->msg != WM_SIZE) {
         return;
     }
@@ -158,7 +162,14 @@ HWND SimpleBrowserWindow::Create(const SimpleBrowserCreateArgs& args) {
     // LayoutControls sizes the nav row to its natural height and the webview
     // into the leftover client area, not a full-client DoLayout
     autoLayout = false;
-    // docs window: Ctrl+W closes; Esc does not (search dialog, issue #5942)
+    Color backgroundColor = args.backgroundColor;
+    if (ColorSkipsPaint(backgroundColor)) {
+        backgroundColor = ThemeWindowBackgroundColor();
+    }
+    // Set the colors before creating the HWND so its first paint cannot fall
+    // back to the white class brush while the WebView initializes.
+    SetColors(ThemeWindowTextColor(), backgroundColor);
+    // Ctrl+W closes. The manual caller can additionally opt into Esc via EscToExit.
     closeOnCtrlW = true;
     onFocus = MkMethod1<SimpleBrowserWindow, WindowBase::FocusEvent*, &SimpleBrowserWindow::OnFocus>(this);
     onSize = MkMethod1<SimpleBrowserWindow, WindowBase::SizeEvent*, &SimpleBrowserWindow::OnSize>(this);
@@ -170,31 +181,29 @@ HWND SimpleBrowserWindow::Create(const SimpleBrowserCreateArgs& args) {
             cargs.pos = {CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT};
         }
         cargs.title = args.title;
-        if (!cargs.title) {
-            cargs.title = "Browser Window";
+        if (len(cargs.title) == 0) {
+            cargs.title = StrL("Browser Window");
         }
         HMODULE h = GetModuleHandleW(nullptr);
         WCHAR* iconName = MAKEINTRESOURCEW(GetAppIconID());
         cargs.icon = LoadIconW(h, iconName);
-        // TODO: if set, navigate to url doesn't work
-        // args.visible = false;
+        cargs.bgColor = backgroundColor;
+        // Build the child host before exposing the frame; otherwise the white
+        // window-class brush can be presented before either window paints.
+        cargs.visible = false;
         frameHwnd = CreateCustom(cargs);
         ReportIf(!frameHwnd);
     }
-
-    // the nav row is painted by us (it holds virtual buttons), so the window
-    // needs a background color of its own - without one it paints black
-    SetColors(ThemeWindowTextColor(), ThemeWindowBackgroundColor());
 
     font = GetDefaultGuiFont();
 
     {
         // Back | Forward | url, the whole row inset by kNavRowPadding. All
         // three are virtual controls, so the window paints them itself
-        btnBack = NewThemedButton(frameHwnd, _TRA("Back"), font, false);
+        btnBack = NewThemedButton(frameHwnd, Tr("Back"), font, false);
         btnBack->onClick = MkMethod1<SimpleBrowserWindow, VirtMouseEvent*, &SimpleBrowserWindow::OnBack>(this);
         btnBack->SetIsEnabled(false);
-        btnForward = NewThemedButton(frameHwnd, _TRA("Forward"), font, false);
+        btnForward = NewThemedButton(frameHwnd, Tr("Forward"), font, false);
         btnForward->onClick = MkMethod1<SimpleBrowserWindow, VirtMouseEvent*, &SimpleBrowserWindow::OnForward>(this);
         btnForward->SetIsEnabled(false);
         urlText = NewVirtText({
@@ -217,13 +226,16 @@ HWND SimpleBrowserWindow::Create(const SimpleBrowserCreateArgs& args) {
     {
         webView = new WebviewWnd();
         Str dataDir = args.dataDir;
-        if (!dataDir) {
+        if (len(dataDir) == 0) {
             dataDir = GetWebViewDataDirTemp();
         }
         webView->dataDir = str::Dup(dataDir);
         webView->resourceProvider = args.resourceProvider;
         wstr::Free(webView->resourceUriPrefix);
         webView->resourceUriPrefix = wstr::Dup(args.resourceUriPrefix);
+        // Match the composition surface to the page background so a resize
+        // does not reveal a differently colored host while WebView2 catches up.
+        webView->defaultBackgroundColor = backgroundColor;
         webView->events.ctx = this;
         webView->events.navigationStarting = NavigationStarting;
         webView->events.navigationCompleted = NavigationCompleted;
@@ -248,8 +260,10 @@ HWND SimpleBrowserWindow::Create(const SimpleBrowserCreateArgs& args) {
 
     // important to call this after hooking up onSize to ensure
     // first layout is triggered
-    webView->Navigate(args.url);
     SetIsVisible(true);
+    // Navigating a WebView while its top-level parent is hidden can stall its
+    // first load, so show the prepared themed frame before starting navigation.
+    webView->Navigate(args.url);
     if (webView) {
         webView->Focus();
     }

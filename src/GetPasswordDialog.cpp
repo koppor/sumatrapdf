@@ -6,21 +6,23 @@
 #include "gui/Dpi.h"
 
 #include "gui/UIModels.h"
+#include "EngineBase.h"
 #include "gui/Layout.h"
 #include "gui/win/WinGui.h"
 #include "gui/PlatformFont.h"
+#include "gui/PlatformWindow.h"
+#include "gui/PasswordDialog.h"
 #include "gui/Gfx.h"
 #include "gui/VirtCtrl.h"
 
 #include "Settings.h"
 #include "AppSettings.h"
-#include "GlobalPrefs.h"
 #include "Theme.h"
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
 #include "Translations.h"
 #include "DarkMode_win.h"
-#include "GetPasswordDialog.h"
+#include "SumatraDialogs.h"
 
 // Labels and buttons are VirtCtrl; the password field and checkboxes are HWNDs.
 // Same WindowBase layout as Change Theme. The dialog itself stays modal: engine
@@ -78,9 +80,7 @@ void GetPasswordWnd::OnShowPasswordChanged() {
     if (showPassword) {
         *showPassword = show;
     }
-    if (editPwd) {
-        editPwd->SetPasswordVisible(show);
-    }
+    EditSetPasswordVisible(editPwd, show);
 }
 
 static void OnClose(WindowBase::CloseEvent* ev) {
@@ -100,7 +100,7 @@ bool GetPasswordWnd::Create() {
     {
         CreateCustomArgs args;
         args.parent = hwndParent;
-        args.title = _TRA("Enter password");
+        args.title = Tr("Enter password");
         args.visible = false;
         args.style = WS_POPUPWINDOW | WS_CAPTION;
         args.font = GetFont();
@@ -118,7 +118,7 @@ bool GetPasswordWnd::Create() {
 
     {
         auto* c = NewVirtText({
-            .s = fmt(_TRA("Enter password for %s").s, fileName),
+            .s = fmt(Tr("Enter password for %s").s, fileName),
             .font = font,
             .isRtl = isRtl,
             .padding = DpiScaledInsets(0, 0, 4, 0),
@@ -133,7 +133,7 @@ bool GetPasswordWnd::Create() {
         hbox->alignCross = CrossAxisAlign::CrossCenter;
 
         auto* lab = NewVirtText({
-            .s = _TRA("&Password:"),
+            .s = Tr("&Password:"),
             .font = font,
             .isRtl = isRtl,
             .prefix = true,
@@ -159,7 +159,7 @@ bool GetPasswordWnd::Create() {
     {
         Checkbox::CreateArgs args;
         args.parent = hwnd;
-        args.text = _TRA("&Show password");
+        args.text = Tr("&Show password");
         args.isRtl = isRtl;
         if (showPassword && *showPassword) {
             args.initialState = Checkbox::State::Checked;
@@ -171,14 +171,14 @@ bool GetPasswordWnd::Create() {
         chkShow = c;
         vbox->AddChild(c);
         if (showPassword && *showPassword) {
-            editPwd->SetPasswordVisible(true);
+            EditSetPasswordVisible(editPwd, true);
         }
     }
 
     if (remember) {
         Checkbox::CreateArgs args;
         args.parent = hwnd;
-        args.text = _TRA("&Remember the password for this document");
+        args.text = Tr("&Remember the password for this document");
         args.isRtl = isRtl;
         auto* c = new Checkbox();
         c->SetInsetsPt(4, 0, 0, 0);
@@ -194,10 +194,10 @@ bool GetPasswordWnd::Create() {
         hbox->gap = font->averageCharWidth;
         auto pad = Insets{4, 0, 4, 0};
 
-        btnCancel = NewThemedButton(hwnd, _TRA("Cancel"), font, false);
+        btnCancel = NewThemedButton(hwnd, Tr("Cancel"), font, false);
         btnCancel->onClick = MkMethod1<GetPasswordWnd, VirtMouseEvent*, &GetPasswordWnd::OnCancel>(this);
         hbox->AddChild(new Padding(btnCancel, pad));
-        btnOk = NewThemedButton(hwnd, _TRA("OK"), font, true);
+        btnOk = NewThemedButton(hwnd, Tr("OK"), font, true);
         btnOk->onClick = MkMethod1<GetPasswordWnd, VirtMouseEvent*, &GetPasswordWnd::OnOk>(this);
         hbox->AddChild(new Padding(btnOk, pad));
         vbox->AddChild(hbox);
@@ -214,27 +214,31 @@ bool GetPasswordWnd::Create() {
 
     SetIsVisible(true);
     BringWindowToTop(hwnd);
-    if (editPwd) {
-        HwndSetFocus(editPwd->hwnd);
-    }
+    EditSetFocus(editPwd);
     return true;
 }
 
 // Modal: disable the parent and pump until OK / Cancel / close. Engine load
 // (often on a worker thread) calls this and cannot continue without a result.
-Str ShowGetPasswordDialog(HWND hwndParent, Str fileName, bool* rememberPassword, bool* showPassword) {
+bool ShowPasswordDialog(const PasswordDialogArgs& args, PasswordDialogResult* result) {
+    if (!result) {
+        return false;
+    }
+    *result = {};
+    bool rememberPassword = args.rememberPassword;
+    bool showPassword = args.showPassword;
     auto* wnd = new GetPasswordWnd();
-    wnd->hwndParent = hwndParent && IsWindow(hwndParent) ? hwndParent : nullptr;
-    wnd->fileName = str::Dup(fileName);
-    wnd->remember = rememberPassword;
-    wnd->showPassword = showPassword;
+    wnd->hwndParent = args.parent && IsWindow(args.parent) ? args.parent : nullptr;
+    wnd->fileName = str::Dup(args.fileName);
+    wnd->remember = args.canRemember ? &rememberPassword : nullptr;
+    wnd->showPassword = &showPassword;
     wnd->closeOnEsc = true;
     wnd->onClose = MkFunc1Void<WindowBase::CloseEvent*>(OnClose);
     wnd->SetFont(GetAppFont());
     bool ok = wnd->Create();
     if (!ok) {
         delete wnd;
-        return {};
+        return false;
     }
 
     HWND parent = wnd->hwndParent;
@@ -263,7 +267,30 @@ Str ShowGetPasswordDialog(HWND hwndParent, Str fileName, bool* rememberPassword,
         SetForegroundWindow(parent);
     }
 
-    Str result = wnd->accepted ? str::Dup(wnd->pwdOut) : Str{};
+    result->accepted = wnd->accepted;
+    result->rememberPassword = rememberPassword;
+    result->showPassword = showPassword;
+    if (wnd->accepted) {
+        result->password = str::Dup(wnd->pwdOut);
+    }
     delete wnd;
-    return result;
+    return result->accepted;
+}
+
+Str ShowGetPasswordDialog(HWND hwndParent, Str fileName, bool* rememberPassword, bool* showPassword) {
+    PasswordDialogArgs args;
+    args.parent = hwndParent;
+    args.fileName = fileName;
+    args.canRemember = rememberPassword != nullptr;
+    args.rememberPassword = rememberPassword && *rememberPassword;
+    args.showPassword = showPassword && *showPassword;
+    PasswordDialogResult result;
+    ShowPasswordDialog(args, &result);
+    if (rememberPassword && result.accepted) {
+        *rememberPassword = result.rememberPassword;
+    }
+    if (showPassword) {
+        *showPassword = result.showPassword;
+    }
+    return result.password;
 }

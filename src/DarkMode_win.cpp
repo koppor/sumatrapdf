@@ -7,6 +7,7 @@
 // enabled, is the current theme the default one - live here instead.
 
 #include "base/Base.h"
+#include <commdlg.h>
 #include "gui/Dpi.h"
 
 #include "gui/UIModels.h"
@@ -21,15 +22,14 @@
 #include "DocController.h"
 #include "EngineBase.h"
 #include "DisplayModel.h"
-#include "GlobalPrefs.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
 #include "AppTools.h"
 #include "Theme.h"
 #include "gui/win/TabsCtrl.h"
-#include "DarkMode_win.h"
 
 #include "DarkModeSubclass.h"
+#include "DarkMode_win.h"
 
 // darkmodelib only supports the architectures we still ship it for; older
 // 32-bit builds run without it
@@ -97,6 +97,7 @@ void DarkModeApplyThemeColors() {
     DarkMode::setDisabledEdgeColor(ThemeDisabledEdgeColor());
     DarkMode::setErrorBackgroundColor(ThemeErrorBackgroundColor());
     DarkMode::updateThemeBrushesAndPens();
+    DarkMode::updateCommonDlgsBrushes();
 
     DarkMode::setViewTextColor(ThemeWindowTextColor());
     DarkMode::setViewBackgroundColor(ThemeWindowControlBackgroundColor());
@@ -151,6 +152,10 @@ void DarkModeApplyToPopupWindow(HWND hwnd) {
     if (IsCurrentThemeDefault()) {
         return;
     }
+    // darkmodelib answers WM_CTLCOLORLISTBOX for a combo's drop-down here (the
+    // combo forwards it to us); without this subclass the list keeps the
+    // system colors and is white in a dark theme (issue #6083)
+    DarkMode::setWindowCtlColorSubclass(hwnd);
     DarkMode::setChildCtrlsSubclassAndTheme(hwnd);
     DarkMode::setWindowNotifyCustomDrawSubclass(hwnd);
 }
@@ -177,14 +182,13 @@ void DarkModeApplyToChildControls(HWND hwnd) {
     DarkMode::setChildCtrlsSubclassAndTheme(hwnd);
 }
 
-// Theming a tooltip applies a visual style to it, which resets its font to the
-// theme's - wrong for a control we size and populate ourselves, so put our font
-// back afterwards (issue #5894).
+// Infotip colors come from TooltipApplyColors (unthemed TTM_SETTIP*).
+// DarkMode_Explorer would ignore those colors and, with Windows in light
+// mode, leave a white bubble (issue #6000).
 static void ApplyToInfotip(MainWindow* win) {
     if (!win || !win->infotip || !win->infotip->hwnd) {
         return;
     }
-    DarkMode::setDarkTooltips(win->infotip->hwnd, (int)DarkMode::ToolTipsType::tooltip);
     win->infotip->SetFont(GetAppFont());
 }
 
@@ -198,6 +202,18 @@ void DarkModeApplyToNewFrame(MainWindow* win) {
     DarkMode::setDarkScrollBar(win->hwndCanvas);
     DarkMode::setWindowMenuBarSubclass(win->hwndFrame);
     ApplyToInfotip(win);
+}
+
+// ChooseColorW with darkmodelib's hook so the system color dialog follows the
+// current theme (darkmodelib 0.76).
+bool DarkModeChooseColor(tagCHOOSECOLORW* cc) {
+    if (!cc) {
+        return false;
+    }
+    if (gUseDarkModeLib) {
+        return DarkMode::darkChooseColorW(cc);
+    }
+    return ChooseColorW(cc);
 }
 
 void DarkModeApplyToFrameAfterThemeChange(MainWindow* win) {

@@ -9,10 +9,11 @@
 // we pad data read with 3 zeros for convenience. That way returned
 // data is a valid null-terminated string or WCHAR*.
 // 3 is for absolute worst case of WCHAR* where last char was partially written
-#define ZERO_PADDING_COUNT 3
+constexpr int kZeroPaddingCount = 3;
 
 // Defined in Win.cpp; avoid pulling all of Win.h into this file.
 void LogLastError(DWORD err = 0);
+Str GetLastErrorAsStr(Arena* arena);
 
 // Same value as HINSTANCE in WinMain for this image (exe or DLL).
 // Using __ImageBase (not GetModuleHandle(nullptr)) so DLL builds report the
@@ -22,7 +23,7 @@ EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 namespace path {
 
 Type GetType(Str pathA) {
-    if (!pathA) {
+    if (len(pathA) == 0) {
         return Type::None;
     }
 
@@ -105,7 +106,7 @@ static void StoreAttrsCache(Str path, u64 now, bool ok, const WIN32_FILE_ATTRIBU
     }
     if (freeIdx < 0 && len(gAttrsCache) < kAttrsCacheMaxEntries) {
         freeIdx = len(gAttrsCache);
-        gAttrsCache.AppendBlanks(1);
+        VecAppendBlanks(gAttrsCache, 1);
     }
     if (freeIdx < 0) {
         freeIdx = oldestIdx;
@@ -139,7 +140,7 @@ constexpr u64 kDriveAvailTtlMs = 4ull * 60ull * 1000ull; // 4 minutes
 // Fill keyOut with a non-fixed drive key ("X" or "\\server\share"). Returns
 // false for fixed drives, relative paths, and paths we do not guard.
 static bool GetNonFixedDriveKey(Str path, char* keyOut, int keyCap) {
-    if (!path || !keyOut || keyCap < 2) {
+    if (len(path) == 0 || !keyOut || keyCap < 2) {
         return false;
     }
     keyOut[0] = 0;
@@ -281,7 +282,7 @@ bool GetCachedAttributesEx(Str path, WIN32_FILE_ATTRIBUTE_DATA* out) {
     if (out) {
         *out = {};
     }
-    if (!path || !out) {
+    if (len(path) == 0 || !out) {
         return false;
     }
 
@@ -647,6 +648,51 @@ bool IsCloudPlaceholder(Str path) {
     return (attrs & cloudBits) != 0;
 }
 
+// True if this directory name is one used by OneNote / Outlook / IE to extract
+// an attachment that the host still needs to rewrite or delete.
+static bool IsEphemeralHostDirName(Str name) {
+    if (str::EqI(name, StrL("OneNote"))) {
+        return true;
+    }
+    if (str::StartsWithI(name, StrL("Microsoft.Office.OneNote"))) {
+        return true;
+    }
+    if (str::EqI(name, StrL("Content.Outlook"))) {
+        return true;
+    }
+    if (str::EqI(name, StrL("INetCache"))) {
+        return true;
+    }
+    if (str::EqI(name, StrL("Temporary Internet Files"))) {
+        return true;
+    }
+    return false;
+}
+
+// Files extracted by OneNote, Outlook, and similar hosts into a cache folder.
+// Opening those in place keeps a handle (or a directory watch) on the host's
+// file, and the host then fails to sync with "denied access to the file"
+// (issue #4705). Detection is by path component only; the file need not exist.
+bool IsEphemeralHostFile(Str path) {
+    if (len(path) == 0) {
+        return false;
+    }
+    int start = 0;
+    int nPath = len(path);
+    for (int i = 0; i <= nPath; i++) {
+        bool sep = (i == nPath) || IsSep(path.s[i]);
+        if (!sep) {
+            continue;
+        }
+        int n = i - start;
+        if (n > 0 && IsEphemeralHostDirName(Str(path.s + start, n))) {
+            return true;
+        }
+        start = i + 1;
+    }
+    return false;
+}
+
 bool IsOnFixedDrive(Str path) {
     WCHAR* ws = CWStrTemp(path);
     if (PathIsNetworkPathW(ws)) {
@@ -661,6 +707,54 @@ bool IsOnFixedDrive(Str path) {
         type = GetDriveType(ws);
     }
     return DRIVE_FIXED == type;
+}
+
+// True if the volume behind `path` is reachable right now. Used when the user
+// explicitly asks to drop deleted history entries: a present USB stick or
+// mapped share with a missing file should be cleaned up, but an unplugged
+// drive / offline share must not — we can't tell those files from deleted.
+bool IsOnAvailableDrive(Str path) {
+    if (len(path) == 0) {
+        return false;
+    }
+
+    char keyBuf[128];
+    if (GetNonFixedDriveKey(path, keyBuf, dimof(keyBuf))) {
+        Str key(keyBuf);
+        const u64 now = GetTickCount64();
+        {
+            ScopedMutex lock(&gAttrsCacheMutex);
+            DriveAvailEntry* e = FindDriveAvailLocked(key, now);
+            if (e) {
+                return e->isAvailable;
+            }
+        }
+        bool avail = ProbeDriveRootAccessible(key);
+        ScopedMutex lock(&gAttrsCacheMutex);
+        StoreDriveAvailLocked(key, avail, GetTickCount64());
+        return avail;
+    }
+
+    WCHAR* ws = CWStrTemp(path);
+    WCHAR root[MAX_PATH];
+    if (GetVolumePathNameW(ws, root, dimof(root))) {
+        return GetFileAttributesW(root) != INVALID_FILE_ATTRIBUTES;
+    }
+
+    int n = len(path);
+    if (n >= 2 && path.s[1] == ':') {
+        WCHAR driveRoot[] = L"X:\\";
+        driveRoot[0] = (WCHAR)toupper((u8)path.s[0]);
+        if (driveRoot[0] < L'A' || driveRoot[0] > L'Z') {
+            return false;
+        }
+        UINT type = GetDriveTypeW(driveRoot);
+        if (type == DRIVE_NO_ROOT_DIR || type == DRIVE_UNKNOWN) {
+            return false;
+        }
+        return GetFileAttributesW(driveRoot) != INVALID_FILE_ATTRIBUTES;
+    }
+    return false;
 }
 
 bool SupportsChangeNotifications(Str pathA) {
@@ -713,12 +807,16 @@ TempStr GetTempFilePathTemp(Str filePrefix) {
     if (!res || res >= dimof(tempDir)) {
         return {};
     }
-    if (!filePrefix) {
+    if (len(filePrefix) == 0) {
         return ToUtf8Temp(tempDir);
     }
     WCHAR path[MAX_PATH]{};
     WCHAR* filePrefixW = CWStrTemp(filePrefix);
     if (!GetTempFileNameW(tempDir, filePrefixW, 0, path)) {
+        DWORD err = GetLastError();
+        logf("GetTempFilePathTemp: GetTempFileNameW failed tempDir='%s' prefix='%s' lastError=%u\n", WStr(tempDir),
+             filePrefix, err);
+        LogLastError(err);
         return {};
     }
     return ToUtf8Temp(path);
@@ -729,14 +827,13 @@ TempWStr GetSelfExePathW() {
     DWORD nChars = dimof(buf) - 1;
     // TODO: GetModuleFileNameW() truncates if too big but doesn't return the needed size
     GetModuleFileNameW((HINSTANCE)&__ImageBase, buf, nChars);
-    return wstr::Dup(buf);
+    return str::DupTemp(WStr(buf));
 }
 
 // Path of this process image (exe or DLL that contains this code).
 TempStr GetSelfExePathTemp() {
     WCHAR buf[MAX_PATH + 2]{};
     DWORD nChars = dimof(buf) - 1;
-    // TODO: GetModuleFileNameW() truncates if too big but doesn't return the needed size
     GetModuleFileNameW((HINSTANCE)&__ImageBase, buf, nChars);
     return ToUtf8Temp(buf);
 }
@@ -757,8 +854,8 @@ TempStr GetPathInExeDirTemp(Str fileName) {
 namespace file {
 
 FILE* OpenFILE(Str path) {
-    ReportIf(!path);
-    if (!path) {
+    ReportIf(len(path) == 0);
+    if (len(path) == 0) {
         return nullptr;
     }
     return _wfopen(CWStrTemp(path), L"rb");
@@ -795,6 +892,75 @@ FileHandle OpenReadOnly(Str path) {
                        nullptr);
 }
 
+// Opens path for reading and writing, creating it when createIfMissing.
+// Shares the file with other readers/writers so a store can stay open while
+// someone else inspects it.
+FileHandle OpenReadWrite(Str path, bool createIfMissing) {
+    DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    DWORD disposition = createIfMissing ? OPEN_ALWAYS : OPEN_EXISTING;
+    return CreateFileW(CWStrTemp(path), GENERIC_READ | GENERIC_WRITE, share, nullptr, disposition,
+                       FILE_ATTRIBUTE_NORMAL, nullptr);
+}
+
+void Close(FileHandle h) {
+    if (h != kInvalidFileHandle && h != nullptr) {
+        CloseHandle(h);
+    }
+}
+
+// Moves the file position to the end and returns it, i.e. the current file
+// size, or -1 on failure. That offset is where the next write lands.
+i64 SeekEnd(FileHandle h) {
+    LARGE_INTEGER zero = {};
+    LARGE_INTEGER pos = {};
+    if (!SetFilePointerEx(h, zero, &pos, FILE_END)) {
+        return -1;
+    }
+    return pos.QuadPart;
+}
+
+// Writes all of data at the current file position, looping over partial writes.
+bool WriteAll(FileHandle h, Str data) {
+    int written = 0;
+    while (written < data.len) {
+        DWORD n = 0;
+        if (!::WriteFile(h, data.s + written, (DWORD)(data.len - written), &n, nullptr) || n == 0) {
+            return false;
+        }
+        written += (int)n;
+    }
+    return true;
+}
+
+// Reads exactly size bytes at offset; a short read (e.g. hitting the end of
+// the file) is a failure. Leaves the file position unspecified, so callers
+// that also write must seek first.
+bool ReadAt(FileHandle h, i64 offset, void* buf, int size) {
+    LARGE_INTEGER pos;
+    pos.QuadPart = offset;
+    if (!SetFilePointerEx(h, pos, nullptr, FILE_BEGIN)) {
+        return false;
+    }
+    int total = 0;
+    while (total < size) {
+        DWORD n = 0;
+        if (!::ReadFile(h, (char*)buf + total, (DWORD)(size - total), &n, nullptr) || n == 0) {
+            return false;
+        }
+        total += (int)n;
+    }
+    return true;
+}
+
+bool Flush(FileHandle h) {
+    return FlushFileBuffers(h) != 0;
+}
+
+// Text of the error left behind by the last failed call, for error messages.
+TempStr LastErrorTemp() {
+    return GetLastErrorAsStr(GetTempArena());
+}
+
 // Reads up to toRead bytes from the front of the file, zero-filling the rest of
 // buf. Returns the number of bytes read or -1 on failure.
 //
@@ -803,8 +969,8 @@ FileHandle OpenReadOnly(Str path) {
 // copies through that buffer before calling CreateFileW anyway. This runs once
 // per page when opening an image directory, so that overhead is worth skipping.
 int ReadN(Str path, u8* buf, size_t toRead) {
-    ReportIf(!path);
-    if (!path || !buf || toRead > (size_t)UINT32_MAX) {
+    ReportIf(len(path) == 0);
+    if (len(path) == 0 || !buf || toRead > (size_t)UINT32_MAX) {
         return -1;
     }
     // share flags match what the CRT's "rb" mode uses, plus DELETE so we don't
@@ -838,7 +1004,7 @@ static i64 GetSizeFromHandle(FileHandle h) {
 }
 
 // Reads the whole file into memory allocated from a (heap if a is nullptr),
-// followed by ZERO_PADDING_COUNT zero bytes so the result is also a valid
+// followed by kZeroPaddingCount zero bytes so the result is also a valid
 // NUL-terminated char* / WCHAR*.
 //
 // Skips the CRT for the same reason ReadN() does, plus two wins that matter
@@ -848,8 +1014,8 @@ static i64 GetSizeFromHandle(FileHandle h) {
 //  - we allocate without zeroing: the buffer is immediately overwritten with
 //    file data, so pre-zeroing it is a second full-size memset per file
 Str ReadFileWithArena(Str filePath, Arena* a) {
-    ReportIf(!filePath);
-    if (!filePath) {
+    ReportIf(len(filePath) == 0);
+    if (len(filePath) == 0) {
         return {};
     }
     DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
@@ -861,15 +1027,15 @@ Str ReadFileWithArena(Str filePath, Arena* a) {
     AutoCloseHandle hf(h);
 
     i64 fileSize = GetSizeFromHandle(h);
-    if (fileSize < 0 || fileSize > (i64)(INT_MAX - ZERO_PADDING_COUNT)) {
+    if (fileSize < 0 || fileSize > (i64)(INT_MAX - kZeroPaddingCount)) {
         return {};
     }
     int size = (int)fileSize;
-    char* d = (char*)Alloc(a, (size_t)size + ZERO_PADDING_COUNT);
+    char* d = (char*)Alloc(a, (size_t)size + kZeroPaddingCount);
     if (!d) {
         return {};
     }
-    memset(d + size, 0, ZERO_PADDING_COUNT);
+    memset(d + size, 0, kZeroPaddingCount);
 
     int nTotal = 0;
     while (nTotal < size) {
@@ -894,7 +1060,7 @@ Str ReadFileWithArena(Str filePath, Arena* a) {
 }
 
 bool Exists(Str path) {
-    if (!path) {
+    if (len(path) == 0) {
         return false;
     }
     // GetCachedAttributes: network paths cached 1hr (avoids UI-thread stalls in
@@ -962,8 +1128,8 @@ static bool GetInfo(Str path, WIN32_FILE_ATTRIBUTE_DATA& fileInfo) {
 }
 
 i64 GetSize(Str path) {
-    ReportIf(!path);
-    if (!path) {
+    ReportIf(len(path) == 0);
+    if (len(path) == 0) {
         return -1;
     }
     WIN32_FILE_ATTRIBUTE_DATA fileInfo{};
@@ -988,7 +1154,7 @@ i64 GetSize(Str path) {
 }
 
 bool Delete(Str filePath) {
-    if (!filePath) {
+    if (len(filePath) == 0) {
         return false;
     }
     BOOL ok = DeleteFileW(CWStrTemp(filePath));
@@ -1108,19 +1274,31 @@ bool DeleteZoneIdentifier(Str filePath) {
 }
 
 bool Rename(Str newPath, Str oldPath) {
-    if (!newPath || !oldPath) {
+    if (len(newPath) == 0 || len(oldPath) == 0) {
         return false;
     }
     BOOL ok = MoveFileW(CWStrTemp(oldPath), CWStrTemp(newPath));
     if (!ok) {
-        LogLastError();
+        DWORD err = GetLastError();
+        logf("file::Rename: MoveFileW failed old='%s' new='%s' lastError=%u\n", oldPath, newPath, err);
+        LogLastError(err);
         return false;
     }
     return true;
 }
 
+// Like Rename() but overwrites newPath if it exists, and doesn't return until
+// the rename is on disk. Used to publish a file written to a temp path.
+bool RenameReplace(Str newPath, Str oldPath) {
+    if (len(newPath) == 0 || len(oldPath) == 0) {
+        return false;
+    }
+    DWORD flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
+    return MoveFileExW(CWStrTemp(oldPath), CWStrTemp(newPath), flags) != 0;
+}
+
 bool OverwriteAtomicRetry(Str dst, Str src, int retryCount, int retrySleepMs) {
-    if (!dst || !src) {
+    if (len(dst) == 0 || len(src) == 0) {
         return false;
     }
 
@@ -1186,14 +1364,14 @@ int FileTimeDiffInSecs(const FILETIME& ft1, const FILETIME& ft2) {
 namespace dir {
 
 bool Exists(WStr dir) {
-    if (!dir) {
+    if (len(dir) == 0) {
         return false;
     }
     return Exists(ToUtf8Temp(dir));
 }
 
 bool Exists(Str dir) {
-    if (!dir) {
+    if (len(dir) == 0) {
         return false;
     }
     DWORD attrs = path::GetCachedAttributes(dir);
@@ -1217,7 +1395,7 @@ bool CreateAll(Str dir, int* errOut) {
     if (errOut) {
         *errOut = 0;
     }
-    if (!dir) {
+    if (len(dir) == 0) {
         return false;
     }
     if (Exists(dir)) {
@@ -1264,7 +1442,7 @@ bool Empty(Str dir) {
 }
 
 bool HasWriteAccess(Str dir) {
-    if (!dir) {
+    if (len(dir) == 0) {
         return false;
     }
     TempStr path = path::JoinTemp(dir, StrL("__sumatra_write_test__.tmp"));

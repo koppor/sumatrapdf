@@ -11,13 +11,13 @@
 #include "Theme.h"
 #include "GumboHelpers.h"
 #include "GumboHtmlParser.h"
-#include "MarkdownToc.h"
 
 extern "C" {
 #include "cmark-gfm.h"
 #include "cmark-gfm-core-extensions.h"
 #include "node.h"
 }
+#include "MarkdownToc.h"
 
 static bool IsMarkdownExt(Str path) {
     return str::EndsWithI(path, StrL(".md")) || str::EndsWithI(path, StrL(".markdown"));
@@ -208,7 +208,7 @@ static Str ExtractHeadingTitle(cmark_node* heading) {
         AppendHeadingText(child, &out);
     }
     Str title = out.TakeStr();
-    if (!title) {
+    if (len(title) == 0) {
         return {};
     }
     return str::Dup(title);
@@ -216,10 +216,10 @@ static Str ExtractHeadingTitle(cmark_node* heading) {
 
 static void ParseMarkdownHeadings(Str filePath, MarkdownFileToc* toc) {
     toc->filePath = str::Dup(filePath);
-    toc->headings.Reset();
+    VecReset(toc->headings);
 
     Str data = file::ReadFile(filePath);
-    if (!data) {
+    if (len(data) == 0) {
         return;
     }
 
@@ -246,14 +246,14 @@ static void ParseMarkdownHeadings(Str filePath, MarkdownFileToc* toc) {
             continue;
         }
         Str title = ExtractHeadingTitle(node);
-        if (!title) {
+        if (len(title) == 0) {
             continue;
         }
         MarkdownHeadingItem item;
         item.title = title;
         item.anchor = MarkdownHeadingSlug(nullptr, title);
         item.level = cmark_node_get_heading_level(node);
-        toc->headings.Append(item);
+        VecAppend(toc->headings, item);
     }
     cmark_iter_free(iter);
     cmark_node_free(doc);
@@ -266,8 +266,8 @@ static bool IsHtmlHeadingTag(HtmlTag tag) {
 // Extract <h1>..<h6> headings from HTML source, using each heading's id=""
 // attribute (when present) as the in-page anchor. headingsOut items are heap-owned.
 void ParseHtmlHeadingsData(Str data, Vec<MarkdownHeadingItem>& headingsOut) {
-    headingsOut.Reset();
-    if (!data) {
+    VecReset(headingsOut);
+    if (len(data) == 0) {
         return;
     }
     GumboHtmlParser parser(data);
@@ -305,7 +305,7 @@ void ParseHtmlHeadingsData(Str data, Vec<MarkdownHeadingItem>& headingsOut) {
                 item.title = str::Dup(title);
                 item.anchor = len(headingId) > 0 ? str::Dup(headingId) : Str{};
                 item.level = headingLevel;
-                headingsOut.Append(item);
+                VecAppend(headingsOut, item);
             }
             str::Free(title);
             str::Free(raw);
@@ -319,9 +319,9 @@ void ParseHtmlHeadingsData(Str data, Vec<MarkdownHeadingItem>& headingsOut) {
 // Build a sibling-file TOC from an HTML file's headings.
 static void ParseHtmlHeadings(Str filePath, MarkdownFileToc* toc) {
     toc->filePath = str::Dup(filePath);
-    toc->headings.Reset();
+    VecReset(toc->headings);
     Str data = file::ReadFile(filePath);
-    if (!data) {
+    if (len(data) == 0) {
         return;
     }
     ParseHtmlHeadingsData(data, toc->headings);
@@ -356,13 +356,13 @@ static void InitMarkdownFileToc(MarkdownFileToc* ft) {
     ft->filePath = {};
     ft->relPath = {};
     // MarkdownFileToc contains a nested Vec; Reset() from a zeroed slot is safe.
-    ft->headings.Reset();
+    VecReset(ft->headings);
 }
 
 // Parse headings from all files in parallel (up to CpuCoreCount() - 2 threads).
 void ParseMarkdownTocsParallel(StrVec& files, bool htmlMode, Vec<MarkdownFileToc>& tocsOut) {
     int n = len(files);
-    tocsOut.Reset();
+    VecReset(tocsOut);
     if (n == 0) {
         return;
     }
@@ -390,7 +390,7 @@ void ParseMarkdownTocsParallel(StrVec& files, bool htmlMode, Vec<MarkdownFileToc
     Vec<ThreadHandle> threads;
     for (int t = 0; t < numThreads; t++) {
         auto fn = MkFunc0(MdTocParseWorker, &ctx);
-        threads.Append(StartThread(fn, "MdTocParse"));
+        VecAppend(threads, StartThread(fn, StrL("MdTocParse")));
     }
     for (ThreadHandle h : threads) {
 #if OS_WIN
@@ -427,7 +427,7 @@ img { max-width: 100%%; }
 // fences. mermaid.js looks for <pre class="mermaid"> (or elements with that class).
 // Returns how many blocks were rewritten.
 static int RewriteMermaidCodeBlocks(str::Builder& out, Str body) {
-    if (!body) {
+    if (len(body) == 0) {
         return 0;
     }
     // Match the open tag cmark produces; language name is case-insensitive.
@@ -526,11 +526,11 @@ static TempStr MarkdownPageCssTemp() {
 
     TempStr bg = ColorToCssTemp(bgCol);
     // the default black-on-white gets the classic GitHub palette
-    TempStr fg = isDefault ? str::DupTemp("#24292f") : ColorToCssTemp(txtCol);
+    TempStr fg = isDefault ? str::DupTemp(StrL("#24292f")) : ColorToCssTemp(txtCol);
     Str link = dark ? StrL("#4493f8") : StrL("#0969da");
     Str muted = dark ? StrL("#9198a1") : StrL("#57606a");
-    TempStr border = isDefault ? str::DupTemp("#d0d7de") : ColorToCssTemp(AccentColor(bgCol, 25));
-    TempStr codeBg = isDefault ? str::DupTemp("#f6f8fa") : ColorToCssTemp(AccentColor(bgCol, 8));
+    TempStr border = isDefault ? str::DupTemp(StrL("#d0d7de")) : ColorToCssTemp(AccentColor(bgCol, 25));
+    TempStr codeBg = isDefault ? str::DupTemp(StrL("#f6f8fa")) : ColorToCssTemp(AccentColor(bgCol, 8));
 
     TempStr cssVars =
         fmt("--bg:%s; --fg:%s; --link:%s; --muted:%s; --border:%s; --code-bg:%s;", bg, fg, link, muted, border, codeBg);
@@ -541,7 +541,7 @@ static TempStr MarkdownPageCssTemp() {
 // relative links on that virtual resource graph instead of navigating to the
 // source .md name.
 static TempStr MarkdownLinkToHtmlTemp(Str url) {
-    if (!url || url.s[0] == '#' || str::StartsWith(url, StrL("//"))) {
+    if (len(url) == 0 || url.s[0] == '#' || str::StartsWith(url, StrL("//"))) {
         return {};
     }
 
@@ -596,7 +596,7 @@ static void RewriteMarkdownLinks(cmark_node* doc) {
 }
 
 static bool IsSafeAnchorId(Str id) {
-    if (!id) {
+    if (len(id) == 0) {
         return false;
     }
     for (int i = 0; i < id.len; i++) {
@@ -716,7 +716,7 @@ static void AddHeadingAnchors(cmark_node* doc) {
             continue;
         }
         Str title = ExtractHeadingTitle(node);
-        if (!title) {
+        if (len(title) == 0) {
             continue;
         }
         Str slug = MarkdownHeadingSlug(nullptr, title);
@@ -732,7 +732,7 @@ static void AddHeadingAnchors(cmark_node* doc) {
 }
 
 static char* MarkdownToHtmlBody(Str markdown) {
-    if (!markdown) {
+    if (len(markdown) == 0) {
         return nullptr;
     }
 
@@ -839,9 +839,9 @@ bool MarkdownToc_UnitTestHtmlLinks() {
     if (!str::Eq(url, StrL("UPPER.html?x=1#part"))) {
         return false;
     }
-    bool linksOk = !MarkdownLinkToHtmlTemp(StrL("https://example.com/readme.md")) &&
-                   !MarkdownLinkToHtmlTemp(StrL("//example.com/readme.md")) &&
-                   !MarkdownLinkToHtmlTemp(StrL("#heading"));
+    bool linksOk = len(MarkdownLinkToHtmlTemp(StrL("https://example.com/readme.md"))) == 0 &&
+                   len(MarkdownLinkToHtmlTemp(StrL("//example.com/readme.md"))) == 0 &&
+                   len(MarkdownLinkToHtmlTemp(StrL("#heading"))) == 0;
 
     Str markdown = StrL(
         "<a id=\"finding-14\"></a>\n\n"

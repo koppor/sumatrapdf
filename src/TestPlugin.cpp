@@ -8,9 +8,9 @@
 #include "base/Base.h"
 #include "base/File.h"
 #include "base/Win.h"
-#include "base/CmdLineArgsIter.h"
+#include "base/CmdLineArgs.h"
 
-#define PLUGIN_TEST_NAME L"SumatraPDF Plugin Test"
+constexpr const WCHAR* kPluginTestName = L"SumatraPDF Plugin Test";
 
 struct PluginStartData {
     Str sumatraPath;
@@ -81,7 +81,7 @@ static LRESULT CALLBACK PluginParentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
             HdcFillRect(hDC, ToRect(rcClient), brushBg);
             LOGFONTW lf{};
             lf.lfHeight = -14;
-            str::BufSet(lf.lfFaceName, dimof(lf.lfFaceName), "MS Shell Dlg");
+            str::BufSet(lf.lfFaceName, dimof(lf.lfFaceName), StrL("MS Shell Dlg"));
             HFONT hFont = CreateFontIndirectW(&lf);
             hFont = (HFONT)SelectObject(hDC, hFont);
             SetTextColor(hDC, 0x000000);
@@ -106,28 +106,35 @@ static LRESULT CALLBACK PluginParentWndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
 
 // Parse args after -test-plugin: [<SumatraPDF.exe>] [<URL>] <filename.ext>
 void TestPlugin(WStr cmdLine) {
-    StrVec argList;
-    ParseCmdLine(cmdLine, argList);
+    StrNode* argList = ParseCmdLine(cmdLine);
+    defer {
+        FreeStrNode(nullptr, argList);
+    };
 
     // find the position of -test-plugin and take args after it
     int pluginIdx = -1;
-    for (int i = 0; i < len(argList); i++) {
-        if (str::EqI(argList[i], StrL("-test-plugin"))) {
-            pluginIdx = i;
+    int argIdx = 0;
+    for (StrNode* n = argList; n; n = n->next, argIdx++) {
+        if (str::EqI(n->s, StrL("-test-plugin"))) {
+            pluginIdx = argIdx;
             break;
         }
     }
 
     StrVec args;
+    StrNode* n = argList;
+    for (int i = 0; n && i < pluginIdx + 1; i++) {
+        n = n->next;
+    }
     if (pluginIdx >= 0) {
-        for (int i = pluginIdx + 1; i < len(argList); i++) {
-            args.Append(argList[i]);
+        for (; n; n = n->next) {
+            args.Append(n->s);
         }
     }
 
     if (len(args) == 0) {
-        MsgBox(nullptr, "Syntax: SumatraPDF.exe -test-plugin [<SumatraPDF.exe>] [<URL>] <filename.ext>",
-               "SumatraPDF Plugin Test", MB_OK | MB_ICONINFORMATION);
+        MsgBox(nullptr, StrL("Syntax: SumatraPDF.exe -test-plugin [<SumatraPDF.exe>] [<URL>] <filename.ext>"),
+               StrL("SumatraPDF Plugin Test"), MB_OK | MB_ICONINFORMATION);
         return;
     }
 
@@ -138,12 +145,12 @@ void TestPlugin(WStr cmdLine) {
     }
     // if no URL given (only exe + file), insert nullptr for URL
     if (len(args) == 2) {
-        args.InsertAt(1, nullptr);
+        args.InsertAt(1, {});
     }
 
     if (len(args) < 3) {
-        MsgBox(nullptr, "Syntax: SumatraPDF.exe -test-plugin [<SumatraPDF.exe>] [<URL>] <filename.ext>",
-               "SumatraPDF Plugin Test", MB_OK | MB_ICONINFORMATION);
+        MsgBox(nullptr, StrL("Syntax: SumatraPDF.exe -test-plugin [<SumatraPDF.exe>] [<URL>] <filename.ext>"),
+               StrL("SumatraPDF Plugin Test"), MB_OK | MB_ICONINFORMATION);
         return;
     }
 
@@ -152,12 +159,12 @@ void TestPlugin(WStr cmdLine) {
     WNDCLASS wc{};
     wc.lpfnWndProc = PluginParentWndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = PLUGIN_TEST_NAME;
+    wc.lpszClassName = kPluginTestName;
     wc.hCursor = GetCachedCursor(IDC_ARROW);
     RegisterClass(&wc);
 
     PluginStartData data = {args[0], args[2], args[1]};
-    HWND hwnd = CreateWindowExW(0, PLUGIN_TEST_NAME, PLUGIN_TEST_NAME, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, 0,
+    HWND hwnd = CreateWindowExW(0, kPluginTestName, kPluginTestName, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, 0,
                                 CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, &data);
     ShowWindow(hwnd, SW_SHOW);
 

@@ -117,6 +117,10 @@ ShowMenubar = true
 ; version 3.7)
 ShowMenubarWithTabs = false
 
+; if true, show the current page as n/N after the file name on tabs (introduced
+; in version 3.7)
+ShowPageNumberInTabs = false
+
 ; if true, show tips on the home page (introduced in version 3.7)
 ShowTips = true
 
@@ -131,7 +135,7 @@ ShowToolbar = true
 ; toolbar mode: show (pinned), hide (no toolbar), overlay (toolbar floats over
 ; the page, sized to its natural width and centered, only shown when the mouse
 ; is near it). if empty, derived from ShowToolbar (introduced in version 3.7)
-Toolbar =
+Toolbar = show
 
 ; where the toolbar is placed: top or bottom (applies to both show and overlay
 ; modes) (introduced in version 3.7)
@@ -162,6 +166,10 @@ SidebarOnRight = false
 ; version 3.6)
 ShowLinks = false
 
+; if true, highlight empty fillable PDF form fields in pale blue so they are
+; easy to find (introduced in version 3.7)
+HighlightFormFields = true
+
 ; if true, a click (not a drag) on the left fifth of the page area goes to the
 ; previous page and a click on the right fifth goes to the next page (reversed
 ; in manga / right-to-left mode). Links, annotations and presentation-mode
@@ -173,10 +181,23 @@ ClickEdgeToTurnPage = false
 ; version 3.7)
 DisableLinks = false
 
+; if true, Space in File Explorer (or on the desktop) previews the selected file
+; in a popup window, like macOS Quick Look. Esc or Space closes it; Left / Right
+; open the previous / next file in the folder. Starts a small background helper
+; at logon so it works even when SumatraPDF is not open (introduced in version
+; 3.7)
+ExplorerQuickLook = false
+
 ; if true, next/previous page keeps the same view position on the page instead
 ; of jumping to the top (useful when zoomed in on similarly sized pages)
 ; (introduced in version 3.7)
 RememberViewOffsetOnPageTurn = false
+
+; if true, one mouse-wheel notch goes to the next / previous page instead of
+; scrolling; combine with RememberViewOffsetOnPageTurn to read zoomed-in pages
+; without touching the keyboard. Alt + wheel still scrolls, Shift + wheel
+; scrolls horizontally and Ctrl + wheel zooms (introduced in version 3.7)
+MouseWheelTurnsPage = false
 
 ; if true, draw a focus ring around the document when it has keyboard focus (Tab
 ; to the page area) (introduced in version 3.7)
@@ -185,6 +206,10 @@ ShowDocumentFocusIndicator = false
 ; if true, show a tip when hovering an annotation (e.g. "Highlight annotation.
 ; Ctrl+click to edit.") (introduced in version 3.7)
 ShowAnnotationNotification = true
+
+; if true, show the author at the bottom of an annotation tooltip as "Author:
+; <author>" (introduced in version 3.7)
+ShowAnnotationAuthorInTooltip = false
 
 ; if true, show page numbers (labels) right-aligned on bookmark /
 ; table-of-contents entries (introduced in version 3.7)
@@ -206,8 +231,8 @@ Scrollbars = windows
 ; 3.6)
 ScrollbarInSinglePage = false
 
-; if true, smooth mouse-wheel scrolling (exponential chase of the target;
-; continuous wheel input stays fluid) (introduced in version 3.6)
+; if true, smooth mouse-wheel and arrow-key scrolling (exponential chase of the
+; target; continuous input stays fluid) (introduced in version 3.6)
 SmoothScroll = true
 
 ; distance, in screen pixels at 96 DPI, scrolled by an arrow-key press or one
@@ -225,6 +250,12 @@ PaddingAfterLastPage = false
 ; 'forbid the change of the current zoom factor during execution of Go to
 ; Destination actions' (introduced in version 3.7)
 IgnoreDestinationZoom = false
+
+; if true, following an internal link or bookmark flashes a highlight at the
+; destination so you can see where you landed (a bibliography entry, figure, or
+; named destination). The color and fade match ForwardSearch. Off when the
+; destination is only a page with no position (introduced in version 3.7)
+HighlightLinkDestination = false
 
 ; how long an internal-document link has to be hovered, in milliseconds, before
 ; a popup rendering the destination region (citation entry, figure, footnote)
@@ -257,7 +288,7 @@ TabWidth = 300
 ; Light, Solarized Dark, Dracula, Nebula, Greeny, Choco, Purpy, One Dark,
 ; Monokai, Nord, GitHub Dark, Catppuccin Mocha, Tokyo Night, Gruvbox, Night Owl,
 ; Ayu, Palenight, System (introduced in version 3.5)
-Theme = 
+Theme = Light
 
 ; the light theme the light/dark toggle and the System theme switch to
 ; (introduced in version 3.7)
@@ -335,6 +366,13 @@ UseTabs = true
 ; (introduced in version 3.7)
 SelectionToolbar = true
 
+; which built-in buttons the selection toolbar has and in what order, e.g.
+; CmdCopySelection | CmdCreateAnnotHighlight. | or Separator inserts a
+; separator. Leave a button out to hide it. Empty (the default) is the standard
+; set. SelectionHandlers with SelectToolbarNameOrSvg still come last (introduced
+; in version 3.7)
+SelectionToolbarLayout = 
+
 ; if true, Ctrl+Tab and Ctrl+Shift+Tab show the tab switcher in most recently
 ; used order instead of tab-strip order (introduced in version 3.7)
 TabsMru = false
@@ -371,8 +409,8 @@ FixedPageUI [
     ; document
     WindowMargin = 2 4 2 4
 
-    ; horizontal and vertical distance between two pages in facing and book view
-    ; modes
+    ; horizontal and vertical gap between pages (between columns in facing/book
+    ; view, between rows in continuous view)
     PageSpacing = 4 4
 
     ; experimental: instead of a single background color, fade through these
@@ -385,6 +423,40 @@ FixedPageUI [
     ; if given, sets the canvas background color for PDF files (introduced in
     ; version 3.7)
     WindowBgCol = 
+
+    ; measurement grid overlay (View > Page Grid). Spacing and style are saved;
+    ; showing the grid is session-only (introduced in version 3.7)
+    PageGrid [
+        ; distance between major vertical grid lines, in PDF points (1/72 inch)
+        ; (introduced in version 3.7)
+        Width = 72
+
+        ; distance between major horizontal grid lines, in PDF points
+        ; (introduced in version 3.7)
+        Height = 72
+
+        ; minor lines per major cell (introduced in version 3.7)
+        Subdivisions = 4
+
+        ; horizontal origin offset from the left of the page, in PDF points
+        ; (introduced in version 3.7)
+        OffsetX = 0
+
+        ; vertical origin offset from the bottom of the page, in PDF points
+        ; (introduced in version 3.7)
+        OffsetY = 0
+
+        ; color of the page grid overlay (introduced in version 3.7)
+        Color = #8080ff
+
+        ; grid overlay style: dots (marks at intersections), dotted (dotted
+        ; lines), or solid (introduced in version 3.7)
+        Style = dots
+
+        ; units shown in the Configure Page Grid dialog: pt, in, mm, or cm
+        ; (introduced in version 3.7)
+        Units = in
+    ]
 ]
 
 ; customization options for the ebook UI (EPUB, MOBI, FB2, PDB and plain text)
@@ -446,13 +518,14 @@ ComicBookUI [
     ; document
     WindowMargin = 0 0 0 0
 
-    ; horizontal and vertical distance between two pages in facing and book view
-    ; modes
+    ; horizontal and vertical gap between pages (between columns in facing/book
+    ; view, between rows in continuous view)
     PageSpacing = 4 4
 
     ; if true, documents that don't state their own reading direction default to
-    ; manga mode, i.e. right to left. A document that states a direction (e.g.
-    ; an EPUB with page-progression-direction) is shown the way it asks for
+    ; manga mode, i.e. right to left. A document that states a direction (PDF
+    ; ViewerPreferences/Direction, or an EPUB with page-progression-direction)
+    ; is shown the way it asks for
     CbxMangaMode = false
 
     ; if given, sets the canvas background color for comic book files
@@ -475,10 +548,16 @@ ComicBookUI [
     ; version 3.7)
     DefaultDisplayMode = 
 
-    ; default zoom for comic books; empty uses the global DefaultZoom. valid
-    ; values: fit page, fit width, fit height, fit content, shrink to fit or
-    ; percent like 100% (introduced in version 3.7)
+    ; default zoom for comic books; empty uses fit page. valid values: fit page,
+    ; fit width, fit height, fit content, shrink to fit or percent like 100%
+    ; (introduced in version 3.7)
     DefaultZoom = 
+
+    ; if true, in facing and book view a landscape page (wider than tall)
+    ; occupies the whole two-page row instead of pairing with the next page. For
+    ; comics that store double-page spreads as one image (issues #1324, #872)
+    ; (introduced in version 3.7)
+    LandscapeAsSpread = true
 ]
 
 ; customization options for image files UI
@@ -500,6 +579,11 @@ ImageUI [
     ; if true, absolute zoom never makes a page taller than the window (each
     ; page is capped at Fit Height) (introduced in version 3.7)
     LimitToWindowHeight = false
+
+    ; if true, in facing and book view a landscape page (wider than tall)
+    ; occupies the whole two-page row instead of pairing with the next page
+    ; (issues #1324, #872) (introduced in version 3.7)
+    LandscapeAsSpread = true
 ]
 
 ; customization options for CHM UI. UseFixedPageUI switches to the PDF-style
@@ -668,7 +752,7 @@ Annotations [
     FreeTextBorderWidth = 1
 
     ; how text is aligned in newly created free text annotations (Text Alignment
-    ; in the annotation editor): left, center or right. Right-to-left scripts
+    ; in the compact property row): left, center or right. Right-to-left scripts
     ; (Arabic, Hebrew, Persian) want right (introduced in version 3.7)
     FreeTextAlignment = left
 
@@ -753,7 +837,7 @@ Fullscreen [
     ; toolbar mode in fullscreen: show (pinned), hide (no toolbar), overlay
     ; (toolbar floats over the page, only shown when the mouse is near it). if
     ; empty, derived from Fullscreen.ShowToolbar (introduced in version 3.7)
-    Toolbar =
+    Toolbar = hide
 
     ; if true, show the menu bar in fullscreen mode
     ShowMenubar = false
@@ -770,9 +854,9 @@ Fullscreen [
 ; is active. See docs for more information (https://www.sumatrapdfreader.org/docs/Customize-search-translation-services)
 SelectionHandlers [
   [
-    ; url to invoke for the selection. ${selection} will be replaced with
-    ; current selection and ${userlang} with language code for current UI (e.g.
-    ; 'de' for German)
+    ; url to invoke for the selection. ${selection} is the selected text,
+    ; ${userlang} the UI language (e.g. 'de'), ${selectionPosition} the
+    ; selection's screen rect as x,y,dx,dy
     URL =
 
     ; name shown in context menu
@@ -783,7 +867,8 @@ SelectionHandlers [
 
     ; command line of a program to run instead of opening a URL. Use
     ; ${selectionfile} to pass the selection as a temporary utf-8 file, which
-    ; has no length limit. If set, URL is ignored (introduced in version 3.7)
+    ; has no length limit, and ${selectionPosition} for the selection's screen
+    ; rect (x,y,dx,dy). If set, URL is ignored (introduced in version 3.7)
     Exe =
 
     ; how to send the selection. GET (default) puts it in the URL, which limits
@@ -794,8 +879,8 @@ SelectionHandlers [
     Method = GET
 
     ; request body for POST / POST-VIA-BROWSER; the same ${selection},
-    ; ${selectionjson} and ${userlang} substitutions apply. If unset, the body
-    ; is the raw selection (introduced in version 3.7)
+    ; ${selectionjson}, ${userlang} and ${selectionPosition} substitutions
+    ; apply. If unset, the body is the raw selection (introduced in version 3.7)
     Body =
 
     ; value of the Content-Type header for POST. Defaults to 'text/plain;
@@ -812,10 +897,19 @@ SelectionHandlers [
     ; file (introduced in version 3.7)
     Headers =
 
-    ; if set, the handler also gets a button in the toolbar that pops up over a
-    ; text selection. The value is the button's text, or, if it starts with
-    ; '<svg', an icon to draw instead (introduced in version 3.7)
+    ; if set, the handler also gets a button on the floating selection toolbar.
+    ; The value is the button's text, or, if it starts with '<svg', an icon to
+    ; draw instead. SVG buttons use Name as their tooltip and ToolbarSize as
+    ; their icon size (introduced in version 3.7)
     SelectToolbarNameOrSvg =
+
+    ; if set, the handler also gets a button on the main toolbar with this label
+    ; (introduced in version 3.7)
+    ToolbarText =
+
+    ; optional SVG icon for that main-toolbar button; if both ToolbarSvgIcon and
+    ; ToolbarText are set, the icon is used (introduced in version 3.7)
+    ToolbarSvgIcon =
   ]
 ]
 
@@ -854,6 +948,14 @@ Themes [
 
     ; background color of toolbar, tabs, sidebars and dialogs
     ControlBackgroundColor = 
+
+    ; background color of the active tab; if empty, uses ControlBackgroundColor
+    ; (introduced in version 3.7)
+    ActiveTabBackgroundColor = 
+
+    ; background color of inactive tabs; if empty, derived from
+    ; ControlBackgroundColor (introduced in version 3.7)
+    InactiveTabBackgroundColor = 
 
     ; color of clickable links in the UI
     LinkColor = 
@@ -945,44 +1047,35 @@ WindowPos = 0 0 0 0
 ; position/size of the floating find window (see SearchUIFloating)
 SearchUIWindowPos = 0 0 0 0
 
+; position/size of the in-app Help: Manual window (introduced in version 3.7)
+HelpWindowPos = 0 0 0 0
+
 ; information about opened files (in most recently used order)
 FileStates [
   [
-    ; path of the document
-    FilePath =
-
     ; pages of this document bookmarked in the Favorites menu
     Favorites [
       [
         ; name of this favorite as shown in the menu
         Name =
 
-        ; number of the bookmarked page
-        PageNo = 0
+        ; number of the bookmarked page, or `bm:<bookmark>` for documents with
+        ; chapters (see PagePosition.cpp)
+        PageNo = 1
 
         ; label for this page (only present if logical and physical page numbers
         ; are not the same)
         PageLabel =
+
+        ; position on the page when the favorite was added (document units; -1
+        ; if not stored) (introduced in version 3.7)
+        ScrollPos = -1 -1
 
         ; session-only favorite; omitted when serializing array elements
         ; (introduced in version 3.7)
         IsTemporary = false
       ]
     ]
-
-    ; if true, the document is "pinned" to the Frequently Read list, so that
-    ; recently opened documents don't displace it
-    IsPinned = false
-
-    ; if true, the file is considered missing and won't be shown in any list
-    IsMissing = false
-
-    ; number of times this document has been opened recently
-    OpenCount = 0
-
-    ; data required to open a password protected document without having to ask
-    ; for the password again
-    DecryptionKey =
 
     ; reflowable (ebook) settings for just this document. The block is absent
     ; until you add it; a field left empty or 0 uses the global EBookUI value.
@@ -1023,45 +1116,24 @@ FileStates [
         CustomCSS = 
     ]
 
-    ; if true, this document opens with the global defaults instead of the
-    ; values below
-    UseDefaultState = false
+    ; data required to determine which parts of the table of contents have been
+    ; expanded
+    TocState =
+
+    ; path of the document
+    FilePath =
+
+    ; data required to open a password protected document without having to ask
+    ; for the password again
+    DecryptionKey =
 
     ; layout of pages. valid values: automatic, single page, facing, book view,
     ; continuous, continuous facing, continuous book view
     DisplayMode = automatic
 
-    ; how far this document has been scrolled (in x and y direction)
-    ScrollPos = 0 0
-
-    ; number of the last read page
-    PageNo = 1
-
     ; zoom (in %) or one of those values: fit page, fit width, fit height, fit
     ; content
     Zoom = fit page
-
-    ; how far pages have been rotated as a multiple of 90 degrees
-    Rotation = 0
-
-    ; state of the window. 1 is normal, 2 is maximized, 3 is fullscreen, 4 is
-    ; minimized
-    WindowState = 0
-
-    ; default position (can be on any monitor)
-    WindowPos = 0 0 0 0
-
-    ; if true, show the table of contents (Bookmarks) sidebar when the document
-    ; has one
-    ShowToc = true
-
-    ; width of the bookmarks / favorites sidebar in screen pixels, as last
-    ; resized
-    SidebarDx = 0
-
-    ; if true, the document is displayed right-to-left in facing and book view
-    ; modes
-    DisplayR2L = false
 
     ; if given, overrides the background color for this document (introduced in
     ; version 3.7)
@@ -1071,12 +1143,52 @@ FileStates [
     ; 3.7)
     TabCol = 
 
-    ; data required to restore the last read page in the ebook UI
-    ReparseIdx = 0
+    ; number of times this document has been opened recently
+    OpenCount = 0
 
-    ; data required to determine which parts of the table of contents have been
-    ; expanded
-    TocState =
+    ; number of the last read page, or `bm:<bookmark>` for documents with
+    ; chapters (folds in ReparseIdx; see PagePosition.cpp)
+    PageNo = 1
+
+    ; how far pages have been rotated as a multiple of 90 degrees
+    Rotation = 0
+
+    ; state of the window. 1 is normal, 2 is maximized, 3 is fullscreen, 4 is
+    ; minimized
+    WindowState = 0
+
+    ; width of the bookmarks / favorites sidebar in screen pixels, as last
+    ; resized
+    SidebarDx = 0
+
+    ; how far this document has been scrolled (in x and y direction)
+    ScrollPos = 0 0
+
+    ; default position (can be on any monitor)
+    WindowPos = 0 0 0 0
+
+    ; if true, the document is "pinned" to the Frequently Read list, so that
+    ; recently opened documents don't displace it
+    IsPinned = false
+
+    ; if true, the file is considered missing and won't be shown in any list
+    IsMissing = false
+
+    ; if true, this document opens with the global defaults instead of the
+    ; values below
+    UseDefaultState = false
+
+    ; if true, show the table of contents (Bookmarks) sidebar when the document
+    ; has one
+    ShowToc = true
+
+    ; if true, the document is displayed right-to-left in facing and book view
+    ; modes
+    DisplayR2L = false
+
+    ; if true, percentage zoom scales every page to the width page 1 has at that
+    ; zoom level (introduced in version 3.7)
+    UniformPageWidth = false
   ]
 ]
 
@@ -1094,7 +1206,8 @@ SessionData [
         ; facing, book view, continuous, continuous facing, continuous book view
         DisplayMode = automatic
 
-        ; number of the last read page
+        ; number of the last read page, or `bm:<bookmark>` for documents with
+        ; chapters (see PagePosition.cpp)
         PageNo = 1
 
         ; zoom (in %) or one of those values: fit page, fit width, fit height,

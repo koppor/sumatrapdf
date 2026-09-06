@@ -1,42 +1,39 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
-// TODO: not quite happy how those functions are split among
-// Annotation.cpp, EngineMupdf.cpp and EditAnnotations.cpp
-
 struct Pixmap;
 
 // for fast conversions, must match the order of pdf_annot_type enum in annot.h
 enum class AnnotationType {
-    Text,
-    Link,
-    FreeText,
-    Line,
-    Square,
-    Circle,
-    Polygon,
-    PolyLine,
-    Highlight,
-    Underline,
-    Squiggly,
-    StrikeOut,
-    Redact,
-    Stamp,
-    Caret,
-    Ink,
-    Popup,
-    FileAttachment,
-    Sound,
-    Movie,
-    RichMedia,
-    Widget,
-    Screen,
-    PrinterMark,
-    TrapNet,
-    Watermark,
-    ThreeD,
-    Projection,
-    Last = Projection,
+    Text = 0,
+    Link = 1,
+    FreeText = 2,
+    Line = 3,
+    Square = 4,
+    Circle = 5,
+    Polygon = 6,
+    PolyLine = 7,
+    Highlight = 8,
+    Underline = 9,
+    Squiggly = 10,
+    StrikeOut = 11,
+    Redact = 12,
+    Stamp = 13,
+    Caret = 14,
+    Ink = 15,
+    Popup = 16,
+    FileAttachment = 17,
+    Sound = 18,
+    Movie = 19,
+    RichMedia = 20,
+    Widget = 21,
+    Screen = 22,
+    PrinterMark = 23,
+    TrapNet = 24,
+    Watermark = 25,
+    ThreeD = 26,
+    Projection = 27,
+    Last = 27,
     Unknown = -1
 };
 
@@ -46,10 +43,28 @@ enum class AnnotationChange {
     Modify,
 };
 
+enum class InkEraseResult {
+    None,
+    Changed,
+    Empty,
+};
+
+class EngineBase;
 class EngineMupdf;
 extern "C" struct pdf_annot;
 
 SeqStrings AnnotationTextIcons();
+
+// untranslated type names, in AnnotationType order; for syntax the user types
+SeqStrings AnnotationTypeNames();
+AnnotationType AnnotationTypeFromName(Str);
+
+// The annotation a cut is waiting to delete once its copy is pasted (see
+// CutAnnotation). ~Annotation clears it, so it can never dangle. Both are
+// inline: EngineMupdf.cpp deletes annotations in the mupdf-only targets
+// (PdfFilter / PdfPreview), which don't link Annotation.cpp.
+struct Annotation;
+inline Annotation* gPendingCutAnnotation = nullptr;
 
 // an user annotation on page
 // It abstracts over pdf_annot so that we don't have to
@@ -66,7 +81,11 @@ struct Annotation {
     pdf_annot* pdfannot = nullptr; // not owned
 
     Annotation() = default;
-    ~Annotation() = default;
+    ~Annotation() {
+        if (this == gPendingCutAnnotation) {
+            gPendingCutAnnotation = nullptr;
+        }
+    }
 };
 
 struct AnnotCreateArgs {
@@ -90,6 +109,13 @@ struct AnnotCreateArgs {
     bool setContentToSelection = false;
     Str content;
     Pixmap* stampImage = nullptr;
+    bool hasLineEnd = false;
+    PointF lineEnd;
+    const Vec<PointF>* polyLinePoints = nullptr;
+    bool hasRect = false;
+    RectF rect;
+    const Vec<int>* inkStrokeCounts = nullptr;
+    const Vec<PointF>* inkPoints = nullptr;
 };
 
 int PageNo(Annotation*);
@@ -97,9 +123,11 @@ RectF GetBounds(Annotation*);
 RectF GetRect(Annotation*);
 void SetRect(Annotation*, RectF);
 void SetQuadPointsAsRect(Annotation*, const Vec<RectF>&);
+Vec<RectF> GetQuadPointsAsRect(Annotation*);
 
 Str Author(Annotation*);
 time_t ModificationDate(Annotation*);
+void SetModificationDateToNow(Annotation*);
 int PopupId(Annotation*); // -1 if not exist
 Str AnnotationReadableNameTemp(AnnotationType tp);
 AnnotationType Type(Annotation*);
@@ -110,6 +138,10 @@ int DefaultAppearanceTextSize(Annotation*);
 Str Contents(Annotation*);
 PdfColor GetColor(Annotation*);      // kColorUnset if no color
 PdfColor InteriorColor(Annotation*); // kColorUnset if no color
+// placeholder contents of a free text annotation created without explicit
+// content; the placement preview shows it, so both must use this
+// an array, not a const char*, so StrL() can take its compile-time length
+constexpr char kDefaultFreeTextContent[] = "This is a text...";
 // PDF /Q: how free text is aligned in its box ("Text Alignment" in the
 // annotation editor). Right is also what right-to-left scripts want.
 constexpr int kQuaddingLeft = 0;
@@ -123,6 +155,13 @@ int BorderWidth(Annotation*);
 Str IconName(Annotation*); // empty if no icon
 int Opacity(Annotation*);
 void GetLineEndingStyles(Annotation*, int* start, int* end);
+bool GetLinePoints(Annotation*, PointF& start, PointF& end);
+void SetLinePoints(Annotation*, PointF start, PointF end);
+Vec<PointF> GetVertices(Annotation*);
+void SetVertices(Annotation*, const Vec<PointF>&);
+void GetInkList(Annotation*, Vec<int>&, Vec<PointF>&);
+bool EraseInkStrokes(Vec<int>&, Vec<PointF>&, PointF, float);
+InkEraseResult EraseAnnotationInk(Annotation*, PointF, float);
 
 void SetDefaultAppearanceTextFont(Annotation*, Str);
 void SetDefaultAppearanceTextSize(Annotation*, int);
@@ -134,6 +173,10 @@ bool SetQuadding(Annotation*, int);
 void SetBorderWidth(Annotation*, int);
 void SetOpacity(Annotation*, int);
 void SetIconName(Annotation*, Str);
+bool HasEmbeddedFile(Annotation*);
+Str EmbeddedFileNameTemp(Annotation*);
+Str LoadEmbeddedFile(Annotation*);
+bool SetEmbeddedFileFromPath(Annotation*, Str);
 void SetLineEndStyles(Annotation*, int end);
 void SetLineStartStyles(Annotation*, int start);
 
@@ -161,8 +204,18 @@ bool AnnotationIsLive(Annotation*);
 void DeleteAnnotation(Annotation*);
 bool AnnotationCanBeMoved(AnnotationType);
 bool AnnotationCanBeResized(AnnotationType);
+bool AnnotationCanBeCopied(AnnotationType);
 bool AnnotationSupportsColor(AnnotationType);
 bool AnnotationSupportsBorder(AnnotationType);
 bool AnnotationSupportsInteriorColor(AnnotationType);
+bool AnnotationSupportsOpacity(AnnotationType);
+
+bool CopyAnnotation(Annotation*);
+bool CutAnnotation(Annotation*);
+Annotation* TakeCutAnnotation();
+bool EngineOwnsAnnotation(EngineBase*, Annotation*);
+bool HasCopiedAnnotation();
+void FreeAnnotationClipboard();
+Annotation* PasteCopiedAnnotation(EngineBase*, int pageNo, PointF topLeft);
 
 AnnotationType CmdIdToAnnotationType(int cmdId);

@@ -49,6 +49,7 @@ static bool IsTabsRtl(HWND hwnd) {
 TabInfo::~TabInfo() {
     str::Free(text);
     str::Free(tooltip);
+    str::Free(pageText);
 }
 
 static Gdiplus::Color GdipCol(Color c) {
@@ -107,7 +108,7 @@ TabCtrl::TabCtrl() {
 }
 
 int TabCtrl::Idx() {
-    return tabsCtrl ? tabsCtrl->tabs.Find(ti) : -1;
+    return tabsCtrl ? VecFind(tabsCtrl->tabs, ti) : -1;
 }
 
 bool TabCtrl::IsSelected() {
@@ -128,6 +129,7 @@ bool TabCtrl::IsUnderMouse() {
 
 Color TabCtrl::BgColor() {
     Color selected = GetColor(kColTabBg);
+    Color inactive = GetColor(kColTabInactiveBg);
     bool isSelected = IsSelected();
     bool isUnderMouse = IsUnderMouse();
     // a tab with a color of its own keeps it, shaded when it isn't selected
@@ -140,7 +142,7 @@ Color TabCtrl::BgColor() {
     if (isSelected) {
         return selected;
     }
-    return AccentColor(selected, isUnderMouse ? 35 : 25);
+    return isUnderMouse ? AccentColor(inactive, 10) : inactive;
 }
 
 Size TabCtrl::GetIdealSize() {
@@ -241,18 +243,48 @@ void TabCtrl::Paint(VirtPaintCtx& ctx) {
         int textRight = closeVisible ? rClose.x - textGap : r.x + r.dx - textPad;
         rTxt.dx = std::max(0, textRight - rTxt.x);
     }
+    PlatformFont* pageFont = font;
+    int pageDx = 0;
+    if (len(ti->pageText) > 0) {
+        PlatformFont* scaled = GetScaledPlatformFont(font, 85);
+        if (scaled) {
+            pageFont = scaled;
+        }
+        pageDx = gfx->MeasureText(ti->pageText, pageFont).dx;
+        if (pageDx + DpiScale(12) >= rTxt.dx) {
+            pageDx = 0;
+        }
+    }
+
+    Rect rFile = rTxt;
+    Rect rPage{};
+    if (pageDx > 0) {
+        if (isRtl) {
+            rPage = {rTxt.x, rTxt.y, pageDx, rTxt.dy};
+            rFile.x = rTxt.x + pageDx;
+            rFile.dx = rTxt.dx - pageDx;
+        } else {
+            rFile.dx = rTxt.dx - pageDx;
+            rPage = {rFile.Right(), rTxt.y, pageDx, rTxt.dy};
+        }
+    }
+
     u32 fmt = gfxTextEllipsis | gfxTextVCenter | (isRtl ? gfxTextRight : gfxTextLeft);
-    gfx->DrawText(ti->text, rTxt, fmt, font, textColor);
+    gfx->DrawText(ti->text, rFile, fmt, font, textColor);
+    if (pageDx > 0) {
+        Color pageCol = AccentColor(textColor, 40);
+        u32 pageFmt = gfxTextVCenter | gfxTextNoClip | (isRtl ? gfxTextRight : gfxTextLeft);
+        gfx->DrawText(ti->pageText, rPage, pageFmt, pageFont, pageCol);
+    }
 
     // draw red dot after tab text for dirty (unsaved) tabs
     if (ti->isDirty) {
         int dotRadius = DpiScale(3);
         // the text may have been ellipsized, so the dot goes after whichever is
         // narrower: the text or the room it had
-        int textDx = std::min(gfx->MeasureText(ti->text, font).dx, rTxt.dx);
-        int textEnd = isRtl ? rTxt.Right() : rTxt.x + textDx;
-        // clamp to not exceed the text area
-        int maxX = rTxt.Right() - (dotRadius * 2);
+        int textDx = std::min(gfx->MeasureText(ti->text, font).dx, rFile.dx);
+        int textEnd = isRtl ? rFile.Right() : rFile.x + textDx;
+        int maxX = rFile.Right() - (dotRadius * 2);
         int dotX = std::min(textEnd + dotRadius, maxX);
         int dotY = r.y + ((r.dy - (dotRadius * 2)) / 2);
         gfx->FillEllipse({dotX, dotY, dotRadius * 2, dotRadius * 2}, MkRgb(0xEE, 0x22, 0x22));
@@ -339,7 +371,7 @@ void TabsCtrl::Destroy() {
     }
     if (vroot) {
         // tops do not own us; clear root pointer before deleting
-        vroot->tops.Reset();
+        VecReset(vroot->tops);
         delete vroot;
         vroot = nullptr;
     }
@@ -395,13 +427,13 @@ bool TabsCtrl::IsVisible() const {
 // and it keeps the tree and the list impossible to get out of step
 void TabsCtrl::RebuildTabCtrls() {
     RemoveAllChildren(true);
-    tabCtrls.Reset();
+    VecReset(tabCtrls);
     int n = TabCount();
     for (int i = 0; i < n; i++) {
         auto* w = new TabCtrl();
         w->tabsCtrl = this;
         w->ti = tabs[i];
-        tabCtrls.Append(w);
+        VecAppend(tabCtrls, w);
         AddChild(w);
     }
 }
@@ -524,10 +556,14 @@ HBITMAP TabsCtrl::RenderForDragging(int idx) {
     gfx->SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
     gfx->SetPageUnit(UnitPixel);
 
-    StringFormat sf(StringFormat::GenericDefault());
-    sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
-    sf.SetLineAlignment(StringAlignmentCenter);
-    sf.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+    StringFormat sfFile(StringFormat::GenericDefault());
+    sfFile.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+    sfFile.SetLineAlignment(StringAlignmentCenter);
+    sfFile.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+    StringFormat sfPage(StringFormat::GenericDefault());
+    sfPage.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+    sfPage.SetLineAlignment(StringAlignmentCenter);
+    sfPage.SetTrimming(Gdiplus::StringTrimmingNone);
 
     // the drag image is the tab as it looks while selected
     Color bgCol = GetColor(kColTabBg);
@@ -537,16 +573,45 @@ HBITMAP TabsCtrl::RenderForDragging(int idx) {
     Gdiplus::Rect gr(0, 0, r.dx, r.dy);
     gfx->FillRectangle(&br, gr);
 
-    HDC hdc = GetDC(hwnd);
-    Font f(hdc, GetFont()->GetHFont());
-    ReleaseDC(hwnd, hdc);
+    Gdiplus::Font* f = GetFont() ? GetFont()->GetGdiplusFont() : nullptr;
+    bool ownedFont = false;
+    if (!f && GetFont()) {
+        HDC hdc = GetDC(hwnd);
+        f = new Font(hdc, GetFont()->GetHFont());
+        ReleaseDC(hwnd, hdc);
+        ownedFont = true;
+    }
 
     Gdiplus::RectF rTxt(0, 0, (float)r.dx, (float)r.dy);
     rTxt.X += 8;
     rTxt.Width -= (8 + 8);
+
+    int pageDx = 0;
+    if (len(ti->pageText) > 0 && GetFont()) {
+        pageDx = PlatformFontMeasureText(GetFont(), ti->pageText).dx;
+        if (pageDx + 12 >= (int)rTxt.Width) {
+            pageDx = 0;
+        }
+    }
+    Gdiplus::RectF rFile = rTxt;
+    Gdiplus::RectF rPage = rTxt;
+    if (pageDx > 0) {
+        rFile.Width = rTxt.Width - (float)pageDx;
+        rPage.X = rFile.X + rFile.Width;
+        rPage.Width = (float)pageDx;
+    }
+
     br.SetColor(GdipCol(textCol));
     WCHAR* ws = CWStrTemp(ti->text);
-    gfx->DrawString(ws, -1, &f, rTxt, &sf, &br);
+    gfx->DrawString(ws, -1, f, rFile, &sfFile, &br);
+    if (pageDx > 0) {
+        br.SetColor(GdipCol(AccentColor(textCol, 40)));
+        WCHAR* wsPage = CWStrTemp(ti->pageText);
+        gfx->DrawString(wsPage, -1, f, rPage, &sfPage, &br);
+    }
+    if (ownedFont) {
+        delete f;
+    }
 
     HBITMAP ret;
     bitmap.GetHBITMAP(Gdiplus::Color(255, 255, 255), &ret);
@@ -632,20 +697,20 @@ static void UpdateAfterDrag(TabsCtrl* tabsCtrl, int tabIdxFrom, int tabIdxTo) {
     bool badState =
         (tabIdxFrom == tabIdxTo) || (tabIdxFrom < 0) || (tabIdxTo < 0) || (tabIdxFrom >= nTabs) || (tabIdxTo > nTabs);
     if (badState) {
-        logfa("tabIdxFrom: %d, tabIdxTo: %d, nTabs: %d\n", tabIdxFrom, tabIdxTo, nTabs);
+        logf("tabIdxFrom: %d, tabIdxTo: %d, nTabs: %d\n", tabIdxFrom, tabIdxTo, nTabs);
         ReportDebugIf(true);
         return;
     }
 
     auto&& tabs = tabsCtrl->tabs;
     TabInfo* moved = tabs[tabIdxFrom];
-    tabs.RemoveAt(tabIdxFrom);
+    VecRemoveAt(tabs, tabIdxFrom);
     if (tabIdxFrom < tabIdxTo) {
         // we moved from left to right e.g. from 1 to 3
         // after removing 1 we insert not at 3 but 2
         tabIdxTo -= 1;
     }
-    tabs.InsertAt(tabIdxTo, moved);
+    VecInsertAt(tabs, tabIdxTo, moved);
     tabsCtrl->RebuildTabCtrls();
     tabsCtrl->SetSelected(tabIdxTo);
     tabsCtrl->LayoutTabs();
@@ -795,7 +860,7 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 TabCtrl* hlCtrl = TabCtrlAt(hl);
                 HBITMAP hbmp = RenderForDragging(hl);
                 if (!hbmp || !hlCtrl) {
-                    logfa("TabsCtrl::WndProc: RenderForDragging failed for tab %d\n", hl);
+                    logf("TabsCtrl::WndProc: RenderForDragging failed for tab %d\n", hl);
                     return 0;
                 }
                 Rect r = hlCtrl->BoundsInWindow();
@@ -996,7 +1061,7 @@ HWND TabsCtrl::Create(TabsCtrl::CreateArgs& args) {
     vroot = new VirtRoot(hwnd);
     // non-owning top: MainWindow owns TabsCtrl, TabsCtrl owns vroot
     Vec<VirtCtrl*> tops;
-    tops.Append(this);
+    VecAppend(tops, this);
     vroot->SetTops(tops);
     return hwnd;
 }
@@ -1009,7 +1074,7 @@ Size TabsCtrl::GetIdealSize() {
 // takes ownership of tab
 int TabsCtrl::InsertTab(int idx, TabInfo* tab, bool update) {
     ReportIf(idx < 0);
-    tabs.InsertAt(idx, tab);
+    VecInsertAt(tabs, idx, tab);
     RebuildTabCtrls();
     if (update) {
         // LayoutTabs() must be before SetSelected() because SetSelected()
@@ -1020,6 +1085,18 @@ int TabsCtrl::InsertTab(int idx, TabInfo* tab, bool update) {
         TabsCtrlUpdateAfterChangingTabsCount(this);
     }
     return idx;
+}
+
+void TabsCtrl::SetPageText(int idx, Str page) {
+    TabInfo* tab = GetTab(idx);
+    if (!tab) {
+        return;
+    }
+    if (tab->pageText && page && str::Eq(tab->pageText, page)) {
+        return;
+    }
+    str::ReplaceWithCopy(&tab->pageText, page);
+    ScheduleRepaint();
 }
 
 void TabsCtrl::SetTextAndTooltip(int idx, Str text, Str tooltip2) {
@@ -1048,12 +1125,20 @@ void TabsCtrl::SetTabDirty(int idx, bool dirty) {
 
 // returns userData because it's not owned by TabsCtrl
 UINT_PTR TabsCtrl::RemoveTab(int idx) {
-    ReportIf(idx < 0);
-    ReportIf(idx >= TabCount());
+    // GetTabIdx's "not found" is -1; a nested DDE CloseAllTabs / CloseWindow can
+    // remove the tab before the outer CloseTab resumes. Do not index tabs[-1].
+    if (idx < 0 || idx >= TabCount()) {
+        if (idx < -1) {
+            ReportIf(true);
+        } else {
+            logf("TabsCtrl::RemoveTab: out-of-range idx=%d (tabs=%d)\n", idx, TabCount());
+        }
+        return 0;
+    }
     int selectedTab = selectedIdx;
     TabInfo* tab = tabs[idx];
     UINT_PTR userData = tab->userData;
-    tabs.RemoveAt(idx);
+    VecRemoveAt(tabs, idx);
     delete tab;
     RebuildTabCtrls();
     if (TabCount() > 0 && selectedTab >= 0) {
@@ -1081,7 +1166,7 @@ void TabsCtrl::SwapTabs(int idx1, int idx2) {
 // Note: the caller should take care of deleting userData
 void TabsCtrl::RemoveAllTabs() {
     DeleteVecMembers(tabs);
-    tabs.Reset();
+    VecReset(tabs);
     selectedIdx = -1;
     RebuildTabCtrls();
     LayoutTabs();

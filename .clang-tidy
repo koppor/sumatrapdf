@@ -19,6 +19,7 @@ Checks: >
   -modernize-avoid-c-arrays,
   -modernize-avoid-c-style-cast,
   -modernize-use-nodiscard,
+  -bugprone-derived-method-shadowing-base-method,
   -modernize-use-using,
   -performance-no-int-to-ptr,
   -performance-enum-size,
@@ -30,7 +31,15 @@ Checks: >
   -readability-uppercase-literal-suffix,
   -readability-make-member-function-const,
   -readability-convert-member-functions-to-static,
-  -readability-use-anyofallof
+  -readability-use-anyofallof,
+  -readability-named-parameter,
+  -modernize-macro-to-enum,
+  -bugprone-reserved-identifier,
+  -misc-multiple-inheritance,
+  -readability-avoid-nested-conditional-operator,
+  -modernize-use-auto,
+  -misc-use-internal-linkage,
+  -modernize-avoid-setjmp-longjmp
 
 # Diagnose our own headers, but not vendored ones. Matching '/src/' positively
 # would misfire: the checkout itself lives under a path containing 'src'

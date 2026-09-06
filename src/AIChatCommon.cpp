@@ -16,7 +16,6 @@
 #include "Settings.h"
 #include "DocController.h"
 #include "EngineBase.h"
-#include "GlobalPrefs.h"
 #include "AppSettings.h"
 #include "MainWindow.h"
 #include "WindowTab.h"
@@ -26,8 +25,8 @@
 
 #include "base/GuessFileType.h"
 
-#include "AIChatCommon.h"
 #include "EngineAll.h"
+#include "AIChatCommon.h"
 
 bool IsAIChatAvailable() {
     // the chat UI is a WebView
@@ -35,7 +34,7 @@ bool IsAIChatAvailable() {
 }
 
 bool IsAIChatSupportedForFile(Str filePath, Kind engineKind) {
-    if (!filePath) {
+    if (len(filePath) == 0) {
         return false;
     }
     // Comics, image folders, single images, and DjVu have no useful text/agent
@@ -49,34 +48,34 @@ bool IsAIChatSupportedForFile(Str filePath, Kind engineKind) {
 }
 
 bool IsAIChatSupportedForTab(WindowTab* tab) {
-    if (!tab || tab->IsAboutTab() || !tab->filePath) {
+    if (!tab || tab->IsAboutTab() || len(tab->filePath) == 0) {
         return false;
     }
     return IsAIChatSupportedForFile(tab->filePath, tab->GetEngineType());
 }
 
 TempStr AIChatJsEscapeTemp(Str s) {
-    if (!s) {
-        return str::DupTemp("");
+    if (len(s) == 0) {
+        return str::DupTemp(StrL(""));
     }
     str::Builder buf;
     for (int i = 0; i < s.len; i++) {
         char c = s.s[i];
         switch (c) {
             case '\\':
-                buf.Append("\\\\");
+                buf.Append(StrL("\\\\"));
                 break;
             case '\'':
-                buf.Append("\\'");
+                buf.Append(StrL("\\'"));
                 break;
             case '\n':
-                buf.Append("\\n");
+                buf.Append(StrL("\\n"));
                 break;
             case '\r':
-                buf.Append("\\r");
+                buf.Append(StrL("\\r"));
                 break;
             case '\t':
-                buf.Append("\\t");
+                buf.Append(StrL("\\t"));
                 break;
             default:
                 buf.AppendChar(c);
@@ -134,7 +133,7 @@ void AIChatFreeSessions(Vec<AIChatSessionInfo>& sessions) {
         str::Free(sessions[i].display);
         str::Free(sessions[i].project);
     }
-    sessions.Reset();
+    VecReset(sessions);
 }
 
 void AIChatSortSessionsByTimestampDesc(Vec<AIChatSessionInfo>& sessions) {
@@ -176,8 +175,8 @@ TempStr AIChatDebugGetTemp() {
 }
 
 void AIChatLog(AIChatLogger* logger, Str direction, Str text) {
-    if (!text) {
-        text = "";
+    if (len(text) == 0) {
+        text = StrL("");
     }
 
     SYSTEMTIME st;
@@ -202,15 +201,15 @@ void AIChatLog(AIChatLogger* logger, Str direction, Str text) {
         return;
     }
     if (logger->logTag) {
-        logfa("%s %s: %s", logger->logTag, direction, text);
+        logf("%s %s: %s", logger->logTag, direction, text);
     }
 
     TempStr dir = GetSumatraDataDirTemp();
-    if (!dir || !logger->logFileName) {
+    if (len(dir) == 0 || len(logger->logFileName) == 0) {
         return;
     }
     TempStr path = path::JoinTemp(dir, logger->logFileName);
-    if (!path || !logger->mutex) {
+    if (len(path) == 0 || !logger->mutex) {
         return;
     }
 
@@ -244,15 +243,15 @@ static HRESULT CALLBACK AIChatNotInstalledDialogCallback(HWND /*hwnd*/, UINT msg
 }
 
 void AIChatShowNotInstalledDialog(const AIChatNotInstalledDialogArgs& args) {
-    Str linkLabel = _TRA("AI Chat documentation");
+    Str linkLabel = Tr("AI Chat documentation");
     TempStr link = fmt(R"(<a href="#">%s</a>)", linkLabel);
-    TempStr content = fmt(_TRA("See %s for setup instructions.").s, link);
+    TempStr content = fmt(Tr("See %s for setup instructions.").s, link);
 
     TASKDIALOG_BUTTON buttons[2];
     buttons[0].nButtonID = IDOK;
-    buttons[0].pszButtonText = CWStrTemp(_TRA("OK"));
+    buttons[0].pszButtonText = CWStrTemp(Tr("OK"));
     buttons[1].nButtonID = kBtnIdAIChatLearnMore;
-    buttons[1].pszButtonText = CWStrTemp(_TRA("Learn more"));
+    buttons[1].pszButtonText = CWStrTemp(Tr("Learn more"));
 
     TASKDIALOGCONFIG dialogConfig{};
     DWORD flags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT | TDF_ENABLE_HYPERLINKS;
@@ -291,22 +290,15 @@ TempStr AIChatFindExecutableTemp(const StrVec& fullPathCandidates, WStr searchEx
         return ToUtf8Temp(pathW);
     }
 #endif
-    return nullptr;
+    return {};
 }
 
 void AIChatAppendModelUnique(StrVec& models, Str model) {
+    str::TrimWsBoth(model);
     if (len(model) == 0) {
         return;
     }
     TempStr norm = str::DupTemp(model);
-    int start = 0;
-    while (start < norm.len && str::IsWs(norm.s[start])) {
-        start++;
-    }
-    if (start >= norm.len) {
-        return;
-    }
-    norm = Str(norm.s + start, norm.len - start);
     str::ToLowerInPlace(norm);
     for (int i = 0; i < len(models); i++) {
         if (str::EqI(models[i], norm)) {
@@ -487,7 +479,7 @@ TempStr AIChatFormatChatHtmlTemp(Str virtualHost, Str bgColor) {
     Color themeBg = ThemeControlBackgroundColor();
     bool dark = followTheme && !IsLightColor(themeBg);
     TempStr bg = followTheme ? ColorToCssTemp(themeBg) : str::DupTemp(bgColor);
-    TempStr fg = dark ? ColorToCssTemp(ThemeWindowTextColor()) : str::DupTemp("#222222");
+    TempStr fg = dark ? ColorToCssTemp(ThemeWindowTextColor()) : str::DupTemp(StrL("#222222"));
     Str muted = dark ? StrL("#a0a0a0") : StrL("#555555");
     Str user = dark ? StrL("#7fb3d5") : StrL("#1a5276");
     Str border = dark ? StrL("#4a4a4a") : StrL("#cccccc");
@@ -521,7 +513,8 @@ bool AIChatLaunchProcessWithStdoutPipe(Str cmdLine, Str cwd, AIChatProcessLaunch
     sa.lpSecurityDescriptor = nullptr;
     sa.bInheritHandle = TRUE;
 
-    HANDLE hReadPipe, hWritePipe;
+    HANDLE hReadPipe;
+    HANDLE hWritePipe;
     if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
         return false;
     }
@@ -601,7 +594,7 @@ TempStr AIChatFitPanelTitleTemp(PlatformFont* font, Str prefix, Str docName, int
 TempStr AIChatGenerateSessionIdTemp() {
     GUID guid;
     if (FAILED(CoCreateGuid(&guid))) {
-        return nullptr;
+        return {};
     }
     return fmt("%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x", guid.Data1, guid.Data2, guid.Data3, guid.Data4[0],
                guid.Data4[1], guid.Data4[2], guid.Data4[3], guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
@@ -649,8 +642,8 @@ void AIChatApplySavedSidebarDx(MainWindow* win) {
     if (!win) {
         return;
     }
-    if (gGlobalPrefs->aiChatSidebarDx > 0) {
-        win->aiChatDx = gGlobalPrefs->aiChatSidebarDx;
+    if (gSettings->aiChatSidebarDx > 0) {
+        win->aiChatDx = gSettings->aiChatSidebarDx;
     }
 }
 
@@ -660,10 +653,10 @@ void AIChatUpdateSidebarDx(MainWindow* win, int dx, bool persist) {
     }
     win->aiChatDx = dx;
     if (dx > 0) {
-        gGlobalPrefs->aiChatSidebarDx = dx;
+        gSettings->aiChatSidebarDx = dx;
     }
     if (persist) {
-        SaveSettings();
+        ScheduleSaveSettings();
     }
 }
 

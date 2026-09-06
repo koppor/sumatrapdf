@@ -8,6 +8,7 @@
 #include <sapi.h>
 
 #include <TextToSpeech.h>
+#include "SumatraLog.h"
 
 #pragma comment(lib, "sapi.lib")
 #pragma comment(lib, "winmm.lib")
@@ -33,6 +34,7 @@ static TtsBackend gTtsBackend = TtsBackend::Unknown;
 
 // shared state
 static bool gTtsActive = false;
+static bool gTtsQueuedStarted = false;
 
 // copy of the text passed to last speak request and the position (in WCHARs)
 // of the last word boundary reached, for resuming stopped speech
@@ -69,6 +71,22 @@ static bool TtsVoiceLess(const TtsVoiceInfo& a, const TtsVoiceInfo& b) {
     return str::CmpI(a.name ? a.name : StrL(""), b.name ? b.name : StrL("")) < 0;
 }
 
+static bool TtsForceSapi() {
+    return len(GetEnvVariableTemp(StrL("SUMATRA_TTS_FORCE_SAPI"))) > 0;
+}
+
+static bool TtsVoiceIdInList(const Vec<TtsVoiceInfo>& voices, Str id) {
+    if (len(id) == 0) {
+        return false;
+    }
+    for (const TtsVoiceInfo& v : voices) {
+        if (v.id && str::EqI(v.id, id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void TtsSortVoicesByLanguage(Vec<TtsVoiceInfo>& voices) {
     for (int i = 1; i < len(voices); i++) {
         TtsVoiceInfo value = voices[i];
@@ -89,6 +107,14 @@ static ISpVoice* gSapiVoice = nullptr;
 static bool gSapiCoInitialized = false;
 static ULONG gSapiStreamNum = 0;
 static ULONG gSapiLastWordPos = 0;
+static ULONG gSapiQueuedStreamNum = 0;
+static WStr gSapiQueuedText;
+
+static void SapiClearQueued() {
+    gSapiQueuedStreamNum = 0;
+    wstr::Free(gSapiQueuedText);
+    gSapiQueuedText = {};
+}
 
 // Voice token lookup and metadata
 
@@ -253,6 +279,7 @@ static void SapiRelease() {
         gSapiVoice = nullptr;
     }
 
+    SapiClearQueued();
     gSapiStreamNum = 0;
     gSapiLastWordPos = 0;
 
@@ -303,7 +330,7 @@ static void SapiGetVoices(Vec<TtsVoiceInfo>& voices) {
             info.id = str::Dup(ToUtf8Temp(idW));
             info.name = str::Dup(ToUtf8Temp(nameW));
             info.lang = SapiGetVoiceLanguage(token);
-            voices.Append(info);
+            VecAppend(voices, info);
         }
 
         if (idW) {
@@ -392,13 +419,27 @@ static void SapiProcessEvents() {
 
     while (eventSource->GetEvents(1, &eventItem, &fetched) == S_OK && fetched > 0) {
         if (eventItem.eEventId == SPEI_END_INPUT_STREAM && eventItem.ulStreamNum == gSapiStreamNum) {
-            gTtsActive = false;
-            gSapiStreamNum = 0;
+            dbgtts("sapi-end stream=%u\n", (u32)eventItem.ulStreamNum);
+            if (gSapiQueuedStreamNum) {
+                gSapiStreamNum = gSapiQueuedStreamNum;
+                gSapiQueuedStreamNum = 0;
+                wstr::Free(gTtsSpokenText);
+                gTtsSpokenText = gSapiQueuedText;
+                gSapiQueuedText = {};
+                gSapiLastWordPos = 0;
+                gTtsQueuedStarted = true;
+                gTtsActive = true;
+                dbgtts("sapi-queued-start stream=%u\n", (u32)gSapiStreamNum);
+            } else {
+                gTtsActive = false;
+                gSapiStreamNum = 0;
+            }
         }
 
         if (eventItem.eEventId == SPEI_WORD_BOUNDARY && eventItem.ulStreamNum == gSapiStreamNum) {
             // lParam is the character position of the word in the spoken text
             gSapiLastWordPos = (ULONG)eventItem.lParam;
+            dbgtts("sapi-word pos=%u\n", (u32)gSapiLastWordPos);
         }
 
         SapiClearEvent(&eventItem);
@@ -415,14 +456,36 @@ static bool SapiSpeak(WStr textW) {
         return false;
     }
 
+    SapiClearQueued();
     ULONG streamNum = 0;
     HRESULT hr = gSapiVoice->Speak(textW.s, SPF_ASYNC | SPF_PURGEBEFORESPEAK | SPF_IS_NOT_XML, &streamNum);
     if (FAILED(hr)) {
+        dbgtts("sapi-speak failed hr=0x%x chars=%d\n", (int)hr, textW.len);
         return false;
     }
 
     gSapiLastWordPos = 0;
     gSapiStreamNum = streamNum;
+    dbgtts("sapi-speak stream=%u chars=%d\n", (u32)streamNum, textW.len);
+    return true;
+}
+
+static bool SapiQueue(WStr textW) {
+    if (!SapiInit() || !gSapiVoice || gSapiQueuedStreamNum) {
+        return false;
+    }
+
+    ULONG streamNum = 0;
+    HRESULT hr = gSapiVoice->Speak(textW.s, SPF_ASYNC | SPF_IS_NOT_XML, &streamNum);
+    if (FAILED(hr)) {
+        dbgtts("sapi-queue failed hr=0x%x chars=%d\n", (int)hr, textW.len);
+        return false;
+    }
+
+    gSapiQueuedStreamNum = streamNum;
+    wstr::Free(gSapiQueuedText);
+    gSapiQueuedText = wstr::Dup(textW);
+    dbgtts("sapi-queue stream=%u chars=%d\n", (u32)streamNum, textW.len);
     return true;
 }
 
@@ -431,6 +494,7 @@ static void SapiStop() {
         gSapiVoice->Speak(nullptr, SPF_ASYNC | SPF_PURGEBEFORESPEAK, nullptr);
     }
 
+    SapiClearQueued();
     gSapiStreamNum = 0;
     gSapiLastWordPos = 0;
 }
@@ -473,6 +537,8 @@ static u8* gWinWavData = nullptr; // the whole WAV file (binary)
 static DWORD gWinAvgBytesPerSec = 0;
 static DWORD gWinSamplesPerSec = 0;
 static LONG gWinWaveDone = 0; // set from the waveOut callback thread
+static LARGE_INTEGER gWinPlayQpcStart{};
+static DWORD gWinPlayDurationMs = 0;
 
 // word boundary cues extracted from the synthesized stream: position in
 // the spoken text (in WCHARs) and the time the word starts playing
@@ -481,6 +547,22 @@ struct WinTtsCue {
     int timeMs;
 };
 static Vec<WinTtsCue> gWinCues;
+
+static bool gWinSynthIsQueue = false;
+static u8* gWinQueuedWav = nullptr;
+static DWORD gWinQueuedWavSize = 0;
+static Vec<WinTtsCue> gWinQueuedCues;
+static WStr gWinQueuedText;
+
+static void WinTtsClearQueued() {
+    free(gWinQueuedWav);
+    gWinQueuedWav = nullptr;
+    gWinQueuedWavSize = 0;
+    VecReset(gWinQueuedCues);
+    wstr::Free(gWinQueuedText);
+    gWinQueuedText = {};
+    gWinSynthIsQueue = false;
+}
 
 static Str HStringToUtf8Dup(HSTRING hs) {
     UINT32 len = 0;
@@ -556,6 +638,8 @@ static void WinTtsStopPlayback() {
     gWinWavData = nullptr;
     gWinAvgBytesPerSec = 0;
     gWinSamplesPerSec = 0;
+    gWinPlayQpcStart = {};
+    gWinPlayDurationMs = 0;
     InterlockedExchange(&gWinWaveDone, 0);
 }
 
@@ -664,7 +748,7 @@ static bool WinTtsInit() {
         }
     }
     if (nVoices == 0) {
-        log("WinTtsInit: no voices installed\n");
+        logf("tts: WinTtsInit: no voices installed\n");
         gWinSynth->Release();
         gWinSynth = nullptr;
         if (gWinVoicesStatic) {
@@ -695,8 +779,9 @@ static bool WinTtsInit() {
 
 static void WinTtsRelease() {
     WinTtsCancelSynth();
+    WinTtsClearQueued();
     WinTtsStopPlayback();
-    gWinCues.Reset();
+    VecReset(gWinCues);
 
     if (gWinVoicesStatic) {
         gWinVoicesStatic->Release();
@@ -743,8 +828,8 @@ static void WinTtsGetVoices(Vec<TtsVoiceInfo>& voices) {
             TtsVoiceInfo info{};
             info.id = HStringToUtf8Dup(id);
             info.name = HStringToUtf8Dup(name);
-            info.lang = lang ? HStringToUtf8Dup(lang) : nullptr;
-            voices.Append(info);
+            info.lang = lang ? HStringToUtf8Dup(lang) : Str();
+            VecAppend(voices, info);
         }
 
         if (id) {
@@ -810,15 +895,7 @@ static bool WinTtsSetVoiceById(Str voiceId) {
     return didSet;
 }
 
-static bool WinTtsSpeak(WStr textW) {
-    if (!WinTtsInit()) {
-        return false;
-    }
-
-    WinTtsCancelSynth();
-    WinTtsStopPlayback();
-    gWinCues.Reset();
-
+static bool WinTtsStartSynth(WStr textW) {
     HSTRING text = nullptr;
     HRESULT hr = pWindowsCreateString(textW.s, (UINT32)textW.len, &text);
     if (FAILED(hr)) {
@@ -829,6 +906,7 @@ static bool WinTtsSpeak(WStr textW) {
     hr = gWinSynth->SynthesizeTextToStreamAsync(text, &op);
     pWindowsDeleteString(text);
     if (FAILED(hr) || !op) {
+        dbgtts("winrt-synth failed hr=0x%x chars=%d\n", (int)hr, textW.len);
         return false;
     }
 
@@ -840,10 +918,43 @@ static bool WinTtsSpeak(WStr textW) {
     return true;
 }
 
+static bool WinTtsSpeak(WStr textW) {
+    if (!WinTtsInit()) {
+        return false;
+    }
+
+    WinTtsCancelSynth();
+    WinTtsClearQueued();
+    WinTtsStopPlayback();
+    VecReset(gWinCues);
+    gWinSynthIsQueue = false;
+
+    if (!WinTtsStartSynth(textW)) {
+        dbgtts("winrt-speak failed chars=%d\n", textW.len);
+        return false;
+    }
+    dbgtts("winrt-speak start chars=%d\n", textW.len);
+    return true;
+}
+
+static bool WinTtsQueue(WStr textW) {
+    if (!WinTtsInit() || gWinSynthOp || gWinQueuedWav) {
+        return false;
+    }
+    if (!WinTtsStartSynth(textW)) {
+        return false;
+    }
+    gWinSynthIsQueue = true;
+    wstr::Free(gWinQueuedText);
+    gWinQueuedText = wstr::Dup(textW);
+    dbgtts("winrt-queue start chars=%d\n", textW.len);
+    return true;
+}
+
 // extract word boundary cues: where each word starts in the spoken text
 // and when it starts playing
-static void WinTtsExtractCues(WMSS::ISpeechSynthesisStream* stream) {
-    gWinCues.Reset();
+static void WinTtsExtractCues(WMSS::ISpeechSynthesisStream* stream, Vec<WinTtsCue>& dest) {
+    VecReset(dest);
 
     WMC::ITimedMetadataTrackProvider* provider = nullptr;
     if (FAILED(stream->QueryInterface(IID_PPV_ARGS(&provider))) || !provider) {
@@ -892,7 +1003,7 @@ static void WinTtsExtractCues(WMSS::ISpeechSynthesisStream* stream) {
                         WinTtsCue wc;
                         wc.inputPos = (int)pos;
                         wc.timeMs = (int)(ts.Duration / 10000);
-                        gWinCues.Append(wc);
+                        VecAppend(dest, wc);
                     }
                     speechCue->Release();
                 }
@@ -906,19 +1017,19 @@ static void WinTtsExtractCues(WMSS::ISpeechSynthesisStream* stream) {
     tracks->Release();
 
     // sort by time (insertion sort, the cues are mostly sorted already)
-    for (int i = 1; i < len(gWinCues); i++) {
-        WinTtsCue value = gWinCues[i];
+    for (int i = 1; i < len(dest); i++) {
+        WinTtsCue value = dest[i];
         int j = i - 1;
-        while (j >= 0 && gWinCues[j].timeMs > value.timeMs) {
-            gWinCues[j + 1] = gWinCues[j];
+        while (j >= 0 && dest[j].timeMs > value.timeMs) {
+            dest[j + 1] = dest[j];
             j--;
         }
-        gWinCues[j + 1] = value;
+        dest[j + 1] = value;
     }
 }
 
 // reads the whole synthesized WAV file into gWinWavData
-static bool WinTtsReadStreamBytes(WMSS::ISpeechSynthesisStream* stream) {
+static bool WinTtsReadStreamBytes(WMSS::ISpeechSynthesisStream* stream, u8** dataOut, DWORD* sizeOut) {
     IStream* istm = nullptr;
     HRESULT hr = pCreateStreamOverRandomAccessStream((IUnknown*)stream, IID_PPV_ARGS(&istm));
     if (FAILED(hr) || !istm) {
@@ -929,8 +1040,8 @@ static bool WinTtsReadStreamBytes(WMSS::ISpeechSynthesisStream* stream) {
     Str data = ReadIStream(istm);
     constexpr int kMaxWavSize = 512 * 1024 * 1024;
     if (!str::IsNull(data) && data.len > 0 && data.len < kMaxWavSize) {
-        gWinWavData = (u8*)data.s;
-        gWinWaveHdr.dwBufferLength = (DWORD)data.len; // temporarily holds the file size
+        *dataOut = (u8*)data.s;
+        *sizeOut = (DWORD)data.len;
         ok = true;
     } else {
         str::Free(data);
@@ -947,7 +1058,7 @@ static DWORD WavGetU32(const u8* d) {
 
 // finds "fmt " and "data" chunks in a RIFF WAVE file
 static bool WinTtsParseWav(const u8* d, size_t n, WAVEFORMATEX* wfx, const u8** dataOut, DWORD* dataSizeOut) {
-    if (n < 12 + 8 || !str::EqN(Str((char*)(d), 4), StrL("RIFF"), 4) ||
+    if (n < 12 + 8 || !str::EqN(Str((char*)d, 4), StrL("RIFF"), 4) ||
         !str::EqN(Str((char*)(d + 8), 4), StrL("WAVE"), 4)) {
         return false;
     }
@@ -1006,13 +1117,13 @@ static bool WinTtsStartPlayback() {
     const u8* data = nullptr;
     DWORD dataSize = 0;
     if (!WinTtsParseWav(gWinWavData, wavSize, &wfx, &data, &dataSize)) {
-        logf("WinTtsStartPlayback: failed to parse WAV, size: %d\n", (int)wavSize);
+        logf("tts: WinTtsStartPlayback: failed to parse WAV, size: %d\n", (int)wavSize);
         return false;
     }
 
     MMRESULT res = waveOutOpen(&gWinWaveOut, WAVE_MAPPER, &wfx, (DWORD_PTR)WinTtsWaveOutCb, 0, CALLBACK_FUNCTION);
     if (res != MMSYSERR_NOERROR) {
-        logf("WinTtsStartPlayback: waveOutOpen() failed: %d, format tag: %d\n", (int)res, (int)wfx.wFormatTag);
+        logf("tts: WinTtsStartPlayback: waveOutOpen() failed: %d, format tag: %d\n", (int)res, (int)wfx.wFormatTag);
         gWinWaveOut = nullptr;
         return false;
     }
@@ -1024,13 +1135,41 @@ static bool WinTtsStartPlayback() {
     gWinWaveHdr.dwBufferLength = dataSize;
     if (waveOutPrepareHeader(gWinWaveOut, &gWinWaveHdr, sizeof(gWinWaveHdr)) != MMSYSERR_NOERROR ||
         waveOutWrite(gWinWaveOut, &gWinWaveHdr, sizeof(gWinWaveHdr)) != MMSYSERR_NOERROR) {
-        log("WinTtsStartPlayback: waveOutPrepareHeader() or waveOutWrite() failed\n");
+        logf("tts: WinTtsStartPlayback: waveOutPrepareHeader() or waveOutWrite() failed\n");
         WinTtsStopPlayback();
         return false;
     }
+    QueryPerformanceCounter(&gWinPlayQpcStart);
+    gWinPlayDurationMs = wfx.nAvgBytesPerSec ? (DWORD)((u64)dataSize * 1000 / wfx.nAvgBytesPerSec) : 0;
 
-    logf("WinTtsStartPlayback: playing %d bytes, %d Hz, %d word cues\n", (int)dataSize, (int)wfx.nSamplesPerSec,
-         len(gWinCues));
+    dbgtts("winrt-play bytes=%d hz=%d cues=%d tag=%d avgBps=%u\n", (int)dataSize, (int)wfx.nSamplesPerSec,
+           len(gWinCues), (int)wfx.wFormatTag, (u32)wfx.nAvgBytesPerSec);
+    return true;
+}
+
+static bool WinTtsPlayQueued() {
+    if (!gWinQueuedWav) {
+        return false;
+    }
+
+    WinTtsStopPlayback();
+    gWinWavData = gWinQueuedWav;
+    gWinQueuedWav = nullptr;
+    gWinWaveHdr.dwBufferLength = gWinQueuedWavSize;
+    gWinQueuedWavSize = 0;
+    gWinCues = gWinQueuedCues;
+    VecReset(gWinQueuedCues);
+    wstr::Free(gTtsSpokenText);
+    gTtsSpokenText = gWinQueuedText;
+    gWinQueuedText = {};
+    gWinSynthIsQueue = false;
+
+    if (!WinTtsStartPlayback()) {
+        return false;
+    }
+    gTtsQueuedStarted = true;
+    gTtsActive = true;
+    dbgtts("winrt-queued-start cues=%d\n", len(gWinCues));
     return true;
 }
 
@@ -1049,40 +1188,80 @@ static void WinTtsProcessEvents() {
         if (status == AsyncStatus::Started) {
             return; // still synthesizing
         }
+        dbgtts("winrt-synth done status=%d queue=%d\n", (int)status, (int)gWinSynthIsQueue);
 
         SynthAsyncOp* op = gWinSynthOp;
         gWinSynthOp = nullptr;
+        bool isQueue = gWinSynthIsQueue;
+        gWinSynthIsQueue = false;
 
         bool ok = false;
         if (status == AsyncStatus::Completed) {
             WMSS::ISpeechSynthesisStream* stream = nullptr;
             HRESULT hr = op->GetResults(&stream);
             if (SUCCEEDED(hr) && stream) {
-                WinTtsExtractCues(stream);
-                bool didRead = WinTtsReadStreamBytes(stream);
-                if (!didRead) {
-                    log("WinTtsProcessEvents: failed to read synthesized stream\n");
+                if (isQueue) {
+                    WinTtsExtractCues(stream, gWinQueuedCues);
+                    DWORD sz = 0;
+                    u8* data = nullptr;
+                    bool didRead = WinTtsReadStreamBytes(stream, &data, &sz);
+                    if (didRead) {
+                        gWinQueuedWav = data;
+                        gWinQueuedWavSize = sz;
+                        if (gWinWaveOut) {
+                            ok = true;
+                            dbgtts("winrt-queue ready bytes=%u\n", (u32)sz);
+                        } else {
+                            ok = WinTtsPlayQueued();
+                        }
+                    } else {
+                        logf("tts: WinTtsProcessEvents: failed to read queued stream\n");
+                    }
+                } else {
+                    WinTtsExtractCues(stream, gWinCues);
+                    DWORD sz = 0;
+                    bool didRead = WinTtsReadStreamBytes(stream, &gWinWavData, &sz);
+                    if (didRead) {
+                        gWinWaveHdr.dwBufferLength = sz;
+                        ok = WinTtsStartPlayback();
+                    } else {
+                        logf("tts: WinTtsProcessEvents: failed to read synthesized stream\n");
+                    }
                 }
-                ok = didRead && WinTtsStartPlayback();
                 stream->Release();
             } else {
-                logf("WinTtsProcessEvents: GetResults() failed: 0x%x\n", (int)hr);
+                logf("tts: WinTtsProcessEvents: GetResults() failed: 0x%x\n", (int)hr);
             }
         } else {
-            logf("WinTtsProcessEvents: synthesis failed, status: %d\n", (int)status);
+            logf("tts: WinTtsProcessEvents: synthesis failed, status: %d\n", (int)status);
         }
         op->Release();
 
         if (!ok) {
-            WinTtsStopPlayback();
-            gTtsActive = false;
+            dbgtts("winrt-synth play failed queue=%d\n", (int)isQueue);
+            if (isQueue && gWinWaveOut) {
+                WinTtsClearQueued();
+            } else {
+                WinTtsStopPlayback();
+                WinTtsClearQueued();
+                gTtsActive = false;
+            }
         }
         return;
     }
 
     // playback finished
     if (InterlockedCompareExchange(&gWinWaveDone, 0, 1) == 1) {
-        if (gWinWaveOut) {
+        dbgtts("winrt-play done queued=%d synth=%d\n", gWinQueuedWav ? 1 : 0, gWinSynthOp ? 1 : 0);
+        if (gWinQueuedWav) {
+            if (!WinTtsPlayQueued()) {
+                WinTtsStopPlayback();
+                gTtsActive = false;
+            }
+        } else if (gWinSynthOp && gWinSynthIsQueue) {
+            WinTtsStopPlayback();
+            gTtsActive = true;
+        } else if (gWinWaveOut) {
             WinTtsStopPlayback();
             gTtsActive = false;
         }
@@ -1091,6 +1270,23 @@ static void WinTtsProcessEvents() {
 
 // position (in WCHARs) in the spoken text of the word being played;
 // -1 if playback has not started yet (still synthesizing)
+static DWORD WinTtsClockMs() {
+    if (gWinPlayQpcStart.QuadPart == 0) {
+        return 0;
+    }
+    LARGE_INTEGER now, freq;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    if (freq.QuadPart <= 0) {
+        return 0;
+    }
+    u64 ms = (u64)(now.QuadPart - gWinPlayQpcStart.QuadPart) * 1000 / (u64)freq.QuadPart;
+    if (gWinPlayDurationMs && ms > gWinPlayDurationMs) {
+        ms = gWinPlayDurationMs;
+    }
+    return (DWORD)ms;
+}
+
 static int WinTtsLastWordPosWide() {
     if (!gWinWaveOut) {
         return -1;
@@ -1099,22 +1295,8 @@ static int WinTtsLastWordPosWide() {
         return 0;
     }
 
-    MMTIME mmt{};
-    mmt.wType = TIME_MS;
-    if (waveOutGetPosition(gWinWaveOut, &mmt, sizeof(mmt)) != MMSYSERR_NOERROR) {
-        return 0;
-    }
-
-    DWORD ms;
-    if (mmt.wType == TIME_MS) {
-        ms = mmt.u.ms;
-    } else if (mmt.wType == TIME_BYTES && gWinAvgBytesPerSec) {
-        ms = (DWORD)((u64)mmt.u.cb * 1000 / gWinAvgBytesPerSec);
-    } else if (mmt.wType == TIME_SAMPLES && gWinSamplesPerSec) {
-        ms = (DWORD)((u64)mmt.u.sample * 1000 / gWinSamplesPerSec);
-    } else {
-        return 0;
-    }
+    // WAVE_MAPPER often reports TIME_BYTES/TIME_MS as 0; the QPC clock does not.
+    DWORD ms = WinTtsClockMs();
 
     int pos = 0;
     for (WinTtsCue& cue : gWinCues) {
@@ -1123,11 +1305,19 @@ static int WinTtsLastWordPosWide() {
         }
         pos = cue.inputPos;
     }
+    DBG_TTS({
+        static DWORD sLastMs = 0xFFFFFFFFu;
+        if (ms / 250 != sLastMs / 250) {
+            sLastMs = ms;
+            dbgtts("play-ms=%u pos=%d cues=%d dur=%u\n", (u32)ms, pos, len(gWinCues), gWinPlayDurationMs);
+        }
+    });
     return pos;
 }
 
 static void WinTtsStop() {
     WinTtsCancelSynth();
+    WinTtsClearQueued();
     WinTtsStopPlayback();
 }
 
@@ -1135,14 +1325,12 @@ static void WinTtsStop() {
 
 static bool IsWinRtBackend() {
     if (gTtsBackend == TtsBackend::Unknown) {
-        // an escape hatch, also for testing the SAPI implementation
-        bool forceSapi = len(GetEnvVariableTemp(StrL("SUMATRA_TTS_FORCE_SAPI"))) > 0;
-        if (!forceSapi && WinTtsInit()) {
+        if (!TtsForceSapi() && WinTtsInit()) {
             gTtsBackend = TtsBackend::WinRt;
-            log("Tts: using Windows.Media.SpeechSynthesis\n");
+            dbgtts("backend=winrt\n");
         } else {
             gTtsBackend = TtsBackend::Sapi;
-            log("Tts: using SAPI\n");
+            dbgtts("backend=sapi forceSapi=%d\n", (int)TtsForceSapi());
         }
     }
     return gTtsBackend == TtsBackend::WinRt;
@@ -1171,9 +1359,11 @@ bool TtsSpeakUtf8(Str text) {
     }
 
     TempWStr textW = ToWStrTemp(text);
-    if (!textW) {
+    if (len(textW) == 0) {
         return false;
     }
+
+    gTtsQueuedStarted = false;
 
     bool ok;
     if (IsWinRtBackend()) {
@@ -1182,13 +1372,43 @@ bool TtsSpeakUtf8(Str text) {
         ok = SapiSpeak(textW);
     }
     if (!ok) {
+        dbgtts("speak failed utf8=%d\n", text.len);
         return false;
     }
 
     wstr::Free(gTtsSpokenText);
     gTtsSpokenText = wstr::Dup(textW);
     gTtsActive = true;
+    dbgtts("speak ok utf8=%d active=1\n", text.len);
     return true;
+}
+
+// Next utterance: synthesize (WinRT) or SAPI-queue without stopping playback.
+bool TtsQueueUtf8(Str text) {
+    if (len(text) == 0) {
+        return false;
+    }
+
+    TempWStr textW = ToWStrTemp(text);
+    if (len(textW) == 0) {
+        return false;
+    }
+
+    bool ok;
+    if (IsWinRtBackend()) {
+        ok = WinTtsQueue(textW);
+    } else {
+        ok = SapiQueue(textW);
+    }
+    dbgtts("queue %s utf8=%d\n", ok ? StrL("ok") : StrL("fail"), text.len);
+    return ok;
+}
+
+// One-shot: the queued utterance just became the playing one.
+bool TtsDidStartQueued() {
+    bool v = gTtsQueuedStarted;
+    gTtsQueuedStarted = false;
+    return v;
 }
 
 bool TtsIsSpeaking() {
@@ -1219,37 +1439,69 @@ int TtsGetSpokenPosUtf8() {
 }
 
 void TtsStop() {
+    dbgtts("stop backend=%d active=%d\n", (int)gTtsBackend, (int)gTtsActive);
     if (gTtsBackend == TtsBackend::WinRt) {
         WinTtsStop();
     } else {
         SapiStop();
     }
     gTtsActive = false;
+    gTtsQueuedStarted = false;
 }
 
+// WinRT OneCore plus SAPI (NaturalVoiceSAPIAdapter etc.). Same token id once.
 Vec<TtsVoiceInfo> TtsGetVoices() {
     Vec<TtsVoiceInfo> voices;
-    if (IsWinRtBackend()) {
+    if (!TtsForceSapi()) {
         WinTtsGetVoices(voices);
-    } else {
-        SapiGetVoices(voices);
     }
+
+    Vec<TtsVoiceInfo> sapi;
+    SapiGetVoices(sapi);
+    for (TtsVoiceInfo& v : sapi) {
+        if (TtsVoiceIdInList(voices, v.id)) {
+            str::Free(v.id);
+            str::Free(v.name);
+            str::Free(v.lang);
+            continue;
+        }
+        VecAppend(voices, v);
+    }
+    VecReset(sapi);
+
     TtsSortVoicesByLanguage(voices);
+    dbgtts("voices winrt+sapi=%d forceSapi=%d\n", len(voices), (int)TtsForceSapi());
     return voices;
 }
 
+// Use WinRT if it knows the id, else SAPI. Empty id is the system default.
 bool TtsSetVoiceById(Str voiceId) {
-    bool ok;
-    if (IsWinRtBackend()) {
-        ok = WinTtsSetVoiceById(voiceId);
-    } else {
-        ok = SapiSetVoiceById(voiceId);
+    TtsBackend prev = gTtsBackend;
+    TtsBackend next = TtsBackend::Unknown;
+    bool ok = false;
+
+    if (!TtsForceSapi() && WinTtsInit() && WinTtsSetVoiceById(voiceId)) {
+        next = TtsBackend::WinRt;
+        ok = true;
+    } else if (SapiSetVoiceById(voiceId)) {
+        next = TtsBackend::Sapi;
+        ok = true;
     }
     if (!ok) {
         return false;
     }
 
+    if (prev != TtsBackend::Unknown && prev != next) {
+        if (prev == TtsBackend::WinRt) {
+            WinTtsStop();
+        } else {
+            SapiStop();
+        }
+    }
+
+    gTtsBackend = next;
     str::ReplacePtr(&gTtsVoiceId, voiceId ? str::Dup(voiceId) : Str{});
+    dbgtts("set-voice backend=%d\n", (int)next);
     return true;
 }
 
@@ -1282,7 +1534,7 @@ void TtsFreeVoices(Vec<TtsVoiceInfo>& voices) {
         str::Free(voice.name);
         str::Free(voice.lang);
     }
-    voices.Reset();
+    VecReset(voices);
 }
 
 void TtsRelease() {
@@ -1290,6 +1542,7 @@ void TtsRelease() {
     SapiRelease();
 
     gTtsActive = false;
+    gTtsQueuedStarted = false;
     gTtsBackend = TtsBackend::Unknown;
     wstr::FreePtr(&gTtsSpokenText);
 

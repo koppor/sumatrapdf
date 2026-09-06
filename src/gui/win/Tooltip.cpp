@@ -7,7 +7,20 @@
 #include "gui/UIModels.h"
 
 #include "gui/Layout.h"
+#include "gui/GuiColors.h"
 #include "gui/win/WinGui.h"
+
+static void TooltipApplyColors(HWND hwnd) {
+    if (!hwnd) {
+        return;
+    }
+    GuiColorsInitIfNeeded();
+    // TOOLTIPS_CLASS ships with a visual style; TTM_SETTIP* colors are
+    // ignored until the style is stripped (issue #6000).
+    SetWindowTheme(hwnd, L"", L"");
+    SendMessageW(hwnd, TTM_SETTIPBKCOLOR, (WPARAM)gColsWin[kColWinBg], 0);
+    SendMessageW(hwnd, TTM_SETTIPTEXTCOLOR, (WPARAM)gColsWin[kColWinText], 0);
+}
 
 //--- Tooltip
 
@@ -59,13 +72,13 @@ static TempStr TooltipGetTextTemp(HWND hwnd, HWND owner, int id) {
     return ToUtf8Temp(buf);
 }
 
-static const int MULTILINE_INFOTIP_WIDTH_PX = 500;
+constexpr int kMultilineInfotipWidthPx = 500;
 
 static void SetMaxWidthForText(HWND hwnd, Str s, bool multiline) {
     int dx = -1;
     if (multiline || str::ContainsChar(s, '\n')) {
         // TODO: dpi scale
-        dx = MULTILINE_INFOTIP_WIDTH_PX;
+        dx = kMultilineInfotipWidthPx;
     }
     SendMessageW(hwnd, TTM_SETMAXTIPWIDTH, 0, dx);
 }
@@ -112,31 +125,6 @@ static void TooltipTrackDeactivate(HWND hwndTT, HWND owner, int id) {
     SendMessageW(hwndTT, TTM_TRACKACTIVATE, FALSE, (LPARAM)&ti);
 }
 
-static void TooltipTrackActivateAtScreen(HWND hwndTT, HWND owner, int id, int screenX, int screenY) {
-    if (!hwndTT || !owner || id == 0) {
-        return;
-    }
-    SendMessageW(hwndTT, TTM_TRACKPOSITION, 0, MAKELPARAM(screenX, screenY));
-    TOOLINFOW ti = {};
-    ti.cbSize = sizeof(ti);
-    ti.hwnd = owner;
-    ti.uId = (UINT_PTR)id;
-    ti.uFlags = kTrackToolFlags;
-    SendMessageW(hwndTT, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
-}
-
-static void TooltipTrackActivateAtCursor(HWND hwndTT, HWND owner, int id) {
-    if (!hwndTT || !owner || id == 0) {
-        return;
-    }
-    POINT pt;
-    if (!GetCursorPos(&pt)) {
-        return;
-    }
-    // Slight offset so the tip is not under the cursor hot-spot.
-    TooltipTrackActivateAtScreen(hwndTT, owner, id, pt.x + 12, pt.y + 18);
-}
-
 // Tip bubble size after the tool exists (for placement under a keyboard selection).
 static Size TooltipGetBubbleSize(HWND hwndTT, HWND owner, int id) {
     TOOLINFOW ti = {};
@@ -149,6 +137,76 @@ static Size TooltipGetBubbleSize(HWND hwndTT, HWND owner, int id) {
         return {};
     }
     return {LOWORD(lr), HIWORD(lr)};
+}
+
+// TTF_ABSOLUTE disables the tooltip control's own edge-flip, so a wide
+// annotation / link tip at the right (or bottom) of the screen was clipped
+// (issue #6002). Shift (x,y) so a tip of size tipSz stays in the work area.
+static void ClampTipPosToWorkArea(int& x, int& y, Size tipSz) {
+    if (tipSz.dx <= 0 || tipSz.dy <= 0) {
+        return;
+    }
+    HMONITOR mon = MonitorFromPoint(POINT{x, y}, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{sizeof(mi)};
+    if (!GetMonitorInfoW(mon, &mi)) {
+        return;
+    }
+    RECT wa = mi.rcWork;
+    if (x + tipSz.dx > wa.right) {
+        x = wa.right - tipSz.dx;
+    }
+    x = std::max<LONG>(x, wa.left);
+    if (y + tipSz.dy > wa.bottom) {
+        y = wa.bottom - tipSz.dy;
+    }
+    y = std::max<LONG>(y, wa.top);
+}
+
+static void TooltipMoveOntoWorkArea(HWND hwndTT) {
+    if (!hwndTT) {
+        return;
+    }
+    RECT wr;
+    if (!GetWindowRect(hwndTT, &wr)) {
+        return;
+    }
+    int x = wr.left;
+    int y = wr.top;
+    Size sz{wr.right - wr.left, wr.bottom - wr.top};
+    ClampTipPosToWorkArea(x, y, sz);
+    if (x != wr.left || y != wr.top) {
+        SetWindowPos(hwndTT, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
+static void TooltipTrackActivateAtScreen(HWND hwndTT, HWND owner, int id, int screenX, int screenY) {
+    if (!hwndTT || !owner || id == 0) {
+        return;
+    }
+    SendMessageW(hwndTT, TTM_TRACKPOSITION, 0, MAKELPARAM(screenX, screenY));
+    TOOLINFOW ti = {};
+    ti.cbSize = sizeof(ti);
+    ti.hwnd = owner;
+    ti.uId = (UINT_PTR)id;
+    ti.uFlags = kTrackToolFlags;
+    SendMessageW(hwndTT, TTM_TRACKACTIVATE, TRUE, (LPARAM)&ti);
+    // TTM_GETBUBBLESIZE can be 0 before the first show; use the real window.
+    TooltipMoveOntoWorkArea(hwndTT);
+}
+
+static void TooltipTrackActivateAtCursor(HWND hwndTT, HWND owner, int id) {
+    if (!hwndTT || !owner || id == 0) {
+        return;
+    }
+    POINT pt;
+    if (!GetCursorPos(&pt)) {
+        return;
+    }
+    // Slight offset so the tip is not under the cursor hot-spot.
+    int x = pt.x + 12;
+    int y = pt.y + 18;
+    ClampTipPosToWorkArea(x, y, TooltipGetBubbleSize(hwndTT, owner, id));
+    TooltipTrackActivateAtScreen(hwndTT, owner, id, x, y);
 }
 
 Tooltip::Tooltip() {
@@ -173,6 +231,7 @@ HWND Tooltip::Create(const CreateArgs& args) {
 
     ControlBase::CreateControl(cargs);
     SetDelayTime(TTDT_AUTOPOP, 32767);
+    TooltipApplyColors(hwnd);
     return hwnd;
 }
 Size Tooltip::GetIdealSize() {
@@ -185,6 +244,7 @@ void Tooltip::SetMaxWidth(int dx) {
 }
 
 int Tooltip::Add(Str s, const Rect& rc, bool multiline) {
+    TooltipApplyColors(hwnd);
     int id = GetNextTooltipID();
     SetMaxWidthForText(hwnd, s, multiline);
     TempWStr ws = ToWStrTemp(s);
@@ -202,7 +262,7 @@ int Tooltip::Add(Str s, const Rect& rc, bool multiline) {
     }
     bool isRtl = IsTextRtl(ws);
     HwndSetRtl(hwnd, isRtl);
-    tooltipIds.Append(id);
+    VecAppend(tooltipIds, id);
     return id;
 }
 
@@ -280,21 +340,7 @@ int Tooltip::SetSingleAt(Str s, const Rect& rc, Point screenPos, bool multiline,
             x = maxRightScreen - tipSz.dx;
         }
     }
-    if (tipSz.dx > 0 && tipSz.dy > 0) {
-        HMONITOR mon = MonitorFromPoint(POINT{x, y}, MONITOR_DEFAULTTONEAREST);
-        MONITORINFO mi{sizeof(mi)};
-        if (GetMonitorInfoW(mon, &mi)) {
-            RECT wa = mi.rcWork;
-            if (x + tipSz.dx > wa.right) {
-                x = wa.right - tipSz.dx;
-            }
-            x = std::max<LONG>(x, wa.left);
-            if (y + tipSz.dy > wa.bottom) {
-                y = wa.bottom - tipSz.dy;
-            }
-            y = std::max<LONG>(y, wa.top);
-        }
-    }
+    ClampTipPosToWorkArea(x, y, tipSz);
     TooltipTrackActivateAtScreen(hwnd, parent, id, x, y);
     return id;
 }
@@ -311,7 +357,7 @@ void Tooltip::Delete(int id) {
     str::Free(lastText);
     lastText = {};
     if (!hwnd) {
-        tooltipIds.Reset();
+        VecReset(tooltipIds);
         return;
     }
     if (len(tooltipIds) > 0) {
@@ -319,7 +365,7 @@ void Tooltip::Delete(int id) {
     }
     SendMessageW(hwnd, TTM_POP, 0, 0);
     TooltipRemoveAll(hwnd);
-    tooltipIds.Reset();
+    VecReset(tooltipIds);
 }
 
 // https://docs.microsoft.com/en-us/windows/win32/controls/ttm-setdelaytime
@@ -328,6 +374,6 @@ void Tooltip::Delete(int id) {
 void Tooltip::SetDelayTime(int type, int timeInMs) {
     ReportIf(!IsValidDelayType(type));
     ReportIf(timeInMs < 0);
-    ReportIf(timeInMs > 32767); // TODO: or is it 65535?
+    ReportIf(timeInMs > 32767);
     SendMessageW(hwnd, TTM_SETDELAYTIME, type, (LPARAM)timeInMs);
 }

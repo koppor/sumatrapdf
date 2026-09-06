@@ -4,7 +4,7 @@
 #include "base/Base.h"
 #include "base/File.h"
 
-#if defined(DEBUG)
+#if IS_DEBUG
 #include "base/UtAssert.h"
 #endif
 
@@ -194,7 +194,7 @@ WatchedFile* FileWatcherSubscribe(Str path, const Func0& onFileChangedCb, bool) 
         return nullptr;
     }
     TempStr dirPath = path::GetDirTemp(path);
-    if (!dirPath) {
+    if (len(dirPath) == 0) {
         dirPath = StrL(".");
     }
     TempStr name = path::GetBaseNameTemp(path);
@@ -276,7 +276,7 @@ void FileWatcherWaitForShutdown(void) {
     gThreadRunning = false;
 }
 
-#if defined(DEBUG)
+#if IS_DEBUG
 
 static void NoteFileWatcherChange(AtomicInt* count) {
     AtomicIntInc(count);

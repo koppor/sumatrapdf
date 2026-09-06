@@ -1,14 +1,14 @@
 # sumatrapdf-tool info
 
-> The command-line tools are provided by `sumatrapdf-tool`, which is installed next to `SumatraPDF.exe`. They only work after SumatraPDF has been installed.
+or [SumatraPDF.exe info](Tools.md)
 
 **Available in [pre-release 3.7](https://www.sumatrapdfreader.org/prerelease)**
 
 **Usage:** `sumatrapdf-tool info [options] file.pdf [pages]`
 
-PDF file can contain embedded fonts, images, patterns etc. Each object has an object number.
+A PDF file can contain embedded fonts, images, patterns, etc. Each object has an object number.
 
-`sumatrapdf-tool info foo.pdf` shows list of objects in the PDF file.
+`sumatrapdf-tool info foo.pdf` shows a list of objects in the PDF file.
 
 By default it shows all supported types of objects.
 

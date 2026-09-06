@@ -3,15 +3,15 @@
 
 #include "base/Base.h"
 
-#include "Commands.h"
 #include "Settings.h"
 #include "DisplayMode.h"
 #include "Notifications.h"
-#if !defined(SUMATRA_TEST_UTIL)
+#ifndef SUMATRA_TEST_UTIL
 #include "ShortcutParse.h"
 #include "Accelerators.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #endif
+#include "Commands.h"
 
 // @gen-start cmd-c
 // clang-format off
@@ -88,7 +88,6 @@ static SeqStrings gCommandNames =
     "CmdSaveAnnotations\0"
     "CmdSaveAnnotationsNewFile\0"
     "CmdDiscardChanges\0"
-    "CmdEditAnnotations\0"
     "CmdDeleteAnnotation\0"
     "CmdZoomFitPage\0"
     "CmdZoomActualSize\0"
@@ -296,6 +295,31 @@ static SeqStrings gCommandNames =
     "CmdZoomToSelection\0"
     "CmdToggleHoverPreview\0"
     "CmdToggleDisableLinks\0"
+    "CmdSignDocument\0"
+    "CmdInsertImage\0"
+    "CmdToggleHighlightFormFields\0"
+    "CmdTogglePageBoxes\0"
+    "CmdConvertPdfToImages\0"
+    "CmdToggleUniformPageWidth\0"
+    "CmdToggleTransparencyGrid\0"
+    "CmdTogglePageGrid\0"
+    "CmdConfigurePageGrid\0"
+    "CmdToggleEditPDF\0"
+    "CmdApplyRedactions\0"
+    "CmdUndo\0"
+    "CmdRedo\0"
+    "CmdCutAnnotation\0"
+    "CmdCopyAnnotation\0"
+    "CmdPasteAnnotation\0"
+    "CmdSearchGoogleLens\0"
+    "CmdNavigateThumbnail\0"
+    "CmdShowAnnotationText\0"
+    "CmdAnnotationHighlightBrush\0"
+    "CmdFindAnnotation\0"
+    "CmdOpenFileNoHistory\0"
+    "CmdCopySelectionAsImage\0"
+    "CmdSearchGoogleLensPage\0"
+    "CmdSearchGoogleLensImage\0"
     "CmdRefHoverPushToJabRef\0"
     "CmdNone\0"
     "\0";
@@ -373,7 +397,6 @@ static i32 gCommandIds[] = {
     CmdSaveAnnotations,
     CmdSaveAnnotationsNewFile,
     CmdDiscardChanges,
-    CmdEditAnnotations,
     CmdDeleteAnnotation,
     CmdZoomFitPage,
     CmdZoomActualSize,
@@ -581,6 +604,31 @@ static i32 gCommandIds[] = {
     CmdZoomToSelection,
     CmdToggleHoverPreview,
     CmdToggleDisableLinks,
+    CmdSignDocument,
+    CmdInsertImage,
+    CmdToggleHighlightFormFields,
+    CmdTogglePageBoxes,
+    CmdConvertPdfToImages,
+    CmdToggleUniformPageWidth,
+    CmdToggleTransparencyGrid,
+    CmdTogglePageGrid,
+    CmdConfigurePageGrid,
+    CmdToggleEditPDF,
+    CmdApplyRedactions,
+    CmdUndo,
+    CmdRedo,
+    CmdCutAnnotation,
+    CmdCopyAnnotation,
+    CmdPasteAnnotation,
+    CmdSearchGoogleLens,
+    CmdNavigateThumbnail,
+    CmdShowAnnotationText,
+    CmdAnnotationHighlightBrush,
+    CmdFindAnnotation,
+    CmdOpenFileNoHistory,
+    CmdCopySelectionAsImage,
+    CmdSearchGoogleLensPage,
+    CmdSearchGoogleLensImage,
     CmdRefHoverPushToJabRef,
     CmdNone,
 };
@@ -658,7 +706,6 @@ SeqStrings gCommandDescriptions =
     "Save Annotations to existing PDF\0"
     "Save Annotations to a new PDF...\0"
     "Discard Changes\0"
-    "Edit Annotations...\0"
     "Delete Annotation\0"
     "Zoom: Fit Page\0"
     "Zoom: Actual Size\0"
@@ -864,8 +911,33 @@ SeqStrings gCommandDescriptions =
     "Extend Selection One Word Right\0"
     "Toggle Laser Pointer\0"
     "Zoom: To Selection\0"
-    "Toggle Hover Preview\0"
+    "Toggle Citation Hover Preview\0"
     "Toggle Disable Links\0"
+    "Sign Document...\0"
+    "Insert Image...\0"
+    "Toggle Highlight Form Fields\0"
+    "Toggle Page Boxes\0"
+    "Convert PDF to Images...\0"
+    "Toggle Uniform Page Width\0"
+    "Toggle Transparency Grid\0"
+    "Toggle Page Grid\0"
+    "Configure Page Grid...\0"
+    "Toggle Edit PDF\0"
+    "Apply Redactions\0"
+    "Undo\0"
+    "Redo\0"
+    "Cut Annotation\0"
+    "Copy Annotation\0"
+    "Paste Annotation\0"
+    "Search with Google Lens\0"
+    "Navigate Thumbnails\0"
+    "Show Comment\0"
+    "Highlight with Brush\0"
+    "Find Annotation\0"
+    "Open File Without History...\0"
+    "Copy Selection As Image\0"
+    "Search Page with Google Lens\0"
+    "Search Image with Google Lens\0"
     "Push Reference to JabRef\0"
     "Do nothing\0"
     "\0";
@@ -888,6 +960,8 @@ static const ArgSpec argSpecs[] = {
     {CmdSelectionHandler, kCmdArgContentType, CommandArg::Type::String},
     {CmdSelectionHandler, kCmdArgHeaders, CommandArg::Type::String},
     {CmdSelectionHandler, kCmdArgSelectToolbar, CommandArg::Type::String},
+    {CmdSelectionHandler, kCmdArgToolbarText, CommandArg::Type::String},
+    {CmdSelectionHandler, kCmdArgToolbarSvgIcon, CommandArg::Type::String},
 
     {CmdExec, kCmdArgExe, CommandArg::Type::String}, // default
     {CmdExec, kCmdArgFilter, CommandArg::Type::String},
@@ -931,7 +1005,7 @@ static const ArgSpec argSpecs[] = {
     // extension including leading dot, e.g. [CmdFixDefaultApp .pdf]
     {CmdFixDefaultApp, kCmdArgExt, CommandArg::Type::String}, // default
 
-    {CmdNone, "", CommandArg::Type::None}, // sentinel
+    {CmdNone, StrL(""), CommandArg::Type::None}, // sentinel
 };
 
 CustomCommand* gFirstCustomCommand = nullptr;
@@ -972,6 +1046,9 @@ int GetCommandIdByName(Str cmdName) {
     if (str::EqI(cmdName, StrL("CmdFindMatch"))) {
         return CmdFindToggleMatchCase;
     }
+    if (str::EqI(cmdName, StrL("CmdTogglePdfAnnotationsToolbar"))) {
+        return CmdToggleEditPDF;
+    }
     return -1;
 }
 
@@ -992,15 +1069,11 @@ int GetCommandIdByDesc(Str cmdDesc) {
 }
 
 Str GetCommandDescription(int commandId) {
-    int off = 0;
     int id = (int)CmdFirst + 1;
-    while (SeqStrAt(gCommandDescriptions, off)) {
-        Str description = SeqStrAt(gCommandDescriptions, off);
+    for (Str description = SeqStrFirst(gCommandDescriptions); len(description) > 0;
+         description = SeqStrNext(description), id++) {
         if (id == commandId) {
             return description;
-        }
-        if (!SeqStrAdvance(gCommandDescriptions, off, &id)) {
-            break;
         }
     }
     return {};
@@ -1011,14 +1084,13 @@ static bool IsArgName(Str name, Str argName) {
     if (str::EqI(name, argName)) {
         return true;
     }
-    if (!str::StartsWithI(name, argName)) {
+    if (!str::TrimPrefixI(name, argName)) {
         return false;
     }
-    if (name.len <= argName.len) {
+    if (len(name) == 0) {
         return false;
     }
-    char c = name.s[argName.len];
-    return c == '=';
+    return name.s[0] == '=';
 }
 
 // One allocation: sizeofi(CommandArg) + name + NUL + strVal + NUL.
@@ -1139,7 +1211,7 @@ static void NormalizeCommandNameAndKey(Str definition, Str* name, Str* key) {
         *key = {};
         return;
     }
-#if !defined(SUMATRA_TEST_UTIL)
+#ifndef SUMATRA_TEST_UTIL
     if (!IsValidShortcutString(*key)) {
         logf("CreateCustomCommand: '%s' is not a valid shortcut for '%s'\n", *key, definition);
         MaybeDelayedWarningNotification(fmt("'%s' is not a valid shortcut for '%s'", *key, definition));
@@ -1233,7 +1305,7 @@ void GetCommandsWithOrigId(Vec<CustomCommand*>& commands, int origId) {
     CustomCommand* curr = gFirstCustomCommand;
     while (curr) {
         if (curr->origId == origId) {
-            commands.Append(curr);
+            VecAppend(commands, curr);
         }
         curr = curr->next;
     }
@@ -1295,7 +1367,7 @@ static int ParseBool(Str s);
 static CommandArg* TryParseDefaultArg(int defaultArgIdx, Str* argsInOut) {
     // first is default value
     Str rest = *argsInOut;
-    str::SkipChar(rest, ' ');
+    str::TrimChar(rest, ' ');
     Str valEnd = str::SliceFromChar(rest, ' ');
     Str argName = argSpecs[defaultArgIdx].name;
     CommandArg::Type type = argSpecs[defaultArgIdx].type;
@@ -1304,14 +1376,14 @@ static CommandArg* TryParseDefaultArg(int defaultArgIdx, Str* argsInOut) {
         // creates a problem: all named args must be before default string arg
         valEnd = {};
     }
-    TempStr val = nullptr;
-    if (!valEnd) {
-        val = str::Dup(rest);
+    TempStr val = {};
+    if (len(valEnd) == 0) {
+        val = str::DupTemp(rest);
         *argsInOut = {};
     } else {
-        val = str::Dup(Str(rest.s, (int)(valEnd.s - rest.s)));
+        val = str::DupTemp(Str(rest.s, (int)(valEnd.s - rest.s)));
         *argsInOut = valEnd;
-        str::SkipChar(*argsInOut, ' ');
+        str::TrimChar(*argsInOut, ' ');
     }
 
     if (type == CommandArg::Type::Bool) {
@@ -1354,14 +1426,13 @@ static CommandArg* TryParseNamedArg(int firstArgIdx, Str* argsInOut) {
             return nullptr;
         }
         argName = argSpecs[i].name;
-        if (!str::StartsWithI(rest, argName)) {
+        if (!str::TrimPrefixI(rest, argName)) {
             continue;
         }
         type = argSpecs[i].type;
         break;
     }
-    rest = Str(rest.s + argName.len, rest.len - argName.len);
-    if (!rest) {
+    if (len(rest) == 0) {
         if (type == CommandArg::Type::Bool) {
             // name of bool arg followed by nothing is true
             *argsInOut = {};
@@ -1372,28 +1443,28 @@ static CommandArg* TryParseNamedArg(int firstArgIdx, Str* argsInOut) {
     } else if (rest.s[0] == ' ') {
         if (type == CommandArg::Type::Bool) {
             // name of bool arg followed by nothing is true
-            str::SkipChar(rest, ' ');
+            str::TrimChar(rest, ' ');
             *argsInOut = rest;
             auto* arg = NewArg(type, argName);
             arg->boolVal = true;
             return arg;
         }
         valStart = rest;
-        str::SkipChar(valStart, ' ');
+        str::TrimChar(valStart, ' ');
     } else if (rest.len >= 2 && rest.s[0] == ':' && rest.s[1] == ' ') {
         valStart = Str(rest.s + 1, rest.len - 1);
-        str::SkipChar(valStart, ' ');
+        str::TrimChar(valStart, ' ');
     } else if (rest.s[0] == '=') {
         valStart = Str(rest.s + 1, rest.len - 1);
     }
-    if (!valStart) {
+    if (len(valStart) == 0) {
         // <args> doesn't start with any of the available commands for this command
         return nullptr;
     }
     Str valEnd = str::SliceFromChar(valStart, ' ');
-    TempStr val = nullptr;
+    TempStr val = {};
     Str afterVal;
-    if (!valEnd) {
+    if (len(valEnd) == 0) {
         val = str::DupTemp(valStart);
         afterVal = {};
     } else {
@@ -1452,7 +1523,7 @@ CustomCommand* CreateCommandFromDefinition(Str definition) {
     }
 
     StrVec parts;
-    Split(&parts, definition, " ", true, 2);
+    Split(&parts, definition, StrL(" "), true, 2);
     Str cmd = parts[0];
     int cmdId = GetCommandIdByName(cmd);
     if (cmdId < 0) {
@@ -1542,7 +1613,7 @@ CustomCommand* CreateCommandFromDefinition(Str definition) {
     if (cmdId == CmdCommandPalette && firstArg) {
         // validate mode
         Str s = firstArg->strVal;
-        static SeqStrings validModes = ">\0#\0@\0:\0*\0$\0"; // TODO: "@@\0" ?
+        static SeqStrings validModes = ">\0#\0@\0:\0*\0$\0%\0=\0"; // TODO: "@@\0" ?
         if (SeqStrIndex(validModes, s) < 0) {
             logf("CreateCommandFromDefinition: invalid CmdCommandPalette mode in '%s'\n", defSafe);
             FreeCommandArgs(firstArg);
@@ -1563,11 +1634,11 @@ CustomCommand* CreateCommandFromDefinition(Str definition) {
         firstArg->type = CommandArg::Type::Float;
         firstArg->floatVal = zoomVal;
     }
-#if !defined(SUMATRA_TEST_UTIL)
+#ifndef SUMATRA_TEST_UTIL
     if (cmdId == CmdToggleBoolSetting && firstArg) {
         // validate the named boolean setting exists (case-insensitive leaf or path)
         Str settingName = firstArg->strVal;
-        if (len(settingName) == 0 || !FindGlobalPrefsBoolSetting(settingName)) {
+        if (len(settingName) == 0 || !FindSettingsBoolSetting(settingName)) {
             MaybeDelayedWarningNotification(
                 fmt("Error parsing Shortcuts: unknown boolean setting '%s' in '%s'\n", settingName, defSafe));
             // still create the command so the shortcut is registered; execute

@@ -2,7 +2,7 @@
 
 **Available in version 3.6 or later.**
 
-You can add buttons to a toolbar using `Shortcuts` [advanced setting](Advanced-options-settings.md). You can also add toolbar buttons for custom external viewers using `ExternalViewers`.
+You can add buttons to the toolbar using the [`Shortcuts` advanced setting](Advanced-options-settings.md). You can also add toolbar buttons for custom external viewers using `ExternalViewers`.
 
 ## Choose which buttons are on the toolbar, and in what order
 
@@ -24,10 +24,10 @@ Hiding a button doesn't disable the command: it's still available from the menu,
 This is the standard toolbar written out, a convenient starting point to edit down:
 
 ```
-ToolbarCustomLayout = CmdOpenFile CmdPrint | PageInfo CmdGoToPrevPage CmdGoToNextPage | CmdNavigateBack CmdNavigateForward | CmdReadAloud | CmdZoomFitWidthAndContinuous CmdZoomFitPageAndSinglePage CmdRotateLeft CmdRotateRight CmdZoomOut CmdZoomIn | CmdFindFirst
+ToolbarCustomLayout = CmdOpenFile CmdPrint | PageInfo CmdGoToPrevPage CmdGoToNextPage | CmdNavigateBack CmdNavigateForward | CmdReadAloud | CmdZoomFitWidthAndContinuous CmdZoomFitPageAndSinglePage CmdRotateLeft CmdRotateRight CmdZoomOut CmdZoomIn | CmdFindFirst | CmdToggleEditPDF
 ```
 
-Some buttons only show when they apply (the Read Aloud button needs `ToolbarShowReadAloud`, Find needs a document that can be searched, rotate needs a document that can be rotated), so a button you list may still stay hidden.
+Some buttons only show when they apply (the Read Aloud button needs `ToolbarShowReadAloud`, Find needs a document that can be searched, rotate needs a document that can be rotated, and Edit PDF needs an editable PDF), so a button you list may still stay hidden. **Edit PDF** toggles a second row of annotation tools. Highlight, underline, squiggly, and strike out are enabled only while text is selected.
 
 ## Show, hide or overlay the toolbar
 
@@ -43,11 +43,11 @@ Press `F8` (the **Toggle Toolbar** command) to cycle through the modes: show →
 Toolbar = overlay
 ```
 
-To customize toolbar:
+To customize the toolbar:
 
-- use `Settings` / `Advanced Options...` menu (or `Ctrl + K` Command Palette, type `adv` to narrow down and select `Advanced Options...` command)
-- this opens default .txt editor with advanced settings file
-- find `Shortcuts` array and add new shortcut definitions
+- use the `Settings` / `Advanced Options...` menu (or open the Command Palette with `Ctrl + K`, type `adv` to narrow the results, and select the `Advanced Options...` command)
+- this opens the advanced settings file in your default text editor
+- find the `Shortcuts` array and add new shortcut definitions
 
 Example using text labels (`ToolbarText`):
 
@@ -83,9 +83,28 @@ Explanation:
 - `CmdNextTab` is one of the [commands](Commands.md)
 - `Next Tab` will be shown in the toolbar
 
-If you provide `Name`, it'll be available in [Command Palette](Command-Palette.md).
+If you provide `Name`, it will be available in the [Command Palette](Command-Palette.md).
 
 See [customize shortcuts](Customize-keyboard-shortcuts.md) for more complete docs on `Shortcuts` [advanced setting](Advanced-options-settings.md).
+
+## Command palette on the toolbar
+
+`Ctrl + K` then `$` opens the [command palette](Command-Palette.md) in favorites
+mode (a floating list that closes when it loses focus). To put that on the
+toolbar, add a shortcut with `ToolbarText` or `ToolbarSvgIcon`:
+
+```
+Shortcuts [
+    [
+        Cmd = CmdCommandPaletteFavorites
+        Name = Favorites
+        ToolbarText = $
+    ]
+]
+```
+
+The table of contents (document bookmarks) is `Ctrl + K` then `%`, or
+`Shift + F12`. For a toolbar button use `CmdCommandPaletteTOC` the same way.
 
 See [customize external viewers](Customize-external-viewers.md) for adding external-viewer toolbar buttons.
 
@@ -122,4 +141,4 @@ As an alternative to SVG, you can use Unicode symbols in `ToolbarText` — they 
 
 Symbols supported by Windows' Segoe UI font: http://zuga.net/articles/unicode-all-characters-supported-by-the-font-segoe-ui/
 
-To find a symbol you can search for example for `arrow` and then copy & paste the symbol (e.g. `→`) into settings file.
+To find a symbol, you can search for a term such as `arrow`, then copy and paste the symbol (e.g. `→`) into the settings file.

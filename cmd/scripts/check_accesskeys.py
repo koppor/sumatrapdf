@@ -4,7 +4,7 @@ Looks for accesskey collisions in translations.
 Groups of menu or dialog items which appear together can be marked as
 
 //[ ACCESSKEY_GROUP <name>
-... _TRN("Menu &Item") ... _TRN("&Another Menu Item") ...
+... TrN("Menu &Item") ... TrN("&Another Menu Item") ...
 //] ACCESSKEY_GROUP <name>
 
 All accesskeys used within a group are compared per translation and

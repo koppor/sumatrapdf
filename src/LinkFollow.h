@@ -6,15 +6,14 @@ struct Gfx;
 
 extern Kind kNotifLinkFollow;
 
-constexpr int kMaxKeyboardLinkTargets = 9;
-
 bool CanFollowLinksWithKeyboard(MainWindow*);
 void ToggleKeyboardLinkFollowing(MainWindow*);
 bool KeyboardLinkFollowingActive(MainWindow*);
 bool StopKeyboardLinkFollowing(MainWindow*);
+bool KeyboardLinkFollowingCapturesKey(MainWindow*, WPARAM vk);
 bool KeyboardLinkFollowingOnChar(MainWindow*, WPARAM key);
 void KeyboardLinkFollowingViewportChanged(MainWindow*);
 void KeyboardLinkFollowingRecompute(MainWindow*);
 void PaintKeyboardLinkTargets(MainWindow*, Gfx*);
 
-TempStr KeyboardLinkFollowResultTemp(int* exitCodeOut);
+TempStr KeyboardLinkFollowResultTemp(Str action, Str chars, int* exitCodeOut);

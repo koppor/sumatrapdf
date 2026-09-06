@@ -24,7 +24,13 @@
 // Keep this fast: F11 is near-instant; do not pad with multi-second sleeps or
 // dense GetPixel grids (a 200px × every-6px strip was ~64k FFI calls × 2).
 //
-// Run:  bun tests/issue-5866.ts [--no-build]   (or via tests/run-almost-all.ts)
+// Not registered in any suite, on purpose: it flips the taskbar's auto-hide
+// setting on the machine it runs on (restored in a finally, but a crashed run
+// would leave it), it is the slowest of the regular tests at ~12s, and a
+// hosted runner has no Explorer taskbar, so the daily could never run it
+// anyway. Run it by hand when touching fullscreen / relayout / chrome paint.
+//
+// Run:  bun tests/issue-5866.ts [--no-build]
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -46,6 +52,9 @@ const PDF = join(ROOT, "ext", "a-zlib", "zlib.3.pdf");
 // to stay out of the document canvas (where progressive render is noisy).
 const STRIP_DY = 80;
 const X_STEP = 16;
+// DWM occasionally changes a handful of anti-aliased caption pixels between
+// otherwise identical paints. The regression leaves thousands different.
+const MAX_CHANGED_PIXELS = 20;
 
 // WindowState = 2 is maximized, the other half of the repro
 const SETTINGS = `WindowState = 2
@@ -64,6 +73,36 @@ function sampleChrome(hwnd: number): number[] {
     px.push(...readWindowDCColumn(hwnd, x, 0, STRIP_DY));
   }
   return px;
+}
+
+// Chrome pixels once they stop changing: a slow build (ASan, a loaded CI
+// runner) is still painting when a fixed sleep expires, and a half-painted
+// "before" makes every later comparison differ.
+async function sampleStableChrome(hwnd: number, timeoutMs = 5000): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs;
+  let prev = sampleChrome(hwnd);
+  for (;;) {
+    await sleep(120);
+    const cur = sampleChrome(hwnd);
+    if (countDifferingPixels(prev, cur) === 0 || Date.now() > deadline) {
+      return cur;
+    }
+    prev = cur;
+  }
+}
+
+// How many sampled pixels still differ from `before`, once they stop coming
+// back (or the deadline passes). The bug never repaints, so it still fails --
+// just after waiting instead of after a fixed sleep that a slow build misses.
+async function waitForChromeRestored(hwnd: number, before: number[], timeoutMs = 5000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const nDiff = countDifferingPixels(before, sampleChrome(hwnd));
+    if (nDiff <= MAX_CHANGED_PIXELS || Date.now() > deadline) {
+      return nDiff;
+    }
+    await sleep(120);
+  }
 }
 
 export async function testit(): Promise<void> {
@@ -90,23 +129,17 @@ export async function testit(): Promise<void> {
     if (!frame) {
       throw new Error("SumatraPDF frame window not found");
     }
-    // Short settle for first paint / maximized layout (not full-page render)
-    await sleep(250);
-
-    const before = sampleChrome(frame);
+    // settle for first paint / maximized layout (not full-page render)
+    const before = await sampleStableChrome(frame);
 
     sendCommand(frame, cmdId("CmdToggleFullscreen"));
-    await sleep(120);
+    await sleep(200);
     sendCommand(frame, cmdId("CmdToggleFullscreen"));
-    // ExitFullScreen + RelayoutFrame is synchronous on the UI thread; a short
-    // beat is enough for WM_PAINT to run after EndFrameRedrawSuppression.
-    await sleep(150);
 
     // nothing here scrolls, switches tabs or moves the mouse: leaving full
     // screen must repaint the chrome on its own
-    const after = sampleChrome(frame);
-    const nDiff = countDifferingPixels(before, after);
-    if (nDiff > 0) {
+    const nDiff = await waitForChromeRestored(frame, before);
+    if (nDiff > MAX_CHANGED_PIXELS) {
       throw new Error(
         `the caption/tab row did not repaint after leaving full screen: ` +
           `${nDiff} of ${before.length} sampled pixels still differ from before`,

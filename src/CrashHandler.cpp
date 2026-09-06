@@ -21,30 +21,39 @@
 #include "gui/win/WebView.h"
 
 #include "Settings.h"
-#include "GlobalPrefs.h"
 #include "AppTools.h"
 #include "Version.h"
 #include "SumatraConfig.h"
 #include "AppSettings.h"
+#include "CrashHandler.h"
 #include "SumatraLog.h"
 
-// logf()/logfa() are now macros that format with fmt() and route through
-// log()/loga(), so they keep logging (to at least the debugger) even when
-// gReducedLogging is set.
+// logf() is a template that formats with fmt() and routes through log(), so it
+// keeps logging (to at least the debugger) even when gReducedLogging is set.
 
 #define kCrashHandlerServer "www.sumatrapdfreader.org"
-#define kCrashHandlerServerPort 443
+constexpr int kCrashHandlerServerPort = 443;
 #define kCrashHandlerServerSubmitURL "/uploadcrash/sumatrapdf-crashes"
+
+// true: write/upload a .dmp (log as CommentStreamA). false: old text report.
+constexpr bool gCrashHandlerUsingMinidump = true;
+
+#if IS_DEBUG
+#define kMinidumpSubmitUrl "http://127.0.0.1:9321/uploadminidump"
+#else
+#define kMinidumpSubmitUrl "https://www.sumatrapdfreader.org/uploadminidump"
+#endif
 
 // The following functions allow crash handler to be used by both installer
 // and sumatra proper. They must be implemented for each app.
-extern void GetStressTestInfo(str::Builder* s);
+extern void GetStressTestInfo();
 extern bool CrashHandlerCanUseNet();
 extern void ShowCrashHandlerMessage();
-extern void GetProgramInfo(str::Builder& s);
+extern void GetProgramInfo();
+extern void AppendClientInfoQuery(str::Builder& url);
 
 // in DEBUG we don't enable symbols download because they are not uploaded
-#if defined(DEBUG)
+#if IS_DEBUG
 static bool gDisableSymbolsDownload = true;
 #else
 static bool gDisableSymbolsDownload = false;
@@ -63,6 +72,33 @@ that CRT creates its own heap for malloc()/free() etc. so that while a deadlock
 is still possible, the probability should be greatly reduced. */
 
 static Arena* gCrashHandlerArena = nullptr;
+
+// The report is built here rather than threaded through every helper as a
+// str::Builder&. Lives in the arena so there is no static ctor/dtor.
+static str::Builder* gCrashInfo = nullptr;
+
+void CrashInfoAppend(Str s) {
+    if (!gCrashInfo) {
+        return;
+    }
+    gCrashInfo->Append(s);
+}
+
+// start a fresh report, keeping the storage already allocated
+static void CrashInfoStart(int cap) {
+    if (!gCrashInfo) {
+        return;
+    }
+    gCrashInfo->Reset();
+    gCrashInfo->Reserve(cap);
+}
+
+static Str CrashInfoTake() {
+    if (!gCrashInfo) {
+        return {};
+    }
+    return gCrashInfo->TakeStr();
+}
 
 // exit code for a debug report (ReportIf) in a -for-testing run; test runners
 // (tests/control.ts) treat it as "assertion fired", so keep the value in sync
@@ -90,6 +126,27 @@ static ThreadId gDumpThreadId = 0;
 static MINIDUMP_EXCEPTION_INFORMATION gMei{};
 static LPTOP_LEVEL_EXCEPTION_FILTER gPrevExceptionFilter = nullptr;
 
+// Copy into the crash arena so the minidump comment can use it without allocating.
+void CrashHandlerSetSettings(Str settings) {
+    if (!gCrashHandlerArena) {
+        return;
+    }
+    gSettingsFile = {};
+    if (len(settings) == 0) {
+        return;
+    }
+    gSettingsFile = str::Dup(gCrashHandlerArena, settings);
+}
+
+static void AppendSettingsToCrashInfo() {
+    if (len(gSettingsFile) == 0) {
+        return;
+    }
+    CrashInfoAppend(StrL("\n--- settings ---\n"));
+    CrashInfoAppend(gSettingsFile);
+    CrashInfoAppend(StrL("\n"));
+}
+
 static bool TryStartCrashHandling(Str handlerName) {
     if (InterlockedCompareExchange(&gCrashHandlerStarted, 1, 0) == 0) {
         gCrashThreadId = GetCurrentThreadId();
@@ -115,7 +172,7 @@ static bool TryStartCrashHandling(Str handlerName) {
 }
 
 // returns true if running on wine
-static bool GetModules(str::Builder& s, bool additionalOnly) {
+static bool GetModules(bool additionalOnly) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
     if (snap == INVALID_HANDLE_VALUE) {
         return true;
@@ -129,11 +186,12 @@ static bool GetModules(str::Builder& s, bool additionalOnly) {
         auto pathA = ToUtf8Temp(mod.szExePath);
         if (additionalOnly && gModulesInfo) {
             if (!str::ContainsI(gModulesInfo, pathA)) {
-                s.Append(
-                    str::Format(s.a, "Module: %p %06X %-16s %s\n", mod.modBaseAddr, mod.modBaseSize, nameA, pathA));
+                CrashInfoAppend(str::Format(gCrashHandlerArena, "Module: %p %06X %-16s %s\n", mod.modBaseAddr,
+                                            mod.modBaseSize, nameA, pathA));
             }
         } else {
-            s.Append(str::Format(s.a, "Module: %p %06X %-16s %s\n", mod.modBaseAddr, mod.modBaseSize, nameA, pathA));
+            CrashInfoAppend(str::Format(gCrashHandlerArena, "Module: %p %06X %-16s %s\n", mod.modBaseAddr,
+                                        mod.modBaseSize, nameA, pathA));
         }
         cont = Module32Next(snap, &mod);
     }
@@ -167,112 +225,106 @@ static const char* LookupUncaughtMupdfError() {
     return nullptr;
 }
 
-static void AppendUncaughtMupdfError(str::Builder& s) {
+static void AppendUncaughtMupdfError() {
     const char* msg = LookupUncaughtMupdfError();
     if (!msg || !msg[0]) {
         return;
     }
     // High-visibility: empty callstacks from the intentional null-write still
     // need to explain the real failure (MuPDF throw with no fz_try).
-    s.Append(str::Format(s.a, "Uncaught MuPDF error: %s\n\n", Str(msg)));
+    CrashInfoAppend(str::Format(gCrashHandlerArena, "Uncaught MuPDF error: %s\n\n", Str(msg)));
 }
 
 static Str BuildCrashInfoText(Str condStr, Str fileLine, bool isCrash, bool captureCallstack) {
-    str::Builder s(16 * 1024);
-    s.a = gCrashHandlerArena;
+    CrashInfoStart(16 * 1024);
     if (!isCrash) {
         captureCallstack = true;
-        s.Append("Type: debug report (not crash)\n");
+        CrashInfoAppend(StrL("Type: debug report (not crash)\n"));
     }
     if (condStr) {
         // format into the pre-allocated crash arena, not the temp allocator
-        s.Append(str::Format(s.a, "Cond: %s @ %s\n", condStr, fileLine));
+        CrashInfoAppend(str::Format(gCrashHandlerArena, "Cond: %s @ %s\n", condStr, fileLine));
     }
-    AppendUncaughtMupdfError(s);
+    AppendUncaughtMupdfError();
     if (gSystemInfo) {
-        s.Append(gSystemInfo);
-        s.Append("\n");
+        CrashInfoAppend(gSystemInfo);
+        CrashInfoAppend(StrL("\n"));
     }
 
-    //    GetStressTestInfo(&s);
+    //    GetStressTestInfo();
 
     if (gMei.ExceptionPointers) {
         // those are only set when we capture exception
-        dbghelp::GetExceptionInfo(s, gMei.ExceptionPointers);
-        s.Append("\n");
+        dbghelp::GetExceptionInfo(*gCrashInfo, gMei.ExceptionPointers);
+        CrashInfoAppend(StrL("\n"));
     } else {
         // GetExceptionInfo() also adds current thread callstack
         if (captureCallstack) {
-            s.Append("\nCrashed thread:\n");
-            dbghelp::GetCurrentThreadCallstack(s);
-            s.Append("\n");
+            CrashInfoAppend(StrL("\nCrashed thread:\n"));
+            dbghelp::GetCurrentThreadCallstack(*gCrashInfo);
+            CrashInfoAppend(StrL("\n"));
         }
     }
 
-    s.Append("\n-------- Log -----------------\n\n");
+    CrashInfoAppend(StrL("\n-------- Log -----------------\n\n"));
     if (gLogBuf) {
-        s.Append(ToStr(*gLogBuf));
+        CrashInfoAppend(ToStr(*gLogBuf));
     } else {
-        s.Append("(no log - crashed before initializing logging)\n");
+        CrashInfoAppend(StrL("(no log - crashed before initializing logging)\n"));
     }
 
-    if (gSettingsFile) {
-        s.Append("\n\n----- Settings file ----------\n\n");
-        s.Append(gSettingsFile);
-        s.Append("\n\n");
-    }
+    AppendSettingsToCrashInfo();
 
-    s.Append("\n-------- Modules   ----------\n\n");
-    s.Append(gModulesInfo);
-    s.Append("\nModules loaded later:\n");
-    GetModules(s, true);
+    CrashInfoAppend(StrL("\n-------- Modules   ----------\n\n"));
+    CrashInfoAppend(gModulesInfo);
+    CrashInfoAppend(StrL("\nModules loaded later:\n"));
+    GetModules(true);
 
     if (captureCallstack) {
-        s.Append("\n-------- All Threads ----------\n\n");
-        dbghelp::GetAllThreadsCallstacks(s);
-        s.Append("\n");
+        CrashInfoAppend(StrL("\n-------- All Threads ----------\n\n"));
+        dbghelp::GetAllThreadsCallstacks(*gCrashInfo);
+        CrashInfoAppend(StrL("\n"));
     }
 
-    return s.TakeStr();
+    return CrashInfoTake();
 }
 
 static Str BuildLocalCrashInfoText(Str condStr, Str fileLine, bool isCrash, bool captureCallstack) {
-    str::Builder s(16 * 1024);
-    s.a = gCrashHandlerArena;
+    CrashInfoStart(16 * 1024);
     if (!isCrash) {
         captureCallstack = true;
-        s.Append("Type: debug report (not crash)\n");
+        CrashInfoAppend(StrL("Type: debug report (not crash)\n"));
     }
     if (condStr) {
         // format into the pre-allocated crash arena, not the temp allocator
-        s.Append(str::Format(s.a, "Cond: %s @ %s\n", condStr, fileLine));
+        CrashInfoAppend(str::Format(gCrashHandlerArena, "Cond: %s @ %s\n", condStr, fileLine));
     }
-    AppendUncaughtMupdfError(s);
+    AppendUncaughtMupdfError();
     if (gSystemInfo) {
-        s.Append(gSystemInfo);
-        s.Append("\n");
+        CrashInfoAppend(gSystemInfo);
+        CrashInfoAppend(StrL("\n"));
     }
 
     ThreadId crashedThreadId = gMei.ThreadId;
     if (gMei.ExceptionPointers) {
-        dbghelp::GetExceptionInfo(s, gMei.ExceptionPointers);
+        dbghelp::GetExceptionInfo(*gCrashInfo, gMei.ExceptionPointers);
     } else if (captureCallstack) {
         crashedThreadId = GetCurrentThreadId();
-        s.Append("\nCrashed thread:\n");
-        dbghelp::GetCurrentThreadCallstack(s);
+        CrashInfoAppend(StrL("\nCrashed thread:\n"));
+        dbghelp::GetCurrentThreadCallstack(*gCrashInfo);
     }
 
     if (captureCallstack) {
-        s.Append("\nOther threads:\n");
-        dbghelp::GetAllThreadsCallstacksExcept(s, crashedThreadId);
-        s.Append("\n");
+        CrashInfoAppend(StrL("\nOther threads:\n"));
+        dbghelp::GetAllThreadsCallstacksExcept(*gCrashInfo, crashedThreadId);
+        CrashInfoAppend(StrL("\n"));
     }
 
-    return s.TakeStr();
+    return CrashInfoTake();
 }
 
 static void SaveCrashInfo(Str d) {
-    if (!gCrashFilePath) {
+    if (len(gCrashFilePath) == 0) {
         logf("SaveCrashInfo: skipping because !gCrashFilePath");
         return;
     }
@@ -294,20 +346,75 @@ static void WriteCrashInfoToStdErr(Str d) {
 }
 
 static void UploadCrashReport(Str d) {
-    log("UploadCrashReport()\n");
+    log(StrL("UploadCrashReport()\n"));
     if (len(d) == 0) {
         return;
     }
 
-    str::Builder headers(256);
-    headers.a = gCrashHandlerArena;
-    headers.Append("Content-Type: text/plain");
+    str::Builder headers(gCrashHandlerArena);
+    headers.Reserve(256);
+    headers.Append(StrL("Content-Type: text/plain"));
 
-    str::Builder data(16 * 1024);
-    data.a = gCrashHandlerArena;
+    str::Builder data(gCrashHandlerArena);
+    data.Reserve(16 * 1024);
     data.Append(d);
 
-    HttpPost(kCrashHandlerServer, kCrashHandlerServerPort, kCrashHandlerServerSubmitURL, &headers, &data);
+    HttpPost(StrL(kCrashHandlerServer), kCrashHandlerServerPort, StrL(kCrashHandlerServerSubmitURL), &headers, &data);
+}
+
+// Log + settings + version; no stacks/modules/exception (those are in the .dmp).
+static Str BuildMinidumpLogText() {
+    CrashInfoStart(16 * 1024);
+    CrashInfoAppend(StrL("Type: crash (minidump)\n"));
+    CrashInfoAppend(str::Format(gCrashHandlerArena, "Minidump: %s\n", gCrashDumpPath));
+    GetProgramInfo();
+    AppendUncaughtMupdfError();
+    CrashInfoAppend(StrL("\n-------- Log -----------------\n\n"));
+    if (gLogBuf) {
+        CrashInfoAppend(ToStr(*gLogBuf));
+    } else {
+        CrashInfoAppend(StrL("(no log - crashed before initializing logging)\n"));
+    }
+    AppendSettingsToCrashInfo();
+    return CrashInfoTake();
+}
+
+static void HandleCrashWithMinidump() {
+    log(StrL("HandleCrashWithMinidump\n"));
+
+    Str logText = BuildMinidumpLogText();
+    SaveCrashInfo(logText);
+    WriteCrashInfoToStdErr(logText);
+
+    DWORD n = GetEnvironmentVariableA("SUMATRAPDF_FULLDUMP", nullptr, 0);
+    bool fullDump = (0 != n);
+    dir::CreateForFile(gCrashDumpPath);
+    TempWStr ws = ToWStrTemp(gCrashDumpPath);
+    dbghelp::WriteMiniDump(ws, &gMei, fullDump, logText);
+
+    if (IsDebuggerPresent()) {
+        log(StrL("HandleCrashWithMinidump: skipping upload, debugger present\n"));
+        return;
+    }
+    if (!CrashHandlerCanUseNet()) {
+        log(StrL("HandleCrashWithMinidump: skipping upload, no net permission\n"));
+        return;
+    }
+
+    Str dump = file::ReadFileWithArena(gCrashDumpPath, gCrashHandlerArena);
+    if (len(dump) == 0) {
+        log(StrL("HandleCrashWithMinidump: empty dump, not uploading\n"));
+        return;
+    }
+
+    str::Builder url(gCrashHandlerArena);
+    url.Append(StrL(kMinidumpSubmitUrl));
+    AppendClientInfoQuery(url);
+    Str urlStr = ToStr(url);
+    HttpRsp rsp;
+    bool ok = HttpPostUrl(urlStr, StrL("application/octet-stream"), {}, dump, &rsp);
+    logf("HandleCrashWithMinidump: upload ok=%d status=%u err=%u bytes=%d url=%s\n", (int)ok,
+         (unsigned)rsp.httpStatusCode, (unsigned)rsp.error, dump.len, urlStr);
 }
 
 static bool ExtractSymbols(Str archiveData, Str dstDir, Arena* a) {
@@ -323,7 +430,7 @@ static bool ExtractSymbols(Str archiveData, Str dstDir, Arena* a) {
         lzma::FileInfo* fi = &(archive.files[i]);
         Str name = fi->name;
         logf("ExtractSymbols: file %d is '%s'\n", i, name);
-        if (!name || str::Eq(name, StrL(".")) || str::Eq(name, StrL("..")) || str::Contains(name, StrL("/")) ||
+        if (len(name) == 0 || str::Eq(name, StrL(".")) || str::Eq(name, StrL("..")) || str::Contains(name, StrL("/")) ||
             str::Contains(name, StrL("\\")) || str::Contains(name, StrL(":"))) {
             return false;
         }
@@ -332,7 +439,7 @@ static bool ExtractSymbols(Str archiveData, Str dstDir, Arena* a) {
             return false;
         }
         TempStr filePath = path::JoinTemp(dstDir, name);
-        if (!filePath) {
+        if (len(filePath) == 0) {
             return false;
         }
         Str d = Str((char*)uncompressed, (int)fi->uncompressedSize);
@@ -359,7 +466,7 @@ static bool ExtractSymbols(Str archiveData, Str dstDir, Arena* a) {
 static bool DownloadAndUnzipSymbols(Str symDir) {
     if (gDisableSymbolsDownload) {
         // don't care about debug builds because we don't release them
-        log("DownloadAndUnzipSymbols: DEBUG build so not doing anything\n");
+        log(StrL("DownloadAndUnzipSymbols: DEBUG build so not doing anything\n"));
         return false;
     }
 
@@ -369,8 +476,8 @@ static bool DownloadAndUnzipSymbols(Str symDir) {
     }
 
     logf("DownloadAndUnzipSymbols: symDir: '%s', url: '%s'\n", symDir, gSymbolsUrl);
-    if (!symDir || !dir::Exists(symDir)) {
-        log("DownloadAndUnzipSymbols: exiting because symDir doesn't exist\n");
+    if (len(symDir) == 0 || !dir::Exists(symDir)) {
+        log(StrL("DownloadAndUnzipSymbols: exiting because symDir doesn't exist\n"));
         return false;
     }
 
@@ -378,23 +485,23 @@ static bool DownloadAndUnzipSymbols(Str symDir) {
 
     HttpRsp rsp;
     if (!HttpGet(gSymbolsUrl, &rsp)) {
-        log("DownloadAndUnzipSymbols: couldn't download symbols\n");
+        log(StrL("DownloadAndUnzipSymbols: couldn't download symbols\n"));
         return false;
     }
     if (!IsHttpRspOk(&rsp)) {
-        log("DownloadAndUnzipSymbols: HttpRspOk() returned false\n");
+        log(StrL("DownloadAndUnzipSymbols: HttpRspOk() returned false\n"));
     }
 
     bool ok = ExtractSymbols(ToStr(rsp.data), symDir, gCrashHandlerArena);
     if (!ok) {
-        log("DownloadAndUnzipSymbols: ExtractSymbols() failed\n");
+        log(StrL("DownloadAndUnzipSymbols: ExtractSymbols() failed\n"));
     }
     return ok;
 }
 
 bool CrashHandlerDownloadSymbols() {
     if (gLocalOnlyCrashHandler) {
-        log("CrashHandlerDownloadSymbols: skipping in local-only crash handler\n");
+        log(StrL("CrashHandlerDownloadSymbols: skipping in local-only crash handler\n"));
         return false;
     }
     return DownloadAndUnzipSymbols(gSymbolsDir);
@@ -434,20 +541,20 @@ static bool gAddSymbolServer = false;
 static bool gAddExeDir = false;
 
 static TempStr BuildSymbolPathTemp(Str symDir) {
-    str::Builder path(2048);
-    path.a = GetTempArena();
+    str::Builder path(GetTempArena());
+    path.Reserve(2048);
 
     bool symDirExists = dir::Exists(symDir);
 
     // at this point symDir might not exist but we add it anyway
     path.Append(symDir);
-    path.Append(";");
+    path.Append(StrL(";"));
 
     // in debug builds the symbols are in the same directory as .exe
     if (gIsDebugBuild || gAddExeDir) {
         TempStr dir = GetSelfExeDirTemp();
         path.Append(dir);
-        path.Append(";");
+        path.Append(StrL(";"));
     }
 
     if (gAddNtSymbolPath) {
@@ -461,7 +568,7 @@ static TempStr BuildSymbolPathTemp(Str symDir) {
         }
         if (len(ntSymPath) > 0) {
             path.Append(ntSymPath);
-            path.Append(";");
+            path.Append(StrL(";"));
         }
     }
     if (gAddSymbolServer && symDirExists) {
@@ -507,9 +614,9 @@ void _uploadDebugReport(Str condStr, Str fileLine, bool isCrash, bool captureCal
     // in release builds ReportIf()/ReportIfFast() will break if running under
     // the debugger. In other builds it sends a debug report
     if (condStr) {
-        logfa("_uploadDebugReport: %s %s\n", condStr, fileLine);
+        logf("_uploadDebugReport: %s %s\n", condStr, fileLine);
     } else {
-        loga("_uploadDebugReport\n");
+        log(StrL("_uploadDebugReport\n"));
     }
 
     bool shouldUpload = true;
@@ -528,18 +635,18 @@ void _uploadDebugReport(Str condStr, Str fileLine, bool isCrash, bool captureCal
         InitializeDbgHelp(false);
         auto s = BuildLocalCrashInfoText(condStr, fileLine, isCrash, captureCallstack);
         if (len(s) == 0) {
-            loga("_uploadDebugReport(): skipping because !BuildLocalCrashInfoText()\n");
+            log(StrL("_uploadDebugReport(): skipping because !BuildLocalCrashInfoText()\n"));
             return;
         }
         Str d = s;
         SaveCrashInfo(d);
         WriteCrashInfoToStdErr(d);
-        loga(s);
-        loga("_uploadDebugReport() finished local-only\n");
+        log(s);
+        log(StrL("_uploadDebugReport() finished local-only\n"));
         if (gForTesting && !isCrash && !IsDebuggerPresent()) {
             // automated tests must fail on debug reports (crashes already
             // kill the process with a non-zero code on their own)
-            loga("_uploadDebugReport(): -for-testing, terminating with exit code 105\n");
+            log(StrL("_uploadDebugReport(): -for-testing, terminating with exit code 105\n"));
             ::TerminateProcess(GetCurrentProcess(), kDebugReportTestExitCode);
         }
         return;
@@ -552,14 +659,14 @@ void _uploadDebugReport(Str condStr, Str fileLine, bool isCrash, bool captureCal
             InitializeDbgHelp(false);
             auto s = BuildCrashInfoText(condStr, fileLine, isCrash, captureCallstack);
             if (len(s) == 0) {
-                loga("_uploadDebugReport(): skipping because !BuildCrashInfoText()\n");
+                log(StrL("_uploadDebugReport(): skipping because !BuildCrashInfoText()\n"));
                 return;
             }
             Str d = s;
             SaveCrashInfo(d);
             log(s);
         }
-        log("_uploadDebugReport skipping because !shouldUpload\n");
+        log(StrL("_uploadDebugReport skipping because !shouldUpload\n"));
         return;
     }
 
@@ -570,7 +677,7 @@ void _uploadDebugReport(Str condStr, Str fileLine, bool isCrash, bool captureCal
 
     // don't send report if this is me debugging
     if (IsDebuggerPresent()) {
-        log("_uploadDebugReport skipping because IsDebuggerPresent\n");
+        log(StrL("_uploadDebugReport skipping because IsDebuggerPresent\n"));
         DebugBreak();
         return;
     }
@@ -581,12 +688,12 @@ void _uploadDebugReport(Str condStr, Str fileLine, bool isCrash, bool captureCal
     didSubmitDebugReport = true;
 
     if (!CrashHandlerCanUseNet()) {
-        log("_uploadDebugReport skipping because !CrashHandlerCanUseNet()\n");
+        log(StrL("_uploadDebugReport skipping because !CrashHandlerCanUseNet()\n"));
         return;
     }
 
-    logfa("_uploadDebugReport: isCrash: %d, captureCallstack: %d, gSymbolsDir: '%s'\n", (int)isCrash,
-          (int)captureCallstack, gSymbolsDir);
+    logf("_uploadDebugReport: isCrash: %d, captureCallstack: %d, gSymbolsDir: '%s'\n", (int)isCrash,
+         (int)captureCallstack, gSymbolsDir);
 
     if (captureCallstack && downloadSymbols) {
         // we proceed even if we fail to download symbols
@@ -595,7 +702,7 @@ void _uploadDebugReport(Str condStr, Str fileLine, bool isCrash, bool captureCal
 
     auto s = BuildCrashInfoText(condStr, fileLine, isCrash, captureCallstack);
     if (len(s) == 0) {
-        loga("_uploadDebugReport(): skipping because !BuildCrashInfoText()\n");
+        log(StrL("_uploadDebugReport(): skipping because !BuildCrashInfoText()\n"));
         return;
     }
     Str d = s;
@@ -603,8 +710,8 @@ void _uploadDebugReport(Str condStr, Str fileLine, bool isCrash, bool captureCal
 
     UploadCrashReport(d);
     // gCrashHandlerArena->Free((const void*)d.data());
-    loga(s);
-    loga("_uploadDebugReport() finished\n");
+    log(s);
+    log(StrL("_uploadDebugReport() finished\n"));
 }
 
 static DWORD WINAPI CrashDumpThread(LPVOID /*data*/) {
@@ -613,8 +720,13 @@ static DWORD WINAPI CrashDumpThread(LPVOID /*data*/) {
         return 0;
     }
 
-    log("CrashDumpThread\n");
-    _uploadDebugReport(nullptr, "", true, true);
+    log(StrL("CrashDumpThread\n"));
+    if (gCrashHandlerUsingMinidump) {
+        HandleCrashWithMinidump();
+        return 0;
+    }
+
+    _uploadDebugReport(Str(), StrL(""), true, true);
 
     // always write a MiniDump (for the latest crash only)
     // set the SUMATRAPDF_FULLDUMP environment variable for more complete dumps
@@ -633,11 +745,11 @@ static LONG WINAPI CrashDumpVectoredExceptionHandler(EXCEPTION_POINTERS* excepti
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    if (!TryStartCrashHandling("CrashDumpVectoredExceptionHandler")) {
+    if (!TryStartCrashHandling(StrL("CrashDumpVectoredExceptionHandler"))) {
         return EXCEPTION_CONTINUE_SEARCH; // Note: or should TerminateProcess()?
     }
 
-    log("CrashDumpVectoredExceptionHandler\n");
+    log(StrL("CrashDumpVectoredExceptionHandler\n"));
     gCrashed = true;
 
     gMei.ThreadId = GetCurrentThreadId();
@@ -658,16 +770,17 @@ static LONG WINAPI CrashDumpVectoredExceptionHandler(EXCEPTION_POINTERS* excepti
 
 static LONG WINAPI CrashDumpExceptionHandler(EXCEPTION_POINTERS* exceptionInfo) {
     if (!exceptionInfo || (EXCEPTION_BREAKPOINT == exceptionInfo->ExceptionRecord->ExceptionCode)) {
-        log("CrashDumpExceptionHandler: exiting because !exceptionInfo || EXCEPTION_BREAKPOINT == "
-            "exceptionInfo->ExceptionRecord->ExceptionCode\n");
+        log(
+            StrL("CrashDumpExceptionHandler: exiting because !exceptionInfo || EXCEPTION_BREAKPOINT == "
+                 "exceptionInfo->ExceptionRecord->ExceptionCode\n"));
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    if (!TryStartCrashHandling("CrashDumpExceptionHandler")) {
+    if (!TryStartCrashHandling(StrL("CrashDumpExceptionHandler"))) {
         return EXCEPTION_CONTINUE_SEARCH; // Note: or should TerminateProcess()?
     }
 
-    log("CrashDumpExceptionHandler\n");
+    log(StrL("CrashDumpExceptionHandler\n"));
     gCrashed = true;
 
     gMei.ThreadId = GetCurrentThreadId();
@@ -686,7 +799,7 @@ static LONG WINAPI CrashDumpExceptionHandler(EXCEPTION_POINTERS* exceptionInfo) 
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-static void GetOsVersion(str::Builder& s) {
+static void GetOsVersion() {
     OSVERSIONINFOEX ver{};
     bool ok = GetOsVersion(ver);
     ver.dwOSVersionInfoSize = sizeof(ver);
@@ -703,31 +816,31 @@ static void GetOsVersion(str::Builder& s) {
         arch = IsRunningInWow64() ? "Wow64" : "32-bit";
     }
     if (0 == servicePackMajor) {
-        s.Append(fmt("OS: Windows %s build %d %s\n", os, buildNumber, Str(arch)));
+        CrashInfoAppend(fmt("OS: Windows %s build %d %s\n", os, buildNumber, Str(arch)));
     } else if (0 == servicePackMinor) {
-        s.Append(fmt("OS: Windows %s SP%d build %d %s\n", os, servicePackMajor, buildNumber, Str(arch)));
+        CrashInfoAppend(fmt("OS: Windows %s SP%d build %d %s\n", os, servicePackMajor, buildNumber, Str(arch)));
     } else {
-        s.Append(
+        CrashInfoAppend(
             fmt("OS: Windows %s %d.%d build %d %s\n", os, servicePackMajor, servicePackMinor, buildNumber, Str(arch)));
     }
 }
 
-static void GetProcessorName(str::Builder& s) {
+static void GetProcessorName() {
     const auto* key = R"(HARDWARE\DESCRIPTION\System\CentralProcessor)";
-    TempStr name = ReadRegStrTemp(HKEY_LOCAL_MACHINE, key, "ProcessorNameString");
-    if (!name) {
+    TempStr name = ReadRegStrTemp(HKEY_LOCAL_MACHINE, Str(key), StrL("ProcessorNameString"));
+    if (len(name) == 0) {
         // if more than one processor
         key = R"(HARDWARE\DESCRIPTION\System\CentralProcessor\0)";
-        name = ReadRegStrTemp(HKEY_LOCAL_MACHINE, key, "ProcessorNameString");
+        name = ReadRegStrTemp(HKEY_LOCAL_MACHINE, Str(key), StrL("ProcessorNameString"));
     }
     if (name) {
-        s.Append(fmt("Processor: %s\n", name));
+        CrashInfoAppend(fmt("Processor: %s\n", name));
     }
 }
 
-#define GFX_DRIVER_KEY_PREFIX "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\"
+#define kGfxDriverKeyPrefix "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\"
 
-static void GetGraphicsDriverInfo(str::Builder& s) {
+static void GetGraphicsDriverInfo() {
     // the info is in registry in:
     // HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\
     //   Device Description REG_SZ (same as DriverDesc, so we don't read it)
@@ -737,32 +850,32 @@ static void GetGraphicsDriverInfo(str::Builder& s) {
     //
     // There can be more than one driver, they are in 0000, 0001 etc.
     for (int i = 0;; i++) {
-        TempStr key = str::JoinTemp(GFX_DRIVER_KEY_PREFIX, fmt("%04d", i));
-        TempStr v = ReadRegStrTemp(HKEY_LOCAL_MACHINE, key, "DriverDesc");
+        TempStr key = str::JoinTemp(StrL(kGfxDriverKeyPrefix), fmt("%04d", i));
+        TempStr v = ReadRegStrTemp(HKEY_LOCAL_MACHINE, key, StrL("DriverDesc"));
         // I assume that if I can't read the value, there are no more drivers
-        if (!v) {
+        if (len(v) == 0) {
             break;
         }
-        s.Append(fmt("Graphics driver %d\n", i));
-        s.Append(fmt("  DriverDesc:         %s\n", v));
+        CrashInfoAppend(fmt("Graphics driver %d\n", i));
+        CrashInfoAppend(fmt("  DriverDesc:         %s\n", v));
 
-        v = ReadRegStrTemp(HKEY_LOCAL_MACHINE, key, "DriverVersion");
+        v = ReadRegStrTemp(HKEY_LOCAL_MACHINE, key, StrL("DriverVersion"));
         if (v) {
-            s.Append(fmt("  DriverVersion:      %s\n", v));
+            CrashInfoAppend(fmt("  DriverVersion:      %s\n", v));
         }
 
-        v = ReadRegStrTemp(HKEY_LOCAL_MACHINE, key, "UserModeDriverName");
+        v = ReadRegStrTemp(HKEY_LOCAL_MACHINE, key, StrL("UserModeDriverName"));
         if (v) {
-            s.Append(fmt("  UserModeDriverName: %s\n", v));
+            CrashInfoAppend(fmt("  UserModeDriverName: %s\n", v));
         }
     }
 }
 
-static void GetSystemInfo(str::Builder& s) {
+static void GetSystemInfo() {
     SYSTEM_INFO si;
     GetSystemInfo(&si);
-    s.Append(fmt("Number Of Processors: %d\n", si.dwNumberOfProcessors));
-    GetProcessorName(s);
+    CrashInfoAppend(fmt("Number Of Processors: %d\n", si.dwNumberOfProcessors));
+    GetProcessorName();
 
     {
         MEMORYSTATUSEX ms;
@@ -772,29 +885,31 @@ static void GetSystemInfo(str::Builder& s) {
         float physMemGB = (float)ms.ullTotalPhys / (float)(1024 * 1024 * 1024);
         float totalPageGB = (float)ms.ullTotalPageFile / (float)(1024 * 1024 * 1024);
         DWORD usedPerc = ms.dwMemoryLoad;
-        s.Append(fmt("Physical Memory: %.2f GB\nCommit Charge Limit: %.2f GB\nMemory Used: %d%%\n", physMemGB,
-                     totalPageGB, usedPerc));
+        CrashInfoAppend(fmt("Physical Memory: %.2f GB\nCommit Charge Limit: %.2f GB\nMemory Used: %d%%\n", physMemGB,
+                            totalPageGB, usedPerc));
     }
     {
         TempStr ver = GetWebView2VersionTemp();
         if (len(ver) == 0) {
-            ver = "no WebView2 installed";
+            ver = StrL("no WebView2 installed");
         }
-        s.Append(fmt("WebView2: %s\n", ver));
+        CrashInfoAppend(fmt("WebView2: %s\n", ver));
     }
     {
         // get computer name
-        TempStr s1 = ReadRegStrTemp(HKEY_LOCAL_MACHINE, R"(HARDWARE\DESCRIPTION\System\BIOS)", "SystemFamily");
-        TempStr s2 = ReadRegStrTemp(HKEY_LOCAL_MACHINE, R"(HARDWARE\DESCRIPTION\System\BIOS)", "SystemVersion");
+        TempStr s1 =
+            ReadRegStrTemp(HKEY_LOCAL_MACHINE, StrL(R"(HARDWARE\DESCRIPTION\System\BIOS)"), StrL("SystemFamily"));
+        TempStr s2 =
+            ReadRegStrTemp(HKEY_LOCAL_MACHINE, StrL(R"(HARDWARE\DESCRIPTION\System\BIOS)"), StrL("SystemVersion"));
 
-        if (!s1 && !s2) {
+        if (len(s1) == 0 && len(s2) == 0) {
             // no-op
-        } else if (!s1) {
-            s.Append(fmt("Machine: %s\n", s2));
-        } else if (!s2 || str::EqI(s1, s2)) {
-            s.Append(fmt("Machine: %s\n", s1));
+        } else if (len(s1) == 0) {
+            CrashInfoAppend(fmt("Machine: %s\n", s2));
+        } else if (len(s2) == 0 || str::EqI(s1, s2)) {
+            CrashInfoAppend(fmt("Machine: %s\n", s1));
         } else {
-            s.Append(fmt("Machine: %s %s\n", s1, s2));
+            CrashInfoAppend(fmt("Machine: %s %s\n", s1, s2));
         }
     }
     {
@@ -802,71 +917,69 @@ static void GetSystemInfo(str::Builder& s) {
         char country[32] = {}, lang[32]{};
         GetLocaleInfoA(LOCALE_USER_DEFAULT, LOCALE_SISO3166CTRYNAME, country, dimof(country) - 1);
         GetLocaleInfoA(LOCALE_USER_DEFAULT, LOCALE_SISO639LANGNAME, lang, dimof(lang) - 1);
-        s.Append(fmt("Lang: %s %s\n", Str(lang), Str(country)));
+        CrashInfoAppend(fmt("Lang: %s %s\n", Str(lang), Str(country)));
     }
-    GetGraphicsDriverInfo(s);
+    GetGraphicsDriverInfo();
     {
         auto cpu = CpuID();
-        s.Append("CPU: ");
+        CrashInfoAppend(StrL("CPU: "));
         if (cpu & kCpuMMX) {
-            s.Append("MMX ");
+            CrashInfoAppend(StrL("MMX "));
         }
         if (cpu & kCpuSSE) {
-            s.Append("SSE ");
+            CrashInfoAppend(StrL("SSE "));
         }
         if (cpu & kCpuSSE2) {
-            s.Append("SSE2 ");
+            CrashInfoAppend(StrL("SSE2 "));
         }
         if (cpu & kCpuSSE3) {
-            s.Append("SSE3 ");
+            CrashInfoAppend(StrL("SSE3 "));
         }
         if (cpu & kCpuSSE41) {
-            s.Append("SSE41 ");
+            CrashInfoAppend(StrL("SSE41 "));
         }
         if (cpu & kCpuSSE42) {
-            s.Append("SSE42 ");
+            CrashInfoAppend(StrL("SSE42 "));
         }
         if (cpu & kCpuAVX) {
-            s.Append("AVX ");
+            CrashInfoAppend(StrL("AVX "));
         }
         if (cpu & kCpuAVX2) {
-            s.Append("AVX2 ");
+            CrashInfoAppend(StrL("AVX2 "));
         }
         if (cpu & kCpuNEON) {
-            s.Append("NEON ");
+            CrashInfoAppend(StrL("NEON "));
         }
         if (cpu & kCpuArmCrypto) {
-            s.Append("Crypto ");
+            CrashInfoAppend(StrL("Crypto "));
         }
         if (cpu & kCpuArmAtomics) {
-            s.Append("Atomics ");
+            CrashInfoAppend(StrL("Atomics "));
         }
         if (cpu & kCpuArmDotProd) {
-            s.Append("DotProd ");
+            CrashInfoAppend(StrL("DotProd "));
         }
     }
 }
 
 // returns true if running on wine
 static bool BuildModulesInfo() {
-    str::Builder s(1024);
-    s.a = gCrashHandlerArena;
-    bool isWine = GetModules(s, false);
-    gModulesInfo = s.TakeStr();
+    CrashInfoStart(1024);
+    bool isWine = GetModules(false);
+    gModulesInfo = CrashInfoTake();
     return isWine;
 }
 
 static void BuildSystemInfo() {
-    str::Builder s(1024);
-    s.a = gCrashHandlerArena;
-    GetProgramInfo(s);
-    GetOsVersion(s);
-    GetSystemInfo(s);
-    gSystemInfo = s.TakeStr();
+    CrashInfoStart(1024);
+    GetProgramInfo();
+    GetOsVersion();
+    GetSystemInfo();
+    gSystemInfo = CrashInfoTake();
 }
 
 bool SetSymbolsDir(Str symDir) {
-    if (!symDir) {
+    if (len(symDir) == 0) {
         return false;
     }
     gSymbolsDir = str::Dup(gCrashHandlerArena, symDir);
@@ -942,8 +1055,8 @@ static Str BuildSymbolsUrl() {
 void InstallCrashHandler(Str crashDumpPath, Str crashFilePath, Str symDir, bool localOnly) {
     ReportIf(gDumpEvent || gDumpThread);
 
-    if (!crashDumpPath) {
-        log("InstallCrashHandler: skipping because !crashDumpPath\n");
+    if (len(crashDumpPath) == 0) {
+        log(StrL("InstallCrashHandler: skipping because !crashDumpPath\n"));
         return;
     }
 
@@ -951,9 +1064,10 @@ void InstallCrashHandler(Str crashDumpPath, Str crashFilePath, Str symDir, bool 
     // when crash handler is invoked. It's ok to use standard
     // allocation functions here.
     gCrashHandlerArena = ArenaNew();
+    gCrashInfo = New<str::Builder>(gCrashHandlerArena, gCrashHandlerArena);
 
     if (!SetSymbolsDir(symDir)) {
-        log("InstallCrashHandler: skipping because !SetSymbolsDir()\n");
+        log(StrL("InstallCrashHandler: skipping because !SetSymbolsDir()\n"));
         return;
     }
 
@@ -971,7 +1085,7 @@ void InstallCrashHandler(Str crashDumpPath, Str crashFilePath, Str symDir, bool 
     // as they're not helpful
     bool isWine = BuildModulesInfo();
     if (isWine) {
-        log("InstallCrashHandler: skipping because isWine\n");
+        log(StrL("InstallCrashHandler: skipping because isWine\n"));
         return;
     }
 
@@ -991,26 +1105,26 @@ void InstallCrashHandler(Str crashDumpPath, Str crashFilePath, Str symDir, bool 
         Str prefsData = file::ReadFile(path);
         if (len(prefsData) > 0) {
             // serialize without FileStates info because it's the largest
-            GlobalPrefs* gp = NewGlobalPrefs(prefsData);
+            Settings* gp = NewSettings(prefsData);
             DeleteFileStates(gp->fileStates);
             gp->fileStates = new Vec<FileState*>();
             // TODO: also sessionData?
-            Str d = SerializeGlobalPrefs(gp, nullptr);
-            gSettingsFile = str::Dup(gCrashHandlerArena, d);
+            Str d = SerializeSettings(gp, {});
+            CrashHandlerSetSettings(d);
             str::Free(d);
-            DeleteGlobalPrefs(gp);
+            DeleteSettings(gp);
             str::Free(prefsData);
         }
     }
 
     gDumpEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (!gDumpEvent) {
-        log("InstallCrashHandler: skipping because !gDumpEvent\n");
+        log(StrL("InstallCrashHandler: skipping because !gDumpEvent\n"));
         return;
     }
     gDumpThread = CreateThread(nullptr, 0, CrashDumpThread, nullptr, 0, &gDumpThreadId);
     if (!gDumpThread) {
-        log("InstallCrashHandler: skipping because !gDumpThread\n");
+        log(StrL("InstallCrashHandler: skipping because !gDumpThread\n"));
         return;
     }
     gPrevExceptionFilter = SetUnhandledExceptionFilter(CrashDumpExceptionHandler);
@@ -1063,6 +1177,7 @@ void UninstallCrashHandler() {
     gModulesInfo = {};
     gCrashFilePath = {};
     ArenaDelete(gCrashHandlerArena);
+    gCrashInfo = nullptr;
     gCrashHandlerArena = nullptr;
     gCrashThreadId = 0;
     gDumpThreadId = 0;
@@ -1073,51 +1188,3 @@ void UninstallCrashHandler() {
 // Tests that various ways to crash will generate crash report.
 // Commented-out because they are ad-hoc. Left in code because
 // I don't want to write them again if I ever need to test crash reporting
-#if 0
-static void TestCrashAbort()
-{
-    raise(SIGABRT);
-}
-
-struct Base;
-void foo(Base* b);
-
-struct Base {
-    Base() {
-        foo(this);
-    }
-    virtual ~Base() = 0;
-    virtual void pure() = 0;
-};
-struct Derived : public Base {
-    void pure() { }
-};
-
-void foo(Base* b) {
-    b->pure();
-}
-
-static void TestCrashPureCall()
-{
-    Derived d; // should crash
-}
-
-// tests that making a big allocation with new raises an exception
-static int TestBigNew()
-{
-    size_t size = 1024*1024*1024*1;  // 1 GB should be out of reach
-    char* mem = (char*)1;
-    while (mem) {
-        mem = new char[size];
-    }
-    // just some code so that compiler doesn't optimize this code to null
-    for (size_t i = 0; i < 1024; i++) {
-        mem[i] = i & 0xff;
-    }
-    int res = 0;
-    for (size_t i = 0; i < 1024; i++) {
-        res += mem[i];
-    }
-    return res;
-}
-#endif

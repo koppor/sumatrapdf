@@ -41,7 +41,7 @@ static chm_entry* ChmLookupPath(const ChmFile* chm, Str path) {
 // tolerating backslashes in URLs the way Microsoft's HTML Help viewer does.
 // Returns the entry (owned by chmCtx) or nullptr.
 static chm_entry* ChmResolveObject(const ChmFile* chm, Str fileName) {
-    if (!fileName) {
+    if (len(fileName) == 0) {
         return nullptr;
     }
     if (!str::StartsWith(fileName, StrL("/"))) {
@@ -83,13 +83,13 @@ TempStr ChmFile::GetDataTemp(Str fileName) const {
         return {};
     }
 
-    return Str((char*)(d), n);
+    return Str((char*)d, n);
 }
 
 // Strip a UTF-8 BOM if present; otherwise convert from `codepage` to UTF-8
 // (unless already UTF-8). Returns a TempStr owned by the temp allocator.
 TempStr SmartToUtf8Temp(Str s, uint codepage) {
-    if (str::TrimPrefix(s, UTF8_BOM)) {
+    if (str::TrimPrefix(s, StrL(kUtf8Bom))) {
         return str::DupTemp(s);
     }
     if (CP_UTF8 == codepage) {
@@ -119,8 +119,8 @@ static Str GetCharZ(Str d, int off) {
 
 // http://www.nongnu.org/chmspec/latest/Internal.html#WINDOWS
 void ChmFile::ParseWindowsData() {
-    TempStr windowsData = GetDataTemp("/#WINDOWS");
-    TempStr stringsData = GetDataTemp("/#STRINGS");
+    TempStr windowsData = GetDataTemp(StrL("/#WINDOWS"));
+    TempStr stringsData = GetDataTemp(StrL("/#STRINGS"));
 
     if (len(windowsData) == 0 || len(stringsData) == 0) {
         return;
@@ -158,7 +158,7 @@ void ChmFile::ParseWindowsData() {
     }
 }
 
-#define CP_CHM_DEFAULT 1252
+constexpr int kCpChmDefault = 1252;
 
 static uint LcidToCodepage(DWORD lcid) {
     // cf. http://msdn.microsoft.com/en-us/library/bb165625(v=VS.90).aspx
@@ -226,12 +226,12 @@ static uint LcidToCodepage(DWORD lcid) {
         }
     }
 
-    return CP_CHM_DEFAULT;
+    return kCpChmDefault;
 }
 
 // http://www.nongnu.org/chmspec/latest/Internal.html#SYSTEM
 bool ChmFile::ParseSystemData() {
-    TempStr d = GetDataTemp("/#SYSTEM");
+    TempStr d = GetDataTemp(StrL("/#SYSTEM"));
     if (len(d) == 0) {
         return false;
     }
@@ -291,7 +291,7 @@ bool ChmFile::ParseSystemData() {
 }
 
 TempStr ChmFile::ResolveTopicID(unsigned int id) const {
-    TempStr ivbData = GetDataTemp("/#IVB");
+    TempStr ivbData = GetDataTemp(StrL("/#IVB"));
     int ivbLen = ivbData.len;
     ByteReader br(ivbData);
     if ((ivbLen % 8) != 4 || ivbLen - 4 != (int)br.UInt32LE(0)) {
@@ -300,9 +300,9 @@ TempStr ChmFile::ResolveTopicID(unsigned int id) const {
 
     for (int off = 4; off < ivbLen; off += 8) {
         if (br.UInt32LE(off) == id) {
-            TempStr stringsData = GetDataTemp("/#STRINGS");
+            TempStr stringsData = GetDataTemp(StrL("/#STRINGS"));
             Str res = GetCharZ(stringsData, (int)br.UInt32LE(off + 4));
-            if (!res) {
+            if (len(res) == 0) {
                 return {};
             }
             return str::DupTemp(res);
@@ -370,7 +370,7 @@ bool ChmFile::Load(Str path) {
     }
 
     if (!HasData(homePath)) {
-        Str pathsToTest[] = {"/index.htm", "/index.html", "/default.htm", "/default.html"};
+        Str pathsToTest[] = {StrL("/index.htm"), StrL("/index.html"), StrL("/default.htm"), StrL("/default.html")};
         for (Str testPath : pathsToTest) {
             if (HasData(testPath)) {
                 str::ReplaceWithCopy(&homePath, testPath);
@@ -391,7 +391,7 @@ TempStr ChmFile::GetPropertyTemp(DocProp prop) const {
     } else if (prop == DocProp::CreatorApp && len(creator) > 0) {
         result = SmartToUtf8Temp(creator, codepage);
     }
-    if (!result) {
+    if (len(result) == 0) {
         return {};
     }
     str::NormalizeWSInPlace(result);
@@ -407,7 +407,7 @@ void ChmFile::GetAllPaths(StrVec* v) const {
     for (int i = 0; i < nEntries; i++) {
         chm_entry* e = entries[i];
         if (e->is_file && e->is_normal && e->path && e->path[0]) {
-            v->Append(e->path);
+            v->Append(Str(e->path));
         }
     }
 }
@@ -432,13 +432,13 @@ static Str StripItsProtocol(Str url) {
 }
 
 static bool VisitChmTocItem(EbookTocVisitor* visitor, const GumboNode* objNode, int level) {
-    ReportIf(!GumboTagNameIs(objNode, "object"));
+    ReportIf(!GumboTagNameIs(objNode, StrL("object")));
 
     TempStr name, local;
     const GumboVector* children = &objNode->v.element.children;
     for (unsigned int i = 0; i < children->length; i++) {
         const GumboNode* child = (const GumboNode*)children->data[i];
-        if (!GumboTagNameIs(child, "param")) {
+        if (!GumboTagNameIs(child, StrL("param"))) {
             continue;
         }
         const GumboAttribute* attrName = gumbo_get_attribute(&child->v.element.attributes, "name");
@@ -446,13 +446,13 @@ static bool VisitChmTocItem(EbookTocVisitor* visitor, const GumboNode* objNode, 
         if (!attrName || !attrVal) {
             continue;
         }
-        if (str::EqI(attrName->value, StrL("Name"))) {
-            name = str::DupTemp(attrVal->value);
-        } else if (str::EqI(attrName->value, StrL("Local"))) {
+        if (str::EqI(Str(attrName->value), StrL("Name"))) {
+            name = str::DupTemp(Str(attrVal->value));
+        } else if (str::EqI(Str(attrName->value), StrL("Local"))) {
             local = str::DupTemp(StripItsProtocol(Str(attrVal->value)));
         }
     }
-    if (!name) {
+    if (len(name) == 0) {
         return false;
     }
     visitor->Visit(name, local, level);
@@ -473,7 +473,7 @@ static bool VisitChmTocItem(EbookTocVisitor* visitor, const GumboNode* objNode, 
   ... siblings ...
 */
 static bool VisitChmIndexItem(EbookTocVisitor* visitor, const GumboNode* objNode, int level) {
-    ReportIf(!GumboTagNameIs(objNode, "object"));
+    ReportIf(!GumboTagNameIs(objNode, StrL("object")));
 
     StrVec references;
     Str keyword;
@@ -481,7 +481,7 @@ static bool VisitChmIndexItem(EbookTocVisitor* visitor, const GumboNode* objNode
     const GumboVector* children = &objNode->v.element.children;
     for (unsigned int i = 0; i < children->length; i++) {
         const GumboNode* child = (const GumboNode*)children->data[i];
-        if (!GumboTagNameIs(child, "param")) {
+        if (!GumboTagNameIs(child, StrL("param"))) {
             continue;
         }
         const GumboAttribute* attrName = gumbo_get_attribute(&child->v.element.attributes, "name");
@@ -489,20 +489,20 @@ static bool VisitChmIndexItem(EbookTocVisitor* visitor, const GumboNode* objNode
         if (!attrName || !attrVal) {
             continue;
         }
-        if (str::EqI(attrName->value, StrL("Keyword"))) {
+        if (str::EqI(Str(attrName->value), StrL("Keyword"))) {
             keyword = Str(attrVal->value);
-        } else if (str::EqI(attrName->value, StrL("Name"))) {
+        } else if (str::EqI(Str(attrName->value), StrL("Name"))) {
             name = Str(attrVal->value);
             // some CHM documents seem to use a lonely Name instead of Keyword
-            if (!keyword) {
+            if (len(keyword) == 0) {
                 keyword = name;
             }
-        } else if (str::EqI(attrName->value, StrL("Local")) && name) {
+        } else if (str::EqI(Str(attrName->value), StrL("Local")) && name) {
             references.Append(name);
             references.Append(StripItsProtocol(Str(attrVal->value)));
         }
     }
-    if (!keyword) {
+    if (len(keyword) == 0) {
         return false;
     }
 
@@ -542,12 +542,12 @@ static void WalkChmUl(EbookTocVisitor* visitor, const GumboNode* ulNode, bool is
     // ToC nesting can't overflow the call stack. Order and levels match the
     // recursive walk exactly (parent frame resumes after its child completes).
     Vec<ChmUlFrame> stack;
-    stack.Append({ulNode, level, 0});
+    VecAppend(stack, {ulNode, level, 0});
     while (len(stack) > 0) {
-        ChmUlFrame& top = stack.Last();
+        ChmUlFrame& top = VecLast(stack);
         const GumboVector* lis = &top.ul->v.element.children;
         if (top.i >= lis->length) {
-            stack.RemoveLast();
+            VecRemoveLast(stack);
             continue;
         }
         const GumboNode* child = (const GumboNode*)lis->data[top.i];
@@ -555,16 +555,16 @@ static void WalkChmUl(EbookTocVisitor* visitor, const GumboNode* ulNode, bool is
         top.i++;
         // any stack.Append() below may reallocate -> don't touch `top` after this
 
-        if (GumboTagNameIs(child, "ul")) {
+        if (GumboTagNameIs(child, StrL("ul"))) {
             // a bare <ul> among the <li>s holds the children of the preceding <li>
-            stack.Append({child, lvl + 1, 0});
+            VecAppend(stack, {child, lvl + 1, 0});
             continue;
         }
         const GumboNode* li = child;
-        if (!GumboTagNameIs(li, "li")) {
+        if (!GumboTagNameIs(li, StrL("li"))) {
             continue; // skip whitespace / text / unexpected nodes
         }
-        const GumboNode* objNode = GumboFindChildByTag(li, "object");
+        const GumboNode* objNode = GumboFindChildByTag(li, StrL("object"));
         if (!objNode) {
             continue;
         }
@@ -572,9 +572,9 @@ static void WalkChmUl(EbookTocVisitor* visitor, const GumboNode* ulNode, bool is
         if (!valid) {
             continue;
         }
-        const GumboNode* nested = GumboFindChildByTag(li, "ul");
+        const GumboNode* nested = GumboFindChildByTag(li, StrL("ul"));
         if (nested) {
-            stack.Append({nested, lvl + 1, 0});
+            VecAppend(stack, {nested, lvl + 1, 0});
         }
     }
 }
@@ -591,7 +591,7 @@ static void WalkChmTocOrIndex(EbookTocVisitor* visitor, const GumboNode* firstUl
         (parent->type == GUMBO_NODE_ELEMENT) ? &parent->v.element.children : &parent->v.document.children;
     for (size_t s = firstUl->index_within_parent; s < siblings->length; s++) {
         const GumboNode* sib = (const GumboNode*)siblings->data[s];
-        if (sib->type != GUMBO_NODE_ELEMENT || !GumboTagNameIs(sib, "ul")) {
+        if (sib->type != GUMBO_NODE_ELEMENT || !GumboTagNameIs(sib, StrL("ul"))) {
             break;
         }
         WalkChmUl(visitor, sib, isIndex, 1);
@@ -603,15 +603,15 @@ static void WalkChmTocOrIndex(EbookTocVisitor* visitor, const GumboNode* firstUl
 static bool WalkBrokenChmTocOrIndex(EbookTocVisitor* visitor, const GumboNode* root, bool isIndex, bool* hadOneInOut) {
     // iterative pre-order DFS so a deeply nested document can't overflow the stack
     Vec<const GumboNode*> toVisit;
-    toVisit.Append(root);
+    VecAppend(toVisit, root);
     while (len(toVisit) > 0) {
-        const GumboNode* node = toVisit.Pop();
+        const GumboNode* node = VecPop(toVisit);
         if (!node) {
             continue;
         }
-        if (node->type == GUMBO_NODE_ELEMENT && GumboTagNameIs(node, "object")) {
+        if (node->type == GUMBO_NODE_ELEMENT && GumboTagNameIs(node, StrL("object"))) {
             const GumboAttribute* type = gumbo_get_attribute(&node->v.element.attributes, "type");
-            if (type && str::EqI(type->value, StrL("text/sitemap"))) {
+            if (type && str::EqI(Str(type->value), StrL("text/sitemap"))) {
                 *hadOneInOut |= isIndex ? VisitChmIndexItem(visitor, node, 1) : VisitChmTocItem(visitor, node, 1);
                 continue; // don't recurse into the object's <param> children
             }
@@ -625,7 +625,7 @@ static bool WalkBrokenChmTocOrIndex(EbookTocVisitor* visitor, const GumboNode* r
         if (children) {
             // push in reverse so children are visited in document order
             for (unsigned int i = children->length; i > 0; i--) {
-                toVisit.Append((const GumboNode*)children->data[i - 1]);
+                VecAppend(toVisit, (const GumboNode*)children->data[i - 1]);
             }
         }
     }
@@ -690,7 +690,7 @@ static int ChmEntityByte(WCHAR c) {
 // are pure-ASCII labels (issue #842).
 static TempStr FixChmTocEntitiesTemp(Str s, uint codepage) {
     uint cp = (codepage == CP_ACP) ? GetACP() : codepage;
-    if (!s || !ChmTocNeedsEntityRemap(cp)) {
+    if (len(s) == 0 || !ChmTocNeedsEntityRemap(cp)) {
         return s;
     }
     TempWStr ws = ToWStrTemp(s);
@@ -724,7 +724,7 @@ struct ChmTocEntityFixer : EbookTocVisitor {
 };
 
 bool ChmFile::ParseTocOrIndex(EbookTocVisitor* visitor, Str path, bool isIndex) const {
-    if (!path) {
+    if (len(path) == 0) {
         return false;
     }
     TempStr htmlData = GetDataTemp(path);
@@ -735,7 +735,7 @@ bool ChmFile::ParseTocOrIndex(EbookTocVisitor* visitor, Str path, bool isIndex) 
     // attribute values come out in a known encoding -- no per-attribute
     // conversion needed in the visit functions.
     TempStr utf8 = SmartToUtf8Temp(htmlData, codepage);
-    if (!utf8) {
+    if (len(utf8) == 0) {
         return false;
     }
     int n = ::len(utf8);
@@ -751,8 +751,8 @@ bool ChmFile::ParseTocOrIndex(EbookTocVisitor* visitor, Str path, bool isIndex) 
     ChmTocEntityFixer fixer(visitor, codepage);
 
     // Find <body>, then the first <ul> under it (DFS). <body> is optional.
-    const GumboNode* body = GumboFindDescendantByTag(output->document, "body");
-    const GumboNode* firstUl = GumboFindDescendantByTag(body ? body : output->document, "ul");
+    const GumboNode* body = GumboFindDescendantByTag(output->document, StrL("body"));
+    const GumboNode* firstUl = GumboFindDescendantByTag(body ? body : output->document, StrL("ul"));
     bool result;
     if (firstUl) {
         WalkChmTocOrIndex(&fixer, firstUl, isIndex);

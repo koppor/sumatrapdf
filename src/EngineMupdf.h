@@ -4,6 +4,7 @@
 #include "PdfCadDetect.h"
 
 struct Annotation;
+enum class AnnotationChange;
 struct DarkModePageAnalysis;
 struct DarkModeEngineCache;
 
@@ -18,7 +19,8 @@ struct FitzPageImageInfo {
 };
 
 struct FzPageInfo {
-    int pageNo = 0; // 1-based
+    int pageNo = 0; // 1-based, may shift when an earlier chapter is laid out
+    Location loc;   // chapter-aware address; stable across shifts
     fz_page* page = nullptr;
 
     // each containz fz_link for this page
@@ -79,6 +81,7 @@ class EngineMupdf : public EngineBase {
 
     RectF PageMediabox(int pageNo) override;
     RectF PageContentBox(int pageNo, RenderTarget target = RenderTarget::View) override;
+    void GetPdfPageBoxes(int pageNo, Vec<PdfPageBox>& out) override;
 
     Pixmap* RenderPage(RenderPageArgs& args) override;
 
@@ -106,7 +109,15 @@ class EngineMupdf : public EngineBase {
 
     IPageDestination* GetNamedDest(Str name) override;
     int GetOpenActionPageNo() override;
+    bool HasToc() override;
     TocTree* GetToc() override;
+    int LayOutChapter(int chapter) override;
+    Location ResolveDest(IPageDestination* dest) override;
+    TocTree* BuildToc();
+    void StartHeadingTocIfNeeded();
+    bool HeadingTocPending() const;
+
+    Func0 headingTocDoneCb;
 
     TempStr GetPageLabeTemp(int pageNo) const override;
     int GetPageByLabel(Str label) const override;
@@ -162,7 +173,13 @@ class EngineMupdf : public EngineBase {
     int displayDPI{96};
     fz_document* _doc = nullptr;
     pdf_document* pdfdoc = nullptr;
-    Vec<FzPageInfo*> pages;
+    // chapter-major page info; index [chapter - 1] is that chapter's pages
+    // (index [page - 1] within). An unlaid chapter has a single placeholder
+    // entry; LayOutChapter() appends the rest once the real count is known.
+    Vec<Vec<FzPageInfo*>*> chapterPages;
+    // every page of a reflowable doc shares this mediabox (set once in
+    // FinishNonPDFLoading); lets PageMediabox() skip pagesLock on the hot path
+    RectF reflowMediabox;
     fz_outline* outline = nullptr;
     fz_outline* attachments = nullptr;
     pdf_obj* pdfInfo = nullptr;
@@ -170,12 +187,29 @@ class EngineMupdf : public EngineBase {
 
     TocTree* tocTree = nullptr;
 
+    AtomicInt headingTocCancel = 0;
+    bool headingTocStarted = false;
+    bool headingTocDone = false;
+    AtomicInt annotLoadCancel = 0;
+    bool annotLoadStarted = false;
+    bool annotLoadDone = false;
+    Func0 annotLoadDoneCb;
+    Vec<int> annotLoadFirstPages;
+    TocItem* pendingHeadingToc = nullptr;
+    int pendingHeadingTocIdCounter = 0;
+
     // password used to decrypt the document (needed for re-encryption/decryption)
     TempStr pdfPassword;
 
     // used to track "dirty" state of annotations. not perfect because if we add and delete
     // the same annotation, we should be back to 0
     bool modifiedAnnotations = false;
+
+    // how many journal operations we have open (see EngineMupdfBeginOperation).
+    // MuPDF can't undo / redo while one is, e.g. during a resize drag
+    int journalNesting = 0;
+    // position in the undo history the file was last saved at
+    int savedUndoPos = 0;
 
     // smart dark mode: engine-level image feature/processed caches
     DarkModeEngineCache* darkModeEngineCache = nullptr;
@@ -185,6 +219,17 @@ class EngineMupdf : public EngineBase {
     // comes out in the default font, so the UI names it in a notification after
     // the document opens (issue #4600). owned by the engine
     Str ebookFontUnavailable;
+
+    // reflowable docs (EPUB/HTML/…): user CSS without the theme overlay, plus
+    // the layout size passed to fz_layout_document, so a later theme-color
+    // change can restyle without reopening the file
+    Str ebookUserCss;
+    int ebookPublisherCss = 1;
+    float ebookLayoutW = 0;
+    float ebookLayoutH = 0;
+    float ebookLayoutEm = 0;
+
+    void ApplyReflowThemeCss();
 
     void GetBitmapRecolorSkipRects(int pageNo, float zoom, int rotation, const RectF& renderPageRect, Size bmpSize,
                                    Vec<Rect>& skipRects) override;
@@ -209,6 +254,9 @@ class EngineMupdf : public EngineBase {
     FzPageInfo* GetFzPageInfoCanFail(int pageNo);
     FzPageInfo* GetFzPageInfoFast(int pageNo);
     FzPageInfo* GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* cookie = nullptr);
+    FzPageInfo* GetFzPageInfo(Location loc, bool loadQuick, fz_cookie* cookie = nullptr);
+    FzPageInfo* PageInfoByLoc(Location loc);
+    FzPageInfo* PageInfoByPageNo(int pageNo);
     fz_matrix viewctm(int pageNo, float zoom, int rotation);
     fz_matrix viewctm(fz_page* page, float zoom, int rotation) const;
     TocItem* BuildTocTree(TocItem* parent, fz_outline* outline, int& idCounter, bool isAttachment, int depth);
@@ -221,5 +269,19 @@ EngineMupdf* AsEngineMupdf(EngineBase* engine);
 
 fz_rect ToFzRect(RectF rect);
 RectF ToRectF(fz_rect rect);
-void MarkNotificationAsModified(EngineMupdf*, Annotation*, AnnotationChange = AnnotationChange::Modify);
+void MarkNotificationAsModified(EngineMupdf*, Annotation*);
+void MarkNotificationAsModified(EngineMupdf*, Annotation*, AnnotationChange);
 Annotation* MakeAnnotationWrapper(EngineMupdf* engine, pdf_annot* annot, int pageNo);
+int EngineMupdfUndoPos(EngineMupdf* e, int* stepsOut);
+void EngineMupdfBeginOperation(EngineBase*, const char* name);
+void EngineMupdfEndOperation(EngineBase*);
+
+// Everything changed while this is alive becomes one undo step. Use it for a
+// gesture that makes several changes (creating an annotation sets its geometry,
+// colors and contents; a resize drag writes on every mouse move).
+struct ScopedEngineOperation {
+    EngineBase* engine = nullptr;
+
+    ScopedEngineOperation(EngineBase* e, const char* name) : engine(e) { EngineMupdfBeginOperation(e, name); }
+    ~ScopedEngineOperation() { EngineMupdfEndOperation(engine); }
+};

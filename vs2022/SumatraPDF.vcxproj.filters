@@ -45,6 +45,9 @@
     <ClInclude Include="..\ext\darkmodelib\include\DarkModeSubclass.h">
       <Filter>ext\darkmodelib\include</Filter>
     </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\include\Darkmodelib.h">
+      <Filter>ext\darkmodelib\include</Filter>
+    </ClInclude>
     <ClInclude Include="..\ext\darkmodelib\src\DmlibColor.h">
       <Filter>ext\darkmodelib\src</Filter>
     </ClInclude>
@@ -78,6 +81,12 @@
     <ClInclude Include="..\ext\darkmodelib\src\IatHook.h">
       <Filter>ext\darkmodelib\src</Filter>
     </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\MemoryHelper.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ext\darkmodelib\src\MemoryHelperDef.h">
+      <Filter>ext\darkmodelib\src</Filter>
+    </ClInclude>
     <ClInclude Include="..\ext\darkmodelib\src\ModuleHelper.h">
       <Filter>ext\darkmodelib\src</Filter>
     </ClInclude>
@@ -99,10 +108,19 @@
     <ClInclude Include="..\src\Accelerators.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\AddFavoriteDialog.h">
+    <ClInclude Include="..\src\AnnotEditToolbar.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\AdvancedSettingsDialog.h">
+    <ClInclude Include="..\src\AnnotFilterToolbar.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\AnnotPlacement.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\AnnotSearch.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\AnnotTextPopup.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\Annotation.h">
@@ -126,16 +144,7 @@
     <ClInclude Include="..\src\CaptionGlyphs.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\ChangeColorDialog.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\ChangeLanguageDialog.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\ChangeScrollbarDialog.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\ChangeThemeDialog.h">
+    <ClInclude Include="..\src\ChapterTable.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\ChmDump.h">
@@ -159,9 +168,6 @@
     <ClInclude Include="..\src\CrashHandler.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\CustomZoomDialog.h">
-      <Filter>src</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\DarkMode_win.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -180,16 +186,13 @@
     <ClInclude Include="..\src\DocumentLayout.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\DocumentProperties.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\EbookDoc.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\EbookFormatter.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\EbookSettingsDialog.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\EditAnnotations.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\EmbeddedResources.h">
@@ -204,7 +207,13 @@
     <ClInclude Include="..\src\EngineMupdf.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\EutlTrust.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\ExifDump.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ExplorerQuickLook.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\ExternalViewers.h">
@@ -237,13 +246,10 @@
     <ClInclude Include="..\src\FormFields.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\GetPasswordDialog.h">
+    <ClInclude Include="..\src\GlobalHotkeys.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\GlobalPrefs.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\GoToPageDialog.h">
+    <ClInclude Include="..\src\GoogleLens.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\GumboHelpers.h">
@@ -270,9 +276,6 @@
     <ClInclude Include="..\src\Installer.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\InverseSearchDialog.h">
-      <Filter>src</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\JxlReader.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -280,6 +283,9 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\LinkFollow.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\LitDoc.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\MainWindow.h">
@@ -304,6 +310,9 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\OverlayScrollbar.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PagePosition.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\PageRenderPolicy.h">
@@ -342,6 +351,9 @@
     <ClInclude Include="..\src\Print.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\PrintWin11.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\ProgressUpdateUI.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -355,18 +367,6 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\RefHover.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\RefHoverDetect.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\RefHoverInternal.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\RefHoverText.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\RefHoverTextDetect.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\RegistryPreview.h">
@@ -408,9 +408,6 @@
     <ClInclude Include="..\src\Settings.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\SettingsDialog.h">
-      <Filter>src</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\ShortcutParse.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -430,9 +427,6 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\SumatraPDF.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\SumatraProperties.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\SumatraTest.h">
@@ -465,13 +459,7 @@
     <ClInclude Include="..\src\Toolbar.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\ToolbarInternal.h">
-      <Filter>src</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\Translations.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\TreeModel.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\UpdateCheck.h">
@@ -492,9 +480,6 @@
     <ClInclude Include="..\src\base\UtAssert.h">
       <Filter>src\base</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\gui\CommandPaletteModel.h">
-      <Filter>src\gui</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\gui\DocumentView.h">
       <Filter>src\gui</Filter>
     </ClInclude>
@@ -508,6 +493,9 @@
       <Filter>src\gui</Filter>
     </ClInclude>
     <ClInclude Include="..\src\gui\Layout_win.h">
+      <Filter>src\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\gui\PasswordDialog.h">
       <Filter>src\gui</Filter>
     </ClInclude>
     <ClInclude Include="..\src\gui\PlatformCanvas.h">
@@ -532,9 +520,6 @@
       <Filter>src\gui</Filter>
     </ClInclude>
     <ClInclude Include="..\src\gui\win\BrowserDocView.h">
-      <Filter>src\gui\win</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\gui\win\DialogSizer.h">
       <Filter>src\gui\win</Filter>
     </ClInclude>
     <ClInclude Include="..\src\gui\win\FrameRateWnd.h">
@@ -575,7 +560,7 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\ext\darkmodelib\src\DarkModeSubclass.cpp">
+    <ClCompile Include="..\ext\darkmodelib\src\Darkmodelib.cpp">
       <Filter>ext\darkmodelib\src</Filter>
     </ClCompile>
     <ClCompile Include="..\ext\darkmodelib\src\DmlibColor.cpp">
@@ -635,6 +620,21 @@
     <ClCompile Include="..\src\AdvancedSettingsDialog.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\AnnotEditToolbar.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AnnotFilterToolbar.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AnnotPlacement.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AnnotSearch.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\AnnotTextPopup.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\Annotation.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -674,6 +674,9 @@
     <ClCompile Include="..\src\ChangeThemeDialog.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\ChapterTable.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\ChmDump.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -687,15 +690,6 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\CommandPalette.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\CommandPaletteCollect.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\CommandPaletteDraw.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\CommandPaletteFilter.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Commands.cpp">
@@ -716,10 +710,16 @@
     <ClCompile Include="..\src\DisplayModel.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\DocController.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\DocProperties.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\DocumentLayout.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\DocumentProperties.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\EbookDoc.cpp">
@@ -729,9 +729,6 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\EbookSettingsDialog.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\EditAnnotations.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\EmbeddedResources.cpp">
@@ -761,7 +758,13 @@
     <ClCompile Include="..\src\EnginePs.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\EutlTrust.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\ExifDump.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ExplorerQuickLook.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\ExternalViewers.cpp">
@@ -797,10 +800,13 @@
     <ClCompile Include="..\src\GetPasswordDialog.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\GlobalPrefs.cpp">
+    <ClCompile Include="..\src\GlobalHotkeys.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\GoToPageDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\GoogleLens.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\GumboHelpers.cpp">
@@ -851,6 +857,9 @@
     <ClCompile Include="..\src\LinkFollow.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\LitDoc.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\MainWindow.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -876,6 +885,12 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\OverlayScrollbar.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PageGridDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PagePosition.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\PageRenderPolicy.cpp">
@@ -932,6 +947,9 @@
     <ClCompile Include="..\src\PdfDarkModeScanProcess.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\PdfSign.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\PdfSync.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -942,6 +960,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Print.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PrintWin11.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\ReadAloudHighlight.cpp">
@@ -1025,6 +1046,9 @@
     <ClCompile Include="..\src\ShortcutParse.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\SignDocumentDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\SimpleBrowserWindow.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -1044,9 +1068,6 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\SumatraPDF.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\SumatraProperties.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\SumatraStartup.cpp">
@@ -1109,9 +1130,6 @@
     <ClCompile Include="..\src\Translations.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\TreeModel.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\Uninstaller.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -1130,10 +1148,16 @@
     <ClCompile Include="..\src\base\UtAssert.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\base\tests\AppendStore_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\base\tests\Base_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\ByteReaderWriter_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\base\tests\ClipboardImage_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\Crypto_ut.cpp">
@@ -1178,9 +1202,6 @@
     <ClCompile Include="..\src\base\tests\Win_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\gui\CommandPaletteModel.cpp">
-      <Filter>src\gui</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\gui\GfxDirect2D_win.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
@@ -1197,6 +1218,9 @@
       <Filter>src\gui</Filter>
     </ClCompile>
     <ClCompile Include="..\src\gui\Layout_win.cpp">
+      <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\PasswordDialog.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
     <ClCompile Include="..\src\gui\PlatformFont.cpp">
@@ -1230,9 +1254,6 @@
       <Filter>src\gui\win</Filter>
     </ClCompile>
     <ClCompile Include="..\src\gui\win\Checkbox.cpp">
-      <Filter>src\gui\win</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\gui\win\DialogSizer.cpp">
       <Filter>src\gui\win</Filter>
     </ClCompile>
     <ClCompile Include="..\src\gui\win\DropDown.cpp">

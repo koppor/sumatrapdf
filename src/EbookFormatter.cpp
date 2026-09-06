@@ -21,14 +21,15 @@
 
 /* Mobi-specific formatting methods */
 
-MobiFormatter::MobiFormatter(HtmlFormatterArgs* args, MobiDoc* doc) : HtmlFormatter(args), doc(doc) {
+MobiFormatter::MobiFormatter(HtmlFormatterArgs* args, MobiDoc* doc, MobiCoverImage coverImage)
+    : HtmlFormatter(args), doc(doc) {
     bool fromBeginning = (0 == args->reparseIdx);
-    if (!doc || !fromBeginning) {
+    if (!doc || !fromBeginning || coverImage != MobiCoverImage::Show) {
         return;
     }
 
     Str img = doc->GetCoverImage();
-    if (!img) {
+    if (len(img) == 0) {
         return;
     }
 
@@ -89,20 +90,26 @@ void MobiFormatter::HandleSpacing_Mobi(HtmlToken* t) {
 // <img recindex="0000n" alt=""/>
 // where recindex is the record number of pdb record
 // that holds the image (within image record array, not a
-// global record)
+// global record). KF8 uses src="kindle:embed:XXXX" instead.
 void MobiFormatter::HandleTagImg(HtmlToken* t) {
     // we allow formatting raw html which can't require doc
     if (!doc) {
         return;
     }
     bool needAlt = true;
+    int n = 0;
     AttrInfo* attr = t->GetAttrByName(StrL("recindex"));
-    if (attr) {
-        int n;
-        if (!str::IsNull(str::Parse(attr->val, "%d", &n))) {
-            Str img = doc->GetImage(n);
-            needAlt = !img || !EmitImage(img);
+    if (attr && !str::IsNull(str::Parse(attr->val, "%d", &n))) {
+        // recindex parsed
+    } else {
+        attr = t->GetAttrByName(StrL("src"));
+        if (attr) {
+            n = KindleEmbedToRecIndex(attr->val);
         }
+    }
+    if (n > 0) {
+        Str img = doc->GetImage(n);
+        needAlt = len(img) == 0 || !EmitImage(img);
     }
     if (needAlt) {
         attr = t->GetAttrByName(StrL("alt"));
@@ -123,7 +130,7 @@ void MobiFormatter::HandleHtmlTag(HtmlToken* t) {
     } else if (Tag_A == t->tag) {
         HandleAnchorAttr(t);
         // handle internal and external links (prefer internal ones)
-        if (!HandleTagA(t, "filepos")) {
+        if (!HandleTagA(t, StrL("filepos"))) {
             HandleTagA(t);
         }
     } else if (Tag_Hr == t->tag) {
@@ -152,7 +159,7 @@ void EpubFormatter::HandleTagImg(HtmlToken* t) {
     if (attr) {
         TempStr src = url::DecodeTemp(attr->val);
         Str img = epubDoc->GetImageData(src, pagePath);
-        needAlt = !img || !EmitImage(img);
+        needAlt = len(img) == 0 || !EmitImage(img);
     }
     if (needAlt) {
         attr = t->GetAttrByName(StrL("alt"));
@@ -171,10 +178,10 @@ void EpubFormatter::HandleTagPagebreak(HtmlToken* t) {
         RectF bbox(0, currY, pageDx, 0);
         // attr->val is owned by the gumbo parse tree which doesn't outlive
         // the formatter, so copy it into textAllocator
-        currPage->instructions.Append(DrawInstr::PageMarkerAnchor(str::Dup(textAllocator, attr->val), bbox));
+        VecAppend(currPage->instructions, DrawInstr::PageMarkerAnchor(str::Dup(textAllocator, attr->val), bbox));
         str::ReplaceWithCopy(&pagePath, attr->val);
         // reset CSS style rules for the new document
-        styleRules.Reset();
+        VecReset(styleRules);
     }
 }
 
@@ -184,11 +191,11 @@ void EpubFormatter::HandleTagLink(HtmlToken* t) {
         return;
     }
     AttrInfo* attr = t->GetAttrByName(StrL("rel"));
-    if (!attr || !attr->ValIs("stylesheet")) {
+    if (!attr || !attr->ValIs(StrL("stylesheet"))) {
         return;
     }
     attr = t->GetAttrByName(StrL("type"));
-    if (attr && !attr->ValIs("text/css")) {
+    if (attr && !attr->ValIs(StrL("text/css"))) {
         return;
     }
     attr = t->GetAttrByName(StrL("href"));
@@ -209,7 +216,7 @@ void EpubFormatter::HandleTagSvgImage(HtmlToken* t) {
     if (t->IsEndTag()) {
         return;
     }
-    if (!tagNesting.Contains(Tag_Svg) && Tag_Svg_Image != t->tag) {
+    if (!VecContains(tagNesting, Tag_Svg) && Tag_Svg_Image != t->tag) {
         return;
     }
     AttrInfo* attr = t->GetAttrByNameNS(StrL("href"), StrL("http://www.w3.org/1999/xlink"));
@@ -225,7 +232,7 @@ void EpubFormatter::HandleTagSvgImage(HtmlToken* t) {
 
 void EpubFormatter::HandleHtmlTag(HtmlToken* t) {
     ReportIf(!t->IsTag());
-    if (hiddenDepth && t->IsEndTag() && len(tagNesting) == hiddenDepth && t->tag == tagNesting.Last()) {
+    if (hiddenDepth && t->IsEndTag() && len(tagNesting) == hiddenDepth && t->tag == VecLast(tagNesting)) {
         hiddenDepth = 0;
         UpdateTagNesting(t);
         return;
@@ -254,7 +261,7 @@ Fb2Formatter::Fb2Formatter(HtmlFormatterArgs* args, Fb2Doc* doc)
         return;
     }
     Str cover = doc->GetCoverImage();
-    if (!cover) {
+    if (len(cover) == 0) {
         return;
     }
     EmitImage(cover);
@@ -262,7 +269,7 @@ Fb2Formatter::Fb2Formatter(HtmlFormatterArgs* args, Fb2Doc* doc)
     // smaller images just separated by a horizontal line
     if (0 == len(currLineInstr)) {
         /* the image was broken */;
-    } else if (currLineInstr.Last().bbox.dy > args->pageDy / 2) {
+    } else if (VecLast(currLineInstr).bbox.dy > args->pageDy / 2) {
         ForceNewPage();
     } else {
         EmitHr();
@@ -302,8 +309,8 @@ void Fb2Formatter::HandleHtmlTag(HtmlToken* t) {
         HandleAnchorAttr(t);
         if (!isSubtitle && t->IsStartTag()) {
             // the anchor must outlive the formatter, so not a TempStr
-            Str link = str::Dup(textAllocator, fmt(FB2_TOC_ENTRY_MARK "%d", ++titleCount));
-            currPage->instructions.Append(DrawInstr::Anchor(link, RectF(0, currY, pageDx, 0)));
+            Str link = str::Dup(textAllocator, fmt(kFb2TocEntryMark "%d", ++titleCount));
+            VecAppend(currPage->instructions, DrawInstr::Anchor(link, RectF(0, currY, pageDx, 0)));
         }
     } else if (Tag_Section == t->tag) {
         if (t->IsStartTag()) {
@@ -314,29 +321,29 @@ void Fb2Formatter::HandleHtmlTag(HtmlToken* t) {
         FlushCurrLine(true);
         HandleAnchorAttr(t);
     } else if (Tag_P == t->tag) {
-        if (!tagNesting.Contains(Tag_Title)) {
+        if (!VecContains(tagNesting, Tag_Title)) {
             HtmlFormatter::HandleHtmlTag(t);
         }
     } else if (Tag_Image == t->tag) {
         HandleTagImg(t);
         HandleAnchorAttr(t);
     } else if (Tag_A == t->tag) {
-        HandleTagA(t, "href", "http://www.w3.org/1999/xlink");
+        HandleTagA(t, StrL("href"), StrL("http://www.w3.org/1999/xlink"));
         HandleAnchorAttr(t, true);
     } else if (Tag_Pagebreak == t->tag) {
         ForceNewPage();
     } else if (Tag_Strong == t->tag) {
-        HandleTagAsHtml(t, "b");
+        HandleTagAsHtml(t, StrL("b"));
     } else if (t->NameIs(StrL("emphasis"))) {
-        HandleTagAsHtml(t, "i");
+        HandleTagAsHtml(t, StrL("i"));
     } else if (t->NameIs(StrL("epigraph"))) {
-        HandleTagAsHtml(t, "blockquote");
+        HandleTagAsHtml(t, StrL("blockquote"));
     } else if (t->NameIs(StrL("empty-line"))) {
         if (!t->IsEndTag()) {
             EmitParagraph(0);
         }
     } else if (t->NameIs(StrL("stylesheet"))) {
-        HandleTagAsHtml(t, "style");
+        HandleTagAsHtml(t, StrL("style"));
     }
 }
 
@@ -352,7 +359,7 @@ void HtmlFileFormatter::HandleTagImg(HtmlToken* t) {
     if (attr) {
         TempStr src = url::DecodeTemp(attr->val);
         Str img = htmlDoc->GetImageData(src);
-        needAlt = !img || !EmitImage(img);
+        needAlt = len(img) == 0 || !EmitImage(img);
     }
     if (needAlt) {
         attr = t->GetAttrByName(StrL("alt"));
@@ -368,11 +375,11 @@ void HtmlFileFormatter::HandleTagLink(HtmlToken* t) {
         return;
     }
     AttrInfo* attr = t->GetAttrByName(StrL("rel"));
-    if (!attr || !attr->ValIs("stylesheet")) {
+    if (!attr || !attr->ValIs(StrL("stylesheet"))) {
         return;
     }
     attr = t->GetAttrByName(StrL("type"));
-    if (attr && !attr->ValIs("text/css")) {
+    if (attr && !attr->ValIs(StrL("text/css"))) {
         return;
     }
     attr = t->GetAttrByName(StrL("href"));

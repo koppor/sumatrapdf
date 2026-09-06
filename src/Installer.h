@@ -28,18 +28,18 @@ extern int gBottomPartDy;
 
 extern int gButtonDy;
 
-#define WM_APP_INSTALLATION_FINISHED (WM_APP + 1)
-#define WM_APP_START_INSTALLATION (WM_APP + 2)
+constexpr int kWmAppInstallationFinished = (WM_APP + 1);
+constexpr int kWmAppStartInstallation = (WM_APP + 2);
 
 extern Str gFirstError;
 extern Str gDefaultMsg;
 extern HWND gHwndFrame;
 extern Str gMsgError;
 
-extern Gdiplus::Color COLOR_MSG_WELCOME;
-extern Gdiplus::Color COLOR_MSG_OK;
-extern Gdiplus::Color COLOR_MSG_INSTALLATION;
-extern Gdiplus::Color COLOR_MSG_FAILED;
+extern Gdiplus::Color kColorMsgWelcome;
+extern Gdiplus::Color kColorMsgOk;
+extern Gdiplus::Color kColorMsgInstallation;
+extern Gdiplus::Color kColorMsgFailed;
 extern Gdiplus::Color gCol1;
 extern Gdiplus::Color gCol1Shadow;
 extern Gdiplus::Color gCol2;
@@ -82,8 +82,6 @@ void UnRegisterPreviewer();
 void RegisterSearchFilter(bool allUsers, Str installDir);
 void UnRegisterSearchFilter();
 
-void UninstallBrowserPlugin();
-
 // Unregister shell extensions and kill processes holding install-dir files
 // so ExtractInstallerFiles can overwrite PdfFilter.dll / PdfPreview.dll / etc.
 // Call before extracting over an existing install. removedOut (optional) is
@@ -114,5 +112,6 @@ void RemoveInstallRegistryKeys(HKEY hkey);
 int GetInstallerWinDx();
 
 void ReRegisterFileAssociations();
+void LogNonDefaultRegisteredExtensions();
 void CollectNonDefaultRegisteredExtensions(StrVec& out);
 void LaunchDefaultAppDialogForExtension(HWND hwnd, Str ext);

@@ -2,12 +2,13 @@
    License: GPLv3 */
 
 struct AnnotCreateArgs;
+struct CustomCommand;
 enum class FileType : u8;
 
 #include "OverlayScrollbar.h"
 
-#define CANVAS_CLASS_NAME L"SUMATRA_PDF_CANVAS"
-#define FRAME_CLASS_NAME L"SUMATRA_PDF_FRAME"
+constexpr const WCHAR* kCanvasClassName = L"SUMATRA_PDF_CANVAS";
+constexpr const WCHAR* kFrameClassName = L"SUMATRA_PDF_FRAME";
 
 constexpr int kFrameResizeHitTest = 5;
 
@@ -17,30 +18,30 @@ constexpr const char* kWebsiteURL = "https://www.sumatrapdfreader.org/";
 constexpr const char* kManualURL = "https://www.sumatrapdfreader.org/manual";
 constexpr const char* kContributeTranslationsURL = "https://www.sumatrapdfreader.org/docs/Contribute-translation";
 
-#ifndef CRASH_REPORT_URL
-#define CRASH_REPORT_URL "https://www.sumatrapdfreader.org/docs/Contribute-to-SumatraPDF"
+#ifndef kCrashReportUrl
+#define kCrashReportUrl "https://www.sumatrapdfreader.org/docs/Contribute-to-SumatraPDF"
 #endif
 
 // scrolls half a page down/up (needed for Shift+Up/Down)
-#define SB_HALF_PAGEUP (WM_USER + 102)
-#define SB_HALF_PAGEDOWN (WM_USER + 103)
+constexpr int kSbHalfPageUp = (WM_USER + 102);
+constexpr int kSbHalfPageDown = (WM_USER + 103);
 
 constexpr int kHideCursorTimerID = 3;
 constexpr int kHideCursorDelayInMs = 3000;
 
-#define REPAINT_TIMER_ID 1
-#define REPAINT_MESSAGE_DELAY_IN_MS 1000
+constexpr int kRepaintTimerID = 1;
+constexpr int kRepaintMessageDelayInMs = 1000;
 
-#define AUTO_RELOAD_TIMER_ID 5
+constexpr int kAutoReloadTimerID = 5;
 
-#define READ_ALOUD_HIGHLIGHT_TIMER_ID 8
-#define READ_ALOUD_HIGHLIGHT_DELAY_IN_MS 80
+constexpr int kReadAloudHighlightTimerID = 8;
+constexpr int kReadAloudHighlightDelayInMs = 80;
 // debounce: coalesce bursts of file-change notifications (a single save can
 // fire several) into one reload. SetTimer() with the same id resets it, so the
 // reload only happens once the file has been quiet for this long (#5690).
 // The timer also re-arms itself while the file keeps changing, so a slow
 // writer doesn't get us to load a half-written document
-#define AUTO_RELOAD_DELAY_IN_MS 500
+constexpr int kAutoReloadDelayInMs = 500;
 // stop waiting for the writer after this long and reload whatever is there
 constexpr u64 kAutoReloadMaxWaitMs = 5000;
 
@@ -66,22 +67,22 @@ enum class Perm : uint {
     RestrictedUse = 0x1000000,
 };
 
-inline constexpr Perm operator|(Perm lhs, Perm rhs) {
+constexpr Perm operator|(Perm lhs, Perm rhs) {
     using T = std::underlying_type_t<Perm>;
     return static_cast<Perm>(static_cast<T>(lhs) | static_cast<T>(rhs));
 }
 
-inline constexpr Perm operator&(Perm lhs, Perm rhs) {
+constexpr Perm operator&(Perm lhs, Perm rhs) {
     using T = std::underlying_type_t<Perm>;
     return static_cast<Perm>(static_cast<T>(lhs) & static_cast<T>(rhs));
 }
 
-inline constexpr Perm operator<<(Perm lhs, uint rhs) {
+constexpr Perm operator<<(Perm lhs, uint rhs) {
     using T = std::underlying_type_t<Perm>;
     return static_cast<Perm>(static_cast<T>(lhs) << static_cast<T>(rhs));
 }
 
-inline constexpr Perm operator~(Perm lhs) {
+constexpr Perm operator~(Perm lhs) {
     using T = std::underlying_type_t<Perm>;
     T v = static_cast<T>(lhs);
     v = ~v;
@@ -91,9 +92,13 @@ inline constexpr Perm operator~(Perm lhs) {
 struct Favorites;
 struct FileHistory;
 struct MainWindow;
+extern Func1<MainWindow*> gAfterLayout;
 // tells the frame's virtual tree which splitters exist (they are created
 // with their panes)
 void FrameSyncSplitters(MainWindow*);
+void SetAnnotCreateArgs(AnnotCreateArgs&, CustomCommand*);
+void BeginPdfEditOperation(MainWindow*, const char* name);
+void EndPdfEditOperation(MainWindow*);
 struct NotificationWnd;
 struct RenderCache;
 struct WindowTab;
@@ -148,6 +153,7 @@ WindowTab* FindTabByFilePath(Str path);
 WindowTab* FindTabByController(DocController*);
 WindowTab* GetReadAloudSourceTab();
 void ReadAloudForgetTab(WindowTab*);
+void ReadAloudAfterTtsEvents();
 
 constexpr UINT CmdTtsVoiceDefault = 0x7100;
 constexpr UINT CmdTtsVoiceFirst = 0x7101;
@@ -162,10 +168,15 @@ constexpr UINT CmdTtsSpeedFirst = 0x7300;
 constexpr UINT CmdTtsSpeedLast = 0x730f;
 
 TempStr ReadAloudSpeedLabelTemp(float speed);
+int ReadAloudSpeedCount();
+float ReadAloudSpeedAt(int idx);
+int ReadAloudClosestSpeedIdx();
+void ReadAloudSetSpeedIdx(int idx);
 
 void RebuildReadAloudMenu(MainWindow* win, HMENU menu, bool includeCursorItem = false, bool canReadFromCursor = false);
 bool HandleReadAloudMenuCommand(MainWindow* win, int cmdId);
 void SetReadAloudAppSubmenu(HMENU menu);
+HMENU GetReadAloudAppSubmenu();
 bool IsReadAloudAppSubmenu(HMENU menu);
 void SetReadAloudContextSubmenu(HMENU menu);
 void ShowTtsVoiceMenu(MainWindow* win, Rect buttonScreen);
@@ -174,7 +185,12 @@ HMENU GetReadAloudContextSubmenu();
 bool CanCloseWindow(MainWindow* win);
 void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose);
 void PostAppExit();
-void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites);
+enum class SidebarResizeFrame {
+    Keep,
+    Adjust
+};
+void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites,
+                          SidebarResizeFrame = SidebarResizeFrame::Keep);
 void RememberFavTreeExpansionState(MainWindow* win);
 void AdvanceFocus(MainWindow* win);
 void SetCurrentLanguageAndRefreshUI(Str langCode);
@@ -272,6 +288,8 @@ struct LoadArgs {
 
     bool showWin = true;
     bool forceReuse = false;
+    // do not add as a tab of an existing window (-new-window with several files)
+    bool forceNewWindow = false;
     // over-writes placeWindow and other flags and forces no changing
     // of window location after loading
     bool noPlaceWindow = false;
@@ -286,9 +304,15 @@ struct LoadArgs {
     bool lazyLoad = false;
     bool async = false;
     bool activateExisting = false;
+    // do not add to File History / Windows Recent (CmdOpenFileNoHistory)
+    bool skipHistory = false;
     // with activateExisting: only switch to an existing tab in args->win (UI
     // open paths). DDE and other global lookups leave this false.
     bool activateExistingInWindow = false;
+
+    DisplayMode initialDisplayMode = DisplayMode::Automatic;
+    float initialZoom = kInvalidZoom;
+    float ebookLayoutAspect = 0;
 
     DocController* ctrl = nullptr;
 
@@ -311,14 +335,15 @@ struct PasswordUI;
 MainWindow* LoadDocument(LoadArgs* args);
 MainWindow* LoadDocumentFinish(LoadArgs* args);
 void StartLoadDocument(LoadArgs* args);
-void StartLoadDocuments(StrVec& paths, MainWindow* win);
+void StartLoadDocuments(StrVec& paths, MainWindow* win, bool skipHistory = false);
 MainWindow* CreateAndShowMainWindow(SessionData* data = nullptr, bool showWin = true);
 void ShowMainWindow(MainWindow* win, int windowState);
 void MaybeShowDefaultAppNotification(MainWindow* win);
 DocController* CreateControllerForEngineOrFile(EngineBase* engine, Str path, PasswordUI* pwdUI, MainWindow* win);
+bool OpenDocumentFromMemory(MainWindow* win, Str data, Str nameHint);
 
 uint MbRtlReadingMaybe();
-void MessageBoxWarning(HWND hwnd, Str msg, Str title = nullptr);
+void MessageBoxWarning(HWND hwnd, Str msg, Str title = {});
 void UpdateCursorPositionHelper(MainWindow* win, Point pos, NotificationWnd* wnd);
 void EnterFullScreen(MainWindow* win, bool presentation = false);
 void ExitFullScreen(MainWindow* win);
@@ -335,6 +360,7 @@ struct SettingsApplyState {
     bool disableAntiAlias = false;
     bool chmUseFixedPageUI = false;
     bool markdownUseFixedPageUI = false;
+    bool explorerQuickLook = false;
 };
 SettingsApplyState GetSettingsApplyState();
 void ApplyChangedSettingsAndRelayout(const SettingsApplyState& before);
@@ -351,7 +377,7 @@ TempStr WindowStateDuringLoadResultTemp(int* exitCodeOut = nullptr);
 bool DocIsSupportedFileType(FileType);
 TempStr GetLogFilePathTemp();
 void ShowErrorLoadingNotification(MainWindow* win, Str path, bool noSavePrefs, bool showWin = true);
-void SumatraOpenPathInDefaultFileManager(Str path);
+void ShowFileInFolder(MainWindow* win, Str path);
 void SmartZoom(MainWindow* win, float factor, Point* pt, bool smartZoom);
 TempStr GetSumatraDataDirTemp();
 TempStr GetCrashInfoDirTemp();

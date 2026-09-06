@@ -160,6 +160,7 @@ SharedWebViewEnvState gSharedEnvState = SharedWebViewEnvState::NotStarted;
 ICoreWebView2Environment* gSharedEnvironment = nullptr;
 WStr gSharedUserDataFolder;
 Vec<WebviewWnd*> gPendingWebviews;
+bool gWebViewShuttingDown = false;
 
 // Creating the environment fails with HRESULT_FROM_WIN32(ERROR_INVALID_STATE) when
 // another process is already using the same user data folder with different
@@ -183,13 +184,13 @@ void FreePendingOps(Vec<PendingWebViewOp>& ops) {
     for (PendingWebViewOp& op : ops) {
         str::Free(op.text);
     }
-    ops.Reset();
+    VecReset(ops);
 }
 
 void RemovePendingWebview(WebviewWnd* wv) {
-    int i = gPendingWebviews.Find(wv);
+    int i = VecFind(gPendingWebviews, wv);
     if (i >= 0) {
-        gPendingWebviews.RemoveAt(i);
+        VecRemoveAt(gPendingWebviews, i);
     }
     // the retry timer lives on a pending webview's hwnd, so move it if this was
     // the one hosting it -- otherwise the timer dies with the window and the
@@ -419,6 +420,11 @@ class webview2_accel_handler : public ICoreWebView2AcceleratorKeyPressedEventHan
                     wb->Close();
                     return S_OK;
                 }
+                if (wb->closeOnF1 && vk == VK_F1 && !ctrl && !shift && !alt) {
+                    args->put_Handled(TRUE);
+                    wb->Close();
+                    return S_OK;
+                }
             }
             if (!m_wnd->events.resolveAccelCmd) {
                 return S_OK;
@@ -449,19 +455,20 @@ class webview2_accel_handler : public ICoreWebView2AcceleratorKeyPressedEventHan
     WebviewWnd* m_wnd = nullptr;
 };
 
-static TempWStr UriPathFromPrefix(WStr uri, WStr prefix);
+static TempWStr UriPathFromPrefix(WStr uri, WStr prefix, bool keepQueryAndFragment = false);
 
 static TempStr UrlForWebViewEvent(WStr uri, WStr prefix) {
-    if (!uri) {
+    if (len(uri) == 0) {
         return {};
     }
     if (prefix && wstr::StartsWith(uri, prefix)) {
-        TempWStr pathW = UriPathFromPrefix(uri, prefix);
-        if (!pathW) {
+        // keep ?query and #fragment: navigation handlers (markdown heading
+        // dests, CHM) need the hash; resource fetches strip it separately
+        TempWStr pathW = UriPathFromPrefix(uri, prefix, true);
+        if (len(pathW) == 0) {
             return {};
         }
         TempStr path = ToUtf8Temp(pathW);
-        wstr::Free(pathW);
         return path;
     }
     return ToUtf8Temp(uri);
@@ -511,7 +518,7 @@ class webview2_navigation_starting_handler : public ICoreWebView2NavigationStart
         }
         TempStr url = UrlForWebViewEvent(WStr(uri), m_wnd->resourceUriPrefix);
         CoTaskMemFree(uri);
-        if (!url) {
+        if (len(url) == 0) {
             return S_OK;
         }
         bool allow = m_wnd->events.navigationStarting(m_wnd->events.ctx, url, false);
@@ -658,7 +665,7 @@ class webview2_new_window_handler : public ICoreWebView2NewWindowRequestedEventH
 // and open external http(s) URLs in the OS default browser. Virtual-host
 // content (markdown/CHM) is not opened externally.
 static bool ShouldOpenWebViewDownloadInOsBrowser(WStr uri, WStr resourceUriPrefix) {
-    if (!uri) {
+    if (len(uri) == 0) {
         return false;
     }
     if (resourceUriPrefix && wstr::StartsWith(uri, resourceUriPrefix)) {
@@ -770,14 +777,14 @@ class webview2_env_handler : public ICoreWebView2CreateCoreWebView2EnvironmentCo
 
 static TempWStr MimeHeaderFromContentType(Str contentType) {
     if (len(contentType) == 0) {
-        contentType = "text/html";
+        contentType = StrL("text/html");
     }
     TempWStr contentTypeW = ToWStrTemp(contentType);
     return str::JoinTemp(WStrL(L"Content-Type: "), contentTypeW);
 }
 
-static TempWStr UriPathFromPrefix(WStr uri, WStr prefix) {
-    if (!uri || !prefix || !wstr::StartsWith(uri, prefix)) {
+static TempWStr UriPathFromPrefix(WStr uri, WStr prefix, bool keepQueryAndFragment) {
+    if (len(uri) == 0 || len(prefix) == 0 || !wstr::StartsWith(uri, prefix)) {
         return {};
     }
     int pathOff = prefix.len;
@@ -788,15 +795,17 @@ static TempWStr UriPathFromPrefix(WStr uri, WStr prefix) {
         return {};
     }
     WStr path = WStr(uri.s + pathOff, uri.len - pathOff);
-    int q = wstr::IndexOfChar(path, L'?');
-    if (q >= 0) {
-        path = WStr(path.s, q);
+    if (!keepQueryAndFragment) {
+        int q = wstr::IndexOfChar(path, L'?');
+        if (q >= 0) {
+            path = WStr(path.s, q);
+        }
+        int h = wstr::IndexOfChar(path, L'#');
+        if (h >= 0) {
+            path = WStr(path.s, h);
+        }
     }
-    int h = wstr::IndexOfChar(path, L'#');
-    if (h >= 0) {
-        path = WStr(path.s, h);
-    }
-    return wstr::Dup(path);
+    return str::DupTemp(path);
 }
 
 static bool CreateWebResourceResponseFromData(ICoreWebView2WebResourceRequestedEventArgs* args, Str data,
@@ -865,7 +874,7 @@ class webview2_resource_handler : public ICoreWebView2WebResourceRequestedEventH
     }
 
     HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* /*sender*/, ICoreWebView2WebResourceRequestedEventArgs* args) {
-        if (!args || !m_wnd || !m_wnd->resourceProvider.getResource || !m_wnd->resourceUriPrefix) {
+        if (!args || !m_wnd || !m_wnd->resourceProvider.getResource || len(m_wnd->resourceUriPrefix) == 0) {
             return S_OK;
         }
 
@@ -884,15 +893,14 @@ class webview2_resource_handler : public ICoreWebView2WebResourceRequestedEventH
 
         TempWStr pathW = UriPathFromPrefix(WStr(uri), m_wnd->resourceUriPrefix);
         CoTaskMemFree(uri);
-        if (!pathW) {
+        if (len(pathW) == 0) {
             return S_OK;
         }
 
         TempStr path = ToUtf8Temp(pathW);
-        wstr::Free(pathW);
         WebViewResourceResult res;
         if (!m_wnd->resourceProvider.getResource(m_wnd->resourceProvider.ctx, path, &res)) {
-            CreateWebResourceResponseFromData(args, {}, "text/plain", 404);
+            CreateWebResourceResponseFromData(args, {}, StrL("text/plain"), 404);
             return S_OK;
         }
 
@@ -1112,7 +1120,7 @@ void WebviewWnd::QueuePendingOp(PendingWebViewOp::Kind kind, Str text, int token
     op.kind = kind;
     op.text = str::Dup(text ? text : StrL(""));
     op.token = token;
-    pendingOps.Append(op);
+    VecAppend(pendingOps, op);
 }
 
 void WebviewWnd::FlushPendingOps() {
@@ -1122,7 +1130,7 @@ void WebviewWnd::FlushPendingOps() {
     // Vec copies PendingWebViewOp by value (shallow copy of text pointers), so only
     // free op.text once -- in the loop below.
     Vec<PendingWebViewOp> ops = pendingOps;
-    pendingOps.Reset();
+    VecReset(pendingOps);
     for (PendingWebViewOp& op : ops) {
         switch (op.kind) {
             case PendingWebViewOp::Init:
@@ -1201,6 +1209,19 @@ void WebviewWnd::SetControllerVisible(bool visible) {
     webview3->Release();
 }
 
+// WebView2 can keep a hidden or old-size composition surface after showing a
+// tab or after its parent changes from a normal window to fullscreen. Briefly
+// detaching that surface makes it rebuild without reloading the document.
+void WebviewWnd::RefreshControllerSurface() {
+    if (!controller || !desiredVisible) {
+        return;
+    }
+    controller->put_IsVisible(FALSE);
+    controller->put_IsVisible(TRUE);
+    isVisible = true;
+    UpdateWebviewSize();
+}
+
 void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
     if (!controller) {
         FailInit();
@@ -1219,7 +1240,13 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
     ICoreWebView2Controller2* controller2 = nullptr;
     HRESULT bgHr = controller->QueryInterface(IID_PPV_ARGS(&controller2));
     if (SUCCEEDED(bgHr) && controller2) {
-        COREWEBVIEW2_COLOR bg = {0, 0, 0, 0};
+        COREWEBVIEW2_COLOR bg = {};
+        if (!ColorSkipsPaint(defaultBackgroundColor)) {
+            bg.A = 255;
+            bg.R = GetRed(defaultBackgroundColor);
+            bg.G = GetGreen(defaultBackgroundColor);
+            bg.B = GetBlue(defaultBackgroundColor);
+        }
         controller2->put_DefaultBackgroundColor(bg);
         controller2->Release();
     }
@@ -1327,8 +1354,8 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
         failedHandler->Release();
     }
 
-    Init("window.external={invoke:s=>window.chrome.webview.postMessage(s)}");
-    Init(kJsBridgeScript);
+    Init(StrL("window.external={invoke:s=>window.chrome.webview.postMessage(s)}"));
+    Init(Str(kJsBridgeScript));
     // re-register any names bound before the controller was ready
     RebuildBindScript();
     initStarted = true;
@@ -1352,6 +1379,7 @@ void WebviewWnd::UpdateWebviewSize() {
         return;
     }
     Rect bounds = HwndClientRect(hwnd);
+    controller->NotifyParentWindowPositionChanged();
     if (hasLastBounds && bounds == lastBounds) {
         return;
     }
@@ -1411,7 +1439,7 @@ void WebviewWnd::AddInitScriptWithToken(Str js, int token) {
     }
     WebViewInitScript script;
     script.token = token;
-    initScripts.Append(script);
+    VecAppend(initScripts, script);
 
     WCHAR* ws = CWStrTemp(js);
     auto* handler = new webview2_add_script_handler(hwnd, token);
@@ -1420,7 +1448,7 @@ void WebviewWnd::AddInitScriptWithToken(Str js, int token) {
     if (FAILED(hr)) {
         int idx = FindInitScript(token);
         if (idx >= 0) {
-            initScripts.RemoveAt(idx);
+            VecRemoveAt(initScripts, idx);
         }
     }
 }
@@ -1446,7 +1474,7 @@ void WebviewWnd::OnInitScriptAdded(int token, const WCHAR* id) {
         if (webview) {
             webview->RemoveScriptToExecuteOnDocumentCreated(id);
         }
-        initScripts.RemoveAt(idx);
+        VecRemoveAt(initScripts, idx);
         return;
     }
     wstr::Free(script.id);
@@ -1463,7 +1491,7 @@ void WebviewWnd::RemoveInitScript(int token) {
         PendingWebViewOp& op = pendingOps[i];
         if (op.kind == PendingWebViewOp::Init && op.token == token) {
             str::Free(op.text);
-            pendingOps.RemoveAt(i);
+            VecRemoveAt(pendingOps, i);
             return;
         }
     }
@@ -1472,7 +1500,7 @@ void WebviewWnd::RemoveInitScript(int token) {
         return;
     }
     WebViewInitScript& script = initScripts[idx];
-    if (!script.id) {
+    if (len(script.id) == 0) {
         // the id hasn't arrived yet; OnInitScriptAdded will remove it
         script.removePending = true;
         return;
@@ -1481,7 +1509,7 @@ void WebviewWnd::RemoveInitScript(int token) {
         webview->RemoveScriptToExecuteOnDocumentCreated(script.id.s);
     }
     wstr::Free(script.id);
-    initScripts.RemoveAt(idx);
+    VecRemoveAt(initScripts, idx);
 }
 
 void WebviewWnd::RemoveAllInitScripts() {
@@ -1499,7 +1527,7 @@ void WebviewWnd::RemoveAllInitScripts() {
     // OnInitScriptAdded() can remove them once it arrives
     for (int i = len(initScripts) - 1; i >= 0; i--) {
         if (!initScripts[i].removePending) {
-            initScripts.RemoveAt(i);
+            VecRemoveAt(initScripts, i);
         }
     }
 }
@@ -1510,19 +1538,19 @@ static const char* kJsCallPrefix = "{\"__sumatraCall\":1";
 static const char* kJsNotifyPrefix = "{\"__sumatraNotify\":1";
 
 static bool IsJsCallMessage(Str msg) {
-    return str::StartsWith(msg, kJsCallPrefix);
+    return str::StartsWith(msg, Str(kJsCallPrefix));
 }
 
 static bool IsJsNotifyMessage(Str msg) {
-    return str::StartsWith(msg, kJsNotifyPrefix);
+    return str::StartsWith(msg, Str(kJsNotifyPrefix));
 }
 
 namespace {
 // json::Parse hands value as a temp-arena copy; path is valid only during the callback.
 struct JsCallState {
-    TempStr id = nullptr;
-    TempStr method = nullptr;
-    TempStr params = nullptr;
+    TempStr id;
+    TempStr method;
+    TempStr params;
 };
 
 static void JsCallOnValue(JsCallState* st, json::Value* v) {
@@ -1545,7 +1573,7 @@ void WebviewWnd::OnJsCall(Str msg) {
         logf("WebviewWnd::OnJsCall: failed to parse '%s'\n", msg);
         return;
     }
-    if (!st.id || !st.method) {
+    if (len(st.id) == 0 || len(st.method) == 0) {
         return;
     }
     if (!events.jsCall) {
@@ -1566,7 +1594,7 @@ void WebviewWnd::OnJsNotify(Str msg) {
         logf("WebviewWnd::OnJsNotify: failed to parse '%s'\n", msg);
         return;
     }
-    if (!st.method) {
+    if (len(st.method) == 0) {
         return;
     }
     Str params = st.params ? Str(st.params) : StrL("[]");
@@ -1595,16 +1623,16 @@ void WebviewWnd::RebuildBindScript() {
         return;
     }
     str::Builder js;
-    js.Append("(function(){var m=[");
+    js.Append(StrL("(function(){var m=["));
     bool first = true;
     for (Str& name : boundNames) {
         if (!first) {
-            js.Append(",");
+            js.Append(StrL(","));
         }
         first = false;
         js.Append(fmt("\"%s\"", json::EscapeStrTemp(name)));
     }
-    js.Append("];m.forEach(function(n){window.__sumatra__.onBind(n)})})()");
+    js.Append(StrL("];m.forEach(function(n){window.__sumatra__.onBind(n)})})()"));
     bindScriptToken = AddInitScript(ToStr(js));
 }
 
@@ -1619,7 +1647,7 @@ void WebviewWnd::Bind(Str name) {
             return;
         }
     }
-    boundNames.Append(str::Dup(name));
+    VecAppend(boundNames, str::Dup(name));
     RebuildBindScript();
     // also expose it in the document that's already loaded
     Eval(fmt("if (window.__sumatra__) window.__sumatra__.onBind(\"%s\");", json::EscapeStrTemp(name)));
@@ -1630,7 +1658,7 @@ void WebviewWnd::Unbind(Str name) {
     for (int i = 0; i < n; i++) {
         if (str::Eq(boundNames[i], name)) {
             str::Free(boundNames[i]);
-            boundNames.RemoveAt(i);
+            VecRemoveAt(boundNames, i);
             RebuildBindScript();
             Eval(fmt("if (window.__sumatra__) window.__sumatra__.onUnbind(\"%s\");", json::EscapeStrTemp(name)));
             return;
@@ -1746,19 +1774,19 @@ void WebviewWnd::ShowFindUI() {
 
 static BOOL CALLBACK CollectChildHwnds(HWND hwnd, LPARAM lp) {
     auto* hwnds = (Vec<HWND>*)lp;
-    hwnds->Append(hwnd);
+    VecAppend(*hwnds, hwnd);
     return TRUE;
 }
 
 // Register `target` on `hwnd` (replacing any existing drop target). Records the
 // window in `registered` on success so it can be revoked later.
 static void RegisterDropOn(HWND hwnd, IDropTarget* target, Vec<HWND>& registered) {
-    if (registered.Contains(hwnd)) {
+    if (VecContains(registered, hwnd)) {
         return;
     }
     RevokeDragDrop(hwnd);
     if (SUCCEEDED(RegisterDragDrop(hwnd, target))) {
-        registered.Append(hwnd);
+        VecAppend(registered, hwnd);
     }
 }
 
@@ -1779,7 +1807,7 @@ void WebviewWnd::RegisterForwardingDropTarget() {
         dropTarget = new ForwardingDropTarget(parent);
     }
     Vec<HWND> wnds;
-    wnds.Append(hwnd);
+    VecAppend(wnds, hwnd);
     EnumChildWindows(hwnd, CollectChildHwnds, (LPARAM)&wnds);
     for (HWND h : wnds) {
         RegisterDropOn(h, dropTarget, dropTargetHwnds);
@@ -1790,7 +1818,7 @@ void WebviewWnd::RevokeForwardingDropTarget() {
     for (HWND h : dropTargetHwnds) {
         RevokeDragDrop(h);
     }
-    dropTargetHwnds.Reset();
+    VecReset(dropTargetHwnds);
     if (dropTarget) {
         dropTarget->Release();
         dropTarget = nullptr;
@@ -1823,7 +1851,7 @@ static void OnBrowserMessageCbHwnd(void* hwndVoid, Str msg);
 
 static void FailPendingWebviews() {
     Vec<WebviewWnd*> pending = gPendingWebviews;
-    gPendingWebviews.Reset();
+    VecReset(gPendingWebviews);
     for (WebviewWnd* wv : pending) {
         if (wv && !wv->initFailed) {
             wv->FailInit();
@@ -1880,6 +1908,14 @@ static void CancelEnvRetryTimer() {
     gEnvRetryTimerHwnd = nullptr;
 }
 
+void WebViewShutdown() {
+    gWebViewShuttingDown = true;
+    CancelEnvRetryTimer();
+    FailPendingWebviews();
+    ResetSharedEnvironment();
+    wstr::Free(gSharedUserDataFolder);
+}
+
 // Retry on a timer rather than Sleep()ing: this runs on the UI thread.
 static void ScheduleEnvCreateRetry() {
     CancelEnvRetryTimer();
@@ -1915,6 +1951,9 @@ static void OnEnvCreateRetryTimer() {
 }
 
 static void OnSharedEnvironmentReady(HRESULT res, ICoreWebView2Environment* env) {
+    if (gWebViewShuttingDown) {
+        return;
+    }
     if (FAILED(res) || !env) {
         logf("WebView2: creating environment failed with 0x%x (attempt %d/%d)\n", (int)res, gEnvCreateAttempts,
              kMaxEnvCreateAttempts);
@@ -1932,7 +1971,7 @@ static void OnSharedEnvironmentReady(HRESULT res, ICoreWebView2Environment* env)
     gEnvCreateAttempts = 0;
 
     Vec<WebviewWnd*> pending = gPendingWebviews;
-    gPendingWebviews.Reset();
+    VecReset(gPendingWebviews);
     for (WebviewWnd* wv : pending) {
         if (!wv || wv->initFailed) {
             continue;
@@ -1992,10 +2031,13 @@ static bool EnvCreationAllowedAgain() {
 }
 
 bool WebviewWnd::Embed(WebViewMsgCb& cb) {
+    if (gWebViewShuttingDown) {
+        return false;
+    }
     if (initStarted) {
         return !initFailed;
     }
-    if (!dataDir) {
+    if (len(dataDir) == 0) {
         logf("WebviewWnd::Embed: dataDir is null, aborting\n");
         initFailed = true;
         return false;
@@ -2019,7 +2061,7 @@ bool WebviewWnd::Embed(WebViewMsgCb& cb) {
         gEnvCreateAttempts = 0;
     }
 
-    gPendingWebviews.Append(this);
+    VecAppend(gPendingWebviews, this);
 
     if (gSharedEnvState == SharedWebViewEnvState::NotStarted) {
         gSharedEnvState = SharedWebViewEnvState::Creating;
@@ -2061,7 +2103,7 @@ static void OnBrowserMessageCbHwnd(void* hwndVoid, Str msg) {
 }
 
 HWND WebviewWnd::Create(const CreateWebViewArgs& args) {
-    ReportIf(!dataDir);
+    ReportIf(len(dataDir) == 0);
     onTimer = MkMethod1<WebviewWnd, WindowBase::TimerEvent*, &WebviewWnd::OnTimer>(this);
     onSize = MkMethod1<WebviewWnd, WindowBase::SizeEvent*, &WebviewWnd::OnSize>(this);
     onActivate = MkMethod1<WebviewWnd, WindowBase::ActivateEvent*, &WebviewWnd::OnActivate>(this);
@@ -2078,12 +2120,12 @@ HWND WebviewWnd::Create(const CreateWebViewArgs& args) {
     if (!hwnd) {
         return nullptr;
     }
-    // erase to the theme window background: the embedded page may be
-    // transparent (put_DefaultBackgroundColor alpha 0) and without a
-    // background brush the hwnd keeps whatever pixels were on screen when it
-    // appeared - e.g. an edit border painted during startup relayout showed
-    // through a restored document (stale-pixel ghosts)
-    SetColors(kColorNoChange, gColsWin[kColWinBg]);
+    // Keep the host fallback and WebView2's composition background in sync.
+    // Transparent general-purpose webviews use the chrome background; document
+    // webviews supply their page color so resize and tab transitions cannot
+    // reveal stale pixels or the gray canvas behind the page.
+    Color fallbackBg = ColorSkipsPaint(defaultBackgroundColor) ? gColsWin[kColWinBg] : defaultBackgroundColor;
+    SetColors(kColorNoChange, fallbackBg);
 
     auto fn = MkFunc1<void, Str>(OnBrowserMessageCbHwnd, (void*)hwnd);
     if (!Embed(fn)) {
@@ -2103,12 +2145,12 @@ void WebviewWnd::OnTimer(WindowBase::TimerEvent* ev) {
 void WebviewWnd::OnSize(WindowBase::SizeEvent* ev) {
     if (ev->msg == WM_ENTERSIZEMOVE) {
         isInSizeMove = true;
-        Eval("if (window.__setHostResizing) window.__setHostResizing(true);");
+        Eval(StrL("if (window.__setHostResizing) window.__setHostResizing(true);"));
         return;
     }
     if (ev->msg == WM_EXITSIZEMOVE) {
         isInSizeMove = false;
-        Eval("if (window.__setHostResizing) window.__setHostResizing(false);");
+        Eval(StrL("if (window.__setHostResizing) window.__setHostResizing(false);"));
         UpdateWebviewSize();
         return;
     }
@@ -2156,11 +2198,11 @@ WebviewWnd::~WebviewWnd() {
     for (WebViewInitScript& script : initScripts) {
         wstr::Free(script.id);
     }
-    initScripts.Reset();
+    VecReset(initScripts);
     for (Str& name : boundNames) {
         str::Free(name);
     }
-    boundNames.Reset();
+    VecReset(boundNames);
     RevokeForwardingDropTarget();
     // Close() shuts down the browser instance behind this webview and is not
     // optional: releasing the controller only drops our reference, so without
@@ -2241,11 +2283,13 @@ void WebviewWnd::ShowFindUI() {}
 bool WebviewWnd::Embed(WebViewMsgCb&) {
     return false;
 }
+void WebViewShutdown() {}
 void WebviewWnd::OnControllerReady(ICoreWebView2Controller*) {}
 void WebviewWnd::FailInit() {}
 void WebviewWnd::QueuePendingOp(PendingWebViewOp::Kind, Str, int) {}
 void WebviewWnd::FlushPendingOps() {}
 void WebviewWnd::SetControllerVisible(bool) {}
+void WebviewWnd::RefreshControllerSurface() {}
 void WebviewWnd::OnBrowserMessage(Str) {}
 void WebviewWnd::OnTimer(WindowBase::TimerEvent*) {}
 void WebviewWnd::OnSize(WindowBase::SizeEvent*) {}

@@ -7,10 +7,10 @@ License: GPLv3 */
 #include "base/UITask.h"
 
 #include "Settings.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "FileThumbnails.h"
-#include "FileHistory.h"
 #include "HomePage.h"
+#include "FileHistory.h"
 
 /* Handling of file history list.
 
@@ -42,7 +42,7 @@ constexpr int kFileHistoryMaxFiles = 1000;
 // Frequent Read list (space permitting)
 constexpr int kFileHistoryMaxFrequent = 1000;
 
-// owned by gGlobalPrefs->fileStates
+// owned by gSettings->fileStates
 static Vec<FileState*>* gStates;
 
 Vec<FileState*>* FileHistoryStates() {
@@ -54,8 +54,8 @@ void FileHistorySetStates(Vec<FileState*>* states) {
 }
 
 void FileHistoryAppend(FileState* fs) {
-    ReportIf(!fs->filePath);
-    gStates->Append(fs);
+    ReportIf(len(fs->filePath) == 0);
+    VecAppend(*gStates, fs);
 }
 
 // the home page layout cache holds raw FileState* from this list, so it has to
@@ -63,7 +63,7 @@ void FileHistoryAppend(FileState* fs) {
 // FileState right after; crash 8c7b045cb). It is rebuilt on the next paint
 void FileHistoryRemove(FileState* fs) {
     HomePageInvalidateLayoutCache();
-    gStates->Remove(fs);
+    VecRemove(*gStates, fs);
 }
 
 void FileHistoryClear(bool keepFavorites) {
@@ -75,7 +75,7 @@ void FileHistoryClear(bool keepFavorites) {
     for (int i = 0; i < len(*gStates); i++) {
         if (keepFavorites && len(*(*gStates)[i]->favorites) > 0) {
             (*gStates)[i]->openCount = 0;
-            keep.Append((*gStates)[i]);
+            VecAppend(keep, (*gStates)[i]);
         } else {
             DeleteFileState((*gStates)[i]);
         }
@@ -102,7 +102,7 @@ FileState* FileHistoryFindByPath(Str filePath) {
 }
 
 FileState* FileHistoryMarkFileLoaded(Str filePath) {
-    ReportIf(!filePath);
+    ReportIf(len(filePath) == 0);
     // if a history entry with the same name already exists,
     // then reuse it. That way we don't have duplicates and
     // the file moves to the front of the list
@@ -111,21 +111,21 @@ FileState* FileHistoryMarkFileLoaded(Str filePath) {
         fs = NewFileState(filePath);
         fs->useDefaultState = true;
     } else {
-        gStates->Remove(fs);
+        VecRemove(*gStates, fs);
         fs->isMissing = false;
     }
-    gStates->InsertAt(0, fs);
+    VecInsertAt(*gStates, 0, fs);
     fs->openCount++;
     return fs;
 }
 
 bool FileHistoryMarkFileInexistent(Str filePath, bool hide) {
-    ReportIf(!filePath);
+    ReportIf(len(filePath) == 0);
     FileState* state = FileHistoryFindByPath(filePath);
     if (!state) {
         // keep a record so IsMissing can be persisted in settings (fixes #5585)
         state = NewFileState(filePath);
-        gStates->Append(state);
+        VecAppend(*gStates, state);
     }
     // move the file history entry to the end of the list
     // of recently opened documents (if it exists at all),
@@ -133,13 +133,13 @@ bool FileHistoryMarkFileInexistent(Str filePath, bool hide) {
     // and so that we don't completely forget the settings,
     // should the file reappear later on
     int newIdx = hide ? INT_MAX : kFileHistoryMaxRecent - 1;
-    int idx = gStates->Find(state);
-    if (idx < newIdx && state != gStates->Last()) {
-        gStates->Remove(state);
+    int idx = VecFind(*gStates, state);
+    if (idx < newIdx && state != VecLast(*gStates)) {
+        VecRemove(*gStates, state);
         if (len(*gStates) <= newIdx) {
-            gStates->Append(state);
+            VecAppend(*gStates, state);
         } else {
-            gStates->InsertAt(newIdx, state);
+            VecInsertAt(*gStates, newIdx, state);
         }
     }
     // also delete the thumbnail and move the link towards the
@@ -180,7 +180,7 @@ static void GetSortedStates(Vec<FileState*>& list, VecSortCmp<FileState*>::Fn cm
     for (FileState* ds : *gStates) {
         ds->index = i++;
         if (!ds->isMissing || ds->isPinned) {
-            list.Append(ds);
+            VecAppend(list, ds);
         }
     }
     VecSort(list, cmp);
@@ -237,13 +237,13 @@ void FileHistoryPurge(bool alwaysUseDefaultState) {
         // NOLINTNEXTLINE(bugprone-branch-clone): each branch documents a different reason to forget
         if (state->isMissing && (alwaysUseDefaultState || state->useDefaultState)) {
             // forget about missing documents without valuable state
-            gStates->RemoveAt(j - 1);
+            VecRemoveAt(*gStates, j - 1);
         } else if (j > kFileHistoryMaxFiles) {
             // forget about files last opened longer ago than the last FILE_HISTORY_MAX_FILES ones
-            gStates->RemoveAt(j - 1);
+            VecRemoveAt(*gStates, j - 1);
         } else if (alwaysUseDefaultState && state->openCount < minOpenCount && j > kFileHistoryMaxRecent) {
             // forget about files that were hardly used (and without valuable state)
-            gStates->RemoveAt(j - 1);
+            VecRemoveAt(*gStates, j - 1);
         } else {
             continue;
         }
@@ -312,7 +312,7 @@ bool DocumentPathExists(Str path) {
         return true;
     }
     Str pos = str::SliceFromCharLast(Str(path.s + 2, path.len - 2), ':');
-    if (!pos) {
+    if (len(pos) == 0) {
         return false;
     }
     // remove information needed for pointing at embedded documents
@@ -347,7 +347,7 @@ static void CheckFilesExistAsync(CheckFilesExistData* d) {
     int n = len(toCheck);
     for (int i = 0; i < n; i++) {
         Str path = toCheck[i];
-        if (!path) {
+        if (len(path) == 0) {
             continue;
         }
         // files on network / removable drives can be temporarily missing
@@ -392,5 +392,5 @@ void RemoveNonExistentFilesAsync() {
     }
     logf("RemoveNonExistentFilesAsync: starting CheckFilesExistAsync to check %d files\n", len(d->toCheck));
     Func0 fn = MkFunc0<CheckFilesExistData>(CheckFilesExistAsync, d);
-    RunAsync(fn, "CheckFilesExistAsync");
+    RunAsync(fn, StrL("CheckFilesExistAsync"));
 }

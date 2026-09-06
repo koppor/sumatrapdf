@@ -11,6 +11,7 @@
 #include "gui/Dpi.h"
 #include "base/File.h"
 #include "base/FileWatcher.h"
+#include "base/Timer.h"
 #include "base/GdiPlusUtil.h"
 #include "gui/PlatformFont.h"
 #include "gui/PlatformText.h"
@@ -23,6 +24,7 @@
 #include "gui/UIModels.h"
 #include "gui/Layout.h"
 #include "gui/win/WinGui.h"
+#include "gui/win/WebView.h"
 
 #include "Settings.h"
 #include "DisplayMode.h"
@@ -32,7 +34,6 @@
 #include "EngineAll.h"
 #include "DisplayModel.h"
 #include "FileHistory.h"
-#include "GlobalPrefs.h"
 #include "Accelerators.h"
 #include "PdfSync.h"
 #include "RenderCache.h"
@@ -42,6 +43,8 @@
 #include "TextSearch.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "Annotation.h"
+#include "AnnotPlacement.h"
 #include "WindowTab.h"
 #include "UpdateCheck.h"
 #include "resource.h"
@@ -54,8 +57,9 @@
 #include "CrashHandler.h"
 #include "HangDetector.h"
 #include "Print.h"
+#include "PrintWin11.h"
 #include "SearchAndDDE.h"
-#include "SumatraProperties.h"
+#include "DocumentProperties.h"
 #include "Tabs.h"
 #include "Translations.h"
 #include "StressTesting.h"
@@ -71,7 +75,10 @@
 #include "DarkMode_win.h"
 #include "CommandPalette.h"
 #include "SelectTextKeyboard.h"
+#include "LinkFollow.h"
 #include "SumatraControl.h"
+#include "ExplorerQuickLook.h"
+#include "PagePosition.h"
 #include "SumatraLog.h"
 
 // return false if failed in a way that should abort the app
@@ -79,8 +86,8 @@ static NO_INLINE bool MaybeMakePluginWindow(MainWindow* win, HWND hwndParent) {
     if (!hwndParent) {
         return true;
     }
-    logfa("MakePluginWindow: win: 0x%p, hwndParent: 0x%p (isWindow: %d), gPluginURL: %s\n", win, hwndParent,
-          (int)IsWindow(hwndParent), len(gPluginURL) == 0 ? "<nulL>" : gPluginURL);
+    logf("MakePluginWindow: win: 0x%p, hwndParent: 0x%p (isWindow: %d), gPluginURL: %s\n", win, hwndParent,
+         (int)IsWindow(hwndParent), len(gPluginURL) == 0 ? StrL("<nulL>") : gPluginURL);
     ReportIf(!gPluginMode);
 
     if (!IsWindow(hwndParent)) {
@@ -123,14 +130,14 @@ static bool RegisterWinClass() {
     HMODULE h = GetModuleHandleW(nullptr);
     HBRUSH bgBrush = CreateSolidBrush(ThemeMainWindowBackgroundColor());
     gWinClassBgBrush = bgBrush;
-    FillWndClassEx(wcex, FRAME_CLASS_NAME, WndProcSumatraFrame);
+    FillWndClassEx(wcex, kFrameClassName, WndProcSumatraFrame);
     // remove CS_HREDRAW | CS_VREDRAW to avoid full invalidation on every resize
     wcex.style = 0;
     wcex.hIcon = LoadIconW(h, MAKEINTRESOURCEW(GetAppIconID()));
     wcex.hbrBackground = bgBrush;
     RegisterClassEx(&wcex);
 
-    FillWndClassEx(wcex, CANVAS_CLASS_NAME, WndProcCanvas);
+    FillWndClassEx(wcex, kCanvasClassName, WndProcCanvas);
     // remove CS_HREDRAW | CS_VREDRAW to avoid full invalidation on resize
     wcex.style = CS_DBLCLKS;
     wcex.hbrBackground = bgBrush;
@@ -313,20 +320,24 @@ static void MaybeGoTo(MainWindow* win, Str destName, int pageNumber) {
 }
 
 static void MaybeStartSearch(MainWindow* win, Str searchTerm) {
-    if (!win || !searchTerm) {
+    if (!win || len(searchTerm) == 0) {
         return;
     }
-    if (win->findEdit) {
-        win->findEdit->SetText(searchTerm);
-    }
-    bool wasModified = true;
-    bool showProgress = true;
-    FindTextOnThread(win, TextSearch::Direction::Forward, searchTerm, wasModified, showProgress);
+    StartSearchFromCommandLine(win, searchTerm);
 }
 
 static MainWindow* LoadOnStartup(Str filePath, const Flags& flags, bool isFirstWin) {
     LoadArgs args(filePath, nullptr);
     args.showWin = !(flags.printDialog && flags.exitWhenDone) && !gPluginMode;
+    // -new-window: each file in its own window. -new-window-tabs keeps the
+    // default (one window, files as tabs).
+    if (flags.inNewWindow && !flags.inNewWindowTabs) {
+        args.forceNewWindow = true;
+    }
+    if (isFirstWin) {
+        args.initialDisplayMode = flags.startView;
+        args.initialZoom = flags.startZoom;
+    }
     // Explorer multi-open with reuseInstance can deliver the same path via both
     // the cmdline and a DDE/COPYDATA open (and password dialogs keep gIsStartup
     // true long enough for both). Prefer the existing tab over a duplicate.
@@ -384,19 +395,26 @@ void SetTabState(WindowTab* tab, TabState* state) {
     // validate page number from session state
     // TODO: figure out how this happens in the first place i.e.
     // why TabState->pageNo etc. gets saved as 0
-    if (state->pageNo < 1) {
-        state->pageNo = 1;
+    if (ctrl->HasChapters()) {
+        MigrateStoredPagePos(ctrl, &state->pageNo);
+    }
+    StoredPagePos storedPos = ParseStoredPagePos(state->pageNo);
+    int pageNo = PageNoFromStoredPagePos(ctrl, state->pageNo);
+    if (pageNo < 1) {
+        pageNo = 1;
         state->scrollPos = {-1, -1};
     } else {
+        // PageNoFromStoredPagePos() already synced dm (for a bookmark, via
+        // LookupBookmark -> PageNoFromLocation), so this count is fresh
         int nPages = ctrl->PageCount();
-        if (state->pageNo > nPages) {
-            state->pageNo = nPages;
+        if (pageNo > nPages) {
+            pageNo = nPages;
             state->scrollPos = {-1, -1};
         }
     }
 
     tab->tocState = *state->tocState;
-    SetSidebarVisibility(win, state->showToc, gGlobalPrefs->showFavorites);
+    SetSidebarVisibility(win, state->showToc, gSettings->showFavorites);
 
     DisplayMode displayMode = DisplayModeFromString(state->displayMode, DisplayMode::Automatic);
     if (displayMode != DisplayMode::Automatic) {
@@ -404,10 +422,14 @@ void SetTabState(WindowTab* tab, TabState* state) {
     }
 
     if (dm) {
-        ScrollState scrollState = {state->pageNo, state->scrollPos.x, state->scrollPos.y};
+        ScrollState scrollState = {pageNo, state->scrollPos.x, state->scrollPos.y};
+        if (storedPos.bookmark) {
+            // legacy plain int stays flat by design; only a bookmark restores by Location
+            scrollState.loc = ctrl->LocationFromPageNo(pageNo);
+        }
         dm->SetScrollState(scrollState);
     } else {
-        ctrl->GoToPage(state->pageNo, true);
+        ctrl->GoToPage(pageNo, true);
     }
 
     float zoom = ZoomFromString(state->zoom, kInvalidZoom);
@@ -460,7 +482,7 @@ static bool SetupPluginMode(Flags& i) {
     }
 
     gPluginURL = Str(i.pluginURL);
-    if (!gPluginURL) {
+    if (len(gPluginURL) == 0) {
         gPluginURL = Str(i.fileNames[0]);
     }
 
@@ -471,42 +493,42 @@ static bool SetupPluginMode(Flags& i) {
     RestrictPolicies(Perm::SavePreferences | Perm::FullscreenAccess);
 
     i.reuseDdeInstance = i.exitWhenDone = false;
-    gGlobalPrefs->reuseInstance = false;
+    gSettings->reuseInstance = false;
     // don't allow tabbed navigation
-    gGlobalPrefs->useTabs = false;
+    gSettings->useTabs = false;
     // always display the toolbar when embedded (as there's no menubar in that case)
-    gGlobalPrefs->showToolbar = true;
+    gSettings->showToolbar = true;
     // never allow esc as a shortcut to quit
-    gGlobalPrefs->escToExit = false;
+    gSettings->escToExit = false;
     // never show the sidebar by default
-    gGlobalPrefs->showToc = false;
-    if (DisplayMode::Automatic == gGlobalPrefs->defaultDisplayModeEnum) {
+    gSettings->showToc = false;
+    if (DisplayMode::Automatic == gSettings->defaultDisplayModeEnum) {
         // if the user hasn't changed the default display mode,
         // display documents as single page/continuous/fit width
         // (similar to Adobe Reader, Google Chrome and how browsers display HTML)
-        gGlobalPrefs->defaultDisplayModeEnum = DisplayMode::Continuous;
-        gGlobalPrefs->defaultZoomFloat = kZoomFitWidth;
+        gSettings->defaultDisplayModeEnum = DisplayMode::Continuous;
+        gSettings->defaultZoomFloat = kZoomFitWidth;
     }
     // use fixed page UI for all document types (so that the context menu always
     // contains all plugin specific entries and the main window is never closed)
-    gGlobalPrefs->chmUI.useFixedPageUI = true;
+    gSettings->chmUI.useFixedPageUI = true;
 
     // extract some command line arguments from the URL's hash fragment where available
     // see http://www.adobe.com/devnet/acrobat/pdfs/pdf_open_parameters.pdf#nameddest=G4.1501531
     int hashIdx = i.pluginURL ? str::IndexOfChar(i.pluginURL, '#') : -1;
     if (hashIdx >= 0) {
-        TempStr args = str::DupTemp(i.pluginURL.s + hashIdx + 1);
+        TempStr args = str::DupTemp(Str(i.pluginURL.s + hashIdx + 1));
         str::TransCharsInPlace(args, StrL("#"), StrL("&"));
         StrVec parts;
-        Split(&parts, args, "&", true);
+        Split(&parts, args, StrL("&"), true);
         for (int k = 0; k < len(parts); k++) {
             Str part = parts[k];
+            Str pageArg = part;
             int pageNo;
-            if (str::StartsWithI(part, StrL("page=")) &&
-                !str::IsNull(str::Parse(Str(part.s + 4, part.len - 4), "=%d%$", &pageNo))) {
+            if (str::TrimPrefixI(pageArg, StrL("page=")) && !str::IsNull(str::Parse(pageArg, "%d%$", &pageNo))) {
                 i.pageNumber = pageNo;
-            } else if (str::StartsWithI(part, StrL("nameddest=")) && part.len > 10) {
-                i.namedDest = str::Dup(Str(part.s + 10, part.len - 10));
+            } else if (str::TrimPrefixI(part, StrL("nameddest=")) && part) {
+                i.namedDest = str::Dup(part);
             } else if (!str::ContainsChar(part, '=') && part) {
                 i.namedDest = str::Dup(part);
             }
@@ -619,7 +641,7 @@ Retry:
         // returns true for every window, so we reuse the first one as before.
         ISumatraVirtualDesktopManager* vdm = CreateVirtualDesktopManager();
         HWND otherDesktopWnd = nullptr; // a window of the prev instance, on another desktop
-        while ((hwnd = FindWindowExW(HWND_DESKTOP, hwnd, FRAME_CLASS_NAME, nullptr)) != nullptr) {
+        while ((hwnd = FindWindowExW(HWND_DESKTOP, hwnd, kFrameClassName, nullptr)) != nullptr) {
             DWORD wndProcId;
             GetWindowThreadProcessId(hwnd, &wndProcId);
             if (wndProcId != prevProcId) {
@@ -667,7 +689,12 @@ static HACCEL FindAcceleratorsForHwnd(HWND hwnd, HWND* hwndAccel, bool* forwardS
     HACCEL accTable = accTables[0];
     HACCEL editAccTable = accTables[1];
     HACCEL treeViewAccTable = accTables[2];
-    if (FindPropertyWindowByHwnd(hwnd)) {
+    // Only the properties window and its children use the edit table.
+    // FindPropertyWindowByHwnd() also matches the owner frame (so we can
+    // find the dialog for that document); treating the frame as an edit
+    // dropped Home/End (not in the edit table) while Properties stayed open
+    // (issue #5971).
+    if (IsHwndInPropertiesWindow(hwnd)) {
         *hwndAccel = hwnd;
         return editAccTable;
     }
@@ -682,17 +709,29 @@ static HACCEL FindAcceleratorsForHwnd(HWND hwnd, HWND* hwndAccel, bool* forwardS
     if (!win) {
         return nullptr;
     }
-    // Edit / tree keep a reduced table so letters and arrows type/navigate.
+    *hwndAccel = win->hwndFrame;
+    // Find bar/window are owned popups, not children of the frame. Their chrome,
+    // ComboBox and inner Edit must use the edit table: F on the main table is
+    // fullscreen and steals the focus Ctrl+F just gave them.
+    if (hwnd != win->hwndFrame && !::IsChild(win->hwndFrame, hwnd)) {
+        if (forwardSysKeys) {
+            *forwardSysKeys = true;
+        }
+        return editAccTable;
+    }
+    // Edit keeps a reduced table so letters type. Tree keeps nav keys
+    // (arrows, page, home/end, Enter/Space) and takes every other shortcut.
     // Every other child (Virt toolbar, tabs HWND, canvas, WebView host, …)
     // uses the main table — those windows take focus on click, and returning
     // nullptr here is why Ctrl+W stopped closing a tab after the Virt toolbar.
     WCHAR clsName[256];
     int n = GetClassNameW(hwnd, clsName, dimof(clsName));
-    *hwndAccel = win->hwndFrame;
     if (n <= 0) {
         return accTable;
     }
-    if (wstr::EqI(clsName, WC_EDITW)) {
+    // ComboBox / ComboLBox take the win32 focus (find field, history list).
+    // Letters on the main table would fire (F = fullscreen) instead of typing.
+    if (wstr::EqI(clsName, WC_EDITW) || wstr::EqI(clsName, WC_COMBOBOX) || wstr::EqI(clsName, L"ComboLBox")) {
         if (forwardSysKeys) {
             *forwardSysKeys = true;
         }
@@ -707,11 +746,47 @@ static HACCEL FindAcceleratorsForHwnd(HWND hwnd, HWND* hwndAccel, bool* forwardS
     return accTable;
 }
 
+// After a Ctrl/Alt+key accelerator, ignore auto-repeat of that key until it is
+// released. A slow CmdFindFirst (ASan) lets Windows queue a repeat KEYDOWN F
+// after Ctrl is up; F is CmdToggleFullscreen and steals find/search focus.
+static WPARAM gIgnoreRepeatKey = 0;
+
 static bool MaybeTranslateAccelerator(MSG& msg) {
     // TODO: why mouse events?
     bool doAccels = ((msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST) ||
                      (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST));
-    if (!doAccels) return false;
+    if (!doAccels) {
+        return false;
+    }
+
+    if (msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP) {
+        if (gIgnoreRepeatKey && msg.wParam == gIgnoreRepeatKey) {
+            gIgnoreRepeatKey = 0;
+        }
+    } else if (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) {
+        if (gIgnoreRepeatKey && msg.wParam == gIgnoreRepeatKey) {
+            // bit 30: key was already down (auto-repeat), not a new press
+            bool repeat = (msg.lParam & (1L << 30)) != 0;
+            if (repeat && !IsCtrlPressed() && !IsAltPressed()) {
+                return true;
+            }
+            if (!repeat) {
+                gIgnoreRepeatKey = 0;
+            }
+        }
+    }
+
+    // Explorer Quick Look overlay: Space/Esc close, Left/Right change file.
+    if (msg.message == WM_KEYDOWN) {
+        MainWindow* qlWin = FindMainWindowByHwnd(msg.hwnd);
+        if (qlWin && qlWin->isQuickLook) {
+            WPARAM key = msg.wParam;
+            if (key == VK_LEFT || key == VK_RIGHT || key == VK_ESCAPE || key == VK_SPACE || key == VK_PRIOR ||
+                key == VK_NEXT) {
+                return false;
+            }
+        }
+    }
 
     // Arrows, Home/End and PageUp/PageDown normally accelerate to scroll /
     // go-to-page commands. While the keyboard selection caret is up they move
@@ -722,6 +797,25 @@ static bool MaybeTranslateAccelerator(MSG& msg) {
         bool isCaretKey = key == VK_LEFT || key == VK_RIGHT || key == VK_UP || key == VK_DOWN || key == VK_HOME ||
                           key == VK_END || key == VK_PRIOR || key == VK_NEXT;
         if (isCaretKey && SelectTextWithKeyboardActive(FindMainWindowByHwnd(msg.hwnd))) {
+            return false;
+        }
+    }
+
+    // Enter/Space scroll via accelerators; during ink/polyline they finish
+    // the drawing. Consume them here so IsDialogMessage cannot steal them.
+    if (msg.message == WM_KEYDOWN && !IsCtrlPressed() && !IsShiftPressed() && !IsAltPressed()) {
+        WPARAM key = msg.wParam;
+        MainWindow* win = FindMainWindowByHwnd(msg.hwnd);
+        if (AnnotationPlacementOnKeyDown(win, key)) {
+            return true;
+        }
+    }
+
+    // Vimium-style link hints: letter keys type the hint, so skip letter
+    // accelerators ('a' = highlight, 'n' = next page, …). Ctrl/Alt/Shift
+    // shortcuts still work (Shift+F toggles the mode off). Issue #6019.
+    if (msg.message == WM_KEYDOWN && !IsCtrlPressed() && !IsAltPressed() && !IsShiftPressed()) {
+        if (KeyboardLinkFollowingCapturesKey(FindMainWindowByHwnd(msg.hwnd), msg.wParam)) {
             return false;
         }
     }
@@ -763,9 +857,20 @@ static bool MaybeTranslateAccelerator(MSG& msg) {
     HWND hwndAccel;
     bool forwardSysKeys = false;
     HACCEL accels = FindAcceleratorsForHwnd(msg.hwnd, &hwndAccel, &forwardSysKeys);
-    if (!accels) return false;
+    if (!accels) {
+        return false;
+    }
+    bool isChordKey = (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN) &&
+                      (IsCtrlPressed() || IsAltPressed()) && msg.wParam != VK_CONTROL && msg.wParam != VK_MENU &&
+                      msg.wParam != VK_SHIFT;
+    if (isChordKey) {
+        gIgnoreRepeatKey = msg.wParam;
+    }
     if (TranslateAcceleratorW(hwndAccel, accels, &msg)) {
         return true;
+    }
+    if (isChordKey) {
+        gIgnoreRepeatKey = 0;
     }
     // Alt+<mnemonic> / F10 open the menu bar, but those aren't in the accelerator
     // tables; when focus is on a child pane (TOC tree / edit box) the control
@@ -797,11 +902,9 @@ static void ResetTempArenaWithLogging() {
         isNewMax = true;
     }
     if (isNewMax) {
-        char human[32];
-        FormatSizeHumanIntoBuf(gPeakBytes, Str(human, sizeofi(human)));
         logf("temp allocator new max: %s allocations, peak %s bytes (%s)\n",
              str::FormatNumWithThousandSepTemp((i64)gMaxAllocs), str::FormatNumWithThousandSepTemp((i64)gPeakBytes),
-             Str(human));
+             FormatFileSizeTemp(gPeakBytes));
     }
     ResetTempArena();
 }
@@ -846,18 +949,18 @@ static void ReplaceColor(ParsedColor& col, Str maybeColor) {
     }
 }
 
-static void UpdateGlobalPrefs(const Flags& i) {
+static void UpdateSettings(const Flags& i) {
     if (!i.windowPos.IsEmpty()) {
         // -window-pos stands in for the remembered position: code that has to
         // know the window's shape before it's on screen reads it from here
         // (EbookLayoutAspectForWindow), and a remembered maximized state would
         // otherwise ignore the rectangle we were given
-        gGlobalPrefs->windowPos = i.windowPos;
-        gGlobalPrefs->windowState = WIN_STATE_NORMAL;
+        gSettings->windowPos = i.windowPos;
+        gSettings->windowState = WIN_STATE_NORMAL;
     }
     if (i.inverseSearchCmdLine) {
-        str::ReplaceWithCopy(&gGlobalPrefs->inverseSearchCmdLine, i.inverseSearchCmdLine);
-        gGlobalPrefs->enableTeXEnhancements = true;
+        str::ReplaceWithCopy(&gSettings->inverseSearchCmdLine, i.inverseSearchCmdLine);
+        gSettings->enableTeXEnhancements = true;
     }
     if (i.invertColors) {
         SetDocumentColorsFollowTheme(DocumentColorsFollowTheme::Smart);
@@ -868,36 +971,36 @@ static void UpdateGlobalPrefs(const Flags& i) {
     for (int n = 0; n < len(i.globalPrefArgs); n++) {
         arg = i.globalPrefArgs[n];
         if (str::EqI(arg, StrL("-esc-to-exit"))) {
-            gGlobalPrefs->escToExit = true;
+            gSettings->escToExit = true;
         } else if (str::EqI(arg, StrL("-bgcolor")) || str::EqI(arg, StrL("-bg-color"))) {
             // -bgcolor is for backwards compat (was used pre-1.3)
             // -bg-color is for consistency
             param = i.globalPrefArgs[++n];
-            ReplaceColor(gGlobalPrefs->mainWindowBackground, param);
+            ReplaceColor(gSettings->mainWindowBackground, param);
         } else if (str::EqI(arg, StrL("-set-color-range"))) {
             param = i.globalPrefArgs[++n];
-            ReplaceColor(gGlobalPrefs->fixedPageUI.textColor, param);
+            ReplaceColor(gSettings->fixedPageUI.textColor, param);
             param = i.globalPrefArgs[++n];
-            ReplaceColor(gGlobalPrefs->fixedPageUI.backgroundColor, param);
+            ReplaceColor(gSettings->fixedPageUI.backgroundColor, param);
         } else if (str::EqI(arg, StrL("-fwdsearch-offset"))) {
             param = i.globalPrefArgs[++n];
-            gGlobalPrefs->forwardSearch.highlightOffset = ParseInt(param);
-            gGlobalPrefs->enableTeXEnhancements = true;
+            gSettings->forwardSearch.highlightOffset = ParseInt(param);
+            gSettings->enableTeXEnhancements = true;
         } else if (str::EqI(arg, StrL("-fwdsearch-width"))) {
             param = i.globalPrefArgs[++n];
-            gGlobalPrefs->forwardSearch.highlightWidth = ParseInt(param);
-            gGlobalPrefs->enableTeXEnhancements = true;
+            gSettings->forwardSearch.highlightWidth = ParseInt(param);
+            gSettings->enableTeXEnhancements = true;
         } else if (str::EqI(arg, StrL("-fwdsearch-color"))) {
             param = i.globalPrefArgs[++n];
-            ReplaceColor(gGlobalPrefs->forwardSearch.highlightColor, param);
-            gGlobalPrefs->enableTeXEnhancements = true;
+            ReplaceColor(gSettings->forwardSearch.highlightColor, param);
+            gSettings->enableTeXEnhancements = true;
         } else if (str::EqI(arg, StrL("-fwdsearch-permanent"))) {
             param = i.globalPrefArgs[++n];
-            gGlobalPrefs->forwardSearch.highlightPermanent = ParseInt(param);
-            gGlobalPrefs->enableTeXEnhancements = true;
+            gSettings->forwardSearch.highlightPermanent = ParseInt(param);
+            gSettings->enableTeXEnhancements = true;
         } else if (str::EqI(arg, StrL("-manga-mode"))) {
             param = i.globalPrefArgs[++n];
-            gGlobalPrefs->comicBookUI.cbxMangaMode = str::EqI("true", param) || str::Eq("1", param);
+            gSettings->comicBookUI.cbxMangaMode = str::EqI(StrL("true"), param) || str::Eq(StrL("1"), param);
         }
     }
 }
@@ -1019,31 +1122,31 @@ static bool IsLibsumatrapdfAvRaceError(DWORD err) {
 // 8c09d3b87000001 with err=4551 ("An Application Control policy has blocked this file.").
 // Older SDKs / MinGW lack these Smart App Control / System Integrity error codes.
 #ifndef ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION
-#define ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION 4551L
+constexpr DWORD ERROR_SYSTEM_INTEGRITY_POLICY_VIOLATION = 4551L;
 #endif
 #ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_MALICIOUS
-#define ERROR_SYSTEM_INTEGRITY_REPUTATION_MALICIOUS 4556L
+constexpr DWORD ERROR_SYSTEM_INTEGRITY_REPUTATION_MALICIOUS = 4556L;
 #endif
 #ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_PUA
-#define ERROR_SYSTEM_INTEGRITY_REPUTATION_PUA 4557L
+constexpr DWORD ERROR_SYSTEM_INTEGRITY_REPUTATION_PUA = 4557L;
 #endif
 #ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_DANGEROUS_EXT
-#define ERROR_SYSTEM_INTEGRITY_REPUTATION_DANGEROUS_EXT 4558L
+constexpr DWORD ERROR_SYSTEM_INTEGRITY_REPUTATION_DANGEROUS_EXT = 4558L;
 #endif
 #ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_OFFLINE
-#define ERROR_SYSTEM_INTEGRITY_REPUTATION_OFFLINE 4559L
+constexpr DWORD ERROR_SYSTEM_INTEGRITY_REPUTATION_OFFLINE = 4559L;
 #endif
 #ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_UNFRIENDLY_FILE
-#define ERROR_SYSTEM_INTEGRITY_REPUTATION_UNFRIENDLY_FILE 4580L
+constexpr DWORD ERROR_SYSTEM_INTEGRITY_REPUTATION_UNFRIENDLY_FILE = 4580L;
 #endif
 #ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_UNATTAINABLE
-#define ERROR_SYSTEM_INTEGRITY_REPUTATION_UNATTAINABLE 4581L
+constexpr DWORD ERROR_SYSTEM_INTEGRITY_REPUTATION_UNATTAINABLE = 4581L;
 #endif
 #ifndef ERROR_SYSTEM_INTEGRITY_REPUTATION_EXPLICIT_DENY_FILE
-#define ERROR_SYSTEM_INTEGRITY_REPUTATION_EXPLICIT_DENY_FILE 4582L
+constexpr DWORD ERROR_SYSTEM_INTEGRITY_REPUTATION_EXPLICIT_DENY_FILE = 4582L;
 #endif
 #ifndef ERROR_SYSTEM_INTEGRITY_WHQL_NOT_SATISFIED
-#define ERROR_SYSTEM_INTEGRITY_WHQL_NOT_SATISFIED 4583L
+constexpr DWORD ERROR_SYSTEM_INTEGRITY_WHQL_NOT_SATISFIED = 4583L;
 #endif
 static bool IsLibsumatrapdfAppControlError(DWORD err) {
     switch (err) {
@@ -1173,7 +1276,7 @@ static bool LoadLibsumatrapdfFromFileRobust(Str path, i64 expectedSize, bool jus
 // Extract embedded libsumatrapdf.dll into dir (if size mismatches), then load with
 // retry / LoadLibraryExW. Used for single-exe portable layout.
 static bool ExtractAndLoadLibsumatrapdfRobust(Str dir, bool extract) {
-    if (!dir) {
+    if (len(dir) == 0) {
         return false;
     }
     i64 expectedSize = GetEmbeddedLibsumatrapdfSize();
@@ -1212,7 +1315,7 @@ static void LogLibsumatrapdfLoadFailureDiagnostics(Str selfDir, Str buildDir, i6
     logf("LoadLibsumatrapdf FAILED: gLibsumatrapdfDll=%p\n", (void*)gLibsumatrapdfDll);
 
     auto logDllCandidate = [](Str dir, Str label) {
-        if (!dir) {
+        if (len(dir) == 0) {
             logf("LoadLibsumatrapdf FAILED: %s dir is null\n", label);
             return;
         }
@@ -1283,7 +1386,7 @@ static bool LoadLibsumatrapdf(bool showErrorDialog) {
 
     // Upload a debug report (pre-release) without requiring symbols. captureCallstack
     // is false so we skip symbol download; the log (paths/sizes/errors) is the payload.
-    _uploadDebugReport(StrL("LoadLibsumatrapdf failed"), FILE_LINE, false, false);
+    _uploadDebugReport(StrL("LoadLibsumatrapdf failed"), StrL(FILE_LINE), false, false);
 
     if (!showErrorDialog) {
         // e.g. -print-to ... -silent invoked by another program:
@@ -1386,13 +1489,13 @@ static bool ForceRunningAsInstaller() {
         return false;
     }
 
-    Str corruptedInstallationConsole = R"(
+    Str corruptedInstallationConsole = StrL(R"(
 Looks like corrupted installation of SumatraPDF.
 
 Learn more at https://www.sumatrapdfreader.org/docs/Corrupted-installation
-)";
-    Str corruptedInstallation = R"(Looks like corrupted installation of SumatraPDF.
-)";
+)");
+    Str corruptedInstallation = StrL(R"(Looks like corrupted installation of SumatraPDF.
+)");
     bool ok = RedirectIOToExistingConsole();
     if (ok) {
         // if we're launched from console, print help to consle window
@@ -1445,7 +1548,7 @@ static Str kInstallerHelpTmpl() {
 
 static void ShowInstallerHelp() {
     // Note: translation services aren't initialized at this point, so English only
-    TempStr msg = str::ReplaceTemp(kInstallerHelpTmpl(), StrL("${appName}"), kAppName);
+    TempStr msg = str::ReplaceTemp(kInstallerHelpTmpl(), StrL("${appName}"), StrL(kAppName));
 
     bool ok = RedirectIOToExistingConsole();
     if (ok) {
@@ -1484,7 +1587,7 @@ extern int RunUninstaller();
 // In release builds, we want to do fast exit and leave cleaning up (freeing memory) to the os.
 // In debug and in release asan builds, we want to cleanup ourselves in order to see leaks.
 // Note: detect_leaks ASAN flag is not (yet?) supported with msvc 16.4
-#if defined(DEBUG) || defined(ASAN_BUILD)
+#if IS_DEBUG || IS_ASAN
 static bool fastExit = false;
 #else
 static bool fastExit = true;
@@ -1501,16 +1604,16 @@ static void supressThrowFromNew() {
 }
 
 static void ShowNotValidInstallerError() {
-    MsgBox(nullptr, _TRA("Not a valid installer"), _TRA("Error"), MB_OK | MB_ICONERROR);
+    MsgBox(nullptr, Tr("Not a valid installer"), Tr("Error"), MB_OK | MB_ICONERROR);
 }
 
 // delete locally cached copies of cbx files that haven't been opened in a
-// while. We cache network-drive cbx archives under <data>/cbx-cache/ to
-// avoid slow re-reads; they're pure cache so evicting cold entries is
-// safe.
+// while. Network-drive cbx archives over 32 MB are copied under
+// <data>/cbx-cache/ to avoid slow re-reads; they're pure cache so evicting
+// cold entries is safe.
 static void DeleteStaleCbxCacheFiles() {
     TempStr dataDir = GetSumatraDataDirTemp();
-    if (!dataDir) {
+    if (len(dataDir) == 0) {
         return;
     }
     TempStr cacheDir = path::JoinTemp(dataDir, StrL("cbx-cache"));
@@ -1615,7 +1718,7 @@ static int CmpPreviewLogNewestFirst(const PreviewLogFile* a, const PreviewLogFil
 }
 static void DeleteOldPdfPreviewLogs(int keep) {
     TempStr dir = GetPdfPreviewLogDirTemp();
-    if (!dir || !dir::Exists(dir)) {
+    if (len(dir) == 0 || !dir::Exists(dir)) {
         return;
     }
     Vec<PreviewLogFile> files;
@@ -1623,11 +1726,11 @@ static void DeleteOldPdfPreviewLogs(int keep) {
     di.includeFiles = true;
     di.includeDirs = false;
     for (DirIterEntry* de : di) {
-        if (!str::StartsWith(de->name, kPdfPreviewLogPrefix)) {
+        if (!str::StartsWith(de->name, Str(kPdfPreviewLogPrefix))) {
             continue;
         }
         PreviewLogFile lf{str::Dup(de->filePath), de->modificationTime};
-        files.Append(lf);
+        VecAppend(files, lf);
     }
     int n = len(files);
     if (n > keep) {
@@ -1642,15 +1745,95 @@ static void DeleteOldPdfPreviewLogs(int keep) {
     }
 }
 
+// Copies of OneNote/Outlook extracts. Delete leftovers from a crash; live
+// tabs delete their own copy when the tab closes.
+static void DeleteStaleOpenCacheFiles() {
+    TempStr dataDir = GetSumatraDataDirTemp();
+    if (len(dataDir) == 0) {
+        return;
+    }
+    TempStr cacheDir = path::JoinTemp(dataDir, StrL("open-cache"));
+    if (path::GetType(cacheDir) != path::Type::Dir) {
+        return;
+    }
+
+    constexpr i64 kMaxAgeSec = 24LL * 60 * 60;
+    FILETIME nowFt;
+    GetSystemTimeAsFileTime(&nowFt);
+    ULARGE_INTEGER now;
+    now.LowPart = nowFt.dwLowDateTime;
+    now.HighPart = nowFt.dwHighDateTime;
+
+    DirIter di{cacheDir};
+    di.includeFiles = true;
+    di.includeDirs = false;
+    for (DirIterEntry* de : di) {
+        FILETIME atime = de->accessTime;
+        ULARGE_INTEGER a;
+        a.LowPart = atime.dwLowDateTime;
+        a.HighPart = atime.dwHighDateTime;
+        i64 ageSec = (i64)((now.QuadPart - a.QuadPart) / 10000000ULL);
+        if (ageSec < kMaxAgeSec) {
+            continue;
+        }
+        bool ok = file::Delete(de->filePath);
+        logf("DeleteStaleOpenCacheFiles: delete '%s' (age %lld h) -> %d\n", de->filePath, (long long)(ageSec / 3600),
+             (int)ok);
+    }
+}
+
 static void DeleteStaleFilesAsync() {
     DeleteStaleCbxCacheFiles();
+    DeleteStaleOpenCacheFiles();
     DeleteOldPdfPreviewLogs(32);
+
+    // WebView2 can keep its browser process alive for several seconds after
+    // SumatraPDF exits. Each process therefore gets its own profile directory;
+    // remove profiles whose owning process no longer exists. If WebView2 still
+    // has a file open, this harmlessly fails and a later startup retries.
+    TempStr currentWebViewDir = GetWebViewDataDirTemp();
+    TempStr webViewRoot = path::GetDirTemp(currentWebViewDir);
+    if (webViewRoot) {
+        DirIter webViews{webViewRoot};
+        webViews.includeFiles = false;
+        webViews.includeDirs = true;
+        for (DirIterEntry* de : webViews) {
+            Str pidText = de->name;
+            if (!str::TrimPrefix(pidText, StrL("webview-")) || len(pidText) == 0) {
+                continue;
+            }
+            bool isPid = true;
+            for (int i = 0; i < len(pidText); i++) {
+                if (!str::IsDigit(pidText.s[i])) {
+                    isPid = false;
+                    break;
+                }
+            }
+            if (!isPid) {
+                continue;
+            }
+            int pid = ParseInt(pidText);
+            if (pid <= 0) {
+                continue;
+            }
+            AutoCloseHandle process = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+            if (process.IsValid()) {
+                if (WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
+                    continue;
+                }
+            } else if (GetLastError() != ERROR_INVALID_PARAMETER) {
+                continue;
+            }
+            bool ok = dir::RemoveAll(de->filePath);
+            logf("DeleteStaleFilesAsync: remove WebView profile '%s' -> %d\n", de->filePath, (int)ok);
+        }
+    }
 
     if (!(gIsPreReleaseBuild || gIsDebugBuild)) {
         return;
     }
     TempStr dataDir = GetSumatraDataDirTemp();
-    if (!dataDir) {
+    if (len(dataDir) == 0) {
         return;
     }
     logf("DeleteStaleFilesAsync: dataDir: '%s'\n", dataDir);
@@ -1713,7 +1896,7 @@ static int WineDpiFromEnv() {
     int bestDpi = 0;
     for (Str var : scaleVars) {
         Str val = Str(getenv(var.s));
-        if (!val) {
+        if (len(val) == 0) {
             continue;
         }
         float scale = (float)atof(val.s);
@@ -1753,40 +1936,6 @@ static void LogWineDpiInfo() {
         GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
 }
 
-#if 0
-static void LogDpiAwareness() {
-    if (!DynGetThreadDpiAwarenessContext) {
-        return;
-    }
-    auto awc = DynGetThreadDpiAwarenessContext();
-    auto aw = DynGetAwarenessFromDpiAwarenessContext(awc);
-
-    char* aws = "unknown";
-    if (aw == DPI_AWARENESS_INVALID) {
-        aws = "DPI_AWARENESS_INVALID";
-    } else if (aw == DPI_AWARENESS_UNAWARE) {
-        aws = "DPI_AWARENESS_UNAWARE";
-    } else if (aw == DPI_AWARENESS_SYSTEM_AWARE) {
-        aws = "DPI_AWARENESS_SYSTEM_AWARE";
-    } else if (aw == DPI_AWARENESS_PER_MONITOR_AWARE) {
-        aws = "DPI_AWARENESS_PER_MONITOR_AWARE";
-    }
-
-    logf("aw: %d %s\n", (int)aw, aws);
-}
-#endif
-
-#if 0
-static void testLogf() {
-    TempStr fileName = path::GetBaseNameTemp(__FILE__);
-    WCHAR* gswin32c = L"this is a path";
-    WCHAR* tmpFile = L"c:\foo\bar.txt";
-    auto gswin = ToUtf8Temp(gswin32c);
-    auto tmpFileName = ToUtf8Temp(path::GetBaseNameTemp(tmpFile));
-    logf("- %s:%d: using '%s' for creating '%%TEMP%%\\%s'\n", fileName, __LINE__, gswin.Get(), tmpFileName.Get());
-}
-#endif
-
 // in mupdf_load_system_font.c
 extern "C" void destroy_system_font_list();
 extern void DeleteManualBrowserWindow();
@@ -1824,7 +1973,7 @@ int fz_redirect_io_to_existing_console();
 #define FZ_ENABLE_JS 1
 #define FZ_ENABLE_PDF 1
 #define FZ_ENABLE_BARCODE 0
-#define FZ_VERSION "1.27.2"
+#define FZ_VERSION "1.28.2"
 
 using MutoolFunc = int (*)(int argc, char* argv[]);
 
@@ -1986,8 +2135,8 @@ static int MaybeDelegateToToolExe() {
     if (!HasEmbeddedLibsumatrapdf()) {
         return kNoMutool;
     }
-    TempStr toolExe = GetPathInExeDirTemp("sumatrapdf-tool.exe");
-    TempStr libsumatrapdf = GetPathInExeDirTemp("libsumatrapdf.dll");
+    TempStr toolExe = GetPathInExeDirTemp(StrL("sumatrapdf-tool.exe"));
+    TempStr libsumatrapdf = GetPathInExeDirTemp(StrL("libsumatrapdf.dll"));
     if (!file::Exists(toolExe) || !file::Exists(libsumatrapdf)) {
         return kNoMutool;
     }
@@ -2046,7 +2195,7 @@ static int MaybeRunMutool() {
     WCHAR** wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!wargv) {
         // Very rare – allocation failure or severely malformed command line
-        log("CommandLineToArgvW() failed\n");
+        log(StrL("CommandLineToArgvW() failed\n"));
         LogLastError();
         return kNoMutool;
     }
@@ -2070,13 +2219,13 @@ static int MaybeRunMutool() {
             // Emit the message via raw WriteFile (CRT fwrite is what's broken
             // here) to the inherited stderr handle so it survives the bad pipe.
             if (WasLaunchedByPowershellWithPipeRedirect()) {
-                static Str msg = R"(SumatraPDF: command-line tools don't work when their output is redirected by
+                static Str msg = StrL(R"(SumatraPDF: command-line tools don't work when their output is redirected by
 PowerShell (e.g. `SumatraPDF.exe info file.pdf > out.txt` or `... | more`).
 PowerShell pipes a GUI app's output through a pipe that drops the data.
 
 Run the command from cmd.exe instead, e.g.:
     cmd /c "SumatraPDF.exe info file.pdf > out.txt"
-)";
+)");
                 HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
                 if (hErr && hErr != INVALID_HANDLE_VALUE) {
                     DWORD written = 0;
@@ -2158,7 +2307,7 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     LogCommandLine();
 
     if (gIsAsanBuild) {
-        TempStr asanOpts = GetEnvVariableTemp("ASAN_OPTIONS");
+        TempStr asanOpts = GetEnvVariableTemp(StrL("ASAN_OPTIONS"));
         logf("ASAN_OPTIONS: '%s'\n", asanOpts ? asanOpts : StrL("<not set>"));
     }
 
@@ -2181,7 +2330,7 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
         return ret;
     }
 
-    ParseFlags(GetPermArena(), GetCommandLineW(), flags, gToolNames);
+    ParseFlags(GetPermArena(), GetCommandLineW(), flags, Str(gToolNames));
     gCli = &flags;
     gForTesting = flags.forTesting;
     InstallSumatraCrashHandler(flags.forTesting || flags.controlPipeName);
@@ -2236,25 +2385,9 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     // (default policy is to disallow everything)
     InitializePolicies(flags.restrictedUse);
 
-#if defined(DEBUG)
-    if (false) {
-        Str dir = "C:\\Users\\kjk\\Downloads";
-        auto di = DirIter{dir};
-        di.recurse = true;
-        for (DirIterEntry* d : di) {
-            logf("d->filePath: '%s'\n", d->filePath);
-        }
-    }
-    if (false) {
-        TempStr exePath = GetSelfExePathTemp();
-        RunNonElevated(exePath);
-        return 0;
-    }
-#endif
-
     // in debug build, default
     if (gIsDebugBuild) {
-        if (!flags.logFile) {
+        if (len(flags.logFile) == 0) {
             // from the perm arena like all other flag strings (~Flags frees nothing)
             TempStr dir = GetPathInExeDirTemp(StrL("sumlog.txt"));
             flags.logFile = str::Dup(GetPermArena(), dir);
@@ -2281,7 +2414,7 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
         // gRedrawLog = true;
     }
 
-#if defined(DEBUG)
+#if IS_DEBUG
     if (gIsDebugBuild || gIsPreReleaseBuild) {
         if (flags.tester) {
             extern int TesterMain(); // in Tester.cpp
@@ -2372,7 +2505,7 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
         ::ExitProcess(exitCode);
     }
 
-#if defined(DEBUG)
+#if IS_DEBUG
     if (flags.unitTests) {
         CreateSumatraAcceleratorTable();
         exitCode = RunAppUnitTests();
@@ -2395,15 +2528,23 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     // so poster’s own -x never sets justExtractFiles; MaybeRunMutool still runs
     // for tools after we load the DLL below.
     if (flags.justExtractFiles) {
-        RedirectIOToExistingConsole();
+        bool attached = RedirectIOToExistingConsole();
+        auto printExtractErr = [attached](Str msg) {
+            logf("%s\n", msg);
+            if (attached) {
+                fprintf(stderr, "%s\n", CStrTemp(msg));
+                fflush(stderr);
+            }
+        };
         if (!HasEmbeddedLibsumatrapdf()) {
-            log("this is not a SumatraPDF installer, -x option not available\n");
+            printExtractErr(StrL("this is not a SumatraPDF installer, -x option not available"));
             HandleRedirectedConsoleOnShutdown();
             return 1;
         }
         exitCode = 0;
         if (!ExtractInstallerFiles(gCli->installDir)) {
-            log("failed to extract files");
+            Str err = gFirstError ? gFirstError : StrL("failed to extract files");
+            printExtractErr(err);
             LogLastError();
             exitCode = 1;
         }
@@ -2419,7 +2560,7 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
         ::ExitProcess(1);
     }
 
-#if defined(DEBUG)
+#if IS_DEBUG
     if (flags.testExtractPage) {
         TestExtractPage(flags);
         ShutdownCommon();
@@ -2443,7 +2584,7 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
         SetAppDataDir(flags.appdataDir);
     }
 
-#if defined(DEBUG)
+#if IS_DEBUG
     if (flags.testApp) {
         // in TestApp.cpp
         extern void TestApp();
@@ -2474,6 +2615,7 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
 
     DetectExternalViewers();
     ReRegisterFileAssociations();
+    LogNonDefaultRegisteredExtensions();
 
     gRenderCache = new RenderCache();
 
@@ -2481,11 +2623,11 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     DarkModeInit();
 
     LoadSettings();
-    UpdateGlobalPrefs(flags);
+    UpdateSettings(flags);
     if (gMyWindowWasEmbedded) {
-        str::ReplaceWithCopy(&gGlobalPrefs->scrollbars, "windows");
+        str::ReplaceWithCopy(&gSettings->scrollbars, StrL("windows"));
     }
-    SetCurrentLang(flags.lang ? flags.lang : gGlobalPrefs->uiLanguage);
+    SetCurrentLang(flags.lang ? flags.lang : gSettings->uiLanguage);
     if (flags.showPrintersDialog) {
         // -console / -silent: list to stdout only, no dialog window (#5810)
         ShowPrintersDialog(flags.silent || flags.showConsole);
@@ -2514,7 +2656,7 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     gCrashOnOpen = flags.crashOnOpen;
 
     gRenderCache->textColor = ThemePageRenderColors(gRenderCache->backgroundColor);
-    // logfa("retrieved doc colors in WinMain: 0x%x 0x%x\n", gRenderCache->textColor, gRenderCache->backgroundColor);
+    // logf("retrieved doc colors in WinMain: 0x%x 0x%x\n", gRenderCache->textColor, gRenderCache->backgroundColor);
 
     gIsStartup = true;
     if (!RegisterWinClass()) {
@@ -2528,7 +2670,8 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     if (flags.hwndPluginParent) {
         // check early to avoid a crash in MakePluginWindow()
         if (!IsWindow(flags.hwndPluginParent)) {
-            MsgBox(nullptr, "-plugin argument is not a valid window handle (hwnd)", "Error", MB_OK | MB_ICONERROR);
+            MsgBox(nullptr, StrL("-plugin argument is not a valid window handle (hwnd)"), StrL("Error"),
+                   MB_OK | MB_ICONERROR);
             goto Exit;
         }
     }
@@ -2568,14 +2711,31 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
         goto Exit;
     }
 
+    if (flags.quickLookAgent) {
+        RunExplorerQuickLookAgentLoop();
+        goto Exit;
+    }
+
     // only call FindExistingSumatraProcessHwnd() once
     existingInstanceHwnd = FindExistingSumatraProcessHwnd(&hMutex, &openInNewWindow);
+
+    if (flags.quickLook && existingInstanceHwnd && !gForTesting) {
+        bool ok = false;
+        for (Str path : flags.fileNames) {
+            if (SendExplorerQuickLookToExisting(existingInstanceHwnd, path)) {
+                ok = true;
+            }
+        }
+        if (ok || len(flags.fileNames) == 0) {
+            goto Exit;
+        }
+    }
 
     if (flags.printDialog || flags.stressTestPath || gPluginMode || gForTesting) {
         // TODO: pass print request through to previous instance?
     } else if (flags.reuseDdeInstance || flags.dde) {
-        existingHwnd = FindWindowW(FRAME_CLASS_NAME, nullptr);
-    } else if (gGlobalPrefs->reuseInstance) {
+        existingHwnd = FindWindowW(kFrameClassName, nullptr);
+    } else if (gSettings->reuseInstance) {
         existingHwnd = existingInstanceHwnd;
     }
 
@@ -2591,17 +2751,18 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
         // open the first file in a new window so it lands on the current desktop
         // (#5630). Subsequent files then open into that (now current) window.
         bool reuseInNewWindow = openInNewWindow && (existingHwnd == existingInstanceHwnd);
-        // -new-window with several files: only the first forces a new window;
-        // the rest open as tabs in that window (issue #5044). Previously every
-        // file got its own window.
-        bool userNewWindow = flags.inNewWindow;
-        bool canBatchOpen = nFiles > 1 && existingHwnd && !flags.reuseDdeInstance && IsSimpleOpenCase(flags, true);
+        // -new-window: each file in its own window. -new-window-tabs: one new
+        // window, remaining files as tabs in that window (issue #5044).
+        bool userNewWindowEach = flags.inNewWindow && !flags.inNewWindowTabs;
+        bool userNewWindowTabs = flags.inNewWindowTabs;
+        bool canBatchOpen = nFiles > 1 && existingHwnd && !flags.reuseDdeInstance && IsSimpleOpenCase(flags, true) &&
+                            !userNewWindowEach;
         if (canBatchOpen) {
             StrVec paths;
             for (Str path : flags.fileNames) {
                 paths.Append(path::NormalizeTemp(path));
             }
-            u32 newWindow = (reuseInNewWindow || userNewWindow) ? 2 : 0;
+            u32 newWindow = (reuseInNewWindow || userNewWindowTabs) ? 2 : 0;
             if (SendOpenFilesToExistingInstance(existingHwnd, paths, newWindow)) {
                 goto Exit;
             }
@@ -2612,8 +2773,10 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
             bool savedInNewWindow = flags.inNewWindow;
             if (reuseInNewWindow && n == 0) {
                 flags.inNewWindow = true;
-            } else if (userNewWindow) {
+            } else if (userNewWindowTabs) {
                 flags.inNewWindow = (n == 0);
+            } else if (userNewWindowEach) {
+                flags.inNewWindow = true;
             }
             OpenUsingDDE(existingHwnd, path, flags, isFirstWindow);
             flags.inNewWindow = savedInNewWindow;
@@ -2622,12 +2785,12 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
             // https://github.com/sumatrapdfreader/sumatrapdf/issues/2306
             // if -new-window cmd-line flag given, create a new window
             // even if there are no files to open
-            if (flags.inNewWindow) {
+            if (flags.inNewWindow || flags.inNewWindowTabs) {
                 goto ContinueOpenWindow;
             } else {
                 // https://github.com/sumatrapdfreader/sumatrapdf/issues/3386
                 // e.g. when shift-click in taskbar, open a new window
-                SendMyselfDDE("[NewWindow]", existingHwnd);
+                SendMyselfDDE(StrL("[NewWindow]"), existingHwnd);
                 goto Exit;
             }
         }
@@ -2638,10 +2801,11 @@ ContinueOpenWindow:
     // keep this data alive until the end of program and ensure it's not
     // over-written by re-loading settings file while we're using it
     // and also to keep TabState forever for lazy loading of tabs
-    gInitialSessionData = gGlobalPrefs->sessionData;
-    gGlobalPrefs->sessionData = new Vec<SessionData*>();
+    gInitialSessionData = gSettings->sessionData;
+    gSettings->sessionData = new Vec<SessionData*>();
 
-    restoreSession = SettingsRestoreSession() && (len(*gInitialSessionData) > 0) && !NeedsWindowEmbeddingHacks();
+    restoreSession =
+        SettingsRestoreSession() && (len(*gInitialSessionData) > 0) && !NeedsWindowEmbeddingHacks() && !flags.quickLook;
     if (!SettingsUseTabs() && (existingInstanceHwnd != nullptr)) {
         // do not restore a session if tabs are disabled and SumatraPDF is already running
         // TODO: maybe disable restoring if tabs are disabled?
@@ -2650,7 +2814,7 @@ ContinueOpenWindow:
     }
 
     showStartPage =
-        !restoreSession && len(flags.fileNames) == 0 && SettingsRememberOpenedFiles() && gGlobalPrefs->showStartPage;
+        !restoreSession && len(flags.fileNames) == 0 && SettingsRememberOpenedFiles() && gSettings->showStartPage;
 
     // ShGetFileInfoW triggers ASAN deep in Windows code so probably not my fault
     if (showStartPage) {
@@ -2669,7 +2833,7 @@ ContinueOpenWindow:
                     logf("WinMain: skipping RestoreTabOnStartup() because state->filePath is empty\n");
                     continue;
                 }
-                RestoreTabOnStartup(win, state, gGlobalPrefs->lazyLoading);
+                RestoreTabOnStartup(win, state, gSettings->lazyLoading);
             }
             // TabIndex is 1-based among document tabs (home tab is not in TabStates).
             // Also accept legacy sessions that stored a UI index including home.
@@ -2703,7 +2867,7 @@ ContinueOpenWindow:
                 }
                 TabsSelect(win, selectIdx);
             }
-            if (gGlobalPrefs->lazyLoading) {
+            if (gSettings->lazyLoading) {
                 // trigger loading of the document
                 ReloadDocument(win, false);
             }
@@ -2795,6 +2959,11 @@ ContinueOpenWindow:
             goto Exit;
         }
     }
+    if (flags.quickLook && win) {
+        win->isQuickLook = true;
+        ApplyExplorerQuickLookChrome(win);
+    }
+
     if (len(flags.fileNames) == 0) {
         FlagsEnterFullscreen(flags, win);
     }
@@ -2835,7 +3004,7 @@ ContinueOpenWindow:
 
     {
         auto fn = MkFunc0Void(DeleteStaleFilesAsync);
-        RunAsync(fn, "DeleteStaleFilesAsync");
+        RunAsync(fn, StrL("DeleteStaleFilesAsync"));
     }
 
     // needed if RememberOpenedFiles = false
@@ -2881,23 +3050,33 @@ Exit:
         if (gIsDebugBuild) {
             // in debug builds wait for the threads instead of fast-exiting so
             // that full cleanup runs and leak trackers only report real leaks.
-            // Safe: windows are deleted below, so the threads' MainWindow*
-            // stay valid while we wait; their queued finish tasks are drained
-            // (and orphaned controllers freed) later in uitask::Destroy()
-            log("waiting for dangerous threads to finish instead of fast exit\n");
+            // Heading-TOC / annot-load workers decrement the counter from a
+            // uitask. After the message loop has exited those tasks never run
+            // unless we drain here, so a Sleep-only wait never ends.
+            log(StrL("waiting for dangerous threads to finish instead of fast exit\n"));
+            TimeStamp waitStart = TimeGet();
             while (AreDangerousThreadsPending()) {
-                ::Sleep(100);
+                uitask::DrainQueue();
+                if (TimeSinceInMs(waitStart) > 10000) {
+                    log(StrL("timed out waiting for dangerous threads\n"));
+                    break;
+                }
+                ::Sleep(50);
             }
         } else {
             fastExit = true;
         }
     }
+    // Deferred ScheduleSaveSettings posts may still be in the queue, and a
+    // fast ExitProcess never drains it. Flush while windows (and FileHistory)
+    // are still alive. No-op if OnMenuExit already saved (gDontSaveSettings).
+    FlushScheduledSaveSettings();
     if (fastExit) {
         // leave all the remaining clean-up to the OS
         // (as recommended for a quick exit)
         // note: this intentionally skips freeing engines/windows, so leak
         // trackers will report everything still allocated
-        log("fast exit: skipping cleanup, leak reports are expected\n");
+        log(StrL("fast exit: skipping cleanup, leak reports are expected\n"));
         ::ExitProcess(exitCode);
     }
 
@@ -2910,9 +3089,16 @@ Exit:
     while (len(gWindows) > 0) {
         DeleteMainWindow(gWindows[0]);
     }
+    WebViewShutdown();
+    TempStr webViewDataDir = GetWebViewDataDirTemp();
+    if (dir::Exists(webViewDataDir)) {
+        bool removed = dir::RemoveAll(webViewDataDir);
+        logf("WebView shutdown: remove profile '%s' -> %d\n", webViewDataDir, (int)removed);
+    }
 
     DeleteCachedCursors();
     DeleteLaserPointerCursor();
+    DeleteAnnotationPlacementCursors();
     DeleteCreatedFonts();
     DeleteBitmap(gBitmapReloadingCue);
     // all frame/canvas windows are destroyed by now
@@ -2948,11 +3134,13 @@ Exit:
     dbghelp::FreeCallstackLogs();
 
     // must be after uitask::Destroy() because we might have queued ReloadSettings()
-    // which crashes if gGlobalPrefs is freed
+    // which crashes if gSettings is freed
     FileHistorySetStates(nullptr);
     CleanUpSettings();
 
     FreeAllMenuDrawInfos();
+    FreeAnnotationClipboard();
+    ShutdownWin11Printing();
 
     ShutdownCleanup();
     EngineEbookCleanup();

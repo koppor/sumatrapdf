@@ -51,7 +51,6 @@ const char* gInstalledFiles[] = {
     // files no longer shipped, to be deleted
     "libmupdf.dll", // renamed to libsumatrapdf.dll in 3.7
     "DroidSansFallback.ttf",
-    "npPdfViewer.dll",
     "uninstall.exe",
     "UnRar.dll",
     "UnRar64.dll",
@@ -64,15 +63,15 @@ const char* gInstalledFiles[] = {
 
 static Str GetEnvRegKey(bool allUsers) {
     if (allUsers) {
-        return R"(SYSTEM\CurrentControlSet\Control\Session Manager\Environment)";
+        return StrL(R"(SYSTEM\CurrentControlSet\Control\Session Manager\Environment)");
     }
-    return "Environment";
+    return StrL("Environment");
 }
 
 static void RemoveInstallDirFromPath(bool allUsers, Str installDir) {
     HKEY root = allUsers ? HKEY_LOCAL_MACHINE : HKEY_CURRENT_USER;
     Str keyName = GetEnvRegKey(allUsers);
-    TempStr currPath = ReadRegStrTemp(root, keyName, "Path");
+    TempStr currPath = ReadRegStrTemp(root, keyName, StrL("Path"));
     if (len(currPath) == 0) {
         return;
     }
@@ -83,14 +82,14 @@ static void RemoveInstallDirFromPath(bool allUsers, Str installDir) {
 
     str::Builder newPath;
     StrVec parts;
-    Split(&parts, currPath, ";");
+    Split(&parts, currPath, StrL(";"));
     for (Str entry : parts) {
         // skip empty entries and the one matching installDir (case-insensitive)
-        if (!entry || str::EqI(entry, installDir)) {
+        if (len(entry) == 0 || str::EqI(entry, installDir)) {
             continue;
         }
         if (len(newPath) > 0) {
-            newPath.Append(";");
+            newPath.Append(StrL(";"));
         }
         newPath.Append(entry);
     }
@@ -107,8 +106,8 @@ static void RemoveInstalledFiles() {
     // can't use GetExistingInstallationDir() anymore because we
     // delete registry entries
     Str dir = gCli->installDir;
-    if (!dir) {
-        log("RemoveInstalledFiles(): dir is empty\n");
+    if (len(dir) == 0) {
+        log(StrL("RemoveInstalledFiles(): dir is empty\n"));
     }
 #if 0
     for (const char* s : gInstalledFiles) {
@@ -125,11 +124,11 @@ static void RemoveInstalledFiles() {
 
 static TempStr GetInstalledExePathTemp() {
     TempStr dir = gCli->installDir;
-    return path::JoinTemp(dir, kExeName);
+    return path::JoinTemp(dir, Str(kExeName));
 }
 
 static void UninstallerThread() {
-    log("UninstallerThread started\n");
+    log(StrL("UninstallerThread started\n"));
     // also kill the original uninstaller, if it's just spawned
     // a DELETE_ON_CLOSE copy from the temp directory
     TempStr exePath = GetInstalledExePathTemp();
@@ -143,28 +142,29 @@ static void UninstallerThread() {
     ok |= RemoveUninstallerRegistryInfo(HKEY_CURRENT_USER);
 
     if (!ok) {
-        log("RemoveUninstallerRegistryInfo failed\n");
-        NotifyFailed(_TRA("Failed to delete uninstaller registry keys"));
+        log(StrL("RemoveUninstallerRegistryInfo failed\n"));
+        NotifyFailed(Tr("Failed to delete uninstaller registry keys"));
     }
 
     // mark them as uninstalled
     gWasSearchFilterInstalled = false;
     gWasPreviewInstaller = false;
 
-    UninstallBrowserPlugin();
     RemoveInstallRegistryKeys(HKEY_LOCAL_MACHINE);
     RemoveInstallRegistryKeys(HKEY_CURRENT_USER);
     RemoveAppShortcuts();
 
     RemoveInstallDirFromPath(gCli->allUsers, gCli->installDir);
     RemoveInstalledFiles();
+    LoggedDeleteRegValue(HKEY_CURRENT_USER, StrL("Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
+                         StrL("SumatraPDF-QuickLook"));
 
     // always succeed, even for partial uninstallations
     success = true;
 
-    log("UninstallerThread finished\n");
+    log(StrL("UninstallerThread finished\n"));
     if (!gCli->silent) {
-        PostMessageW(gHwndFrame, WM_APP_INSTALLATION_FINISHED, 0, 0);
+        PostMessageW(gHwndFrame, kWmAppInstallationFinished, 0, 0);
     }
 }
 
@@ -175,11 +175,11 @@ static void OnButtonUninstall() {
 
     // disable the button during uninstallation
     gButtonUninstaller->SetIsEnabled(false);
-    SetMsg(_TRA("Uninstallation in progress..."), COLOR_MSG_INSTALLATION);
+    SetMsg(Tr("Uninstallation in progress..."), kColorMsgInstallation);
     HwndRepaintNow(gHwndFrame);
 
     auto fn = MkFunc0Void(UninstallerThread);
-    hThread = StartThread(fn, "UninstallerThread");
+    hThread = StartThread(fn, StrL("UninstallerThread"));
 }
 
 static void OnButtonExit() {
@@ -190,9 +190,9 @@ static void OnUninstallationFinished() {
     auto isRtl = IsUIRtl();
     delete gButtonUninstaller;
     gButtonUninstaller = nullptr;
-    gButtonExit = CreateDefaultButton(gHwndFrame, _TRA("Close"), isRtl);
+    gButtonExit = CreateDefaultButton(gHwndFrame, Tr("Close"), isRtl);
     gButtonExit->onClick = MkFunc0Void(OnButtonExit);
-    SetMsg(_TRA("SumatraPDF has been uninstalled."), gMsgError ? COLOR_MSG_FAILED : COLOR_MSG_OK);
+    SetMsg(Tr("SumatraPDF has been uninstalled."), gMsgError ? kColorMsgFailed : kColorMsgOk);
     gMsgError = gFirstError;
     HwndRepaintNow(gHwndFrame);
 
@@ -211,10 +211,10 @@ static bool UninstallerOnWmCommand(WPARAM wp) {
     return true;
 }
 
-#define kInstallerWindowClassName L"SUMATRA_PDF_INSTALLER_FRAME"
+constexpr const WCHAR* kInstallerWindowClassName = L"SUMATRA_PDF_INSTALLER_FRAME";
 
 static void CreateUninstallerWindow() {
-    TempStr title = fmt(_TRA("SumatraPDF %s Uninstaller").s, StrL(CURR_VERSION_STRA));
+    TempStr title = fmt(Tr("SumatraPDF %s Uninstaller").s, StrL(CURR_VERSION_STRA));
     int x = CW_USEDEFAULT;
     int y = CW_USEDEFAULT;
     int dx = GetInstallerWinDx();
@@ -229,13 +229,13 @@ static void CreateUninstallerWindow() {
     HwndResizeClientSize(gHwndFrame, dx, dy);
 
     auto isRtl = IsUIRtl();
-    gButtonUninstaller = CreateDefaultButton(gHwndFrame, _TRA("Uninstall SumatraPDF"), isRtl);
+    gButtonUninstaller = CreateDefaultButton(gHwndFrame, Tr("Uninstall SumatraPDF"), isRtl);
     gButtonUninstaller->onClick = MkFunc0Void(OnButtonUninstall);
 }
 
 static void ShowUsage() {
     // Note: translation services aren't initialized at this point, so English only
-    TempStr caption = str::JoinTemp(kAppName, StrL(" Uninstaller Usage"));
+    TempStr caption = str::JoinTemp(StrL(kAppName), StrL(" Uninstaller Usage"));
     TempStr msg = fmt(R"(uninstall.exe [/s][/d <path>]
 
 /s	uninstalls %s silently (without user interaction).
@@ -284,7 +284,7 @@ static LRESULT CALLBACK WndProcUninstallerFrame(HWND hwnd, UINT msg, WPARAM wp, 
             break;
         }
 
-        case WM_APP_INSTALLATION_FINISHED: {
+        case kWmAppInstallationFinished: {
             OnUninstallationFinished();
             if (gButtonExit) {
                 HwndSetFocus(gButtonExit->hwnd);
@@ -388,7 +388,7 @@ static TempStr GetUninstallerPathInSystemTemp() {
 // to be able to delete installation directory we must copy
 // ourselves to temp directory and re-launch
 static void RelaunchMaybeElevatedFromTempDirectory(Flags* cli) {
-    log("RelaunchMaybeElevatedFromTempDirectory()\n");
+    log(StrL("RelaunchMaybeElevatedFromTempDirectory()\n"));
     if (gIsDebugBuild) {
         // for easier debugging, debug build doesn't need
         // to be copied / re-launched
@@ -401,13 +401,13 @@ static void RelaunchMaybeElevatedFromTempDirectory(Flags* cli) {
     str::Builder cmdLine;
     cmdLine.Append(StrL("-uninstall"));
     if (cli->silent) {
-        cmdLine.Append(" -silent");
+        cmdLine.Append(StrL(" -silent"));
     }
     if (cli->log) {
-        cmdLine.Append(" -log");
+        cmdLine.Append(StrL(" -log"));
     }
     if (cli->allUsers) {
-        cmdLine.Append(" -all-users");
+        cmdLine.Append(StrL(" -all-users"));
     }
     Str cl = ToStr(cmdLine);
 
@@ -446,7 +446,7 @@ static void RelaunchMaybeElevatedFromTempDirectory(Flags* cli) {
         //  - hold it open denying writers while we launch it
         TempStr sysTempPath = GetUninstallerPathInSystemTemp();
         if (str::IsEmptyOrWhiteSpace(sysTempPath) || str::EqI(sysTempPath, ownPath)) {
-            log("  already running from the system temp dir (or couldn't find it)\n");
+            log(StrL("  already running from the system temp dir (or couldn't find it)\n"));
             return;
         }
         file::Delete(sysTempPath);
@@ -477,7 +477,7 @@ static void RelaunchMaybeElevatedFromTempDirectory(Flags* cli) {
 
     TempStr installerTempPath = GetUninstallerPathInTemp();
     if (str::EqI(installerTempPath, ownPath)) {
-        log("  already running from temp dir\n");
+        log(StrL("  already running from temp dir\n"));
         return;
     }
     logf("  copying installer '%s' to '%s'\n", ownPath, installerTempPath);
@@ -523,11 +523,11 @@ static TempStr GetSystem32PathTemp(Str exeName) {
 // so PATH can't redirect it, and the file goes away seconds after we exit
 // rather than at the next boot. Same code path elevated or not.
 static void InitSelfDelete() {
-    log("InitSelfDelete()\n");
+    log(StrL("InitSelfDelete()\n"));
     TempStr exePath = GetSelfExePathTemp();
     TempStr cmdExe = GetSystem32PathTemp(StrL("cmd.exe"));
     if (str::IsEmptyOrWhiteSpace(cmdExe)) {
-        log("InitSelfDelete(): couldn't find cmd.exe\n");
+        log(StrL("InitSelfDelete(): couldn't find cmd.exe\n"));
         return;
     }
     // ping, not timeout: timeout.exe exits immediately with "Input redirection
@@ -536,7 +536,7 @@ static void InitSelfDelete() {
     // running and failed. 3 pings to loopback is ~2s, enough for us to exit.
     TempStr cmdLine = fmt("\"%s\" /C ping -n 3 127.0.0.1 >nul & del \"%s\"", cmdExe, exePath);
     logf("InitSelfDelete(): '%s'\n", cmdLine);
-    HANDLE h = LaunchProcessInDir(cmdLine, nullptr, CREATE_NO_WINDOW);
+    HANDLE h = LaunchProcessInDir(cmdLine, {}, CREATE_NO_WINDOW);
     if (!h) {
         logf("InitSelfDelete(): failed to launch, scheduling delete for next reboot\n");
         LogLastError();
@@ -547,6 +547,7 @@ static void InitSelfDelete() {
 }
 
 int RunUninstaller() {
+    gLogRegistryCalls = true;
     Str uninstallerLogPath;
     trans::SetCurrentLangByCode(trans::DetectUserLang());
 
@@ -567,25 +568,12 @@ int RunUninstaller() {
     TempStr exePath = GetSelfExePathTemp();
     logf("Running uninstaller '%s' with args '%s' for '%s'\n", exePath, cmdLine, instDir);
 
-    if (false) {
-        Str path = R"(C:\Users\kjk\AppData\Local\Temp\Sumatra-Uninstaller.exe)";
-        Str cl = "-uninstall";
-        logf("LaunchProcessWithCmdLine('%s' '%s')\n", path, cl);
-        HANDLE h = LaunchProcessWithCmdLine(path, cl);
-        if (!h) {
-            logf("LaunchProcessWithCmdLine() failed to launch '%s' '%s'\n", path, cl);
-            LogLastError();
-        } else {
-            logf("LaunchProcessWithCmdLine() launched '%s' '%s' ok!\n", path, cl);
-        }
-    }
-
     int ret = 1;
     auto installerExists = file::Exists(exePath);
     if (!installerExists) {
-        log("Uninstaller executable doesn't exist\n");
-        auto caption = _TRA("Uninstallation failed");
-        auto msg = _TRA("SumatraPDF installation not found.");
+        log(StrL("Uninstaller executable doesn't exist\n"));
+        auto caption = Tr("Uninstallation failed");
+        auto msg = Tr("SumatraPDF installation not found.");
         MsgBox(nullptr, msg, caption, MB_ICONEXCLAMATION | MB_OK);
         goto Exit;
     }
@@ -600,14 +588,14 @@ int RunUninstaller() {
 
     gWasSearchFilterInstalled = IsSearchFilterInstalled();
     if (gWasSearchFilterInstalled) {
-        log("Search filter is installed\n");
+        log(StrL("Search filter is installed\n"));
     }
     gWasPreviewInstaller = IsPreviewInstalled();
     if (gWasPreviewInstaller) {
-        log("Previewer is installed\n");
+        log(StrL("Previewer is installed\n"));
     }
 
-    gDefaultMsg = _TRA("Are you sure you want to uninstall SumatraPDF?");
+    gDefaultMsg = Tr("Are you sure you want to uninstall SumatraPDF?");
 
     // unregister search filter and previewer to reduce
     // possibility of blocking

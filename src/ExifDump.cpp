@@ -7,10 +7,11 @@
 
 #include "Settings.h"
 #include "Flags.h"
+#include "ExifDump.h"
 
 // GUI-subsystem exes lose CRT stdout when spawned with a pipe (issue #5677).
 static void CliWrite(Str s, int n = 0) {
-    if (!s) {
+    if (len(s) == 0) {
         return;
     }
     if (n == 0) {
@@ -33,7 +34,7 @@ static void CliPrint(Str s) {
 // Dump all EXIF metadata for path to stdout (exif-py compatible format).
 // Returns true if any EXIF was found.
 bool DumpExifFile(Str path) {
-    if (!path) {
+    if (len(path) == 0) {
         return false;
     }
     CliPrint(fmt("Opening: %s", path));
@@ -71,6 +72,6 @@ void DumpExif(const Flags& flags) {
         }
     }
     if (!any && len(flags.fileNames) == 0) {
-        CliPrint("No file specified for -dump-exif");
+        CliPrint(StrL("No file specified for -dump-exif"));
     }
 }

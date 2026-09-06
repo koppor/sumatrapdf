@@ -98,7 +98,7 @@ static Graphics* AllocGraphicsForMeasureTextNoLock() {
     }
     GraphicsCacheEntry ce;
     ce.Create();
-    gGraphicsCache->Append(ce);
+    VecAppend(*gGraphicsCache, ce);
     if (len(*gGraphicsCache) < 64) {
         return ce.gfx;
     }
@@ -109,7 +109,7 @@ static Graphics* AllocGraphicsForMeasureTextNoLock() {
         GraphicsCacheEntry e = (*gGraphicsCache)[i];
         if (0 == e.refCount) {
             e.Free();
-            gGraphicsCache->RemoveAt(i);
+            VecRemoveAt(*gGraphicsCache, i);
             return ce.gfx;
         }
     }

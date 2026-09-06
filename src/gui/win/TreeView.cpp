@@ -46,6 +46,10 @@ HWND TreeView::Create(const CreateArgs& args) {
     cargs.style = WS_CHILD | WS_VISIBLE | WS_TABSTOP;
     cargs.style |= TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS;
     cargs.style |= TVS_TRACKSELECT | TVS_NOHSCROLL | TVS_INFOTIP;
+    // nothing handles TVN_BEGINDRAG; without this the control runs a modal
+    // drag-detect loop on every button-down, which never ends for a synthetic
+    // (sent) click that has no button-up behind it
+    cargs.style |= TVS_DISABLEDRAGDROP;
     cargs.exStyle = args.exStyle | TVS_EX_DOUBLEBUFFER;
     cargs.isRtl = args.isRtl;
 
@@ -68,7 +72,6 @@ HWND TreeView::Create(const CreateArgs& args) {
 
     SetToolTipsDelayTime(TTDT_AUTOPOP, 32767);
 
-    // TODO:
     // must be done at the end. Doing  HwndSetWindowStyle() sends bogus (?)
     // TVN_ITEMCHANGED notification. As an alternative we could ignore TVN_ITEMCHANGED
     // if hItem doesn't point to an TreeItem
@@ -80,10 +83,21 @@ Size TreeView::GetIdealSize() {
     return {idealSize.dx, idealSize.dy};
 }
 
+void TreeView::SetBounds(Rect bounds) {
+    int prevDx = lastBounds.dx;
+    ControlBase::SetBounds(bounds);
+    // Width changes (sidebar splitter) need a new paint so ellipsis and
+    // full-row selection match the new clip. Height-only (window resize)
+    // must not: MoveWindow copies the rows and only the new strip paints.
+    if (hwnd && bounds.dx != prevDx) {
+        HwndInvalidate(hwnd, false);
+    }
+}
+
 void TreeView::SetToolTipsDelayTime(int type, int timeInMs) {
     ReportIf(!IsValidDelayType(type));
     ReportIf(timeInMs < 0);
-    ReportIf(timeInMs > 32767); // TODO: or is it 65535?
+    ReportIf(timeInMs > 32767);
     HWND hwndToolTips = GetToolTipsHwnd();
     SendMessageW(hwndToolTips, TTM_SETDELAYTIME, type, (LPARAM)timeInMs);
 }
@@ -94,7 +108,7 @@ HWND TreeView::GetToolTipsHwnd() {
 }
 
 HTREEITEM TreeView::GetHandleByTreeItem(TreeItem item) {
-    return treeModel->GetHandle(item);
+    return (HTREEITEM)treeModel->GetUserData(item);
 }
 
 // the result only valid until the next GetItem call
@@ -253,7 +267,13 @@ bool TreeView::SelectItem(TreeItem ti) {
     if (ti != TreeModel::kNullItem) {
         hi = GetHandleByTreeItem(ti);
     }
+    // TVM_SELECTITEM focuses the tree, which activates the parent frame and
+    // buries other top-level windows (annotations editor, command palette).
+    HWND prev = ::GetFocus();
     BOOL ok = TreeView_SelectItem(hwnd, hi);
+    if (prev && prev != hwnd && ::GetFocus() == hwnd) {
+        ::SetFocus(prev);
+    }
     return ok == TRUE;
 }
 
@@ -409,7 +429,7 @@ static void PopulateTreeItem(TreeView* treeView, TreeItem item, HTREEITEM parent
     for (int i = 0; i < n; i++) {
         auto ti = a[i];
         HTREEITEM h = insertItemFront(treeView, ti, parent);
-        tm->SetHandle(ti, h);
+        tm->SetUserData(ti, (uintptr_t)h);
         // avoid recursing if not needed because we use a lot of stack space
         if (tm->ChildCount(ti) > 0) {
             PopulateTreeItem(treeView, ti, h);
@@ -526,7 +546,7 @@ static void InvalidateTreeItemRow(HWND hwnd, HTREEITEM hItem) {
 void TreeView::OnNotifyReflect(ControlBase::NotifyReflectEvent* rev) {
     TreeView* w = this;
     LPARAM lp = rev->lparam;
-    NMTREEVIEWW* nmtv = (NMTREEVIEWW*)(lp);
+    NMTREEVIEWW* nmtv = (NMTREEVIEWW*)lp;
 
     auto code = nmtv->hdr.code;
     // https://docs.microsoft.com/en-us/windows/win32/controls/tvn-getinfotip
@@ -536,7 +556,7 @@ void TreeView::OnNotifyReflect(ControlBase::NotifyReflectEvent* rev) {
         }
         TreeView::GetTooltipEvent ev;
         ev.treeView = w;
-        ev.info = (NMTVGETINFOTIPW*)(nmtv);
+        ev.info = (NMTVGETINFOTIPW*)nmtv;
         ev.treeItem = GetTreeItemByHandle(ev.info->hItem);
         onGetTooltip.Call(&ev);
         rev->result = 0;
@@ -574,7 +594,7 @@ void TreeView::OnNotifyReflect(ControlBase::NotifyReflectEvent* rev) {
 
     // https://docs.microsoft.com/en-us/windows/win32/controls/tvn-selchanged
     if (code == TVN_SELCHANGED) {
-        // log("tv: TVN_SELCHANGED\n");
+        // log(StrL("tv: TVN_SELCHANGED\n"));
         // only needed when a handler paints beyond the label; without one the
         // control's own invalidation is enough and this would just cost repaints
         if (onCustomDraw.IsValid()) {
@@ -602,7 +622,7 @@ void TreeView::OnNotifyReflect(ControlBase::NotifyReflectEvent* rev) {
 
     // https://docs.microsoft.com/en-us/windows/win32/controls/nm-click-tree-view
     if (code == NM_CLICK || code == NM_DBLCLK) {
-        // log("tv: NM_CLICK\n");
+        // log(StrL("tv: NM_CLICK\n"));
         if (!onClick.IsValid()) {
             return;
         }

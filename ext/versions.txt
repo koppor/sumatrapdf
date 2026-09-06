@@ -1,7 +1,8 @@
 Project         Version    Date
 ----------------------------------
-mupdf           1.28.0-rc2
-  https://github.com/ArtifexSoftware/mupdf/releases/tag/1.28.0-rc2
+mupdf           1.28.2     2026-08-03
+  https://github.com/ArtifexSoftware/mupdf/releases/tag/1.28.2
+  our changes to the vendored tree are recorded in ext/patches/ (see its README)
 
 libarchive     3.8.8      2026-06-23
   https://github.com/libarchive/libarchive
@@ -101,9 +102,9 @@ heicdec         dist       2026-07-28
   Build flags: HEIC_HAVE_DAV1D, HEIC_HAVE_ZLIB, HEIC_HAVE_BROTLI.
   Replaces libheif.
 
-darkmodelib     trunk      2026-01-16
-  https://github.com/ozone10/darkmodelib
-  https://github.com/ozone10/darkmodelib/commit/57cc10c819d17c47b6afd295b424153082144193
+darkmodelib     0.76.0     2026-08-23
+  https://github.com/ozone10/win32-darkmodelib
+  https://github.com/ozone10/win32-darkmodelib/commit/25298e8a92ed0fac8e17b3e6878df5bbd7a5d699
 
 jxldec          dist       2026-08-11
   https://github.com/kjk/jxldec

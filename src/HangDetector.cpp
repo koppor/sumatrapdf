@@ -53,11 +53,11 @@ bool IsUiHangDetectorRunning() {
 // Symbols: prefer a .pdb next to the .exe (what a local build has), then
 // whatever the crash handler downloaded into gSymbolsDir.
 static bool EnsureSymbols() {
-    str::Builder symPath(1024);
-    symPath.a = GetTempArena();
+    str::Builder symPath(GetTempArena());
+    symPath.Reserve(1024);
     symPath.Append(GetSelfExeDirTemp());
     if (len(gSymbolsDir) > 0) {
-        symPath.Append(";");
+        symPath.Append(StrL(";"));
         symPath.Append(gSymbolsDir);
     }
     TempWStr ws = ToWStrTemp(ToStrTemp(symPath));
@@ -159,7 +159,8 @@ static void ReportHang(double blockedMs) {
     }
 
     gHangReportsLeft--;
-    str::Builder s(8 * 1024);
+    str::Builder s;
+    s.Reserve(8 * 1024);
     int nSkipped = 0;
     for (int i = 0; i < nThreads; i++) {
         ThreadStack& ts = gStacks[i];
@@ -167,7 +168,8 @@ static void ReportHang(double blockedMs) {
             nSkipped++;
             continue;
         }
-        str::Builder cs(2048);
+        str::Builder cs;
+        cs.Reserve(2048);
         for (int j = 0; j < ts.nAddrs; j++) {
             dbghelp::GetAddressInfo(cs, (DWORD64)ts.addrs[j], false);
         }
@@ -227,7 +229,7 @@ void StartUiHangDetector() {
     gHwndPing = CreateWindowExW(0, WC_STATICW, L"SumatraPDF hang detector", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr,
                                 GetModuleHandleW(nullptr), nullptr);
     if (!gHwndPing) {
-        log("StartUiHangDetector: failed to create the ping window\n");
+        log(StrL("StartUiHangDetector: failed to create the ping window\n"));
         return;
     }
     gStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -239,7 +241,7 @@ void StartUiHangDetector() {
     }
     gUiThreadId = GetCurrentThreadId();
     auto fn = MkFunc0Void(HangDetectorThreadFunc);
-    gWatchdogThread = StartThread(fn, "HangDetector");
+    gWatchdogThread = StartThread(fn, StrL("HangDetector"));
     if (!gWatchdogThread) {
         StopUiHangDetector();
         return;

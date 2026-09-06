@@ -7,7 +7,7 @@
 // clicking it in the app navigates.
 import { writeFileSync } from "node:fs";
 import { ControlClient, ControlCommand, withControlledSumatra } from "./control";
-import { EXE, cmdId, runStandalone, tmpPath } from "./util";
+import { EXE, cmdId, runStandalone, SLOW_BUILD_FACTOR, tmpPath } from "./util";
 import { FRAME_CLASS, clickAt, findCanvas, sendCommandSync } from "./win-automation";
 import { sleep, waitForTopWindow } from "./winapi";
 
@@ -68,7 +68,7 @@ async function getLinkState(client: ControlClient): Promise<{ st: LinkState; dum
     throw new Error(`unexpected TestKeyboardLinkFollow output:\n${dump}`);
   }
   const rects: LinkState["rects"] = [];
-  for (const m of dump.matchAll(/^link=\d+ page=\d+ rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+)$/gm)) {
+  for (const m of dump.matchAll(/^link=\d+ page=\d+ rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+) hint=[A-Z]+$/gm)) {
     rects.push({ x: +m[1]!, y: +m[2]!, dx: +m[3]!, dy: +m[4]! });
   }
   return { st: { page: +head[1]!, count: +head[2]!, rects }, dump };
@@ -103,10 +103,10 @@ export async function testit(): Promise<void> {
         throw new Error("no canvas window");
       }
 
-      // ask where the link is on screen (link-following numbers every link it
+      // ask where the link is on screen (link-following labels every link it
       // finds, so this also proves the button is in the app's link list)
       sendCommandSync(frame, cmdId("CmdToggleKeyboardLinkFollowing"));
-      const deadline = Date.now() + 4000;
+      const deadline = Date.now() + 4000 * SLOW_BUILD_FACTOR;
       let st: LinkState = { page: 0, count: 0, rects: [] };
       let dump = "";
       while (Date.now() < deadline) {
@@ -127,7 +127,7 @@ export async function testit(): Promise<void> {
       // leave the mode and click the button like a user would
       sendCommandSync(frame, cmdId("CmdToggleKeyboardLinkFollowing"));
       await clickAt(canvas, r.x + r.dx / 2, r.y + r.dy / 2, 200);
-      const deadline2 = Date.now() + 4000;
+      const deadline2 = Date.now() + 4000 * SLOW_BUILD_FACTOR;
       while (Date.now() < deadline2) {
         ({ st, dump } = await getLinkState(client));
         if (st.page === 2) {

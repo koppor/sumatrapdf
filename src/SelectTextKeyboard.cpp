@@ -12,7 +12,7 @@
 #include "gui/Gfx.h"
 
 #include "Settings.h"
-#include "GlobalPrefs.h"
+#include "AppSettings.h"
 #include "DocController.h"
 #include "EngineBase.h"
 #include "base/GuessFileType.h"
@@ -26,6 +26,7 @@
 #include "Commands.h"
 #include "Accelerators.h"
 #include "Selection.h"
+#include "Toolbar.h"
 #include "Notifications.h"
 #include "Translations.h"
 #include "SelectTextKeyboard.h"
@@ -160,16 +161,24 @@ static void ApplySelection(MainWindow* win, bool selecting) {
     if (!dm || !dm->textSelection) {
         return;
     }
+    bool hadTextSelection = dm->textSelection->result.len > 0;
     if (!selecting) {
         dm->textSelection->Reset();
         dm->textSelection->startPage = dm->textSelection->endPage = -1;
         dm->textSelection->startGlyph = dm->textSelection->endGlyph = -1;
         DeleteOldSelectionInfo(win, false);
+        if (hadTextSelection) {
+            ToolbarUpdateStateForWindow(win, false);
+        }
         return;
     }
     dm->textSelection->StartAt(win->textSelectAnchorPage, win->textSelectAnchorGlyph);
     dm->textSelection->SelectUpTo(win->textSelectPage, win->textSelectGlyph);
     UpdateTextSelection(win, false);
+    bool hasTextSelection = dm->textSelection->result.len > 0;
+    if (hadTextSelection != hasTextSelection) {
+        ToolbarUpdateStateForWindow(win, false);
+    }
 }
 
 static void RestartCaretBlink(MainWindow* win) {
@@ -251,12 +260,10 @@ static void ShowModeNotification(MainWindow* win) {
     NotificationCreateArgs args;
     args.hwndParent = win->hwndCanvas;
     args.msg = win->textSelectModeVisual
-                   ? _TRA(
-                         "**Arrows**: extend selection * **V**: cursor mode * "
-                         "**Esc**: exit keyboard selection")
-                   : _TRA(
-                         "**Arrows**: move the caret * **Shift+Arrows**: select * **V**: selection mode * "
-                         "**Esc**: exit keyboard selection");
+                   ? Tr("**Arrows**: extend selection * **V**: cursor mode * "
+                        "**Esc**: exit keyboard selection")
+                   : Tr("**Arrows**: move the caret * **Shift+Arrows**: select * **V**: selection mode * "
+                        "**Esc**: exit keyboard selection");
     // no timeout: the keys are the whole interface of this mode, so the hint
     // stays up for as long as the mode does (removed by StopSelectTextWithKeyboard).
     // The close button is still there for anyone who has learned them.
@@ -282,7 +289,7 @@ void ToggleSelectTextWithKeyboard(MainWindow* win) {
         // feedback (scanned pages without OCR, blank pages)
         NotificationCreateArgs args;
         args.hwndParent = win->hwndCanvas;
-        args.msg = _TRA("No text on this page");
+        args.msg = Tr("No text on this page");
         args.timeoutMs = 2000;
         args.groupId = kNotifTextSelectMode;
         ShowNotification(args);
@@ -539,7 +546,7 @@ TempStr SelectTextKeyboardResultTemp(int* exitCodeOut) {
     str::Builder out;
     if (len(gWindows) == 0) {
         *exitCodeOut = 2;
-        out.Append("NOTREADY no-window\n");
+        out.Append(StrL("NOTREADY no-window\n"));
         return ToStrTemp(out);
     }
     MainWindow* win = gWindows[0];
@@ -590,7 +597,7 @@ void PaintKeyboardTextCaret(MainWindow* win, Gfx* gfx) {
         Rect vis = win->canvasRc.Intersect(band);
         if (!vis.IsEmpty()) {
             Vec<Rect> rects;
-            rects.Append(vis);
+            VecAppend(rects, vis);
             PaintTransparentRectangles(gfx, win->canvasRc, rects, kCaretBandCol, kCaretBandAlpha, 1, false);
         }
     }

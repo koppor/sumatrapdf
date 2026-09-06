@@ -4,7 +4,10 @@
 #include "base/Base.h"
 #include "gui/Dpi.h"
 #include "base/BitManip.h"
+#include "base/File.h"
 #include "base/Pixmap.h"
+#include "base/UITask.h"
+#include "base/Win.h"
 
 #include "gui/UIModels.h"
 
@@ -15,13 +18,16 @@
 #include "EngineBase.h"
 #include "base/GuessFileType.h"
 #include "EngineAll.h"
+#include "DisplayMode.h"
 #include "DisplayModel.h"
-#include "GlobalPrefs.h"
 #include "ProgressUpdateUI.h"
 #include "TextSelection.h"
 #include "TextSearch.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AnnotPlacement.h"
+#include "Notifications.h"
+#include "Canvas.h"
 #include "WindowTab.h"
 #include "resource.h"
 #include "Commands.h"
@@ -29,8 +35,8 @@
 #include "CommandAvailability.h"
 #include "Menu.h"
 #include "SearchAndDDE.h"
-#include "Toolbar.h"
-#include "ToolbarInternal.h"
+#include "AnnotEditToolbar.h"
+#include "AnnotFilterToolbar.h"
 #include "Tabs.h"
 #include "gui/Layout.h"
 #include "gui/win/WinGui.h"
@@ -45,6 +51,7 @@
 #include "SvgIcons.h"
 #include "Theme.h"
 #include "TextToSpeech.h"
+#include "Toolbar.h"
 
 // https://docs.microsoft.com/en-us/windows/win32/controls/toolbar-control-reference
 
@@ -62,30 +69,67 @@ struct ToolbarButtonInfo {
 };
 
 static ToolbarButtonInfo gToolbarButtons[] = {
-    {gIconFileOpen, CmdOpenFile, _TRN("Open")},
-    {gIconPrint, CmdPrint, _TRN("Print")},
-    {nullptr, 0, nullptr},          // separator
-    {nullptr, PageInfoId, nullptr}, // text box for page number + show current page / no of pages
-    {gIconPagePrev, CmdGoToPrevPage, _TRN("Previous Page")},
-    {gIconPageNext, CmdGoToNextPage, _TRN("Next Page")},
-    {nullptr, 0, nullptr}, // separator
-    {gIconNavigateBack, CmdNavigateBack, _TRN("Back")},
-    {gIconNavigateForward, CmdNavigateForward, _TRN("Forward")},
-    {nullptr, 0, nullptr}, // separator
-    {gIconSpeak, CmdReadAloud, _TRN("Read Aloud")},
-    {nullptr, 0, nullptr}, // separator
-    {gIconLayoutContinuous, CmdZoomFitWidthAndContinuous, _TRN("Fit Width and Show Pages Continuously")},
-    {gIconLayoutSinglePage, CmdZoomFitPageAndSinglePage, _TRN("Fit a Single Page")},
-    {gIconRotateLeft, CmdRotateLeft, _TRN("Rotate &Left")},
-    {gIconRotateRight, CmdRotateRight, _TRN("Rotate &Right")},
-    {gIconZoomOut, CmdZoomOut, _TRN("Zoom Out")},
-    {gIconZoomIn, CmdZoomIn, _TRN("Zoom In")},
-    {nullptr, 0, nullptr}, // separator
-    {gIconSearch, CmdFindFirst, _TRN("Find")},
+    {gIconFileOpen, CmdOpenFile, TrN("Open")},
+    {gIconPrint, CmdPrint, TrN("Print")},
+    {nullptr, 0, {}},          // separator
+    {nullptr, PageInfoId, {}}, // text box for page number + show current page / no of pages
+    {gIconPagePrev, CmdGoToPrevPage, TrN("Previous Page")},
+    {gIconPageNext, CmdGoToNextPage, TrN("Next Page")},
+    {nullptr, 0, {}}, // separator
+    {gIconNavigateBack, CmdNavigateBack, TrN("Back")},
+    {gIconNavigateForward, CmdNavigateForward, TrN("Forward")},
+    {nullptr, 0, {}}, // separator
+    {gIconSpeak, CmdReadAloud, TrN("Read Aloud")},
+    {nullptr, 0, {}}, // separator
+    {gIconLayoutContinuous, CmdZoomFitWidthAndContinuous, TrN("Fit Width and Show Pages Continuously")},
+    {gIconLayoutSinglePage, CmdZoomFitPageAndSinglePage, TrN("Fit a Single Page")},
+    {gIconRotateLeft, CmdRotateLeft, TrN("Rotate &Left")},
+    {gIconRotateRight, CmdRotateRight, TrN("Rotate &Right")},
+    {gIconZoomOut, CmdZoomOut, TrN("Zoom Out")},
+    {gIconZoomIn, CmdZoomIn, TrN("Zoom In")},
+    {nullptr, 0, {}}, // separator
+    {gIconSearch, CmdFindFirst, TrN("Find")},
+    {nullptr, 0, {}}, // separator
+    {gIconEditAnnotations, CmdToggleEditPDF, TrN("Edit PDF")},
 };
 // unicode chars: https://www.compart.com/en/unicode/U+25BC
 
 constexpr int kButtonsCount = dimof(gToolbarButtons);
+
+static ToolbarButtonInfo gPdfAnnotationButtons[] = {
+    {gIconAnnotHighlightBrush, CmdAnnotationHighlightBrush, TrN("Highlighter")},
+    {gIconAnnotHighlight, CmdCreateAnnotHighlight, TrN("Highlight")},
+    {gIconAnnotUnderline, CmdCreateAnnotUnderline, TrN("Underline")},
+    {gIconAnnotSquiggly, CmdCreateAnnotSquiggly, TrN("Squiggly")},
+    {gIconAnnotStrikeOut, CmdCreateAnnotStrikeOut, TrN("Strike Out")},
+    {nullptr, 0, {}},
+    {gIconAnnotText, CmdCreateAnnotText, TrN("Text")},
+    {gIconAnnotFreeText, CmdCreateAnnotFreeText, TrN("Free Text")},
+    {nullptr, 0, {}},
+    {gIconAnnotLine, CmdCreateAnnotLine, TrN("Line")},
+    {gIconAnnotPolyLine, CmdCreateAnnotPolyLine, TrN("Polyline")},
+    {gIconAnnotSquare, CmdCreateAnnotSquare, TrN("Square")},
+    {gIconAnnotCircle, CmdCreateAnnotCircle, TrN("Circle")},
+    {gIconAnnotPolygon, CmdCreateAnnotPolygon, TrN("Polygon")},
+    {gIconAnnotInk, CmdCreateAnnotInk, TrN("Ink")},
+    {nullptr, 0, {}},
+    {gIconAnnotRedact, CmdCreateAnnotRedact, TrN("Redact")},
+    {gIconApplyRedactions, CmdApplyRedactions, TrN("Apply Redactions")},
+    {gIconAnnotStamp, CmdCreateAnnotStamp, TrN("Stamp")},
+    {gIconAnnotCaret, CmdCreateAnnotCaret, TrN("Caret")},
+    {gIconAnnotFileAttachment, CmdCreateAnnotFileAttachment, TrN("File Attachment")},
+    {nullptr, 0, {}},
+    {gIconUndo, CmdUndo, TrN("Undo")},
+    {gIconRedo, CmdRedo, TrN("Redo")},
+    {nullptr, 0, {}},
+    {gIconFindAnnotation, CmdFindAnnotation, TrN("Find Annotation")},
+    {nullptr, 0, {}},
+    // the tooltip names the file, see ToolbarUpdateStateForWindow. Hovering it
+    // opens a drop-down with the other two ways to end an editing session
+    {gIconSave, CmdSaveAnnotations, TrN("Save changes to existing PDF")},
+};
+
+constexpr int kPdfAnnotationButtonsCount = dimof(gPdfAnnotationButtons);
 
 // The built-in buttons actually on the toolbar, which is gToolbarButtons unless
 // ToolbarCustomLayout asks for a different set / order (issue #5095). A layout
@@ -128,6 +172,13 @@ static Color TbHoverColor() {
     return ThemeHotBackgroundColor();
 }
 
+// A ground a shade off the normal one, for telling two areas of a drop-down
+// apart. Well short of the hover highlight, which is 20 units off: this is a
+// cue, not something lit up.
+static Color TbSubtleBgColor() {
+    return AccentColor(TbBgColor(), 8);
+}
+
 static Color TbSelectedColor() {
     return AccentColor(TbBgColor(), 28);
 }
@@ -163,6 +214,14 @@ static VirtCtrl* ToolbarItemAt(MainWindow* win, int idx) {
     return tb->items[idx];
 }
 
+static VirtCtrl* PdfAnnotationToolbarItemAt(MainWindow* win, int idx) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    if (!tb || idx < 0 || idx >= len(tb->annotationItems)) {
+        return nullptr;
+    }
+    return tb->annotationItems[idx];
+}
+
 // Includes disabled items (those are not hit-testable), so a click on a gray
 // button is not treated as empty toolbar and does not start a window drag.
 VirtCtrl* ToolbarItemFromPoint(MainWindow* win, Point pt) {
@@ -178,9 +237,21 @@ VirtCtrl* ToolbarItemFromPoint(MainWindow* win, Point pt) {
             return w;
         }
     }
+    for (VirtCtrl* w : tb->annotationItems) {
+        if (!w || w->GetVisibility() != Visibility::Visible) {
+            continue;
+        }
+        if (w->BoundsInWindow().Contains(pt)) {
+            return w;
+        }
+    }
     if (tb->pageTotal && tb->pageTotal->GetVisibility() == Visibility::Visible &&
         tb->pageTotal->BoundsInWindow().Contains(pt)) {
         return tb->pageTotal;
+    }
+    if (tb->chapterTotal && tb->chapterTotal->GetVisibility() == Visibility::Visible &&
+        tb->chapterTotal->BoundsInWindow().Contains(pt)) {
+        return tb->chapterTotal;
     }
     return nullptr;
 }
@@ -192,6 +263,36 @@ static void SetToolbarButtonEnabledByIdx(MainWindow* win, int idx, bool isEnable
     }
     w->SetIsEnabled(isEnabled);
     w->Invalidate();
+}
+
+static void SetPdfAnnotationButtonToolTipByIdx(MainWindow* win, int idx, Str tip) {
+    VirtCtrl* w = PdfAnnotationToolbarItemAt(win, idx);
+    if (w) {
+        w->SetTooltip(tip);
+    }
+}
+
+static void SetPdfAnnotationButtonEnabledByIdx(MainWindow* win, int idx, bool isEnabled) {
+    VirtCtrl* w = PdfAnnotationToolbarItemAt(win, idx);
+    if (!w || w->IsEnabled() == isEnabled) {
+        return;
+    }
+    w->SetIsEnabled(isEnabled);
+    w->Invalidate();
+}
+
+// true if the row has to be laid out again
+static bool SetPdfAnnotationButtonHiddenByIdx(MainWindow* win, int idx, bool isHidden) {
+    VirtCtrl* w = PdfAnnotationToolbarItemAt(win, idx);
+    if (!w) {
+        return false;
+    }
+    Visibility want = isHidden ? Visibility::Collapse : Visibility::Visible;
+    if (w->GetVisibility() == want) {
+        return false;
+    }
+    w->SetVisibility(want);
+    return true;
 }
 
 // hiding the page box hides the whole group (label + edit + " / N")
@@ -216,6 +317,14 @@ static bool SetToolbarButtonHiddenByIdx(MainWindow* win, int idx, bool isHidden)
         if (tb->pageTotal) {
             tb->pageTotal->SetVisibility(want);
         }
+        // chapter widgets stay collapsed unless the doc has chapters;
+        // UpdateToolbarPageText() narrows this further right after
+        if (win->chapterEdit) {
+            win->chapterEdit->SetVisibility(want);
+        }
+        if (tb->chapterTotal) {
+            tb->chapterTotal->SetVisibility(want);
+        }
     }
     return true;
 }
@@ -237,7 +346,7 @@ static void SetToolbarButtonCheckedByIdx(MainWindow* win, int idx, bool isChecke
 // there, `|` a separator, `PageInfo` the page number box, and leaving a button
 // out is how you hide it (issue #5095).
 static void PopulateToolbarLayout() {
-    Str setting = gGlobalPrefs->toolbarCustomLayout;
+    Str setting = gSettings->toolbarCustomLayout;
     if (gLayoutParsed && str::Eq(setting, gLayoutParsedFrom)) {
         return;
     }
@@ -270,15 +379,15 @@ static void PopulateToolbarLayout() {
     for (Str name : names) {
         Str tok = name;
         str::TrimWSInPlace(tok, str::TrimOpt::Both);
-        if (!tok) {
+        if (len(tok) == 0) {
             continue;
         }
         if (str::Eq(tok, StrL("|")) || str::EqI(tok, StrL("Separator"))) {
-            addButton({nullptr, 0, nullptr});
+            addButton({nullptr, 0, {}});
             continue;
         }
         if (str::EqI(tok, StrL("PageInfo"))) {
-            addButton({nullptr, PageInfoId, nullptr});
+            addButton({nullptr, PageInfoId, {}});
             continue;
         }
         int cmdId = GetCommandIdByName(tok);
@@ -328,7 +437,7 @@ void SetToolbarButtonCheckedState(MainWindow* win, int cmdId, bool isChecked) {
 
 // some commands are only avialble in certain contexts
 // we remove toolbar buttons for un-availalbe commands
-static bool IsCmdAvailable(MainWindow* win, int cmdId) {
+static bool IsCmdAvailable(MainWindow* win, int cmdId, AppCommandCtx* ctx) {
     switch (cmdId) {
         case CmdZoomFitWidthAndContinuous:
         case CmdZoomFitPageAndSinglePage:
@@ -346,24 +455,24 @@ static bool IsCmdAvailable(MainWindow* win, int cmdId) {
             return NeedsFindUI(win);
         case CmdReadAloud:
             // opt-in: the button and its drop-down only show if asked for
-            return gGlobalPrefs->toolbarShowReadAloud;
+            return gSettings->toolbarShowReadAloud;
         case PageInfoId:
             return true;
     }
-    auto* ctx = NewBuildMenuCtx(win->CurrentTab(), Point{0, 0});
-    AutoCall delCtx(DeleteBuildMenuCtx, ctx);
     // Toolbar buttons stay visible (but disabled) when no document is open, so
     // decide visibility as if a document were loaded; otherwise the no-document
     // gate in GetCommandVisibility would remove them. Document-type-specific
     // removals (e.g. for CHM/image collections) still apply when a real document
     // is loaded, and the enabled state is handled separately in IsCmdEnabled.
+    bool savedLoaded = ctx->isDocLoaded;
     ctx->isDocLoaded = true;
     bool remove, disable;
     GetCommandIdState(ctx, cmdId, &remove, &disable);
+    ctx->isDocLoaded = savedLoaded;
     return !remove;
 }
 
-static bool IsCmdEnabled(MainWindow* win, int cmdId) {
+static bool IsCmdEnabled(MainWindow* win, int cmdId, AppCommandCtx* ctx) {
     switch (cmdId) {
         case CmdNextTab:
         case CmdPrevTab:
@@ -374,8 +483,6 @@ static bool IsCmdEnabled(MainWindow* win, int cmdId) {
             return true;
     }
 
-    auto* ctx = NewBuildMenuCtx(win->CurrentTab(), Point{0, 0});
-    AutoCall delCtx(DeleteBuildMenuCtx, ctx);
     bool remove, disable;
     GetCommandIdState(ctx, cmdId, &remove, &disable);
     if (remove || disable) {
@@ -383,6 +490,7 @@ static bool IsCmdEnabled(MainWindow* win, int cmdId) {
     }
     switch (cmdId) {
         case CmdOpenFile:
+        case CmdOpenFileNoHistory:
             if (!CanAccessDisk()) {
                 return false;
             }
@@ -403,6 +511,7 @@ static bool IsCmdEnabled(MainWindow* win, int cmdId) {
 
     switch (cmdId) {
         case CmdOpenFile:
+        case CmdOpenFileNoHistory:
             // opening different files isn't allowed in plugin mode
             return !gPluginMode;
 
@@ -417,7 +526,7 @@ static bool IsCmdEnabled(MainWindow* win, int cmdId) {
         case CmdFindNext:
         case CmdFindPrev: {
             // Need non-empty find text (findEdit is the active bar or floating window edit).
-            if (!win->findEdit || win->findEdit->GetTextLen() == 0) {
+            if (CbGetTextLen(win->findEdit) == 0) {
                 return false;
             }
             // When we already know there are zero matches, disable next/prev.
@@ -451,7 +560,7 @@ static bool IsCmdEnabled(MainWindow* win, int cmdId) {
 
 static TempStr ToolbarTipTemp(int cmdId, Str tip, bool translate) {
     TempStr s = translate ? trans::GetTranslation(tip) : TempStr(tip);
-    TempStr accelStr = AppendAccelKeyToMenuStringTemp(nullptr, cmdId);
+    TempStr accelStr = AppendAccelKeyToMenuStringTemp({}, cmdId);
     if (accelStr) {
         Str accel = accelStr.len > 1 ? Str(accelStr.s + 1, accelStr.len - 1) : accelStr;
         s = str::JoinTemp(s, fmt(" (%s)", accel));
@@ -466,10 +575,20 @@ void UpdateToolbarButtonsToolTipsForWindow(MainWindow* win) {
     }
     for (int i = 0; i < gLayoutButtonsCount; i++) {
         const ToolbarButtonInfo& bi = gLayoutButtons[i];
-        if (!bi.toolTip || bi.isText) {
+        if (len(bi.toolTip) == 0 || bi.isText) {
             continue;
         }
         VirtCtrl* w = ToolbarItemAt(win, i);
+        if (w) {
+            w->SetTooltip(ToolbarTipTemp(bi.cmdId, bi.toolTip, true));
+        }
+    }
+    for (int i = 0; i < kPdfAnnotationButtonsCount; i++) {
+        const ToolbarButtonInfo& bi = gPdfAnnotationButtons[i];
+        if (len(bi.toolTip) == 0) {
+            continue;
+        }
+        VirtCtrl* w = PdfAnnotationToolbarItemAt(win, i);
         if (w) {
             w->SetTooltip(ToolbarTipTemp(bi.cmdId, bi.toolTip, true));
         }
@@ -486,9 +605,9 @@ static void SetToolbarButtonImageByIdx(MainWindow* win, int idx, const char* ico
         return;
     }
     ToolbarVirt* tb = win->toolbarVirt;
-    int sz = tb ? tb->iconSize : DpiScale(gGlobalPrefs->toolbarSize);
-    Pixmap* px = GetCachedPixmapForSvg(icon, sz, sz, TbTextColor());
-    Pixmap* pxOff = GetCachedPixmapForSvg(icon, sz, sz, TbDisabledColor());
+    int sz = tb ? tb->iconSize : DpiScale(gSettings->toolbarSize);
+    Pixmap* px = GetCachedPixmapForSvg(Str(icon), sz, sz, TbTextColor());
+    Pixmap* pxOff = GetCachedPixmapForSvg(Str(icon), sz, sz, TbDisabledColor());
     if (ib->pixmap == px && ib->pixmapDisabled == pxOff) {
         return;
     }
@@ -505,11 +624,36 @@ static void SetToolbarButtonToolTipByIdx(MainWindow* win, int idx, int cmdId, St
     w->SetTooltip(ToolbarTipTemp(cmdId, s, false));
 }
 
+static void SetPdfAnnotationsToolbarVisible(MainWindow* win, bool visible) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    if (!tb || !tb->annotationRow) {
+        return;
+    }
+    Visibility want = visible ? Visibility::Visible : Visibility::Collapse;
+    if (tb->annotationRow->GetVisibility() == want) {
+        return;
+    }
+    tb->annotationRow->SetVisibility(want);
+    SetToolbarButtonCheckedState(win, CmdToggleEditPDF, visible);
+    ToolbarSetHeight(win, tb->rowDy * (visible ? 2 : 1));
+    tb->host->Relayout();
+    tb->host->Invalidate(true);
+    if (visible) {
+        StartLoadingAnnotationsForUi(win->CurrentTab());
+        RefreshAnnotFilterAnnotations(win);
+    }
+    ScheduleUiUpdate(win, kUiForceRelayout | kUiToolbarDirty);
+}
+
 // TODO: this is called too often
 // TODO: also set checked state instead of calling SetToolbarButtonCheckedState() all over
 void ToolbarUpdateStateForWindow(MainWindow* win, bool setButtonsVisibility) {
     int n = TotalButtonsCount();
     bool visibilityChanged = false;
+    // One command ctx for the whole pass. Building it per button used to call
+    // HasToc() (and page hit-testing) once per toolbar item during load.
+    auto* ctx = NewBuildMenuCtx(win->CurrentTab(), Point{0, 0});
+    AutoCall delCtx(DeleteBuildMenuCtx, ctx);
     for (int i = 0; i < n; i++) {
         auto& tb = GetToolbarButtonInfoByIdx(i);
         int cmdId = tb.cmdId;
@@ -517,26 +661,50 @@ void ToolbarUpdateStateForWindow(MainWindow* win, bool setButtonsVisibility) {
         // separators are always drawn. Which ones to drop is decided below,
         // by position, not by command availability.
         if (setButtonsVisibility && cmdId != WarningMsgId && cmdId != 0) {
-            bool hide = !IsCmdAvailable(win, cmdId);
+            bool hide = !IsCmdAvailable(win, cmdId, ctx);
             visibilityChanged |= SetToolbarButtonHiddenByIdx(win, i, hide);
         }
         if (!HasToolbarButtonContent(tb)) {
             continue;
         }
-        bool isEnabled = IsCmdEnabled(win, cmdId);
+        bool isEnabled = IsCmdEnabled(win, cmdId, ctx);
         SetToolbarButtonEnabledByIdx(win, i, isEnabled);
 
         if (cmdId == CmdReadAloud || cmdId == CmdPauseReadAloud) {
             bool speaking = TtsIsSpeaking();
             SetToolbarButtonImageByIdx(win, i, speaking ? gIconPauseSpeaking : gIconSpeak);
             // tooltip reflects what clicking the button will do
-            Str tip = _TRA("Read Aloud");
+            Str tip = Tr("Read Aloud");
             if (speaking) {
-                tip = _TRA("Pause Reading");
+                tip = Tr("Pause Reading");
             } else if (CanContinueReadAloud(win->CurrentTab())) {
-                tip = _TRA("Continue Reading");
+                tip = Tr("Continue Reading");
             }
             SetToolbarButtonToolTipByIdx(win, i, cmdId, tip);
+        }
+    }
+
+    bool showPdfAnnotationsToolbar = win->pdfAnnotationsToolbarEnabled && ctx->isPdf && ctx->supportsAnnots;
+    SetPdfAnnotationsToolbarVisible(win, showPdfAnnotationsToolbar);
+    bool annotVisibilityChanged = false;
+    for (int i = 0; i < kPdfAnnotationButtonsCount; i++) {
+        const ToolbarButtonInfo& bi = gPdfAnnotationButtons[i];
+        if (!HasToolbarButtonContent(bi)) {
+            continue;
+        }
+        CommandVisibility v = GetCommandVisibility(bi.cmdId, *ctx, CommandSurface::Toolbar);
+        bool remove = CommandShouldRemove(v);
+        annotVisibilityChanged |= SetPdfAnnotationButtonHiddenByIdx(win, i, remove);
+        SetPdfAnnotationButtonEnabledByIdx(win, i, showPdfAnnotationsToolbar && !CommandShouldDisable(v) && !remove);
+        if (bi.cmdId == CmdSaveAnnotations) {
+            // name the file it writes to, like the annotation list's Save button
+            WindowTab* tab = win->CurrentTab();
+            TempStr base = tab ? path::GetBaseNameTemp(tab->filePath) : TempStr{};
+            Str tip = Tr("Save changes to existing PDF");
+            if (len(base) > 0) {
+                tip = fmt(Tr("Save changes to %s").s, base);
+            }
+            SetPdfAnnotationButtonToolTipByIdx(win, i, ToolbarTipTemp(bi.cmdId, tip, false));
         }
     }
 
@@ -572,7 +740,7 @@ void ToolbarUpdateStateForWindow(MainWindow* win, bool setButtonsVisibility) {
         }
     }
 
-    if (visibilityChanged) {
+    if (visibilityChanged || annotVisibilityChanged) {
         VirtHost* host = ToolbarHost(win);
         if (host) {
             if (host->vroot) {
@@ -619,6 +787,57 @@ void SetToolbarButtonEnableState(MainWindow* win, int cmdId, bool isEnabled) {
             SetToolbarButtonEnabledByIdx(win, i, isEnabled);
         }
     }
+    for (int i = 0; i < kPdfAnnotationButtonsCount; i++) {
+        if (gPdfAnnotationButtons[i].cmdId == originalCmdId) {
+            SetPdfAnnotationButtonEnabledByIdx(win, i, isEnabled);
+        }
+    }
+}
+
+static void SetPdfAnnotationsToolbarEnabled(MainWindow* win, bool enabled) {
+    if (!win) {
+        return;
+    }
+    AppCommandCtx ctx = NewAppCommandCtx(win);
+    if (!ctx.isPdf || !ctx.supportsAnnots) {
+        return;
+    }
+    if (win->pdfAnnotationsToolbarEnabled == enabled) {
+        return;
+    }
+    if (win->pdfAnnotationsToolbarEnabled) {
+        FinishInkAnnotationPlacement(win);
+        // a half-placed line / shape / stamp is editing UI too: its notification
+        // and cross cursor would outlive the mode it belongs to
+        CancelAnnotationPlacement(win);
+    }
+    win->pdfAnnotationsToolbarEnabled = enabled;
+    ToolbarUpdateStateForWindow(win, true);
+    if (enabled) {
+        RemoveNotificationsForGroup(win->hwndCanvas, kNotifAnnotation);
+        UpdateAnnotationHoverOverlay(win);
+    } else {
+        // leaving the mode leaves no editing UI behind: without this the
+        // selection marker and its resize handles stay painted on the page
+        WindowTab* tab = win->CurrentTab();
+        if (tab && tab->selectedAnnotation) {
+            SetSelectedAnnotation(tab, nullptr);
+        }
+        HideAnnotationHoverOverlay(win);
+        HideAnnotEditToolbar(win);
+    }
+    ScheduleRepaint(win, 0);
+}
+
+void TogglePdfAnnotationsToolbar(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    SetPdfAnnotationsToolbarEnabled(win, !win->pdfAnnotationsToolbarEnabled);
+}
+
+void EnablePdfAnnotationsToolbar(MainWindow* win) {
+    SetPdfAnnotationsToolbarEnabled(win, true);
 }
 
 // toolbar mode for this window: Fullscreen.Toolbar in fullscreen, else Toolbar
@@ -630,7 +849,7 @@ static int ToolbarModeForWindow(MainWindow* win) {
 }
 
 bool ShouldShowToolbar(MainWindow* win) {
-    if (win->presentation) {
+    if (win->presentation || win->isQuickLook) {
         return false;
     }
     int mode = ToolbarModeForWindow(win);
@@ -638,7 +857,7 @@ bool ShouldShowToolbar(MainWindow* win) {
 }
 
 bool ShouldOverlayToolbar(MainWindow* win) {
-    if (win->presentation) {
+    if (win->presentation || win->isQuickLook) {
         return false;
     }
     if (ToolbarModeForWindow(win) != kToolbarOverlay) {
@@ -787,7 +1006,13 @@ void RevealOverlayToolbar(MainWindow* win) {
 }
 
 // the delayed-hide timer fired on the toolbar's own host
+static void OnHoverDropdownTimer(MainWindow* win, int timerId);
+
 static void OnToolbarTimer(MainWindow* win, int timerId) {
+    if (timerId == kOpenHoverDropdownTimerId || timerId == kCloseHoverDropdownTimerId) {
+        OnHoverDropdownTimer(win, timerId);
+        return;
+    }
     if (timerId != kHideOverlayToolbarTimerId) {
         return;
     }
@@ -825,11 +1050,17 @@ void ShowOrHideToolbar(MainWindow* win) {
     }
     if (!show && !overlay) {
         // Move the focus out of the toolbar
-        if ((win->findEdit && win->findEdit->IsFocused()) || (win->pageEdit && win->pageEdit->IsFocused())) {
+        if ((win->findEdit && win->findEdit->IsFocused()) || (win->pageEdit && win->pageEdit->IsFocused()) ||
+            (win->chapterEdit && win->chapterEdit->IsFocused())) {
             ToolbarFocusFrame(win);
         }
+        if (win->hwndToolbar) {
+            ShowWindow(win->hwndToolbar, SW_HIDE);
+        }
     }
-    ScheduleUiUpdate(win);
+    // overlay <-> hide does not flip isToolbarVisible, so RelayoutFrame would
+    // skip without this (sidebar stays at the overlay y, toolbar HWND stays)
+    ScheduleUiUpdate(win, kUiForceRelayout | kUiRelayout);
     if (enteredOverlay) {
         ScheduleOverlayHide(win);
     }
@@ -852,10 +1083,14 @@ void UpdateToolbarFindText(MainWindow* win) {
     FindBarReposition(win);
 }
 
+static void UpdateZoomHoverDropdown(MainWindow* win);
+
 void UpdateToolbarState(MainWindow* win) {
     if (!win->IsDocLoaded()) {
         return;
     }
+    // the zoom buttons' strip may be up: the zoom just moved under it
+    UpdateZoomHoverDropdown(win);
     DisplayMode dm = win->ctrl->GetDisplayMode();
     float zoomVirtual = win->ctrl->GetZoomVirtual();
     {
@@ -880,16 +1115,51 @@ void UpdateToolbarPageText(MainWindow* win, int pageCount, bool updateOnly) {
     if (!tb->pageTotal) {
         return;
     }
+
+    bool hasChapters = win->ctrl && win->ctrl->HasChapters();
     if (tb->pageLabel) {
-        tb->pageLabel->SetText(_TRA("Page:"));
+        tb->pageLabel->SetText(hasChapters ? Tr("Chapter:") : Tr("Page:"));
     }
-    TempStr txt = nullptr;
+    Visibility chapterVis = hasChapters ? Visibility::Visible : Visibility::Collapse;
+    bool chapterVisChanged = false;
+    if (win->chapterEdit && win->chapterEdit->GetVisibility() != chapterVis) {
+        win->chapterEdit->SetVisibility(chapterVis);
+        chapterVisChanged = true;
+    }
+    if (tb->chapterTotal && tb->chapterTotal->GetVisibility() != chapterVis) {
+        tb->chapterTotal->SetVisibility(chapterVis);
+        chapterVisChanged = true;
+    }
+    if (tb->pageLabel2 && tb->pageLabel2->GetVisibility() != chapterVis) {
+        tb->pageLabel2->SetVisibility(chapterVis);
+        chapterVisChanged = true;
+    }
+    if (chapterVisChanged) {
+        host->Relayout();
+    }
+
+    TempStr txt;
     if (-1 == pageCount || !pageCount) {
-        txt = " ";
+        txt = StrL(" ");
+    } else if (hasChapters) {
+        int chapter = win->ctrl->CurrentLocation().chapter;
+        txt = fmt(" / %d", win->ctrl->ChapterPageCount(chapter));
+        if (tb->chapterTotal) {
+            tb->chapterTotal->SetText(fmt(" / %d", win->ctrl->ChapterCount()));
+        }
     } else if (!win->ctrl || !win->ctrl->HasPageLabels()) {
         txt = fmt(" / %d", pageCount);
     } else {
-        txt = fmt("%d / %d", win->ctrl->CurrentPageNo(), pageCount);
+        int logical = pageCount;
+        DisplayModel* dm = win->ctrl->AsFixed();
+        if (dm) {
+            logical = dm->LogicalPageCount();
+        }
+        if (logical > 0 && logical != pageCount) {
+            txt = fmt(" / %d (%d / %d)", logical, win->ctrl->CurrentPageNo(), pageCount);
+        } else {
+            txt = fmt("%d / %d", win->ctrl->CurrentPageNo(), pageCount);
+        }
     }
     if (updateOnly && tb->pageTotal->s && txt && str::Eq(tb->pageTotal->s, txt)) {
         return;
@@ -924,12 +1194,12 @@ static TempStr CustomCommandToolbarToolTipTemp(CustomCommand* cmd, Str fallback)
     if (!str::IsEmptyOrWhiteSpace(fallback)) {
         return fallback;
     }
-    return "External Viewer";
+    return StrL("External Viewer");
 }
 
 static void PopulateCustomToolbarButtons() {
     gCustomButtonsCount = 0;
-    for (Shortcut* shortcut : *gGlobalPrefs->shortcuts) {
+    for (Shortcut* shortcut : *gSettings->shortcuts) {
         if (gCustomButtonsCount >= kMaxCustomButtons) {
             break;
         }
@@ -956,15 +1226,15 @@ static void PopulateCustomToolbarButtons() {
     // the reverse of the order the user listed them in (#5869)
     Vec<CustomCommand*> customCmds;
     for (auto* cc = gFirstCustomCommand; cc; cc = cc->next) {
-        customCmds.Append(cc);
+        VecAppend(customCmds, cc);
     }
     VecReverse(customCmds);
     for (CustomCommand* cc : customCmds) {
         if (gCustomButtonsCount >= kMaxCustomButtons) {
             break;
         }
-        Str svgIcon = GetCommandStringArg(cc, kCmdArgToolbarSvgIcon, nullptr);
-        Str tbText = GetCommandStringArg(cc, kCmdArgToolbarText, nullptr);
+        Str svgIcon = GetCommandStringArg(cc, kCmdArgToolbarSvgIcon, {});
+        Str tbText = GetCommandStringArg(cc, kCmdArgToolbarText, {});
         if (!str::IsEmptyOrWhiteSpace(svgIcon)) {
             ToolbarButtonInfo tbi;
             tbi.cmdId = cc->id;
@@ -984,8 +1254,8 @@ static void PopulateCustomToolbarButtons() {
     }
 }
 
-static int ToolbarIconSize() {
-    return RoundUp(DpiScale(gGlobalPrefs->toolbarSize), 4);
+int ToolbarIconSize() {
+    return RoundUp(DpiScale(gSettings->toolbarSize), 4);
 }
 
 static void ApplyToolbarItemColors(VirtCtrl* w) {
@@ -995,6 +1265,7 @@ static void ApplyToolbarItemColors(VirtCtrl* w) {
         ib->SetColor(kColIconBtnBgHover, hover);
         ib->SetColor(kColIconBtnBgSelected, sel);
         ib->SetColor(kColIconBtnChevron, TbTextColor());
+        ib->SetColor(kColIconBtnChevronDisabled, TbDisabledColor());
         return;
     }
     if (auto* b = AsVirtButton(w)) {
@@ -1038,14 +1309,37 @@ static void RefreshToolbarIcons(MainWindow* win) {
         ib->pixmap = GetCachedPixmapForSvg(svg, sz, sz, fg, TbBgColor());
         ib->pixmapDisabled = GetCachedPixmapForSvg(svg, sz, sz, dis, TbBgColor());
     }
+    for (int i = 0; i < len(tb->annotationItems); i++) {
+        VirtCtrl* w = tb->annotationItems[i];
+        ApplyToolbarItemColors(w);
+        auto* ib = AsVirtIconButton(w);
+        if (!ib) {
+            continue;
+        }
+        const ToolbarButtonInfo& bi = gPdfAnnotationButtons[i];
+        if (!HasToolbarButtonContent(bi)) {
+            continue;
+        }
+        ib->pixmap = GetCachedPixmapForSvg(Str(bi.icon), sz, sz, fg, TbBgColor());
+        ib->pixmapDisabled = GetCachedPixmapForSvg(Str(bi.icon), sz, sz, dis, TbBgColor());
+    }
     if (tb->pageLabel) {
         tb->pageLabel->SetColor(kColText, TbTextColor());
+    }
+    if (tb->pageLabel2) {
+        tb->pageLabel2->SetColor(kColText, TbTextColor());
     }
     if (tb->pageTotal) {
         tb->pageTotal->SetColor(kColText, TbTextColor());
     }
     if (win->pageEdit) {
         win->pageEdit->SetColors(TbTextColor(), ThemeWindowControlBackgroundColor());
+    }
+    if (tb->chapterTotal) {
+        tb->chapterTotal->SetColor(kColText, TbTextColor());
+    }
+    if (win->chapterEdit) {
+        win->chapterEdit->SetColors(TbTextColor(), ThemeWindowControlBackgroundColor());
     }
 }
 
@@ -1056,15 +1350,39 @@ void UpdateToolbarAfterThemeChange(MainWindow* win) {
         host->bgColor = TbBgColor();
         host->Invalidate(true);
     }
+    UpdateAnnotFilterToolbar(win);
 }
 
 // bounds of a button in the toolbar's client coords, empty if it has none
+static VirtCtrl* ToolbarItemForCmd(MainWindow* win, int cmdId) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    if (!tb) {
+        return nullptr;
+    }
+    for (VirtCtrl* w : tb->items) {
+        if (w && w->id == cmdId && w->GetVisibility() == Visibility::Visible) {
+            return w;
+        }
+    }
+    for (VirtCtrl* w : tb->annotationItems) {
+        if (w && w->id == cmdId && w->GetVisibility() == Visibility::Visible) {
+            return w;
+        }
+    }
+    return nullptr;
+}
+
 static Rect ToolbarButtonRect(MainWindow* win, int cmdId) {
     ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
     if (!tb) {
         return {};
     }
     for (VirtCtrl* w : tb->items) {
+        if (w && w->id == cmdId && w->GetVisibility() == Visibility::Visible) {
+            return w->BoundsInWindow();
+        }
+    }
+    for (VirtCtrl* w : tb->annotationItems) {
         if (w && w->id == cmdId && w->GetVisibility() == Visibility::Visible) {
             return w->BoundsInWindow();
         }
@@ -1092,12 +1410,14 @@ Rect GetToolbarButtonScreenRect(MainWindow* win, int cmdId) {
 // shows as its tooltip. Also reports how many tools the toolbar's tooltip
 // control ended up with: the toolbar registers one tool per button keyed by
 // command id, so duplicate command ids silently collapse into one tooltip.
+static TempStr HoverDropdownStateTemp(MainWindow* win);
+
 TempStr ToolbarButtonsResultTemp(int* exitCodeOut) {
     str::Builder out;
     MainWindow* win = len(gWindows) == 0 ? nullptr : gWindows[0];
     if (!win || !ToolbarHost(win)) {
         *exitCodeOut = 1;
-        out.Append("ERROR no-toolbar\n");
+        out.Append(StrL("ERROR no-toolbar\n"));
         return ToStrTemp(out);
     }
     ToolbarVirt* tb = win->toolbarVirt;
@@ -1131,6 +1451,21 @@ TempStr ToolbarButtonsResultTemp(int* exitCodeOut) {
             toolIdx++;
         }
     }
+    int nAnnotations = len(tb->annotationItems);
+    bool annotationsVisible = tb->annotationRow && tb->annotationRow->GetVisibility() == Visibility::Visible;
+    out.Append(fmt("annotationButtons=%d visible=%d\n", nAnnotations, annotationsVisible ? 1 : 0));
+    for (int i = 0; i < nAnnotations; i++) {
+        VirtCtrl* w = tb->annotationItems[i];
+        Rect r = w ? w->BoundsInWindow() : Rect{};
+        bool hidden = !annotationsVisible || !w || w->GetVisibility() != Visibility::Visible;
+        const ToolbarButtonInfo& bi = gPdfAnnotationButtons[i];
+        Str tip = w ? w->tooltip : Str{};
+        out.Append(fmt("annotation-idx=%d cmd=%d hidden=%d enabled=%d rect=%d,%d,%d,%d text=%s tip=%s\n", i,
+                       w ? w->id : 0, hidden ? 1 : 0, w && w->IsEnabled() ? 1 : 0, r.x, r.y, r.x + r.dx, r.y + r.dy,
+                       bi.toolTip, tip));
+    }
+    out.Append(AnnotFilterToolbarStateTemp(win));
+    out.Append(HoverDropdownStateTemp(win));
     *exitCodeOut = 0;
     return ToStrTemp(out);
 }
@@ -1173,8 +1508,750 @@ static void OnToolbarButtonClicked(MainWindow* win, VirtMouseEvent* ev) {
             }
         }
     }
+    if (cmdId == CmdSaveAnnotations) {
+        // the hover menu's rows end the session; they no longer apply
+        HideToolbarHoverDropdown(win);
+        if (ToolbarVirt* tb = win->toolbarVirt) {
+            tb->hoverPendingCmdId = cmdId;
+        }
+    }
     ToolbarPostCommand(win, cmdId);
     ev->didHandle = true;
+}
+
+//--- hover drop-down
+
+// A row of NewToolbarHoverMenu(): an icon on the left, text on the right, and a
+// background that lights up under the mouse, like a menu item.
+constexpr int kHoverRowPadY = 6;
+constexpr int kHoverRowPadX = 10;
+constexpr int kHoverRowIconGapX = 8;
+// between the label and the shortcut that sits at the right edge, as in a menu
+constexpr int kHoverRowShortcutGapX = 24;
+constexpr int kHoverMenuBorder = 1;
+// around a label in the single-row strip; less than a menu row's, it is a row
+// of them and the gaps add up
+constexpr int kHoverCellPadX = 8;
+// the mouse crosses a seam going from the button to the drop-down; don't close
+// on the frame where it is over neither
+constexpr int kCloseHoverDropdownDelayMs = 150;
+
+struct ToolbarHoverRow : VirtCtrl {
+    Pixmap* pixmap = nullptr; // not owned, from GetCachedPixmapForSvg()
+    Str text;                 // owned
+    Str shortcut;             // owned; empty when the command has no key
+    PlatformFont* font = nullptr;
+    int iconSize = 0;
+
+    ToolbarHoverRow() = default;
+    ~ToolbarHoverRow() override {
+        str::Free(text);
+        str::Free(shortcut);
+    }
+
+    int ShortcutDx() {
+        if (len(shortcut) == 0) {
+            return 0;
+        }
+        return PlatformFontMeasureText(font, shortcut).dx + DpiScale(kHoverRowShortcutGapX);
+    }
+
+    Size GetIdealSize() override {
+        Size ts = PlatformFontMeasureText(font, text);
+        int dx = (2 * DpiScale(kHoverRowPadX)) + iconSize + DpiScale(kHoverRowIconGapX) + ts.dx + ShortcutDx();
+        int dy = std::max(ts.dy, iconSize) + (2 * DpiScale(kHoverRowPadY));
+        return {dx, dy};
+    }
+
+    void Paint(VirtPaintCtx& ctx) override {
+        bool enabled = IsEnabled();
+        Rect r = ctx.bounds;
+        if (enabled && HasFlag(vwfHovered)) {
+            ctx.gfx->FillRect(r, TbHoverColor());
+        }
+        int x = r.x + DpiScale(kHoverRowPadX);
+        if (pixmap) {
+            int y = r.y + ((r.dy - pixmap->height) / 2);
+            ctx.gfx->DrawPixmap(pixmap, {x, y, pixmap->width, pixmap->height});
+        }
+        x += iconSize + DpiScale(kHoverRowIconGapX);
+        int right = r.Right() - DpiScale(kHoverRowPadX);
+        Color col = enabled ? TbTextColor() : TbDisabledColor();
+        if (shortcut) {
+            // right-aligned and dimmer, the way a menu shows its accelerator
+            Rect sr{x, r.y, right - x, r.dy};
+            ctx.gfx->DrawText(shortcut, sr, gfxTextRight | gfxTextVCenter, font, TbDisabledColor());
+            right -= ShortcutDx();
+        }
+        Rect tr{x, r.y, right - x, r.dy};
+        ctx.gfx->DrawText(text, tr, gfxTextVCenter | gfxTextEllipsis, font, col);
+    }
+
+    void OnMouseEnter() { Invalidate(); }
+    void OnMouseLeave() { Invalidate(); }
+};
+
+// A cell of NewToolbarHoverStrip(): a label in a row of them, no icon. The one
+// in use is boxed rather than ticked; a tick per cell would double the width of
+// a strip whose whole point is to be compact.
+struct ToolbarHoverCell : VirtCtrl {
+    Str text; // owned
+    PlatformFont* font = nullptr;
+    bool isCurrent = false;
+
+    ToolbarHoverCell() = default;
+    ~ToolbarHoverCell() override { str::Free(text); }
+
+    Size GetIdealSize() override {
+        Size ts = PlatformFontMeasureText(font, text);
+        return {ts.dx + (2 * DpiScale(kHoverCellPadX)), ts.dy + (2 * DpiScale(kHoverRowPadY))};
+    }
+
+    void Paint(VirtPaintCtx& ctx) override {
+        bool enabled = IsEnabled();
+        Rect r = ctx.bounds;
+        if (enabled && HasFlag(vwfHovered)) {
+            ctx.gfx->FillRect(r, TbHoverColor());
+        }
+        if (isCurrent) {
+            ctx.gfx->DrawRect(r, TbTextColor(), DpiScale(1));
+        }
+        Color col = enabled ? TbTextColor() : TbDisabledColor();
+        ctx.gfx->DrawText(text, r, gfxTextCenter | gfxTextVCenter, font, col);
+    }
+
+    void OnMouseEnter() { Invalidate(); }
+    void OnMouseLeave() { Invalidate(); }
+};
+
+static void PostedHideHoverDropdown(MainWindow* win) {
+    if (IsMainWindowValidAndNotClosing(win)) {
+        HideToolbarHoverDropdown(win);
+    }
+}
+
+static void OnHoverRowClicked(MainWindow* win, VirtMouseEvent* ev) {
+    VirtCtrl* w = ev ? ev->target : nullptr;
+    if (!w || !w->IsEnabled()) {
+        return;
+    }
+    int cmdId = w->id;
+    // the click is being handled by the drop-down's own window, so it can only
+    // be torn down once that returns
+    uitask::Post(MkFunc0(PostedHideHoverDropdown, win), "HideToolbarHoverDropdown");
+    ToolbarPostCommand(win, cmdId);
+}
+
+// Remember a row/cell for HoverDropdownStateTemp(). `text` has to be the ctrl's
+// own copy: what the caller built the item from is often temp-allocated and
+// gone by the time the dump is asked for.
+static void RecordHoverItem(ToolbarVirt* tb, VirtCtrl* w, Str text, const ToolbarHoverMenuItem& it) {
+    ToolbarHoverItemState st;
+    st.ctrl = w;
+    st.text = text;
+    st.cmdId = it.cmdId;
+    st.isCurrent = it.isCurrent;
+    VecAppend(tb->hoverItems, st);
+}
+
+ILayout* NewToolbarHoverMenu(MainWindow* win, const Vec<ToolbarHoverMenuItem>& items) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    if (!tb) {
+        return nullptr;
+    }
+    int iconSize = tb->iconSize;
+    Color fg = TbTextColor();
+    Color dis = TbDisabledColor();
+    Color bg = TbBgColor();
+    auto* vbox = new VBox();
+    vbox->alignCross = CrossAxisAlign::Stretch;
+    for (const ToolbarHoverMenuItem& it : items) {
+        auto* row = new ToolbarHoverRow();
+        row->id = it.cmdId;
+        row->font = tb->platformFont;
+        row->iconSize = iconSize;
+        str::ReplaceWithCopy(&row->text, it.text);
+        str::ReplaceWithCopy(&row->shortcut, ShortcutsForCmdTemp(it.cmdId, 1));
+        if (it.svgIcon) {
+            row->pixmap = GetCachedPixmapForSvg(it.svgIcon, iconSize, iconSize, it.enabled ? fg : dis, bg);
+        }
+        row->SetIsEnabled(it.enabled);
+        row->onClick = MkFunc1(OnHoverRowClicked, win);
+        vbox->AddChild(row);
+        RecordHoverItem(tb, row, row->text, it);
+    }
+    int b = DpiScale(kHoverMenuBorder);
+    return new Padding(vbox, Insets{b, b, b, b});
+}
+
+// The widest row of the pyramid: the smallest w with 1+2+...+w >= n, so the
+// rows w, w-1, ... w-k hold every item with only the last one part-full. 26
+// items give 7, 6, 5, 4, 3 and a last row of 1.
+static int HoverPyramidTopRow(int n) {
+    int w = 1;
+    while (((w * (w + 1)) / 2) < n) {
+        w++;
+    }
+    return w;
+}
+
+// one row of the pyramid: items [a0, a1) from below the middle and [b0, b1)
+// from above it, so the row still runs smallest to largest
+static void AddHoverPyramidRow(VBox* vbox, const Vec<VirtCtrl*>& cells, int a0, int a1, int b0, int b1) {
+    auto* hbox = new HBox();
+    hbox->alignCross = CrossAxisAlign::Stretch;
+    for (int i = a0; i < a1; i++) {
+        hbox->AddChild(cells[i]);
+    }
+    for (int i = b0; i < b1; i++) {
+        hbox->AddChild(cells[i]);
+    }
+    vbox->AddChild(hbox);
+}
+
+ILayout* NewToolbarHoverStrip(MainWindow* win, const Vec<ToolbarHoverMenuItem>& items) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    if (!tb) {
+        return nullptr;
+    }
+    // a cell per item, made in the order they came in so that hoverItems (and
+    // the -dbg-control dump built from it) stays in that order whatever row a
+    // cell ends up in
+    Vec<VirtCtrl*> cells;
+    for (const ToolbarHoverMenuItem& it : items) {
+        auto* cell = new ToolbarHoverCell();
+        cell->id = it.cmdId;
+        cell->font = tb->platformFont;
+        cell->isCurrent = it.isCurrent;
+        str::ReplaceWithCopy(&cell->text, it.text);
+        cell->SetIsEnabled(it.enabled);
+        cell->onClick = MkFunc1(OnHoverRowClicked, win);
+        VecAppend(cells, (VirtCtrl*)cell);
+        RecordHoverItem(tb, cell, cell->text, it);
+        tb->hoverItems[len(tb->hoverItems) - 1].isStripCell = true;
+    }
+
+    // A pyramid rather than one long row: the middle of the list goes in the
+    // top row, next to the button, and each row below it holds what surrounds
+    // the middle, down to the two extremes. Every value is then a short move
+    // down and across instead of a run along a row as wide as the screen.
+    int base = len(tb->hoverItems) - len(cells);
+    auto* vbox = new VBox();
+    vbox->alignCross = CrossAxisAlign::CrossCenter;
+    int b = DpiScale(kHoverMenuBorder);
+    int n = len(cells);
+    if (n == 0) {
+        return new Padding(vbox, Insets{b, b, b, b});
+    }
+    int top = HoverPyramidTopRow(n);
+    // items [lo, hi) are the ones already placed
+    int lo = (n - top) / 2;
+    int hi = lo + top;
+    // the top row splits at its own middle, and everything past that point is
+    // on the larger side in every row: the rows below it take from the two
+    // sides of the middle in order
+    for (int i = lo + (top / 2); i < n; i++) {
+        tb->hoverItems[base + i].isRightHalf = true;
+    }
+    AddHoverPyramidRow(vbox, cells, lo, hi, 0, 0);
+    int rowLen = top - 1;
+    while (lo > 0 || hi < n) {
+        // as evenly as the two sides allow: the shorter side runs out first
+        // and the other takes what is left of the row
+        int nLeft = std::min(lo, (rowLen + 1) / 2);
+        int nRight = std::min(n - hi, rowLen - nLeft);
+        nLeft = std::min(lo, rowLen - nRight);
+        AddHoverPyramidRow(vbox, cells, lo - nLeft, lo, hi, hi + nRight);
+        lo -= nLeft;
+        hi += nRight;
+        rowLen = std::max(rowLen - 1, 1);
+    }
+    return new Padding(vbox, Insets{b, b, b, b});
+}
+
+// The rows/cells of the drop-down that is up, in screen coordinates, for
+// -dbg-control tests (tests/toolbar-hover-dropdown.ts).
+static TempStr HoverDropdownStateTemp(MainWindow* win) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    VirtHost* host = tb ? tb->hoverHost : nullptr;
+    if (!host) {
+        return StrL("dropdown cmd=0 items=0\n");
+    }
+    str::Builder out;
+    int n = len(tb->hoverItems);
+    out.Append(fmt("dropdown cmd=%d items=%d\n", tb->hoverCmdId, n));
+    for (int i = 0; i < n; i++) {
+        ToolbarHoverItemState& st = tb->hoverItems[i];
+        Rect r = st.ctrl ? host->ToScreen(st.ctrl->BoundsInWindow()) : Rect{};
+        out.Append(fmt("dropdown-item idx=%d cmd=%d current=%d rect=%d,%d,%d,%d text=%s\n", i, st.cmdId,
+                       st.isCurrent ? 1 : 0, r.x, r.y, r.x + r.dx, r.y + r.dy, st.text));
+    }
+    return ToStrTemp(out);
+}
+
+// The toolbar sees no mouse moves once the cursor is inside the drop-down, so
+// the drop-down has to say when the cursor leaves it.
+static void OnHoverDropdownMouseLeave(MainWindow* win) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    if (tb && tb->host && tb->hoverCmdId != 0) {
+        tb->host->SetTimer(kCloseHoverDropdownTimerId, kCloseHoverDropdownDelayMs);
+    }
+}
+
+static void OnHoverDropdownMouseMove(MainWindow* win) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    if (tb && tb->host && tb->hoverCmdId != 0) {
+        tb->host->KillTimer(kCloseHoverDropdownTimerId);
+    }
+}
+
+// The pyramid's right half - the values above the middle - gets its own
+// ground, so which way is bigger can be seen rather than read. The rows are
+// staggered, so the two halves meet along a staircase, and each band runs to
+// the right edge, covering the empty space beside a short row as well.
+static void PaintHoverDropdownRightHalf(MainWindow* win, VirtHostPaintEvent* ev) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    if (!tb) {
+        return;
+    }
+    Vec<ToolbarHoverItemState>& items = tb->hoverItems;
+    int n = len(items);
+    constexpr int kMaxRows = 32;
+    int rowTop[kMaxRows];
+    int rowBottom[kMaxRows];
+    int rowSplit[kMaxRows];
+    int nRows = 0;
+    int prevTop = INT_MIN;
+    while (nRows < kMaxRows) {
+        // the topmost row below the last one found
+        int y = INT_MAX;
+        for (int i = 0; i < n; i++) {
+            // only a strip has halves; a menu's rows are all one ground
+            VirtCtrl* c = items[i].isStripCell ? items[i].ctrl : nullptr;
+            if (c) {
+                int cy = c->BoundsInWindow().y;
+                if (cy > prevTop && cy < y) {
+                    y = cy;
+                }
+            }
+        }
+        if (y == INT_MAX) {
+            break;
+        }
+        int bottom = y;
+        int right = INT_MIN;
+        int split = INT_MAX;
+        for (int i = 0; i < n; i++) {
+            VirtCtrl* c = items[i].ctrl;
+            if (!c) {
+                continue;
+            }
+            Rect r = c->BoundsInWindow();
+            if (r.y != y) {
+                continue;
+            }
+            bottom = std::max(bottom, r.y + r.dy);
+            right = std::max(right, r.x + r.dx);
+            if (items[i].isRightHalf) {
+                split = std::min(split, r.x);
+            }
+        }
+        if (split == INT_MAX) {
+            // nothing of the larger side in this row: only the space past its
+            // end is on that side
+            split = right;
+        }
+        rowTop[nRows] = y;
+        rowBottom[nRows] = bottom;
+        rowSplit[nRows] = split;
+        nRows++;
+        prevTop = y;
+    }
+    Rect cr = ev->clientRect;
+    Color col = TbSubtleBgColor();
+    for (int i = 0; i < nRows; i++) {
+        // the first and last bands take in the border, so no strip of the
+        // other ground is left above or below them
+        int y = (i == 0) ? cr.y : rowTop[i];
+        int bottom = (i == nRows - 1) ? cr.y + cr.dy : rowBottom[i];
+        int x = rowSplit[i];
+        ev->gfx->FillRect(Rect{x, y, (cr.x + cr.dx) - x, bottom - y}, col);
+    }
+}
+
+static void PaintHoverDropdownBg(MainWindow* win, VirtHostPaintEvent* ev) {
+    ev->gfx->FillRect(ev->clientRect, TbBgColor());
+    PaintHoverDropdownRightHalf(win, ev);
+    ev->gfx->DrawRect(ev->clientRect, ThemeEdgeColor(), DpiScale(kHoverMenuBorder));
+}
+
+// The button a drop-down is up for goes without its tooltip: the bubble would
+// sit on top of the drop-down, and WM_SETCURSOR would keep bringing it back.
+static void TakeHoverButtonTooltip(MainWindow* win, int cmdId) {
+    ToolbarVirt* tb = win->toolbarVirt;
+    if (VirtCtrl* btn = ToolbarItemForCmd(win, cmdId)) {
+        str::ReplaceWithCopy(&tb->hoverSavedTip, btn->tooltip);
+        btn->SetTooltip({});
+    }
+}
+
+static void GiveHoverButtonTooltipBack(MainWindow* win) {
+    ToolbarVirt* tb = win->toolbarVirt;
+    if (tb->hoverCmdId == 0) {
+        return;
+    }
+    if (VirtCtrl* btn = ToolbarItemForCmd(win, tb->hoverCmdId)) {
+        btn->SetTooltip(tb->hoverSavedTip);
+    }
+    str::Free(tb->hoverSavedTip);
+    tb->hoverSavedTip = {};
+}
+
+void HideToolbarHoverDropdown(MainWindow* win) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    if (!tb) {
+        return;
+    }
+    VecReset(tb->hoverItems);
+    GiveHoverButtonTooltipBack(win);
+    tb->hoverPendingCmdId = 0;
+    tb->hoverCmdId = 0;
+    if (tb->host) {
+        tb->host->KillTimer(kOpenHoverDropdownTimerId);
+        tb->host->KillTimer(kCloseHoverDropdownTimerId);
+    }
+    if (tb->hoverHost) {
+        VirtHost* h = tb->hoverHost;
+        tb->hoverHost = nullptr;
+        delete h;
+    }
+}
+
+// Geometry, not WindowFromPoint(): the toolbar only gets a mouse move while
+// the cursor is over it, so who is on top does not come into it.
+static bool HostHasPoint(VirtHost* host, Point pt) {
+    return host && host->IsVisible() && host->ScreenRect().Contains(pt);
+}
+
+bool ToolbarHoverDropdownContainsScreenPoint(MainWindow* win, Point pt) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    return HostHasPoint(tb ? tb->hoverHost : nullptr, pt);
+}
+
+static ToolbarHoverReg* FindHoverReg(ToolbarVirt* tb, int cmdId) {
+    if (!tb || cmdId == 0) {
+        return nullptr;
+    }
+    for (ToolbarHoverReg& reg : tb->hoverRegs) {
+        if (reg.cmdId == cmdId) {
+            return &reg;
+        }
+    }
+    return nullptr;
+}
+
+void SetToolbarHoverDropdown(MainWindow* win, int cmdId, const Func1<ToolbarHoverBuildEvent*>& build, int groupId) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    if (!tb) {
+        return;
+    }
+    if (ToolbarHoverReg* reg = FindHoverReg(tb, cmdId)) {
+        reg->build = build;
+        reg->groupId = groupId;
+        return;
+    }
+    ToolbarHoverReg reg;
+    reg.cmdId = cmdId;
+    reg.groupId = groupId;
+    reg.build = build;
+    VecAppend(tb->hoverRegs, reg);
+}
+
+static void OpenHoverDropdown(MainWindow* win, int cmdId) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    ToolbarHoverReg* reg = FindHoverReg(tb, cmdId);
+    if (!reg || !reg->build.IsValid() || !tb->host) {
+        return;
+    }
+    Rect anchor = GetToolbarButtonScreenRect(win, cmdId);
+    if (anchor.IsEmpty()) {
+        return;
+    }
+    ToolbarHoverBuildEvent ev;
+    ev.win = win;
+    VecReset(tb->hoverItems);
+    reg->build.Call(&ev);
+    if (!ev.layout) {
+        return;
+    }
+
+    VirtHost::CreateArgs args;
+    args.parent = win->hwndFrame;
+    args.className = WStrL(L"SumatraToolbarHoverMenu");
+    args.isPopup = true;
+    args.visible = false;
+    args.noActivate = true;
+    args.userData = win;
+    args.bgColor = TbBgColor();
+    args.isRtl = IsUIRtl();
+    args.initialSize = {100, 100};
+    VirtHost* host = VirtHost::Create(args);
+    if (!host) {
+        delete ev.layout;
+        return;
+    }
+    host->onPaintBackground = MkFunc1(PaintHoverDropdownBg, win);
+    host->onMouseMove = MkFunc0(OnHoverDropdownMouseMove, win);
+    host->onMouseLeave = MkFunc0(OnHoverDropdownMouseLeave, win);
+    Size sz = host->SetLayoutSizedToContent(ev.layout);
+
+    // under the button, left edges aligned, kept on the monitor. A build that
+    // asked for it instead hangs off the middle of the button, so it opens
+    // around where the mouse already is
+    int x = anchor.x;
+    if (ev.centerOnButton) {
+        x = anchor.x + ((anchor.dx - sz.dx) / 2);
+    }
+    Rect r{x, anchor.Bottom(), sz.dx, sz.dy};
+    r = ShiftRectToWorkArea(r, win->hwndFrame, true);
+    host->SetPos(r, true);
+
+    TakeHoverButtonTooltip(win, cmdId);
+    if (tb->host->vroot) {
+        tb->host->vroot->HideTooltip();
+    }
+    tb->hoverHost = host;
+    tb->hoverCmdId = cmdId;
+    tb->hoverPendingCmdId = 0;
+}
+
+// The mouse moved over the toolbar (or left it): open, keep or close the
+// drop-down of whatever button it is resting on. clientPt is the move; null
+// on leave, which uses the real cursor so the drop-down stays up in it.
+static void ToolbarHoverDropdownOnMouseMove(MainWindow* win, const Point* clientPt) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    if (!tb || !tb->host || len(tb->hoverRegs) == 0) {
+        return;
+    }
+    Point ptScreen = UiCursorScreenPos();
+    bool overMenu = ToolbarHoverDropdownContainsScreenPoint(win, ptScreen);
+    int cmdId = 0;
+    if (clientPt) {
+        VirtCtrl* w = ToolbarItemFromPoint(win, *clientPt);
+        if (w && FindHoverReg(tb, w->id)) {
+            cmdId = w->id;
+        }
+    } else if (HostHasPoint(tb->host, ptScreen)) {
+        // a disabled button still gets its drop-down, the way it still gets its
+        // tooltip: the rows say what could be done and why they are greyed
+        VirtCtrl* w = ToolbarItemFromPoint(win, tb->host->FromScreen(ptScreen));
+        if (w && FindHoverReg(tb, w->id)) {
+            cmdId = w->id;
+        }
+    }
+
+    if (tb->hoverCmdId != 0) {
+        // one is open: keep it while the mouse is on its button or in it
+        if (overMenu || cmdId == tb->hoverCmdId) {
+            tb->host->KillTimer(kCloseHoverDropdownTimerId);
+            return;
+        }
+        if (cmdId != 0) {
+            ToolbarHoverReg* from = FindHoverReg(tb, tb->hoverCmdId);
+            ToolbarHoverReg* to = FindHoverReg(tb, cmdId);
+            int group = from ? from->groupId : 0;
+            if (group != 0 && to && to->groupId == group) {
+                // both buttons share this drop-down, so it stays put: the two
+                // sit side by side and sliding it between them would be a
+                // twitch, not a new drop-down
+                tb->host->KillTimer(kCloseHoverDropdownTimerId);
+                GiveHoverButtonTooltipBack(win);
+                tb->hoverCmdId = cmdId;
+                TakeHoverButtonTooltip(win, cmdId);
+                return;
+            }
+            // moved straight onto another button that has one: swap to it
+            // without the delay, the way a menu bar follows the mouse
+            HideToolbarHoverDropdown(win);
+            OpenHoverDropdown(win, cmdId);
+            return;
+        }
+        tb->host->SetTimer(kCloseHoverDropdownTimerId, kCloseHoverDropdownDelayMs);
+        return;
+    }
+    if (cmdId == tb->hoverPendingCmdId) {
+        return;
+    }
+    tb->hoverPendingCmdId = cmdId;
+    tb->host->KillTimer(kOpenHoverDropdownTimerId);
+    if (cmdId != 0) {
+        tb->host->SetTimer(kOpenHoverDropdownTimerId, UiTooltipDelayMs());
+    }
+}
+
+static void OnHoverDropdownTimer(MainWindow* win, int timerId) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    if (!tb || !tb->host) {
+        return;
+    }
+    if (timerId == kOpenHoverDropdownTimerId) {
+        tb->host->KillTimer(kOpenHoverDropdownTimerId);
+        int cmdId = tb->hoverPendingCmdId;
+        tb->hoverPendingCmdId = 0;
+        if (cmdId != 0) {
+            OpenHoverDropdown(win, cmdId);
+        }
+        return;
+    }
+    tb->host->KillTimer(kCloseHoverDropdownTimerId);
+    Point pt = UiCursorScreenPos();
+    if (ToolbarHoverDropdownContainsScreenPoint(win, pt)) {
+        return;
+    }
+    // still on the button that opened it: leave it up
+    if (GetToolbarButtonScreenRect(win, tb->hoverCmdId).Contains(pt)) {
+        return;
+    }
+    HideToolbarHoverDropdown(win);
+}
+
+struct ZoomHoverLevel {
+    float zoom;
+    int cmdId;
+};
+
+// What the zoom strip lists: the levels the zoom buttons step through, so a
+// click on one of them is the same jump the buttons make in one go, plus the
+// two fit modes where 100% is. GetDefaultZoomLevels() is ZoomLevels from the
+// settings when it is set, otherwise the built-in list, and GetZoomStepCmdIds()
+// has a command for each of them, in the same order.
+static void ZoomHoverLevels(Vec<ZoomHoverLevel>& out) {
+    int n = 0;
+    float* levels = GetDefaultZoomLevels(&n);
+    Vec<int>* cmdIds = GetZoomStepCmdIds();
+    if (!levels || !cmdIds || len(*cmdIds) != n) {
+        return;
+    }
+    bool addedFits = false;
+    for (int i = 0; i < n; i++) {
+        if (!addedFits && levels[i] > 100) {
+            // the fit modes go where their size puts them, i.e. right after
+            // 100% in every list that has it
+            VecAppend(out, ZoomHoverLevel{kZoomFitPage, CmdZoomFitPage});
+            VecAppend(out, ZoomHoverLevel{kZoomFitWidth, CmdZoomFitWidth});
+            addedFits = true;
+        }
+        VecAppend(out, ZoomHoverLevel{levels[i], (*cmdIds)[i]});
+    }
+    if (!addedFits) {
+        VecAppend(out, ZoomHoverLevel{kZoomFitPage, CmdZoomFitPage});
+        VecAppend(out, ZoomHoverLevel{kZoomFitWidth, CmdZoomFitWidth});
+    }
+}
+
+// which of the levels the document is at, exact match only, -1 when it is at
+// none of them (a zoom typed into Custom Zoom, or a fit mode not listed)
+static int ZoomHoverCurrentIdx(MainWindow* win, const Vec<ZoomHoverLevel>& levels) {
+    DocController* ctrl = win ? win->ctrl : nullptr;
+    if (!ctrl) {
+        return -1;
+    }
+    float current = ctrl->GetZoomVirtual(false);
+    // the same fuzz DisplayModel::GetNextZoomStep uses to match a level
+    constexpr float kZoomFuzz = 0.01f;
+    for (int i = 0; i < len(levels); i++) {
+        float zl = levels[i].zoom;
+        if (current + kZoomFuzz >= zl && current - kZoomFuzz <= zl) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// The zoom buttons' drop-down: the zoom levels as a compact pyramid centred on
+// the button, the one in use boxed, so it is a short trip from the button to
+// any of the levels.
+static void BuildZoomHoverMenu(MainWindow* win, ToolbarHoverBuildEvent* ev) {
+    DocController* ctrl = win ? win->ctrl : nullptr;
+    if (!ctrl) {
+        return;
+    }
+    Vec<ZoomHoverLevel> levels;
+    ZoomHoverLevels(levels);
+    int currentIdx = ZoomHoverCurrentIdx(win, levels);
+
+    Vec<ToolbarHoverMenuItem> items;
+    for (int i = 0; i < len(levels); i++) {
+        ToolbarHoverMenuItem it;
+        it.text = ZoomLevelStrExact(levels[i].zoom);
+        it.cmdId = levels[i].cmdId;
+        it.isCurrent = i == currentIdx;
+        VecAppend(items, it);
+    }
+
+    ev->layout = NewToolbarHoverStrip(win, items);
+    ev->centerOnButton = true;
+}
+
+// The zoom moved (the buttons step it, and their strip stays up while they are
+// clicked): box the level it landed on, if it landed on one. The strip stays
+// where it is; sliding it out from under the mouse mid-click would be worse
+// than the mark being off-centre.
+static void UpdateZoomHoverDropdown(MainWindow* win) {
+    ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
+    if (!tb || !tb->hoverHost) {
+        return;
+    }
+    if (tb->hoverCmdId != CmdZoomIn && tb->hoverCmdId != CmdZoomOut) {
+        return;
+    }
+    Vec<ZoomHoverLevel> levels;
+    ZoomHoverLevels(levels);
+    int currentIdx = ZoomHoverCurrentIdx(win, levels);
+    for (int i = 0; i < len(tb->hoverItems); i++) {
+        ToolbarHoverItemState& st = tb->hoverItems[i];
+        if (!st.isStripCell || !st.ctrl) {
+            continue;
+        }
+        bool isCurrent = i == currentIdx;
+        auto* cell = (ToolbarHoverCell*)st.ctrl;
+        if (cell->isCurrent == isCurrent) {
+            continue;
+        }
+        cell->isCurrent = isCurrent;
+        st.isCurrent = isCurrent;
+        cell->Invalidate();
+    }
+}
+
+// The Save button's drop-down: the three ways to end an editing session.
+static void BuildSaveHoverMenu(MainWindow* win, ToolbarHoverBuildEvent* ev) {
+    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    auto* ctx = NewBuildMenuCtx(tab, Point{0, 0});
+    AutoCall delCtx(DeleteBuildMenuCtx, ctx);
+    bool dirty = ctx->hasUnsavedAnnotations;
+
+    TempStr base = tab ? path::GetBaseNameTemp(tab->filePath) : TempStr{};
+    Str saveText = Tr("Save changes to existing PDF");
+    if (len(base) > 0) {
+        saveText = fmt(Tr("Save changes to %s").s, base);
+    }
+
+    Vec<ToolbarHoverMenuItem> items;
+    VecAppend(items, {Str(gIconSave), saveText, CmdSaveAnnotations, dirty});
+    VecAppend(items, {Str(gIconSaveToNewFile), Tr("Save changes to a new PDF"), CmdSaveAnnotationsNewFile, dirty});
+    VecAppend(items, {Str(gIconTrash), Tr("Discard changes"), CmdDiscardChanges, dirty});
+    ev->layout = NewToolbarHoverMenu(win, items);
+}
+
+static void OnToolbarMouseMove(MainWindow* win, Point pt) {
+    UpdateOverlayToolbarForMouse(win);
+    ToolbarHoverDropdownOnMouseMove(win, &pt);
+}
+
+static void OnToolbarMouseLeave(MainWindow* win) {
+    UpdateOverlayToolbarForMouse(win);
+    ToolbarHoverDropdownOnMouseMove(win, nullptr);
 }
 
 static void PaintToolbarSeparator(VirtCustom*, VirtPaintCtx* ctx) {
@@ -1202,10 +2279,15 @@ static void BuildToolbarLayout(MainWindow* win) {
     PopulateCustomToolbarButtons();
 
     ToolbarVirt* tb = win->toolbarVirt;
-    tb->items.Reset();
+    VecReset(tb->items);
+    VecReset(tb->annotationItems);
+    tb->annotationRow = nullptr;
     tb->pageLabel = nullptr;
+    tb->pageLabel2 = nullptr;
     tb->pageTotal = nullptr;
+    tb->chapterTotal = nullptr;
     win->pageEdit = nullptr;
+    win->chapterEdit = nullptr;
 
     int cyPad = ToolbarCyPad();
     int iconPad = DpiScale(6);
@@ -1226,30 +2308,58 @@ static void BuildToolbarLayout(MainWindow* win) {
             // Old toolbar: label HWND was text + kTextPaddingRight + kButtonSpacingX
             // (10dpi) so "Page:" and "/ N" were not flush against the edit.
             int pageGap = DpiScale(kTextPaddingRight) + DpiScale(kButtonSpacingX);
-            auto* label = new VirtText(_TRA("Page:"), tb->platformFont);
+            auto* label = new VirtText(Tr("Page:"), tb->platformFont);
+            label->isRtl = box->rtl;
             label->SetColor(kColText, fg);
             label->padding = {0, pageGap, 0, DpiScale(4)};
             label->id = PageInfoId;
             tb->pageLabel = label;
             box->AddChild(label);
 
+            // chapter box: [chapterEdit] / N, hidden unless HasChapters()
+            Edit* chapterEdit = ToolbarCreateChapterEdit(win, tb->platformFont, tb->iconSize);
+            chapterEdit->SetVisibility(Visibility::Collapse);
+            win->chapterEdit = chapterEdit;
+            box->AddChild(chapterEdit);
+
+            auto* chapterTotal = new VirtText(StrL(" "), tb->platformFont);
+            chapterTotal->isRtl = box->rtl;
+            chapterTotal->SetColor(kColText, fg);
+            chapterTotal->padding = {0, DpiScale(4), 0, pageGap};
+            chapterTotal->id = PageInfoId;
+            chapterTotal->SetVisibility(Visibility::Collapse);
+            tb->chapterTotal = chapterTotal;
+            box->AddChild(chapterTotal);
+
+            // second "Page:" label, shown before pageEdit only for HasChapters() docs
+            auto* label2 = new VirtText(Tr("Page:"), tb->platformFont);
+            label2->isRtl = box->rtl;
+            label2->SetColor(kColText, fg);
+            label2->padding = {0, pageGap, 0, DpiScale(4)};
+            label2->id = PageInfoId;
+            label2->SetVisibility(Visibility::Collapse);
+            tb->pageLabel2 = label2;
+            box->AddChild(label2);
+
             Edit* pageEdit = ToolbarCreatePageEdit(win, tb->platformFont, tb->iconSize);
             win->pageEdit = pageEdit;
             box->AddChild(pageEdit);
 
             auto* total = new VirtText(StrL(" "), tb->platformFont);
+            total->isRtl = box->rtl;
             total->SetColor(kColText, fg);
             total->padding = {0, DpiScale(4), 0, pageGap};
             total->id = PageInfoId;
             tb->pageTotal = total;
             box->AddChild(total);
-            tb->items.Append(label);
+            VecAppend(tb->items, label);
             continue;
         }
         if (bi.cmdId == 0 || !HasToolbarButtonContent(bi)) {
             w = MakeToolbarSeparator(tb->rowDy);
         } else if (bi.isText) {
             auto* b = new VirtButton(noTranslate ? bi.toolTip : trans::GetTranslation(bi.toolTip), tb->platformFont);
+            b->isRtl = box->rtl;
             b->textPadding = {cyPad, iconPad, cyPad, iconPad};
             w = b;
         } else {
@@ -1270,11 +2380,55 @@ static void BuildToolbarLayout(MainWindow* win) {
         if (bi.cmdId != 0 && bi.cmdId != PageInfoId) {
             w->onClick = MkFunc1(OnToolbarButtonClicked, win);
         }
-        tb->items.Append(w);
+        VecAppend(tb->items, w);
         box->AddChild(w);
     }
 
-    tb->host->SetLayout(new Padding(box, Insets{0, DpiScale(4), 0, DpiScale(4)}));
+    auto* annotationBox = new HBox();
+    annotationBox->alignMain = MainAxisAlign::MainCenter;
+    annotationBox->alignCross = CrossAxisAlign::CrossCenter;
+    annotationBox->rtl = box->rtl;
+    for (const ToolbarButtonInfo& bi : gPdfAnnotationButtons) {
+        VirtCtrl* w = nullptr;
+        if (!HasToolbarButtonContent(bi)) {
+            w = MakeToolbarSeparator(tb->rowDy);
+        } else {
+            auto* ib = new VirtIconButton();
+            ib->padding = {cyPad, iconPad, cyPad, iconPad};
+            ib->pixmap = GetCachedPixmapForSvg(Str(bi.icon), tb->iconSize, tb->iconSize, fg, TbBgColor());
+            ib->pixmapDisabled = GetCachedPixmapForSvg(Str(bi.icon), tb->iconSize, tb->iconSize, dis, TbBgColor());
+            w = ib;
+        }
+        ApplyToolbarItemColors(w);
+        w->id = bi.cmdId;
+        if (bi.toolTip) {
+            w->SetTooltip(ToolbarTipTemp(bi.cmdId, bi.toolTip, true));
+        }
+        if (bi.cmdId != 0) {
+            w->onClick = MkFunc1(OnToolbarButtonClicked, win);
+        }
+        VecAppend(tb->annotationItems, w);
+        annotationBox->AddChild(w);
+    }
+
+    auto* mainRow = new HBox();
+    mainRow->alignCross = CrossAxisAlign::CrossCenter;
+    mainRow->gap = DpiScale(kButtonSpacingX);
+    mainRow->AddChild(box, 1);
+
+    SetToolbarHoverDropdown(win, CmdSaveAnnotations, MkFunc1(BuildSaveHoverMenu, win));
+    // one strip for the two of them, so it doesn't jump when the mouse crosses
+    // from one to the other
+    SetToolbarHoverDropdown(win, CmdZoomIn, MkFunc1(BuildZoomHoverMenu, win), CmdZoomIn);
+    SetToolbarHoverDropdown(win, CmdZoomOut, MkFunc1(BuildZoomHoverMenu, win), CmdZoomIn);
+
+    auto* root = new VBox();
+    root->alignCross = CrossAxisAlign::Stretch;
+    root->AddChild(new Padding(mainRow, Insets{0, DpiScale(4), 0, DpiScale(4)}));
+    tb->annotationRow = new Padding(annotationBox, Insets{0, DpiScale(4), 0, DpiScale(4)});
+    tb->annotationRow->SetVisibility(Visibility::Collapse);
+    root->AddChild(tb->annotationRow);
+    tb->host->SetLayout(root);
 }
 
 static void PaintToolbarBackground(MainWindow*, VirtHostPaintEvent* ev) {
@@ -1326,8 +2480,8 @@ void CreateToolbar(MainWindow* win) {
     host->onPaintBackground = MkFunc1(PaintToolbarBackground, win);
     host->onPaint = MkFunc1(PaintToolbarEdge, win);
     host->onTimer = MkFunc1(OnToolbarTimer, win);
-    host->onMouseMove = MkFunc0(UpdateOverlayToolbarForMouse, win);
-    host->onMouseLeave = MkFunc0(UpdateOverlayToolbarForMouse, win);
+    host->onMouseMove = MkFunc1(OnToolbarMouseMove, win);
+    host->onMouseLeave = MkFunc0(OnToolbarMouseLeave, win);
     ToolbarSetNativeHooks(win, host);
 
     auto* tb = new ToolbarVirt();
@@ -1348,9 +2502,17 @@ void CreateToolbar(MainWindow* win) {
     DocController* ctrl = win->ctrl;
     UpdateToolbarPageText(win, ctrl ? ctrl->PageCount() : -1);
     if (ctrl && win->pageEdit) {
-        TempStr label = ctrl->GetPageLabeTemp(ctrl->CurrentPageNo());
-        win->pageEdit->SetText(label);
-        win->pageEdit->SetNumbersOnly(!ctrl->HasPageLabels());
+        if (ctrl->HasChapters()) {
+            Location cur = ctrl->CurrentLocation();
+            win->pageEdit->SetText(fmt("%d", cur.page));
+            if (win->chapterEdit) {
+                win->chapterEdit->SetText(fmt("%d", cur.chapter));
+            }
+        } else {
+            TempStr label = ctrl->GetPageLabeTemp(ctrl->CurrentPageNo());
+            win->pageEdit->SetText(label);
+        }
+        EditSetNumbersOnly(win->pageEdit, !ctrl->HasPageLabels());
     }
     UpdateToolbarFindText(win);
     ToolbarUpdateStateForWindow(win, true);
@@ -1362,7 +2524,10 @@ void DestroyToolbar(MainWindow* win) {
         win->hwndToolbar = nullptr;
         return;
     }
+    HideToolbarHoverDropdown(win);
+    DeleteAnnotFilterToolbar(win);
     win->pageEdit = nullptr;
+    win->chapterEdit = nullptr;
     win->toolbarVirt = nullptr;
     win->hwndToolbar = nullptr;
     delete tb->host;

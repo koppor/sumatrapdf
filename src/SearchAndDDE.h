@@ -1,8 +1,8 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
-#define kSumatraDdeServer L"SUMATRA"
-#define kSumatraDdeTopic L"control"
+constexpr const WCHAR* kSumatraDdeServer = L"SUMATRA";
+constexpr const WCHAR* kSumatraDdeTopic = L"control";
 
 struct Gfx;
 
@@ -17,9 +17,9 @@ struct Gfx;
 //                    the receiver to finish loading the file.
 // - kCopyDataOpenMany: payload is a SumatraOpenManyCopyData struct followed by
 //                     UTF-8 null-terminated paths.
-#define kCopyDataDdeW 0x44646557     // 'DdeW'
-#define kCopyDataOpen 0x4F70656E     // 'Open'
-#define kCopyDataOpenMany 0x4F704D6E // 'OpMn'
+constexpr int kCopyDataDdeW = 0x44646557;     // 'DdeW'
+constexpr int kCopyDataOpen = 0x4F70656E;     // 'Open'
+constexpr int kCopyDataOpenMany = 0x4F704D6E; // 'OpMn'
 
 struct SumatraOpenCopyData {
     u32 newWindow; // 0: reuse existing, non-zero: force new window
@@ -38,19 +38,24 @@ LRESULT OnDDERequest(HWND hwnd, WPARAM wp, LPARAM lp);
 LRESULT OnDDETerminate(HWND hwnd, WPARAM wp, LPARAM lp);
 LRESULT OnCopyData(HWND hwnd, WPARAM wp, LPARAM lp);
 
-#define HIDE_FWDSRCHMARK_TIMER_ID 4
-#define HIDE_FWDSRCHMARK_DELAY_IN_MS 400
-#define HIDE_FWDSRCHMARK_DECAYINTERVAL_IN_MS 100
-#define HIDE_FWDSRCHMARK_STEPS 5
+constexpr int kHideFwdSearchMarkTimerID = 4;
+constexpr int kHideFwdSearchMarkDelayInMs = 400;
+// dest highlight after a link/bookmark jump (#5945): stay solid longer than
+// SyncTeX so the mark is still there after you look at the new page
+constexpr int kHideLinkDestMarkDelayInMs = 2000;
+constexpr int kHideFwdSearchMarkDecayIntervalInMs = 100;
+constexpr int kHideFwdSearchMarkSteps = 5;
 
 // find-as-you-type debounce timer (lives on hwndFrame); see SearchAndDDE.cpp
-#define kFindDebounceTimerId 0x100
+constexpr int kFindDebounceTimerId = 0x100;
 
 bool NeedsFindUI(MainWindow* win);
 void ClearSearchResult(MainWindow* win);
 bool OnInverseSearch(MainWindow* win, int x, int y);
 void ShowForwardSearchResult(MainWindow* win, Str fileName, int line, int col, int ret, int page, Vec<Rect>& rects);
+void ShowLinkDestHighlight(MainWindow* win, int pageNo, RectF dest);
 void PaintForwardSearchMark(MainWindow* win, Gfx* gfx);
+TempStr LinkDestHighlightResultTemp(int* exitCodeOut);
 void PaintAllFindMatches(MainWindow* win, Gfx* gfx);
 void InvalidateFindMatchPaintCache();
 
@@ -63,6 +68,7 @@ void OnFindBarTextChanged(MainWindow* win);
 bool ParseFindPageRange(Str s, int nPages, Vec<bool>& allowedOut);
 void FindDebounceTimerFired(MainWindow* win);
 bool FindFlushPendingSearch(MainWindow* win);
+bool FindTermDiffersFromLast(MainWindow* win);
 void GoToFindMatch(MainWindow* win, int startPage, int startGlyph, int endPage, int endGlyph);
 void ClearFindMatches(MainWindow* win);
 void InvalidateFindForDocumentChange(MainWindow* win);
@@ -72,5 +78,14 @@ void BrowserFindAllResultReceived(MainWindow* win, Str payload);
 bool AbortFinding(MainWindow* win, bool hideMessage);
 void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, bool showProgress);
 void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, Str text, bool wasModified, bool showProgress);
+void StartSearchFromCommandLine(MainWindow* win, Str text);
+void StartPendingSearch(MainWindow* win);
+TempStr CurrentFindTermTemp(MainWindow* win);
+void EnsureFindSnippets(MainWindow* win);
+
+struct DropDown;
+void RememberFindQuery(Str);
+void ApplyFindHistory(DropDown*);
+TempStr FindHistoryResultTemp(int* exitCodeOut);
 extern bool gIsStartup;
 extern StrVec gDdeOpenOnStartup;

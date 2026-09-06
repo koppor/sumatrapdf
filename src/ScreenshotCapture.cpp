@@ -42,6 +42,9 @@ constexpr int kLabelHeight = 20;
 constexpr int kLabelGap = 4;
 // height for the info bar at the bottom
 constexpr int kInfoBarHeight = 30;
+// WM_TIMER id used to clear a transient info-bar status message
+constexpr UINT_PTR kStatusTimerId = 1;
+constexpr UINT kStatusMsgTimeoutMs = 1500;
 
 struct CapturedScreenshot {
     HBITMAP bmp = nullptr;   // full-size capture
@@ -56,6 +59,7 @@ struct CapturedScreenshot {
 
 struct ScreenshotOverlayData {
     Vec<CapturedScreenshot> captures;
+    HWND hwndRestore = nullptr;
     int selected = 0; // index of currently selected (hovered/arrow-keyed)
     int cols = 0;
     int rows = 0;
@@ -65,6 +69,10 @@ struct ScreenshotOverlayData {
     Vec<int> rowY;       // y start of each row (cumulative)
     int winW = 0;
     int winH = 0;
+    // transient message shown in the info bar (e.g. "Copied to clipboard"),
+    // cleared by a one-shot timer
+    Str statusMsg;
+    UINT_PTR statusTimer = 0;
 };
 
 // true if hwnd is a floating window of ours owned by one of our frames (e.g. the
@@ -503,7 +511,7 @@ static void FreeCapturedScreenshots(ScreenshotOverlayData* data) {
         }
         str::Free(cs.processName);
     }
-    data->captures.Reset();
+    VecReset(data->captures);
 }
 
 // one capture target; the result lands in cs (cs.bmp stays null on failure)
@@ -577,7 +585,7 @@ static BOOL CALLBACK EnumCaptureWindowsProc(HWND hwnd, LPARAM lParam) {
     }
     CaptureItem item;
     item.hwnd = hwnd;
-    ctx->items->Append(item);
+    VecAppend(*ctx->items, item);
     return TRUE;
 }
 
@@ -590,7 +598,7 @@ static void CaptureAllScreenshots(ScreenshotOverlayData* data, HWND overlayHwnd)
     Vec<CaptureItem> items;
     {
         CaptureItem item;
-        items.Append(item);
+        VecAppend(items, item);
     }
     EnumCaptureCtx ectx;
     ectx.items = &items;
@@ -632,7 +640,7 @@ static void CaptureAllScreenshots(ScreenshotOverlayData* data, HWND overlayHwnd)
         Vec<ThreadHandle> threads;
         for (int t = 0; t < numThreads; t++) {
             auto fn = MkFunc0(CaptureWorker, &ctx);
-            threads.Append(StartThread(fn, "ScreenshotCapture"));
+            VecAppend(threads, StartThread(fn, StrL("ScreenshotCapture")));
         }
         for (ThreadHandle h : threads) {
             WaitForSingleObject(h, INFINITE);
@@ -643,7 +651,7 @@ static void CaptureAllScreenshots(ScreenshotOverlayData* data, HWND overlayHwnd)
     // keep successful captures, in enumeration order (desktop first)
     for (int i = 0; i < nItems; i++) {
         if (items[i].cs.bmp) {
-            data->captures.Append(items[i].cs);
+            VecAppend(data->captures, items[i].cs);
         }
     }
 
@@ -748,22 +756,22 @@ static void SaveSelectedScreenshot(ScreenshotOverlayData* data) {
     if (data->selected < 0 || data->selected >= len(data->captures)) {
         return;
     }
-    TempStr screenshotDir = gScreenshotHost.GetSaveDirTemp ? gScreenshotHost.GetSaveDirTemp() : nullptr;
-    if (!screenshotDir) {
+    TempStr screenshotDir = gScreenshotHost.GetSaveDirTemp ? gScreenshotHost.GetSaveDirTemp() : TempStr();
+    if (len(screenshotDir) == 0) {
         return;
     }
     dir::CreateAll(screenshotDir);
 
     auto& cs = data->captures[data->selected];
     TempStr filePath = MakeUniquePathTemp(screenshotDir, cs.processName);
-    if (!filePath) {
+    if (len(filePath) == 0) {
         return;
     }
 
     HWND owner = gScreenshotHost.GetOwnerHwnd ? gScreenshotHost.GetOwnerHwnd() : nullptr;
     HBITMAP hbmpCopy = (HBITMAP)CopyImage(cs.bmp, IMAGE_BITMAP, cs.origW, cs.origH, 0);
     RenderedBitmap* rbmp = new RenderedBitmap(hbmpCopy, Size(cs.origW, cs.origH));
-    ShowImageEditWindow(owner, ImageEditMode::Crop, filePath, rbmp);
+    ShowImageEditWindow(owner, ImageEditMode::Crop, filePath, rbmp, false, {}, true);
     delete rbmp;
 }
 
@@ -894,13 +902,17 @@ static void PaintOverlayLayered(HWND hwnd, ScreenshotOverlayData* data) {
     ncm.cbSize = sizeof(ncm);
     SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
     int infoFontSize = std::abs((int)(ncm.lfMessageFont.lfHeight * 1.3));
-    PlatformFont* infoFont = GetUserGuiFontEx(nullptr, infoFontSize, true, false);
+    PlatformFont* infoFont = GetUserGuiFontEx({}, infoFontSize, true, false);
     HGDIOBJ prevInfoFont = SelectObject(hdcTemp, infoFont->GetHFont());
 
     SetTextColor(hdcTemp, kColWhite);
     SetBkMode(hdcTemp, TRANSPARENT);
-    HdcDrawText(hdcTemp, WStrL(L"Select screenshot to save. ↑ ↓ to navigate. Enter to select. Esc to cancel"), infoRect,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    // a transient status message (e.g. "Copied to clipboard") replaces the hint
+    WStr infoText = WStrL(L"Select screenshot to save. ↑ ↓ to navigate. Enter to save. Ctrl+C to copy. Esc to cancel");
+    if (data->statusMsg) {
+        infoText = ToWStrTemp(data->statusMsg);
+    }
+    HdcDrawText(hdcTemp, infoText, infoRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     SelectObject(hdcTemp, prevInfoFont);
 
@@ -998,6 +1010,40 @@ static void PaintOverlayLayered(HWND hwnd, ScreenshotOverlayData* data) {
     ReleaseDC(nullptr, hdcScreen);
 }
 
+// Show a transient message in the info bar; a one-shot timer clears it again.
+static void ShowOverlayStatus(HWND hwnd, ScreenshotOverlayData* data, Str msg) {
+    str::ReplaceWithCopy(&data->statusMsg, msg);
+    if (data->statusTimer) {
+        KillTimer(hwnd, data->statusTimer);
+    }
+    data->statusTimer = SetTimer(hwnd, kStatusTimerId, kStatusMsgTimeoutMs, nullptr);
+    PaintOverlayLayered(hwnd, data);
+}
+
+// Copy the currently selected screenshot to the clipboard (Ctrl+C in the picker).
+static void CopySelectedScreenshotToClipboard(HWND hwnd, ScreenshotOverlayData* data) {
+    if (data->selected < 0 || data->selected >= len(data->captures)) {
+        return;
+    }
+    auto& cs = data->captures[data->selected];
+    bool ok = cs.bmp && CopyImageToClipboard(cs.bmp, false);
+    ShowOverlayStatus(hwnd, data, ok ? StrL("Copied to clipboard") : StrL("Copy failed"));
+}
+
+// Destroying the picker directly leaves its UI thread without keyboard focus.
+// Return cancellation to the window that was active before the picker opened.
+static void CancelScreenshotOverlay(HWND hwnd, ScreenshotOverlayData* data) {
+    HWND hwndRestore = data->hwndRestore;
+    DestroyWindow(hwnd);
+    if (!hwndRestore || !IsWindow(hwndRestore)) {
+        return;
+    }
+    SetForegroundWindow(hwndRestore);
+    if (GetWindowThreadProcessId(hwndRestore, nullptr) == GetCurrentThreadId()) {
+        SetFocus(hwndRestore);
+    }
+}
+
 static LRESULT CALLBACK WndProcScreenshotOverlay(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     ScreenshotOverlayData* data = (ScreenshotOverlayData*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
 
@@ -1022,7 +1068,7 @@ static LRESULT CALLBACK WndProcScreenshotOverlay(HWND hwnd, UINT msg, WPARAM wp,
             }
             switch (wp) {
                 case VK_ESCAPE:
-                    DestroyWindow(hwnd);
+                    CancelScreenshotOverlay(hwnd, data);
                     return 0;
                 case VK_LEFT:
                     if (data->selected > 0) {
@@ -1048,6 +1094,12 @@ static LRESULT CALLBACK WndProcScreenshotOverlay(HWND hwnd, UINT msg, WPARAM wp,
                         PaintOverlayLayered(hwnd, data);
                     }
                     return 0;
+                case 'C':
+                    if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+                        CopySelectedScreenshotToClipboard(hwnd, data);
+                        return 0;
+                    }
+                    break;
                 case VK_RETURN:
                     SaveSelectedScreenshot(data);
                     DestroyWindow(hwnd);
@@ -1080,8 +1132,23 @@ static LRESULT CALLBACK WndProcScreenshotOverlay(HWND hwnd, UINT msg, WPARAM wp,
             }
             return 0;
 
+        case WM_TIMER:
+            if (data && wp == kStatusTimerId) {
+                KillTimer(hwnd, data->statusTimer);
+                data->statusTimer = 0;
+                str::Free(data->statusMsg);
+                data->statusMsg = {};
+                PaintOverlayLayered(hwnd, data);
+                return 0;
+            }
+            break;
+
         case WM_DESTROY:
             if (data) {
+                if (data->statusTimer) {
+                    KillTimer(hwnd, data->statusTimer);
+                }
+                str::Free(data->statusMsg);
                 FreeCapturedScreenshots(data);
                 delete data;
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -1105,14 +1172,17 @@ static void RegisterScreenshotOverlayClass() {
 
 // Captures every eligible window plus the desktop, then puts up the picker
 // overlay. Choosing one opens it in the image editor.
-void TakeScreenshots() {
+void TakeScreenshots(HWND hwndRestore) {
     RegisterScreenshotOverlayClass();
 
-    // Remember the foreground window and capture screenshots before creating
-    // our overlay window to avoid disturbing what's on screen
-    HWND hwndForeground = GetForegroundWindow();
+    // Menu commands supply their frame; a global hotkey restores the window
+    // that was in the foreground when it fired.
+    if (!hwndRestore) {
+        hwndRestore = GetForegroundWindow();
+    }
 
     auto* data = new ScreenshotOverlayData();
+    data->hwndRestore = hwndRestore;
     CaptureAllScreenshots(data, nullptr);
 
     int screenW = GetSystemMetrics(SM_CXSCREEN);
@@ -1139,10 +1209,10 @@ void TakeScreenshots() {
 
     // Select the previously active window's thumbnail, or first if not found
     data->selected = 0;
-    if (hwndForeground) {
+    if (hwndRestore) {
         int n = len(data->captures);
         for (int i = 0; i < n; i++) {
-            if (data->captures[i].srcHwnd == hwndForeground) {
+            if (data->captures[i].srcHwnd == hwndRestore) {
                 data->selected = i;
                 break;
             }

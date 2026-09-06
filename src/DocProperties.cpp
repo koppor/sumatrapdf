@@ -104,11 +104,11 @@ Str GetPropValueTemp(const Props& props, DocProp prop) {
 }
 
 void AddProp(Props& props, DocProp prop, Str val, bool replaceIfExists) {
-    ReportIf(prop == DocProp::None || !val);
+    ReportIf(prop == DocProp::None || len(val) == 0);
     int idx = GetPropIdx(props, prop);
     if (idx < 0) {
         // doesn't exsit
-        props.Append({prop, val});
+        VecAppend(props, {prop, val});
         return;
     }
     if (!replaceIfExists) {
@@ -120,7 +120,7 @@ void AddProp(Props& props, DocProp prop, Str val, bool replaceIfExists) {
 // like AddProp but stores an owned (heap) copy of val. Use when props must
 // outlive the buffer val points into (e.g. the temp arena). Free with FreeProps.
 void AddPropOwned(Props& props, DocProp prop, Str val, bool replaceIfExists) {
-    if (!val) {
+    if (len(val) == 0) {
         return;
     }
     int idx = GetPropIdx(props, prop);
@@ -129,7 +129,7 @@ void AddPropOwned(Props& props, DocProp prop, Str val, bool replaceIfExists) {
     }
     Str owned = str::Dup(val);
     if (idx < 0) {
-        props.Append({prop, owned});
+        VecAppend(props, {prop, owned});
         return;
     }
     str::Free(props[idx].val);
@@ -142,7 +142,7 @@ void FreeProps(Props& props) {
     for (int i = 0; i < n; i++) {
         str::Free(props[i].val);
     }
-    props.Reset();
+    VecReset(props);
 }
 
 // gPropNames lists the names in DocProp order, so DocProp::Title (value 1) is

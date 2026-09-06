@@ -88,6 +88,25 @@ void GfxGdiplus::FillRects(const Rect* rects, int count, Color col, u8 alpha, in
     }
 }
 
+void GfxGdiplus::FillQuads(const Point* pts, int nQuads, Color col, u8 alpha, int outlineWidth) {
+    if (ColorSkipsPaint(col) || nQuads <= 0 || !pts) {
+        return;
+    }
+    GraphicsPath path(Gdiplus::FillModeWinding);
+    for (int i = 0; i < nQuads; i++) {
+        const Point* p = pts + i * 4;
+        Gdiplus::Point gp[4] = {{p[0].x, p[0].y}, {p[1].x, p[1].y}, {p[2].x, p[2].y}, {p[3].x, p[3].y}};
+        path.AddPolygon(gp, 4);
+    }
+    SolidBrush brush(ToGdipColor(col, alpha));
+    gfx->FillPath(&brush, &path);
+    if (outlineWidth > 0) {
+        path.Outline(nullptr, 0.2f);
+        Pen pen(ToGdipColor(kColBlack, alpha), (float)outlineWidth);
+        gfx->DrawPath(&pen, &path);
+    }
+}
+
 void GfxGdiplus::DrawRect(const Rect& r, Color col, int thickness) {
     if (ColorSkipsPaint(col) || r.IsEmpty() || thickness < 1) {
         return;
@@ -224,18 +243,18 @@ static void InitStringFormat(StringFormat& sf, u32 flags) {
 
     if (flags & gfxTextCenter) {
         sf.SetAlignment(Gdiplus::StringAlignmentCenter);
-    } else if (flags & gfxTextRight) {
-        sf.SetAlignment(Gdiplus::StringAlignmentFar);
-    } else {
+    } else if (GfxTextAlignToReadingStart(flags)) {
         sf.SetAlignment(Gdiplus::StringAlignmentNear);
+    } else {
+        sf.SetAlignment(Gdiplus::StringAlignmentFar);
     }
     bool vcenter = !wrap && (flags & gfxTextVCenter) != 0;
     sf.SetLineAlignment(vcenter ? Gdiplus::StringAlignmentCenter : Gdiplus::StringAlignmentNear);
 }
 
-// A PlatformFont describes itself with gdiplus unless it was adopted from one
-// of the app's HFONTs, in which case the gdiplus font has to be derived from
-// that HFONT. Sets *owned when the caller has to free the result.
+// Prefer the interned gdiplus font. Adopted HFONTs get one at intern time
+// from the family name; Font(hdc, HFONT) is only the last resort (and is
+// then cached on the PlatformFont). Sets *owned when the caller must free.
 Gdiplus::Font* GfxGdiplus::GetGdiplusFont(PlatformFont* font, bool* owned) {
     *owned = false;
     Gdiplus::Font* f = font ? font->GetGdiplusFont() : nullptr;
@@ -255,6 +274,13 @@ Gdiplus::Font* GfxGdiplus::GetGdiplusFont(PlatformFont* font, bool* owned) {
     if (f->GetLastStatus() != Gdiplus::Ok) {
         delete f;
         return nullptr;
+    }
+    // Font(hdc, HFONT) enumerates the font catalog; keep the result on the
+    // interned PlatformFont so tab / UI paints don't pay that on every draw
+    if (font) {
+        font->gdiFont = f;
+        *owned = false;
+        return f;
     }
     *owned = true;
     return f;
@@ -347,7 +373,7 @@ void GfxGdiplus::DrawPixmap(Pixmap* px, const Rect& r) {
 
 void GfxGdiplus::PushClip(const Rect& r) {
     Gdiplus::GraphicsState st = gfx->Save();
-    savedStates.Append((u32)st);
+    VecAppend(savedStates, (u32)st);
     gfx->SetClip(ToGdipRect(r), Gdiplus::CombineModeIntersect);
 }
 
@@ -357,7 +383,7 @@ void GfxGdiplus::PopClip() {
         ReportIf(true);
         return;
     }
-    u32 st = savedStates.Pop();
+    u32 st = VecPop(savedStates);
     gfx->Restore((Gdiplus::GraphicsState)st);
 }
 

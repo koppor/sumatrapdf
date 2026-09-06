@@ -45,8 +45,10 @@ enum class FileType : u8 {
     Txt = 36,
 
     Directory = 37,
+    Lit = 38,
+    Ico = 39,
 };
-constexpr int kFileTypeCount = (int)FileType::Directory + 1;
+constexpr int kFileTypeCount = (int)FileType::Ico + 1;
 
 // embedded PDF files have paths like "c:/foo.pdf:${pdfStreamNo}"
 // or "c:/foo.pdf:${pdfStreamNo}:attachname=${hexUtf8Name}"
@@ -74,6 +76,7 @@ struct FileTypeInfo {
 FileTypeInfo GuessFileInfoFromData(Str d);
 void FreeFileTypeInfo(FileTypeInfo*);
 int WebpExifOrientation(Str d);
+bool FindWebpChunk(Str d, const char fourcc[4], Str& out);
 bool ExifOrientationSwapsDimensions(int orientation);
 FileType GuessFileTypeFromFile(Str path);
 FileType GuessFileTypeFromData(Str d);

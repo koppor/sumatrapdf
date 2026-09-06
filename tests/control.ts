@@ -1,5 +1,6 @@
 import { Socket, createConnection } from "node:net";
 import { killAndWait, testWindowPos } from "./winapi.ts";
+import { SLOW_BUILD_FACTOR } from "./util.ts";
 
 export enum ControlCommand {
   Ping = 1,
@@ -48,9 +49,95 @@ export enum ControlCommand {
   TestFindPageRange = 52,
   TestDocumentFontList = 53,
   WaitRenderIdle = 54,
+  SetNotificationsEnabled = 55,
+  TestHomeSelection = 56,
+  TestImageRenderEdges = 57,
+  TestInsertImage = 58,
+  TestRenderPageColors = 59,
+  TestListSigningCerts = 60,
+  TestSignDocument = 61,
+  TestGetPolicies = 62,
+  TestPageBoxes = 63,
+  TestDocumentSignatures = 64,
+  TestCommandPalette = 65,
+  TestFindHistory = 66,
+  TestImageResizeEdges = 67,
+  TestLinkDestHighlight = 68,
+  TestConvertToImages = 69,
+  TestLayout = 70,
+  TestDpi = 71,
+  TestSelectionVars = 72,
+  TestSelectionToolbar = 73,
+  TestMarkupAnnots = 74,
+  TestCmykImageSave = 75,
+  TestContextMenuPoint = 76,
+  TestFindWindowContents = 77,
+  TestFindUiState = 78,
+  TestRenderViewPrint = 79,
+  TestReadAloudPlaybackBar = 80,
+  TestRotatedTextMouseDrag = 81,
+  TestChapterInfo = 82,
+  TestGoToLocation = 83,
+  TestTocSidebarNav = 84,
+  TestSelectionSurvivesRenumber = 85,
+  TestConvertToPdf = 86,
+  TestInvokeCommand = 87,
+  TestCurrentTab = 88,
+  TestCommandVisibility = 89,
+  TestExtractPages = 90,
+  TestAnnotFilter = 91,
+  TestCanvasFlags = 92,
+  CrashMe = 93,
+  TestDocumentProperties = 94,
+  TestHiddenTabGoToPage = 95,
 }
 
 export type ControlArg = number | string | Uint8Array | ControlArg[];
+
+export type HomeSelection = {
+  ready: boolean;
+  sel: number;
+  entries: number;
+  searchFocus: boolean;
+  searchBox: boolean;
+  search: number[];
+  outline: number[];
+  outlineFull: number[];
+  path: string;
+  listView: boolean;
+  listIcon: number[];
+  raw: string;
+};
+
+export type ChapterInfo = {
+  chapter: number;
+  page: number;
+  chapterCount: number;
+  chapterPageCount: number;
+  pageCount: number;
+  hasChapters: boolean;
+};
+
+export type LayoutRect = { x: number; y: number; dx: number; dy: number };
+
+export type LayoutItem = {
+  visible: boolean;
+  rect: LayoutRect;
+};
+
+export type LayoutNode = LayoutItem & {
+  path: string;
+  kind: string;
+  visibility: number;
+};
+
+export type LayoutInfo = {
+  count: number;
+  watching: boolean;
+  items: Record<string, LayoutItem>;
+  nodes: LayoutNode[];
+  raw: string;
+};
 
 const enum ArgType {
   End = 0,
@@ -276,7 +363,7 @@ export class ControlClient {
 
   constructor(readonly socket: Socket) {}
 
-  static async connect(pipeName: string, timeoutMs = 10000): Promise<ControlClient> {
+  static async connect(pipeName: string, timeoutMs = 10000 * SLOW_BUILD_FACTOR): Promise<ControlClient> {
     const path = pipePath(pipeName);
     const deadline = Date.now() + timeoutMs;
     let lastErr: unknown;
@@ -299,40 +386,234 @@ export class ControlClient {
     const id = this.nextId++ & 0xffff;
     this.socket.write(encodeRequest(cmd, id, args));
 
-    const sizeBuf = await readExactly(this.socket, 4);
-    const size = sizeBuf.readUInt32LE(0);
-    const payload = await readExactly(this.socket, size);
-    const r = new PacketReader(payload);
-    const responseId = r.u16();
-    if (responseId !== id) {
-      throw new Error(`control response id mismatch: got ${responseId}, expected ${id}`);
-    }
-    const result: ControlArg[] = [];
-    for (;;) {
-      const arg = decodeArg(r);
-      if (arg === undefined) {
-        break;
+    try {
+      const sizeBuf = await readExactly(this.socket, 4);
+      const size = sizeBuf.readUInt32LE(0);
+      const payload = await readExactly(this.socket, size);
+      const r = new PacketReader(payload);
+      const responseId = r.u16();
+      if (responseId !== id) {
+        throw new Error(`control response id mismatch: got ${responseId}, expected ${id}`);
       }
-      result.push(arg);
+      const result: ControlArg[] = [];
+      for (;;) {
+        const arg = decodeArg(r);
+        if (arg === undefined) {
+          break;
+        }
+        result.push(arg);
+      }
+      return result;
+    } catch (e) {
+      const msg = String((e as Error)?.message ?? e);
+      if (/EPIPE|control pipe closed/i.test(msg)) {
+        throw new Error(`SumatraPDF exited while waiting for control response (${msg})`);
+      }
+      throw e;
     }
-    return result;
   }
 
   async quit(): Promise<void> {
     await this.request(ControlCommand.Quit);
   }
 
+  // Fire-and-forget: the process dies in the crash handler, so there is no reply.
+  crashMe(): void {
+    const id = this.nextId++ & 0xffff;
+    this.socket.write(encodeRequest(ControlCommand.CrashMe, id, []));
+  }
+
   // Block until the visible page is cached at the resolution a capture would
   // see — not the low-res preview Paint() blits while tiles are still coming.
   // timeoutMs is forwarded to the app (default 15s there too).
   async waitForRenderIdle(timeoutMs = 15000): Promise<string> {
-    const res = await this.request(ControlCommand.WaitRenderIdle, [timeoutMs]);
+    // scaled, so a test that asks for "30s" gets 30s of debug-build rendering
+    const res = await this.request(ControlCommand.WaitRenderIdle, [timeoutMs * SLOW_BUILD_FACTOR]);
     const code = typeof res[0] === "number" ? res[0] : -1;
     const info = String(res[1] ?? "");
     if (code !== 0) {
       throw new Error(`WaitRenderIdle failed: ${info || code}`);
     }
     return info;
+  }
+
+  // What the home page's keyboard navigation is doing: the selected entry, how
+  // many entries the search box currently leaves, and whether it has the focus.
+  // Wait on this after sending a key rather than sleeping.
+  async homeSelection(mode?: "list" | "thumbnails"): Promise<HomeSelection> {
+    const res = await this.request(ControlCommand.TestHomeSelection, mode ? [mode] : []);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const raw = String(res[1] ?? "").trim();
+    if (code !== 0) {
+      return {
+        ready: false,
+        sel: -1,
+        entries: 0,
+        searchFocus: false,
+        searchBox: false,
+        search: [0, 0, 0, 0],
+        outline: [0, 0, 0, 0],
+        outlineFull: [0, 0, 0, 0],
+        path: "",
+        listView: false,
+        listIcon: [0, 0, 0, 0],
+        raw,
+      };
+    }
+    const m =
+      /OK sel=(-?\d+) entries=(\d+) searchFocus=(\d) searchBox=(\d) search=(-?\d+),(-?\d+),(-?\d+),(-?\d+) outline=(-?\d+),(-?\d+),(-?\d+),(-?\d+) outlineFull=(-?\d+),(-?\d+),(-?\d+),(-?\d+) path=(.*) listView=(\d) listIcon=(-?\d+),(-?\d+),(-?\d+),(-?\d+)$/.exec(
+        raw,
+      );
+    if (!m) {
+      throw new Error(`homeSelection: could not parse '${raw}'`);
+    }
+    return {
+      ready: true,
+      sel: parseInt(m[1], 10),
+      entries: parseInt(m[2], 10),
+      searchFocus: m[3] === "1",
+      searchBox: m[4] === "1",
+      search: [parseInt(m[5], 10), parseInt(m[6], 10), parseInt(m[7], 10), parseInt(m[8], 10)],
+      outline: [parseInt(m[9], 10), parseInt(m[10], 10), parseInt(m[11], 10), parseInt(m[12], 10)],
+      outlineFull: [parseInt(m[13], 10), parseInt(m[14], 10), parseInt(m[15], 10), parseInt(m[16], 10)],
+      path: m[17].trim(),
+      listView: m[18] === "1",
+      listIcon: [parseInt(m[19], 10), parseInt(m[20], 10), parseInt(m[21], 10), parseInt(m[22], 10)],
+      raw,
+    };
+  }
+
+  // Snapshot the frame's HWND geometry and every node in its layout trees.
+  // "start"/"reset" also installs gAfterLayout so count measures subsequent
+  // completed relayouts; "stop" removes the probe.
+  async layout(action: "get" | "start" | "reset" | "stop" = "get"): Promise<LayoutInfo> {
+    const res = await this.request(ControlCommand.TestLayout, [action]);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const raw = String(res[1] ?? "").trim();
+    if (code !== 0) {
+      throw new Error(`TestLayout failed: ${raw || code}`);
+    }
+    const lines = raw.split("\n");
+    const header = /^OK count=(\d+) watching=(\d)$/.exec(lines[0] ?? "");
+    if (!header) {
+      throw new Error(`TestLayout: could not parse '${raw}'`);
+    }
+    const rect = (m: RegExpExecArray, at: number): LayoutRect => ({
+      x: parseInt(m[at], 10),
+      y: parseInt(m[at + 1], 10),
+      dx: parseInt(m[at + 2], 10),
+      dy: parseInt(m[at + 3], 10),
+    });
+    const items: Record<string, LayoutItem> = {};
+    const nodes: LayoutNode[] = [];
+    for (const line of lines.slice(1)) {
+      let m = /^item name=(\S+) visible=(\d) rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+)$/.exec(line);
+      if (m) {
+        items[m[1]] = { visible: m[2] === "1", rect: rect(m, 3) };
+        continue;
+      }
+      m = /^layout path=(\S+) kind=(\S+) visibility=(\d+) rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+)$/.exec(line);
+      if (m) {
+        nodes.push({ path: m[1], kind: m[2], visibility: parseInt(m[3], 10), visible: m[3] === "0", rect: rect(m, 4) });
+      }
+    }
+    return {
+      count: parseInt(header[1], 10),
+      watching: header[2] === "1",
+      items,
+      nodes,
+      raw,
+    };
+  }
+
+  // Notifications are drawn over the document and linger for ~2s, so a test
+  // that reads pixels would have to wait them out. Turning them off also takes
+  // down any that are already showing.
+  async setNotificationsEnabled(enabled: boolean): Promise<void> {
+    const res = await this.request(ControlCommand.SetNotificationsEnabled, [enabled ? 1 : 0]);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    if (code !== 0) {
+      throw new Error(`SetNotificationsEnabled failed: ${String(res[1] ?? code)}`);
+    }
+  }
+
+  // Current chapter/page and chapter table state of the front window's doc.
+  async chapterInfo(): Promise<ChapterInfo> {
+    const res = await this.request(ControlCommand.TestChapterInfo);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const raw = String(res[1] ?? "").trim();
+    if (code !== 0) {
+      throw new Error(`TestChapterInfo failed: ${raw || code}`);
+    }
+    const m =
+      /^OK chapter=(\d+) page=(\d+) chapterCount=(\d+) chapterPageCount=(\d+) pageCount=(\d+) hasChapters=(\d)$/.exec(
+        raw,
+      );
+    if (!m) {
+      throw new Error(`chapterInfo: could not parse '${raw}'`);
+    }
+    return {
+      chapter: parseInt(m[1], 10),
+      page: parseInt(m[2], 10),
+      chapterCount: parseInt(m[3], 10),
+      chapterPageCount: parseInt(m[4], 10),
+      pageCount: parseInt(m[5], 10),
+      hasChapters: m[6] === "1",
+    };
+  }
+
+  // Navigate to {chapter, page} (clamped) and report where it landed.
+  async goToLocation(chapter: number, page: number): Promise<{ chapter: number; page: number }> {
+    const res = await this.request(ControlCommand.TestGoToLocation, [chapter, page]);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const raw = String(res[1] ?? "").trim();
+    if (code !== 0) {
+      throw new Error(`TestGoToLocation failed: ${raw || code}`);
+    }
+    const m = /^OK chapter=(\d+) page=(\d+)$/.exec(raw);
+    if (!m) {
+      throw new Error(`goToLocation: could not parse '${raw}'`);
+    }
+    return { chapter: parseInt(m[1], 10), page: parseInt(m[2], 10) };
+  }
+
+  // Starts navigating to the destNo-th (1-based) TOC destination via the same
+  // deferred path (GoToTocItem -> NewGoToTocLinkData -> SnapshotDestForDeferredNav
+  // -> uitask) a real Bookmarks-sidebar click uses. Returns once the uitask is
+  // queued, not once it has run -- poll chapterInfo()/CurrentPageNo afterward.
+  async tocSidebarNav(destNo: number): Promise<void> {
+    const res = await this.request(ControlCommand.TestTocSidebarNav, [destNo]);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const raw = String(res[1] ?? "").trim();
+    if (code !== 0) {
+      throw new Error(`TestTocSidebarNav failed: ${raw || code}`);
+    }
+  }
+
+  // Creates a rectangular selection and a glyph-level text selection on page
+  // 1, lays out `layoutChapter` (triggering SyncWithEngineLayout /
+  // PagesRenumbered), and reports whether both survived instead of being
+  // wiped (see C9 in the location-chapters plan).
+  async hiddenTabGoToPage(): Promise<void> {
+    const res = await this.request(ControlCommand.TestHiddenTabGoToPage, []);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const raw = String(res[1] ?? "").trim();
+    if (code !== 0) {
+      throw new Error(`TestHiddenTabGoToPage failed: ${raw || code}`);
+    }
+  }
+
+  async selectionSurvivesRenumber(
+    layoutChapter: number,
+  ): Promise<{ survived: boolean; pageNo: number; textSurvived: boolean }> {
+    const res = await this.request(ControlCommand.TestSelectionSurvivesRenumber, [layoutChapter]);
+    const raw = String(res[1] ?? "").trim();
+    const m = /^OK survived=1 pageNo=(-?\d+)$/m.exec(raw);
+    const textSurvived = /^textSurvived=1 /m.test(raw);
+    if (m) {
+      return { survived: true, pageNo: parseInt(m[1], 10), textSurvived };
+    }
+    return { survived: false, pageNo: -1, textSurvived };
   }
 
   close(): void {
@@ -364,7 +645,7 @@ export async function withControlledSumatra<T>(
   } = {},
 ): Promise<T> {
   const pipeName = uniquePipeName();
-  // a window a quarter of the screen, in a corner, out of the way: see
+  // a window on the right half of the screen, out of the way: see
   // tests/winapi.ts testWindowPos()
   let posArgs: string[] = [];
   if (!options.defaultWindowPos && !extraArgs.includes("-window-pos")) {
@@ -372,13 +653,15 @@ export async function withControlledSumatra<T>(
     posArgs = ["-window-pos", `${p.dx}x${p.dy}@${p.x}x${p.y}`];
   }
   // stderr is piped: on a debug report the app writes the report text there
-  // before terminating, and we surface it in the failure below
+  // before terminating, and we surface it in the failure below. Drain it
+  // immediately so a verbose ASan dump cannot fill the pipe and stall exit.
   const proc = Bun.spawn([exe, "-for-testing", ...posArgs, "-dbg-control", pipeName, ...extraArgs], {
     stdout: "ignore",
     stderr: "pipe",
     cwd: options.cwd,
     env: cleanEnv(options.env),
   });
+  const stderrPromise: Promise<string> = proc.stderr ? new Response(proc.stderr).text() : Promise.resolve("");
   let client: ControlClient | undefined;
   let killed = false;
   let result: T | undefined;
@@ -406,19 +689,23 @@ export async function withControlledSumatra<T>(
   }
   // quit is graceful (CmdExit) and could in theory be blocked by a dialog;
   // don't let a test hang forever waiting for the process to go away
+  const quitMs = 30_000 * SLOW_BUILD_FACTOR;
   let exitTimer: ReturnType<typeof setTimeout> | undefined;
   const exitCode = await Promise.race([
     proc.exited,
     new Promise<"timeout">((resolve) => {
-      exitTimer = setTimeout(() => resolve("timeout"), 30_000);
+      exitTimer = setTimeout(() => resolve("timeout"), quitMs);
     }),
   ]);
   clearTimeout(exitTimer);
   if (exitCode === "timeout") {
     await killAndWait(proc);
-    throw new Error("SumatraPDF did not exit within 30s of Quit");
   }
-  const stderrText = proc.stderr ? (await new Response(proc.stderr).text()).trim() : "";
+  const stderrText = (await stderrPromise).trim();
+  if (exitCode === "timeout") {
+    const details = stderrText ? `\n${stderrText}` : "";
+    throw new Error(`SumatraPDF did not exit within ${quitMs / 1000}s of Quit${details}`);
+  }
   if (!fnOk) {
     if (stderrText) {
       console.error(stderrText);

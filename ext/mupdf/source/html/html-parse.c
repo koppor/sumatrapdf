@@ -642,33 +642,33 @@ static void generate_text(fz_context *ctx, fz_html_box *box, const char *text, i
 				const char *p = mark;
 				n = fz_chartorune(&c, p);
 				while (p < text)
-			{
+				{
 					p += n;
 					if (fz_isletter_or_apos(c))
-				{
+					{
 						while (p < text)
 						{
 							n = fz_chartorune(&c, p);
 							if (!fz_isletter_or_apos(c))
 								break;
 							p += n;
-				}
+						}
 						generate_text_run_with_hyphens(ctx, box, flow, mark, p, lang, hyph, g);
 					}
 					else
-				{
-						while (p < text)
 					{
+						while (p < text)
+						{
 							n = fz_chartorune(&c, p);
 							if (fz_isletter_or_apos(c))
 								break;
 							p += n;
 						}
 						generate_text_run(ctx, box, flow, mark, p, lang, g);
-						}
-					mark = p;
 					}
+					mark = p;
 				}
+			}
 			else
 			{
 				generate_text_run(ctx, box, flow, mark, text, lang, g);
@@ -696,6 +696,8 @@ static fz_image *load_html_image(fz_context *ctx, fz_archive *zip, const char *b
 			buf = fz_new_buffer_from_base64(ctx, src+22, 0);
 		else if (!strncmp(src, "data:image/gif;base64,", 22))
 			buf = fz_new_buffer_from_base64(ctx, src+22, 0);
+		else if (!strncmp(src, "data:image/webp;base64,", 23))
+			buf = fz_new_buffer_from_base64(ctx, src+23, 0);
 		else
 		{
 			fz_strlcpy(path, base_uri, sizeof path);
@@ -779,6 +781,7 @@ static void fz_drop_html_box(fz_context *ctx, fz_html_box *box)
 		fz_html_box *next = box->next;
 		if (box->type == BOX_FLOW)
 			fz_drop_html_flow(ctx, box->u.flow.head);
+		fz_drop_image(ctx, box->background_image);
 		fz_drop_html_box(ctx, box->down);
 		box = next;
 	}
@@ -868,6 +871,10 @@ static fz_html_box *new_box(fz_context *ctx, struct genstate *g, fz_xml *node, i
 
 	box->style = fz_css_enlist(ctx, style, &g->styles, g->pool);
 
+	/* Only element boxes own a background image; anonymous boxes borrow the style but must not repaint it. */
+	if (node && style->background_image && fz_html_box_has_boxes(box))
+		box->background_image = load_html_image(ctx, g->zip, g->base_uri, style->background_image);
+
 	if (tag)
 	{
 		box->tag = find_known_html_tag(tag);
@@ -932,6 +939,8 @@ static void append_box(fz_context *ctx, fz_html_box *parent, fz_html_box *child)
 
 static fz_html_box *find_block_context(fz_context *ctx, fz_html_box *box)
 {
+	if (box->type == BOX_INLINE)
+		box->stop = 1;
 	while (box->type != BOX_BLOCK && box->type != BOX_TABLE_CELL)
 		box = box->up;
 	return box;
@@ -964,7 +973,10 @@ static fz_html_box *find_inline_context(fz_context *ctx, struct genstate *g, fz_
 	fz_css_style style;
 	fz_html_box *flow_box;
 
-	if (box->type == BOX_FLOW || box->type == BOX_INLINE)
+	if (box->type == BOX_FLOW)
+		return box;
+
+	if (box->type == BOX_INLINE && !box->stop)
 		return box;
 
 	// We have an inline element that is not in an existing flow/inline context.
@@ -1435,16 +1447,16 @@ static void gen2_tag(fz_context *ctx, struct genstate *g, fz_html_box *root_box,
 
 	if (style->direction == FZ_BIDI_UNSET)
 	{
-	dir_att = fz_xml_att(node, "dir");
-	if (dir_att)
-	{
-		if (!strcmp(dir_att, "auto"))
-			g->markup_dir = FZ_BIDI_NEUTRAL;
-		else if (!strcmp(dir_att, "rtl"))
-			g->markup_dir = FZ_BIDI_RTL;
-		else if (!strcmp(dir_att, "ltr"))
-			g->markup_dir = FZ_BIDI_LTR;
-		else
+		dir_att = fz_xml_att(node, "dir");
+		if (dir_att)
+		{
+			if (!strcmp(dir_att, "auto"))
+				g->markup_dir = FZ_BIDI_NEUTRAL;
+			else if (!strcmp(dir_att, "rtl"))
+				g->markup_dir = FZ_BIDI_RTL;
+			else if (!strcmp(dir_att, "ltr"))
+				g->markup_dir = FZ_BIDI_LTR;
+			else
 				g->markup_dir = FZ_BIDI_LTR;
 		}
 	}
@@ -2033,9 +2045,8 @@ static void parse_meta_viewport(fz_context *ctx, const char *viewport, float *me
 		*meta_h = fz_atoi(p + 7);
 }
 
-/* SumatraPDF: collect nested FB2 text (author names, annotation) into a pool string. */
 static void
-fb2_append_xml_text(fz_context *ctx, fz_buffer *buf, fz_xml *node)
+append_xml_text(fz_context *ctx, fz_buffer *buf, fz_xml *node)
 {
 	while (node)
 	{
@@ -2053,14 +2064,13 @@ fb2_append_xml_text(fz_context *ctx, fz_buffer *buf, fz_xml *node)
 				fz_append_string(ctx, buf, text);
 			}
 		}
-		fb2_append_xml_text(ctx, buf, fz_xml_down(node));
+		append_xml_text(ctx, buf, fz_xml_down(node));
 		node = fz_xml_next(node);
 	}
 }
 
-/* SumatraPDF */
 static char *
-fb2_collect_text(fz_context *ctx, fz_pool *pool, fz_xml *node)
+collect_text(fz_context *ctx, fz_pool *pool, fz_xml *node)
 {
 	fz_buffer *buf;
 	char *s = NULL;
@@ -2073,7 +2083,7 @@ fb2_collect_text(fz_context *ctx, fz_pool *pool, fz_xml *node)
 	buf = fz_new_buffer(ctx, 128);
 	fz_try(ctx)
 	{
-		fb2_append_xml_text(ctx, buf, fz_xml_down(node));
+		append_xml_text(ctx, buf, fz_xml_down(node));
 		fz_terminate_buffer(ctx, buf);
 		len = fz_buffer_storage(ctx, buf, &data);
 		if (len > 0 && data)
@@ -2104,16 +2114,15 @@ xml_to_boxes(fz_context *ctx,
 	const char *user_css,
 	fz_xml_doc *xml,
 	fz_html_tree *tree,
-	char **rtitle,
+	fz_html_metadata *metadata,
 	fz_html_flavor flavor,
 	int publisher_css,
 	float *meta_w,
 	float *meta_h
 )
 {
-	fz_xml *root, *node, *head;
+	fz_xml *root, *node, *head, *node2;
 	char *viewport;
-	char *title;
 
 	fz_css_match root_match, match;
 	struct genstate g = {0};
@@ -2138,8 +2147,8 @@ xml_to_boxes(fz_context *ctx,
 	g.publisher_css = publisher_css;
 	g.depth = 0;
 
-	if (rtitle)
-		*rtitle = NULL;
+	if (metadata)
+		memset(metadata, 0, sizeof(*metadata));
 
 	root = fz_xml_root(g.xml);
 	g.css = fz_new_css(ctx);
@@ -2230,40 +2239,49 @@ xml_to_boxes(fz_context *ctx,
 
 		if (g.is_fb2)
 		{
-			/* SumatraPDF: also read author + annotation from title-info */
-			fz_xml *title_info;
-			fz_html *html = (fz_html *)tree;
+			if (metadata)
+			{
+				char *author = NULL, *first_name, *last_name;
 
-			node = fz_xml_find(root, "FictionBook");
-			node = fz_xml_find_down(node, "description");
-			title_info = fz_xml_find_down(node, "title-info");
-			node = fz_xml_find_down(title_info, "book-title");
-			if (rtitle)
-			{
-				title = fz_xml_text(fz_xml_down(node));
-				if (title)
-					*rtitle = fz_pool_strdup(ctx, g.pool, title);
-			}
-			/* SumatraPDF: store on fz_html when parsing a document (rtitle set);
-			 * story path passes rtitle=NULL and skips this. */
-			if (rtitle && title_info)
-			{
-				fz_xml *author_el = fz_xml_find_down(title_info, "author");
-				fz_xml *annot_el = fz_xml_find_down(title_info, "annotation");
-				html->author = fb2_collect_text(ctx, g.pool, author_el);
-				html->subject = fb2_collect_text(ctx, g.pool, annot_el);
+				node = fz_xml_find(root, "FictionBook");
+				node = fz_xml_find_down(node, "description");
+				node = fz_xml_find_down(node, "title-info");
+				node2 = fz_xml_find_down(node, "book-title");
+				metadata->title = collect_text(ctx, g.pool, node2);
+
+				for (node2 = fz_xml_find_down(node, "author"); node2; node2 = fz_xml_find_next(node2, "author"))
+				{
+					first_name = collect_text(ctx, g.pool, fz_xml_find_down(node2, "first-name"));
+					last_name = collect_text(ctx, g.pool, fz_xml_find_down(node2, "last-name"));
+					if (first_name && last_name)
+					{
+						if (author)
+							author = fz_pool_asprintf(ctx, g.pool, "%s, %s %s", author, first_name, last_name);
+						else
+							author = fz_pool_asprintf(ctx, g.pool, "%s %s", first_name, last_name);
+					}
+					else
+					{
+						if (author)
+							author = fz_pool_asprintf(ctx, g.pool, "%s, %s", author, collect_text(ctx, g.pool, node2));
+						else
+							author = collect_text(ctx, g.pool, node2);
+					}
+				}
+				metadata->author = author;
+
+				node2 = fz_xml_find_down(node, "annotation");
+				metadata->subject = collect_text(ctx, g.pool, node2);
 			}
 		}
 		else
 		{
-			head = fz_xml_find(root, "html");
-			head = fz_xml_find_down(head, "head");
-			node = fz_xml_find_down(head, "title");
-			if (rtitle)
+			if (metadata)
 			{
-				title = fz_xml_text(fz_xml_down(node));
-				if (title)
-					*rtitle = fz_pool_strdup(ctx, g.pool, title);
+				head = fz_xml_find(root, "html");
+				head = fz_xml_find_down(head, "head");
+				node = fz_xml_find_down(head, "title");
+				metadata->title = collect_text(ctx, g.pool, node);
 			}
 
 			// Move html or body background-color to :root.
@@ -2290,10 +2308,14 @@ xml_to_boxes(fz_context *ctx,
 	}
 	fz_catch(ctx)
 	{
-		if (rtitle)
+		if (metadata)
 		{
-			fz_free(ctx, *rtitle);
-			*rtitle = NULL;
+			fz_free(ctx, metadata->title);
+			metadata->title = NULL;
+			fz_free(ctx, metadata->author);
+			metadata->author = NULL;
+			fz_free(ctx, metadata->subject);
+			metadata->subject = NULL;
 		}
 		fz_rethrow(ctx);
 	}
@@ -2396,7 +2418,7 @@ patch_mobi_html(fz_context *ctx, fz_pool *pool, fz_xml *node)
 static void
 fz_parse_html_tree(fz_context *ctx,
 	fz_html_font_set *set, fz_archive *zip, const char *base_uri, fz_buffer *buf, const char *user_css,
-	int try_xml, int try_html5, fz_html_tree *tree, char **rtitle, fz_html_flavor flavor,
+	int try_xml, int try_html5, fz_html_tree *tree, fz_html_metadata *metadata, fz_html_flavor flavor,
 	int publisher_css,
 	float *meta_w,
 	float *meta_h
@@ -2404,8 +2426,8 @@ fz_parse_html_tree(fz_context *ctx,
 {
 	fz_xml_doc *xml;
 
-	if (rtitle)
-		*rtitle = NULL;
+	if (metadata)
+		memset(metadata, 0, sizeof(*metadata));
 
 	xml = parse_to_xml(ctx, buf, try_xml, try_html5);
 
@@ -2413,7 +2435,7 @@ fz_parse_html_tree(fz_context *ctx,
 		patch_mobi_html(ctx, xml->u.doc.pool, fz_xml_root(xml));
 
 	fz_try(ctx)
-		xml_to_boxes(ctx, set, zip, base_uri, user_css, xml, tree, rtitle, flavor, publisher_css,
+		xml_to_boxes(ctx, set, zip, base_uri, user_css, xml, tree, metadata, flavor, publisher_css,
 			meta_w, meta_h);
 	fz_always(ctx)
 		fz_drop_xml(ctx, xml);
@@ -2458,12 +2480,9 @@ fz_parse_html(fz_context *ctx,
 	html->layout_w = 0;
 	html->layout_h = 0;
 	html->layout_em = 0;
-	html->title = NULL;
-	html->author = NULL; /* SumatraPDF */
-	html->subject = NULL; /* SumatraPDF */
 
 	fz_try(ctx)
-		fz_parse_html_tree(ctx, set, zip, base_uri, buf, user_css, try_xml, try_html5, &html->tree, &html->title, flavor, publisher_css,
+		fz_parse_html_tree(ctx, set, zip, base_uri, buf, user_css, try_xml, try_html5, &html->tree, &html->metadata, flavor, publisher_css,
 			&html->meta_w, &html->meta_h);
 	fz_catch(ctx)
 	{
@@ -2729,9 +2748,9 @@ fz_debug_html_box(fz_context *ctx, fz_html_box *box, int level)
 			fz_debug_css_number(level, "height", box->style->height);
 			if (box->u.block.margin[0] != 0 || box->u.block.margin[1] != 0 || box->u.block.margin[2] != 0 || box->u.block.margin[3] != 0)
 			{
-			indent(level+1);
-			printf(">margin=(%g %g %g %g)\n", box->u.block.margin[0], box->u.block.margin[1], box->u.block.margin[2], box->u.block.margin[3]);
-		}
+				indent(level+1);
+				printf(">margin=(%g %g %g %g)\n", box->u.block.margin[0], box->u.block.margin[1], box->u.block.margin[2], box->u.block.margin[3]);
+			}
 			if (box->u.block.border[0] != 0 || box->u.block.border[1] != 0 || box->u.block.border[2] != 0 || box->u.block.border[3] != 0)
 			{
 				indent(level+1);

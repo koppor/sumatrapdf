@@ -8,11 +8,10 @@ table of contents)).
 
 We can have multiple favorites per file.
 
-Favorites are accurate to a page - it's simple and should be good enough
-for the user.
-
-A favorite is identified by a (mandatory) page number and (optional) name
-(provided by the user) and page label (from EngineBase::GetPageLabel).
+A favorite is identified by a (mandatory) page number, an optional name
+(provided by the user), an optional page label (from EngineBase::GetPageLabel),
+and the scroll position on that page (so jumping back lands where you were,
+not only at the top).
 
 Favorites do not remember presentation settings like zoom or viewing mode -
 they are for navigation only. Presentation settings are remembered on a
@@ -20,13 +19,17 @@ per-file basis in FileHistory.
 */
 
 struct WindowTab;
+struct DocController;
 
 bool HasFavorites();
 void AddFavoriteWithLabelAndName(MainWindow* win, int pageNo, Str pageLabel, Str nameIn);
 void ApplyAddFavorite(MainWindow* win, Str filePath, int pageNo, Str pageLabel, Str name);
 void AddFavoriteForPage(MainWindow* win, int pageNo);
 void AddFavoriteForCurrentPage(MainWindow* win);
-void DelFavorite(Str filePath, int pageNo);
+// ctrl, when it's the DocController for filePath, lets a chaptered doc's
+// favorite be matched by (chapter, page) instead of the stale flat pageNo
+void DelFavorite(Str filePath, int pageNo, DocController* ctrl = nullptr);
+void DelFavorite(FileState* fs, Favorite* fav);
 void RebuildFavMenu(MainWindow* win, HMENU menu);
 void CreateFavorites(MainWindow* win);
 void ToggleFavorites(MainWindow* win); // sidebar
@@ -37,12 +40,13 @@ void LayoutFavoritesContainer(MainWindow* win);
 void GoToFavoriteByMenuId(MainWindow* win, int cmdId);
 void UpdateFavoritesTree(MainWindow* win);
 void UpdateFavoritesTreeForAllWindows();
-bool IsPageInFavorites(Str filePath, int pageNo);
+bool IsPageInFavorites(Str filePath, int pageNo, DocController* ctrl = nullptr);
 
 void GoToNextFavorite(MainWindow* win, bool forward);
 
 TempStr FavReadableNameTemp(Favorite* fn);
 void GoToFavorite(MainWindow* win, FileState* fs, Favorite* fav);
+void JumpToFavorite(MainWindow* win, Favorite* fav);
 
 void SetSearchStartFavorite(MainWindow* win);
 

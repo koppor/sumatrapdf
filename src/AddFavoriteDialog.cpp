@@ -14,7 +14,6 @@
 
 #include "Settings.h"
 #include "AppSettings.h"
-#include "GlobalPrefs.h"
 #include "MainWindow.h"
 #include "Theme.h"
 #include "SumatraConfig.h"
@@ -22,7 +21,7 @@
 #include "Favorites.h"
 #include "Translations.h"
 #include "DarkMode_win.h"
-#include "AddFavoriteDialog.h"
+#include "SumatraDialogs.h"
 
 // Label and buttons are VirtCtrl; the name field is a real HWND Edit.
 // Same WindowBase layout pattern as Change Theme / Change Language.
@@ -38,8 +37,8 @@ struct AddFavoriteWnd : WindowBase {
     VirtButton* btnCancel = nullptr;
     VirtButton* btnOk = nullptr;
 
-    bool Create(MainWindow* win, Str filePath, int pageNo, Str pageLabel, Str name);
-    void SetTarget(MainWindow* win, Str filePath, int pageNo, Str pageLabel, Str name);
+    bool Create(MainWindow* win, Str path, int page, Str labelIn, Str name);
+    void SetTarget(MainWindow* win, Str path, int page, Str labelIn, Str name);
 
     void OnCancel(VirtMouseEvent* ev = nullptr);
     void OnOk(VirtMouseEvent* ev = nullptr);
@@ -57,11 +56,15 @@ static void ClearAddFavoriteWnd() {
 }
 
 static TempStr FavoritePromptTemp(Str pageLabel) {
-    return fmt(_TRA("Add page %s to favorites with (optional) name:").s, pageLabel);
+    int chapter = 0, page = 0;
+    if (str::Parse(pageLabel, "%d/%d%$", &chapter, &page)) {
+        return fmt(Tr("Add chapter %d page %d to favorites with (optional) name:").s, chapter, page);
+    }
+    return fmt(Tr("Add page %s to favorites with (optional) name:").s, pageLabel);
 }
 
-void AddFavoriteWnd::SetTarget(MainWindow* mainWin, Str path, int page, Str labelIn, Str name) {
-    win = mainWin;
+void AddFavoriteWnd::SetTarget(MainWindow* win, Str path, int page, Str labelIn, Str name) {
+    this->win = win;
     pageNo = page;
     str::ReplaceWithCopy(&pageLabel, labelIn);
     str::ReplaceWithCopy(&filePath, path);
@@ -70,7 +73,7 @@ void AddFavoriteWnd::SetTarget(MainWindow* mainWin, Str path, int page, Str labe
     }
     if (editName) {
         editName->SetText(name);
-        editName->SelectAll();
+        EditSelectAll(editName);
     }
 }
 
@@ -100,12 +103,13 @@ static void OnDestroy(WindowBase::DestroyEvent* /*ev*/) {
     }
 }
 
-bool AddFavoriteWnd::Create(MainWindow* mainWin, Str path, int page, Str labelIn, Str name) {
-    SetTarget(mainWin, path, page, labelIn, name);
+bool AddFavoriteWnd::Create(MainWindow* win, Str path, int page, Str labelIn, Str name) {
+    SetTarget(win, path, page, labelIn, name);
 
     {
         CreateCustomArgs args;
-        args.title = _TRA("Add Favorite");
+        args.owner = win ? win->hwndFrame : nullptr;
+        args.title = Tr("Add Favorite");
         args.visible = false;
         args.style = WS_POPUPWINDOW | WS_CAPTION;
         args.font = GetFont();
@@ -151,12 +155,12 @@ bool AddFavoriteWnd::Create(MainWindow* mainWin, Str path, int page, Str labelIn
         hbox->alignMain = MainAxisAlign::MainEnd;
         hbox->alignCross = CrossAxisAlign::CrossCenter;
         hbox->gap = font->averageCharWidth;
-        auto pad = Insets{4, 0, 4, 0};
+        auto pad = Insets{.top = 4, .right = 0, .bottom = 4, .left = 0};
 
-        btnCancel = NewThemedButton(hwnd, _TRA("Cancel"), font, false);
+        btnCancel = NewThemedButton(hwnd, Tr("Cancel"), font, false);
         btnCancel->onClick = MkMethod1<AddFavoriteWnd, VirtMouseEvent*, &AddFavoriteWnd::OnCancel>(this);
         hbox->AddChild(new Padding(btnCancel, pad));
-        btnOk = NewThemedButton(hwnd, _TRA("OK"), font, true);
+        btnOk = NewThemedButton(hwnd, Tr("OK"), font, true);
         btnOk->onClick = MkMethod1<AddFavoriteWnd, VirtMouseEvent*, &AddFavoriteWnd::OnOk>(this);
         hbox->AddChild(new Padding(btnOk, pad));
         vbox->AddChild(hbox);
@@ -172,10 +176,8 @@ bool AddFavoriteWnd::Create(MainWindow* mainWin, Str path, int page, Str labelIn
     UpdateTheme();
 
     SetIsVisible(true);
-    if (editName) {
-        editName->SelectAll();
-        HwndSetFocus(editName->hwnd);
-    }
+    EditSelectAll(editName);
+    EditSetFocus(editName);
     return true;
 }
 
@@ -187,9 +189,7 @@ void ShowAddFavoriteDialog(MainWindow* win, Str filePath, int pageNo, Str pageLa
             HwndInvalidate(gAddFavoriteWnd->hwnd);
         }
         HwndSetFocus(gAddFavoriteWnd->hwnd);
-        if (gAddFavoriteWnd->editName) {
-            HwndSetFocus(gAddFavoriteWnd->editName->hwnd);
-        }
+        EditSetFocus(gAddFavoriteWnd->editName);
         return;
     }
     auto* wnd = new AddFavoriteWnd();
@@ -204,4 +204,5 @@ void ShowAddFavoriteDialog(MainWindow* win, Str filePath, int pageNo, Str pageLa
         return;
     }
     gAddFavoriteWnd = wnd;
+    RunModalWindow(wnd->hwnd, win ? win->hwndFrame : nullptr);
 }

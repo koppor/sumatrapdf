@@ -3,9 +3,11 @@
 // Why this exists: driving SumatraPDF for verification means finding its windows
 // and posting real window messages / reading scrollbar state cross-process.
 // Injected mouse-button input is dropped on the test machine, but PostMessage,
-// MoveWindow, SetCursorPos and cross-process GetScrollInfo all work (see the
-// project memory env-gui-automation). These helpers wrap the handful of user32
-// calls those tests need so individual test files don't each re-declare the FFI.
+// MoveWindow and cross-process GetScrollInfo all work (see the project memory
+// env-gui-automation). SetCursorPos only works while the session owns an
+// unlocked desktop -- see hasInteractiveDesktop() below. These helpers wrap
+// the handful of user32 calls those tests need so individual test files don't
+// each re-declare the FFI.
 //
 // Handles (HWND) are represented as JS `number`s here. That's fine for window
 // handles in practice; do not use these helpers for arbitrary 64-bit pointers.
@@ -17,6 +19,7 @@ const user32 = dlopen("user32.dll", {
   EnumChildWindows: { args: [FFIType.ptr, FFIType.function, FFIType.i64], returns: FFIType.bool },
   GetClassNameW: { args: [FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
   GetWindowThreadProcessId: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.u32 },
+  GetWindow: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.u64 },
   PostMessageW: { args: [FFIType.ptr, FFIType.u32, FFIType.i64, FFIType.i64], returns: FFIType.bool },
   SendMessageW: { args: [FFIType.ptr, FFIType.u32, FFIType.i64, FFIType.i64], returns: FFIType.i64 },
   MoveWindow: {
@@ -34,10 +37,15 @@ const user32 = dlopen("user32.dll", {
   GetClientRect: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
   GetScrollInfo: { args: [FFIType.ptr, FFIType.i32, FFIType.ptr], returns: FFIType.bool },
   SetCursorPos: { args: [FFIType.i32, FFIType.i32], returns: FFIType.bool },
+  GetAsyncKeyState: { args: [FFIType.i32], returns: FFIType.i16 },
+  keybd_event: { args: [FFIType.u8, FFIType.u8, FFIType.u32, FFIType.u64], returns: FFIType.void },
   ClientToScreen: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
   GetWindowTextW: { args: [FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
   GetWindowRect: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
   IsWindowVisible: { args: [FFIType.ptr], returns: FFIType.bool },
+  IsWindowEnabled: { args: [FFIType.ptr], returns: FFIType.bool },
+  WindowFromPoint: { args: [FFIType.i64], returns: FFIType.u64 },
+  GetAncestor: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.u64 },
   SetForegroundWindow: { args: [FFIType.ptr], returns: FFIType.bool },
   GetForegroundWindow: { args: [], returns: FFIType.u64 },
   GetWindowDC: { args: [FFIType.ptr], returns: FFIType.u64 },
@@ -46,6 +54,7 @@ const user32 = dlopen("user32.dll", {
   GetSystemMetrics: { args: [FFIType.i32], returns: FFIType.i32 },
   SystemParametersInfoW: { args: [FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u32], returns: FFIType.bool },
   SetProcessDpiAwarenessContext: { args: [FFIType.i64], returns: FFIType.bool },
+  GetCursorPos: { args: [FFIType.ptr], returns: FFIType.bool },
   GetGUIThreadInfo: { args: [FFIType.u32, FFIType.ptr], returns: FFIType.bool },
   GetCursorInfo: { args: [FFIType.ptr], returns: FFIType.bool },
   GetIconInfo: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.bool },
@@ -67,6 +76,7 @@ const user32 = dlopen("user32.dll", {
   GetMenuItemCount: { args: [FFIType.u64], returns: FFIType.i32 },
   GetSubMenu: { args: [FFIType.u64, FFIType.i32], returns: FFIType.u64 },
   GetMenuStringW: { args: [FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.i32, FFIType.u32], returns: FFIType.i32 },
+  GetMenuState: { args: [FFIType.u64, FFIType.u32, FFIType.u32], returns: FFIType.u32 },
 });
 
 // GDI + GDI+ for capturing a window to a PNG (see captureWindowToPng). Capturing
@@ -157,6 +167,11 @@ const kernel32 = dlopen("kernel32.dll", {
   WaitForSingleObject: { args: [FFIType.u64, FFIType.u32], returns: FFIType.u32 },
   CloseHandle: { args: [FFIType.u64], returns: FFIType.bool },
   GetLastError: { args: [], returns: FFIType.u32 },
+  CreateFileW: {
+    args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.u64],
+    returns: FFIType.u64,
+  },
+  DeleteFileW: { args: [FFIType.ptr], returns: FFIType.bool },
 });
 
 // Authenticode helpers (mirror src/base/Crypto_win.cpp GetExecutableSignerTemp / IsPEFileSigned).
@@ -235,11 +250,15 @@ export const WM_CHAR = 0x0102;
 export const WM_MOUSEMOVE = 0x0200;
 export const WM_LBUTTONDOWN = 0x0201;
 export const WM_LBUTTONUP = 0x0202;
+export const WM_LBUTTONDBLCLK = 0x0203;
 export const WM_RBUTTONDOWN = 0x0204;
 export const WM_RBUTTONUP = 0x0205;
 export const WM_MBUTTONDOWN = 0x0207;
 export const WM_CONTEXTMENU = 0x007b;
+export const WM_KILLFOCUS = 0x0008;
 export const WM_COMMAND = 0x0111;
+export const WM_SYSCOMMAND = 0x0112;
+export const SC_CLOSE = 0xf060;
 export const WM_COPYDATA = 0x004a;
 // virtual-key / mouse-button flags
 export const MK_LBUTTON = 0x0001;
@@ -248,13 +267,27 @@ export const MK_SHIFT = 0x0004;
 export const MK_CONTROL = 0x0008;
 export const MK_MBUTTON = 0x0010;
 // virtual key codes
+export const VK_RBUTTON = 0x02;
 export const VK_TAB = 0x09;
+export const VK_SHIFT = 0x10;
+export const VK_CONTROL = 0x11;
+export const VK_MENU = 0x12;
+export const VK_LSHIFT = 0xa0;
+export const VK_RSHIFT = 0xa1;
+export const VK_LCONTROL = 0xa2;
+export const VK_RCONTROL = 0xa3;
+export const VK_LMENU = 0xa4;
+export const VK_RMENU = 0xa5;
 export const VK_RETURN = 0x0d;
 export const VK_ESCAPE = 0x1b;
+export const VK_SPACE = 0x20;
+export const VK_END = 0x23;
+export const VK_HOME = 0x24;
 export const VK_LEFT = 0x25;
 export const VK_UP = 0x26;
 export const VK_RIGHT = 0x27;
 export const VK_DOWN = 0x28;
+export const VK_DELETE = 0x2e;
 // PrintWindow flags
 export const PW_CLIENTONLY = 0x00000001;
 export const PW_RENDERFULLCONTENT = 0x00000002;
@@ -272,7 +305,9 @@ export const SB_VERT = 1;
 const SIF_ALL = 0x17;
 // TreeView (SysTreeView32) messages / flags
 export const TVM_GETNEXTITEM = 0x110a;
+export const TVM_SELECTITEM = 0x110b;
 export const TVM_EXPAND = 0x1102;
+export const TVM_GETITEMHEIGHT = 0x111c;
 export const TVGN_ROOT = 0x0;
 export const TVGN_NEXT = 0x1;
 export const TVGN_CARET = 0x9;
@@ -359,15 +394,37 @@ export async function waitForWindowIdle(hwnd: number, timeoutMs = 5000, settleMs
   return false;
 }
 
-// The upper-right quarter of the work area. Tests put SumatraPDF there: a
-// window of that size renders and, more to the point, captures a quarter of
-// the pixels a default-sized one does, and every captureWindowPixels() walk
-// over the result costs a quarter as much. Upper-right keeps it clear of the
-// taskbar's usual place and of anything at the top-left of the desktop
+// Where tests put the SumatraPDF window. "rightHalf" is the default and what a
+// developer wants: it leaves the left half of the desktop alone and still gives
+// the app a window big enough for toolbars, sidebars and dialogs.
+// "workArea" is for a runner on a machine nobody is looking at, where the
+// screen is small (a GitHub runner boots at 1024x768) and anything less than
+// all of it is too cramped.
+export type TestWindowLayout = "rightHalf" | "workArea";
+
+let gTestWindowLayout: TestWindowLayout = "rightHalf";
+
+// Set by the test runner (run-all.ts vs run-github-ci.ts) before running any
+// test; every launch path takes its geometry from testWindowPos(), so this is
+// the only knob.
+export function setTestWindowLayout(layout: TestWindowLayout): void {
+  gTestWindowLayout = layout;
+}
+
+export function getTestWindowLayout(): TestWindowLayout {
+  return gTestWindowLayout;
+}
+
+// The right half of the work area, three quarters of its height (or all of it,
+// see setTestWindowLayout). Anchored top-right, which keeps it clear of the
+// taskbar's usual place and of anything at the top-left of the desktop.
 export function testWindowPos(): WindowPos {
   const wa = getWorkArea();
+  if (gTestWindowLayout === "workArea") {
+    return { x: wa.left, y: wa.top, dx: wa.right - wa.left, dy: wa.bottom - wa.top };
+  }
   const dx = Math.floor((wa.right - wa.left) / 2);
-  const dy = Math.floor((wa.bottom - wa.top) / 2);
+  const dy = Math.floor(((wa.bottom - wa.top) * 3) / 4);
   return { x: wa.left + dx, y: wa.top, dx, dy };
 }
 
@@ -454,6 +511,18 @@ export function findChildWindow(parent: number, className: string): number {
   let found = 0;
   enumChildWindows(parent, (hwnd) => {
     if (getClassName(hwnd) === className) {
+      found = hwnd;
+      return false;
+    }
+    return true;
+  });
+  return found;
+}
+
+export function findVisibleChildWindow(parent: number, className: string): number {
+  let found = 0;
+  enumChildWindows(parent, (hwnd) => {
+    if (getClassName(hwnd) === className && isWindowVisible(hwnd)) {
       found = hwnd;
       return false;
     }
@@ -561,8 +630,16 @@ export function treeGetSelection(tree: number): bigint {
   return treeGetNextItem(tree, TVGN_CARET, 0n);
 }
 
+export function treeClearSelection(tree: number): void {
+  sendMessage(tree, TVM_SELECTITEM, TVGN_CARET, 0);
+}
+
 export function treeExpand(tree: number, action: number, item: bigint): void {
   sendMessage(tree, TVM_EXPAND, action, item);
+}
+
+export function treeGetItemHeight(tree: number): number {
+  return Number(sendMessage(tree, TVM_GETITEMHEIGHT, 0, 0));
 }
 
 // number of currently-visible (i.e. expanded-into-view) rows in the tree
@@ -594,6 +671,7 @@ export const SWP_NOZORDER = 0x0004;
 export const SWP_NOACTIVATE = 0x0010;
 export const SWP_FRAMECHANGED = 0x0020;
 export const GWL_STYLE = -16;
+export const GWL_EXSTYLE = -20;
 export const WS_MAXIMIZE = 0x01000000;
 
 export function getWindowLong(hwnd: number, index: number): number {
@@ -627,6 +705,18 @@ export function setCursorPos(x: number, y: number): boolean {
   return user32.symbols.SetCursorPos(x, y);
 }
 
+// physical (system-wide) key state: true while the key is held down
+export function isKeyDownAsync(vk: number): boolean {
+  return (user32.symbols.GetAsyncKeyState(vk) & 0x8000) !== 0;
+}
+
+const KEYEVENTF_KEYUP = 0x0002;
+
+// inject a key-up for vk, clearing a key the system thinks is still held
+export function injectKeyUp(vk: number): void {
+  user32.symbols.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0n);
+}
+
 // a null-terminated UTF-16 (wide) string buffer, for LPCWSTR args
 export function wideZ(s: string): Uint16Array {
   const buf = new Uint16Array(s.length + 1);
@@ -635,6 +725,31 @@ export function wideZ(s: string): Uint16Array {
   }
   buf[s.length] = 0;
   return buf;
+}
+
+const GENERIC_WRITE = 0x40000000;
+const OPEN_EXISTING = 3;
+const FILE_ATTRIBUTE_NORMAL = 0x80;
+
+// CreateFileW with dwShareMode=0: what OneNote does when it tries to rewrite
+// an extracted attachment. ok=false means another process is still holding it.
+export function tryOpenExclusive(path: string): { ok: boolean; error: number } {
+  const w = wideZ(path);
+  const h = kernel32.symbols.CreateFileW(ptr(w), GENERIC_WRITE, 0, null, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0n);
+  if (h === 0xffffffffffffffffn || h === -1n) {
+    return { ok: false, error: kernel32.symbols.GetLastError() };
+  }
+  kernel32.symbols.CloseHandle(h);
+  return { ok: true, error: 0 };
+}
+
+export function tryDeleteFile(path: string): { ok: boolean; error: number } {
+  const w = wideZ(path);
+  const ok = kernel32.symbols.DeleteFileW(ptr(w));
+  if (ok) {
+    return { ok: true, error: 0 };
+  }
+  return { ok: false, error: kernel32.symbols.GetLastError() };
 }
 
 export function getWindowText(hwnd: number): string {
@@ -691,6 +806,65 @@ export function isWindowVisible(hwnd: number): boolean {
   return user32.symbols.IsWindowVisible(hwnd);
 }
 
+export function isWindowEnabled(hwnd: number): boolean {
+  return user32.symbols.IsWindowEnabled(hwnd);
+}
+
+export const GW_HWNDFIRST = 0;
+export const GW_HWNDNEXT = 2;
+const GW_OWNER = 4;
+
+export function getWindow(hwnd: number, cmd: number): number {
+  return Number(user32.symbols.GetWindow(hwnd, cmd));
+}
+
+export function getWindowOwner(hwnd: number): number {
+  return Number(user32.symbols.GetWindow(hwnd, GW_OWNER));
+}
+
+// true if a is higher in the top-level Z order than b
+export function isWindowAbove(a: number, b: number): boolean {
+  let h = getWindow(a, GW_HWNDFIRST);
+  while (h) {
+    if (h === a) {
+      return true;
+    }
+    if (h === b) {
+      return false;
+    }
+    h = getWindow(h, GW_HWNDNEXT);
+  }
+  return false;
+}
+
+// The top-level window that owns whatever is drawn at this screen point, i.e.
+// what a click there would hit. Use it to check that the window you are about
+// to read pixels from is really the one on screen at that spot -- another
+// (possibly always-on-top) window covering it is otherwise indistinguishable
+// from your window not painting.
+export function windowFromPoint(x: number, y: number): number {
+  const pt = (BigInt(y >>> 0) << 32n) | BigInt(x >>> 0);
+  return Number(user32.symbols.WindowFromPoint(pt));
+}
+
+export function topLevelWindowFromPoint(x: number, y: number): number {
+  const h = windowFromPoint(x, y);
+  if (!h) {
+    return 0;
+  }
+  return getRootWindow(h);
+}
+
+export function getRootWindow(hwnd: number): number {
+  const GA_ROOT = 2;
+  return Number(user32.symbols.GetAncestor(hwnd, GA_ROOT)) || hwnd;
+}
+
+export function getParentWindow(hwnd: number): number {
+  const GA_PARENT = 1;
+  return Number(user32.symbols.GetAncestor(hwnd, GA_PARENT));
+}
+
 export function setForegroundWindow(hwnd: number): boolean {
   return user32.symbols.SetForegroundWindow(hwnd);
 }
@@ -715,6 +889,32 @@ export function getSystemMetrics(index: number): number {
 export function setProcessDpiAware(): boolean {
   // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4
   return user32.symbols.SetProcessDpiAwarenessContext(-4n as unknown as number);
+}
+
+// The real cursor position, in screen (physical, when this process is DPI
+// aware) coordinates.
+export function getCursorPos(): { x: number; y: number } {
+  const buf = new Int32Array(2);
+  if (!user32.symbols.GetCursorPos(ptr(buf))) {
+    return { x: 0, y: 0 };
+  }
+  return { x: buf[0]!, y: buf[1]! };
+}
+
+// True when this session can actually move the pointer. A locked screen or a
+// disconnected RDP session cannot: SetCursorPos returns FALSE and the cursor
+// stays at 0,0, so anything the app reads back with GetCursorPos() (hover,
+// tooltips, WM_SETCURSOR handlers) cannot be driven from a test. Reconnect to
+// the console -- `tscon <id> /dest:console` hands an RDP session back to it --
+// and unlock before running those.
+//
+// Ask SetCursorPos itself, with a move to where the cursor already is. Poking
+// at the input desktop is not equivalent: an elevated process opens Winlogon's
+// desktop happily, and a disconnected session still names "Default" as the
+// input desktop while refusing to move the pointer.
+export function hasInteractiveDesktop(): boolean {
+  const at = getCursorPos();
+  return user32.symbols.SetCursorPos(at.x, at.y);
 }
 
 // Taskbar auto-hide, via SHAppBarMessage. Takes effect immediately (no Explorer
@@ -835,6 +1035,47 @@ export function captureWindowPixels(hwnd: number): { w: number; h: number; data:
   gdi32.symbols.DeleteDC(memDC);
   user32.symbols.ReleaseDC(0, screenDC);
   return { w, h, data };
+}
+
+// Copy a window-DC region into a 32bpp top-down DIB and return its BGRA bytes.
+// Unlike PrintWindow this reads the pixels currently displayed by the window,
+// but avoids thousands of slow GetPixel FFI calls when a test needs a region.
+export function captureWindowDCRegionPixels(
+  hwnd: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): Uint8Array | null {
+  if (w <= 0 || h <= 0) {
+    return null;
+  }
+  const winDC = user32.symbols.GetWindowDC(hwnd);
+  const memDC = gdi32.symbols.CreateCompatibleDC(winDC);
+  const bmi = new ArrayBuffer(40);
+  const dv = new DataView(bmi);
+  dv.setUint32(0, 40, true);
+  dv.setInt32(4, w, true);
+  dv.setInt32(8, -h, true);
+  dv.setUint16(12, 1, true);
+  dv.setUint16(14, 32, true);
+  const bitsPtr = new BigUint64Array(1);
+  const bmp = gdi32.symbols.CreateDIBSection(memDC, ptr(bmi), 0, ptr(bitsPtr), 0n, 0);
+  if (!bmp || !bitsPtr[0]) {
+    gdi32.symbols.DeleteDC(memDC);
+    user32.symbols.ReleaseDC(hwnd, winDC);
+    return null;
+  }
+  const oldObj = gdi32.symbols.SelectObject(memDC, bmp);
+  const copied = gdi32.symbols.BitBlt(memDC, 0, 0, w, h, winDC, x, y, SRCCOPY);
+  gdi32.symbols.SelectObject(memDC, oldObj);
+
+  const bits = Number(bitsPtr[0]) as unknown as Parameters<typeof toArrayBuffer>[0];
+  const data = copied ? new Uint8Array(toArrayBuffer(bits, 0, w * h * 4)).slice() : null;
+  gdi32.symbols.DeleteObject(bmp);
+  gdi32.symbols.DeleteDC(memDC);
+  user32.symbols.ReleaseDC(hwnd, winDC);
+  return data;
 }
 
 // Toolbar (ToolbarWindow32) helpers. A button is addressed by its command id.
@@ -1345,8 +1586,30 @@ export function getMenuItemText(hmenu: bigint, pos: number): string {
 }
 
 export const MF_BYPOSITION = 0x400;
+export const MF_GRAYED = 0x0001;
+export const MF_DISABLED = 0x0002;
 
-export type MenuItem = { text: string; items?: MenuItem[] };
+// the shortcut a menu item advertises (the part after the tab), "" if none
+export function getMenuItemAccel(hmenu: bigint, pos: number): string {
+  const buf = new Uint16Array(512);
+  const n = user32.symbols.GetMenuStringW(hmenu, pos, ptr(buf), 512, MF_BYPOSITION);
+  if (n <= 0) {
+    return "";
+  }
+  const s = Buffer.from(buf.buffer, 0, n * 2).toString("utf16le");
+  const parts = s.split("\t");
+  return parts.length > 1 ? parts[1]!.replace(/&/g, "") : "";
+}
+
+export type MenuItem = { text: string; accel?: string; items?: MenuItem[]; disabled?: boolean };
+
+export function getMenuItemDisabled(hmenu: bigint, pos: number): boolean {
+  const st = user32.symbols.GetMenuState(hmenu, pos, MF_BYPOSITION);
+  if (st === 0xffffffff) {
+    return false;
+  }
+  return (st & (MF_GRAYED | MF_DISABLED)) !== 0;
+}
 
 // the whole menu tree, submenus included. Separators (empty labels) are skipped
 export function readMenuTree(hmenu: bigint): MenuItem[] {
@@ -1358,7 +1621,15 @@ export function readMenuTree(hmenu: bigint): MenuItem[] {
     if (sub) {
       out.push({ text, items: readMenuTree(sub) });
     } else if (text) {
-      out.push({ text });
+      const item: MenuItem = { text };
+      const accel = getMenuItemAccel(hmenu, i);
+      if (accel) {
+        item.accel = accel;
+      }
+      if (getMenuItemDisabled(hmenu, i)) {
+        item.disabled = true;
+      }
+      out.push(item);
     }
   }
   return out;

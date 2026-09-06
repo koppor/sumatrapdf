@@ -4,9 +4,9 @@
 #include "base/Base.h"
 
 #include "DocController.h"
-#include "TreeModel.h"
+#include "gui/UIModels.h"
 #include "EngineBase.h"
-#if defined(DEBUG)
+#if IS_DEBUG
 #include "base/UtAssert.h"
 #endif
 #include "TextSelection.h"
@@ -40,7 +40,16 @@ void TextSelection::Reset() {
     result.pages = nullptr;
     free(result.rects);
     result.rects = nullptr;
+    free(result.quads);
+    result.quads = nullptr;
     wordStartPage = wordStartGlyph = wordEndPage = wordEndGlyph = -1;
+}
+
+static bool GlyphContains(Rect coord, const QuadF* quads, int i, PointF pt, Point pti) {
+    if (quads && quads[i].IsRotated()) {
+        return quads[i].Contains(pt);
+    }
+    return coord.Contains(pti);
 }
 
 // returns the index of the glyph closest to the right of the given coordinates
@@ -48,9 +57,9 @@ void TextSelection::Reset() {
 // glyph following it, which will be the first glyph (not) to be selected)
 static int FindClosestGlyph(TextSelection* ts, int pageNo, double x, double y) {
     Rect* coords;
+    QuadF* quads = nullptr;
     int textLen = 0;
-    // called for the side effect of filling textLen and coords
-    ts->engine->GetTextForPage(pageNo, &textLen, &coords);
+    ts->engine->GetTextForPage(pageNo, &textLen, &coords, &quads);
     PointF pt = PointF((float)x, (float)y);
 
     unsigned int maxDist = UINT_MAX;
@@ -63,17 +72,27 @@ static int FindClosestGlyph(TextSelection* ts, int pageNo, double x, double y) {
         if (!coord.x && !coord.dx) {
             continue;
         }
-        if (overGlyph && !coord.Contains(pti)) {
+        bool inside = GlyphContains(coord, quads, i, pt, pti);
+        if (overGlyph && !inside) {
             continue;
         }
 
-        uint dist = distSq((int)x - coord.x - (coord.dx / 2), (int)y - coord.y - (coord.dy / 2));
+        int cx, cy;
+        if (quads && quads[i].IsRotated()) {
+            PointF c = quads[i].Center();
+            cx = (int)c.x;
+            cy = (int)c.y;
+        } else {
+            cx = coord.x + (coord.dx / 2);
+            cy = coord.y + (coord.dy / 2);
+        }
+        uint dist = distSq((int)x - cx, (int)y - cy);
         if (dist < maxDist) {
             result = i;
             maxDist = dist;
         }
         // prefer glyphs the cursor is actually over
-        if (!overGlyph && coord.Contains(pti)) {
+        if (!overGlyph && inside) {
             overGlyph = true;
             result = i;
             maxDist = dist;
@@ -85,10 +104,35 @@ static int FindClosestGlyph(TextSelection* ts, int pageNo, double x, double y) {
     }
     ReportIf(result < 0 || result >= textLen);
 
-    // the result indexes the first glyph to be selected in a forward selection
-    RectF bbox = ts->engine->Transform(ToRectF(coords[result]), pageNo, 1.0, 0);
-    pt = ts->engine->Transform(pt, pageNo, 1.0, 0);
-    if (pt.x > bbox.x + (0.5 * bbox.dx)) {
+    // the result indexes the first glyph to be selected in a forward selection.
+    // Along the baseline for rotated glyphs; along +x for upright ones.
+    bool pastMid = false;
+    if (quads && quads[result].IsRotated()) {
+        PointF ul = quads[result].ul;
+        PointF ur = quads[result].ur;
+        float dx = ur.x - ul.x;
+        float dy = ur.y - ul.y;
+        float den = dx * dx + dy * dy;
+        if (den > 0.01f) {
+            float t = ((pt.x - ul.x) * dx + (pt.y - ul.y) * dy) / den;
+            float ax = ul.x + t * dx;
+            float ay = ul.y + t * dy;
+            float perp2 = (pt.x - ax) * (pt.x - ax) + (pt.y - ay) * (pt.y - ay);
+            float hx = quads[result].ll.x - ul.x;
+            float hy = quads[result].ll.y - ul.y;
+            float height2 = hx * hx + hy * hy;
+            // ignore the half-glyph split when the point is far off the baseline
+            // (e.g. F7 caret at the page's top-left)
+            if (overGlyph || perp2 <= height2 * 4.f) {
+                pastMid = t > 0.5f;
+            }
+        }
+    } else {
+        RectF bbox = ts->engine->Transform(ToRectF(coords[result]), pageNo, 1.0, 0);
+        PointF ptT = ts->engine->Transform(pt, pageNo, 1.0, 0);
+        pastMid = ptT.x > bbox.x + (0.5 * bbox.dx);
+    }
+    if (pastMid) {
         result++;
         // for some (DjVu) documents, all glyphs of a word share the same bbox
         while (result < textLen && coords[result - 1] == coords[result]) {
@@ -110,13 +154,66 @@ static bool IsGlyphOnVisualLine(Rect lineBox, Rect glyphBox) {
     return (bottom - top) * 2 >= glyphBox.dy;
 }
 
+static void TextSelAppend(TextSel* result, int pageNo, Rect bbox, const QuadF* quad) {
+    int currLen = result->len;
+    int left = result->cap - currLen;
+    ReportIf(left < 0);
+    if (left == 0) {
+        int newCap = result->cap * 2;
+        newCap = std::max(newCap, 64);
+        int* newPages = (int*)realloc(result->pages, sizeof(int) * newCap);
+        Rect* newRects = (Rect*)realloc(result->rects, sizeof(Rect) * newCap);
+        ReportIf(!newPages);
+        ReportIf(!newRects);
+        result->pages = newPages;
+        result->rects = newRects;
+        if (result->quads) {
+            QuadF* newQuads = (QuadF*)realloc(result->quads, sizeof(QuadF) * newCap);
+            ReportIf(!newQuads);
+            memset(newQuads + result->cap, 0, sizeof(QuadF) * (newCap - result->cap));
+            result->quads = newQuads;
+        }
+        result->cap = newCap;
+    }
+    if (quad && !result->quads) {
+        result->quads = (QuadF*)calloc(result->cap, sizeof(QuadF));
+        ReportIf(!result->quads);
+    }
+    result->pages[currLen] = pageNo;
+    result->rects[currLen] = bbox;
+    if (result->quads) {
+        result->quads[currLen] = quad ? *quad : QuadF{};
+    }
+    result->len++;
+}
+
 static void FillSelectionRects(TextSel* result, int pageNo, Rect* coords, int textLen, int glyph, int length,
-                               Rect mediabox) {
+                               Rect mediabox, QuadF* glyphQuads = nullptr) {
     Rect *c = &coords[glyph], *end = c + length;
     while (c < end) {
         // skip line breaks (empty boxes: hard newlines and soft-join spaces)
         for (; c < end && !c->x && !c->dx; c++) {
             // no-op
+        }
+        if (c >= end) {
+            break;
+        }
+
+        int runStart = (int)(c - coords);
+        bool rotated = glyphQuads && glyphQuads[runStart].IsRotated();
+        if (rotated) {
+            for (; c < end && (c->x || c->dx); c++) {
+                int ix = (int)(c - coords);
+                if (ix > runStart && !IsGlyphOnVisualLine(coords[runStart], *c)) {
+                    break;
+                }
+                Rect bbox = c->Intersect(mediabox);
+                if (bbox.IsEmpty()) {
+                    continue;
+                }
+                TextSelAppend(result, pageNo, bbox, &glyphQuads[ix]);
+            }
+            continue;
         }
 
         Rect bbox;
@@ -139,31 +236,15 @@ static void FillSelectionRects(TextSel* result, int pageNo, Rect* coords, int te
             bbox.dx = c->x - bbox.x;
         }
 
-        int currLen = result->len;
-        int left = result->cap - currLen;
-        ReportIf(left < 0);
-        if (left == 0) {
-            int newCap = result->cap * 2;
-            newCap = std::max(newCap, 64);
-            int* newPages = (int*)realloc(result->pages, sizeof(int) * newCap);
-            Rect* newRects = (Rect*)realloc(result->rects, sizeof(Rect) * newCap);
-            ReportIf(!newPages);
-            ReportIf(!newRects);
-            result->pages = newPages;
-            result->rects = newRects;
-            result->cap = newCap;
-        }
-
-        result->pages[currLen] = pageNo;
-        result->rects[currLen] = bbox;
-        result->len++;
+        TextSelAppend(result, pageNo, bbox, nullptr);
     }
 }
 
 static void FillResultRects(TextSelection* ts, int pageNo, int glyph, int length, StrVec* lines = nullptr) {
     Rect* coords;
+    QuadF* quads = nullptr;
     int textLen = 0;
-    Str text = ts->engine->GetTextForPage(pageNo, &textLen, &coords);
+    Str text = ts->engine->GetTextForPage(pageNo, &textLen, &coords, &quads);
     // Clamp ranges that outlive their page text (stale find-match coords after
     // tab close/reload, or a multi-page match that ends past a shorter page).
     if (glyph < 0) {
@@ -191,9 +272,7 @@ static void FillResultRects(TextSelection* ts, int pageNo, int glyph, int length
         auto flushLine = [&](int runEnd) {
             if (runStart >= 0 && runEnd > runStart) {
                 Str s = Utf8SliceByCodepoints(text, runStart, runEnd - runStart);
-                if (len(s) > 0) {
-                    lines->Append(s);
-                }
+                lines->AppendNonEmpty(s);
             }
             runStart = -1;
         };
@@ -221,10 +300,10 @@ static void FillResultRects(TextSelection* ts, int pageNo, int glyph, int length
         return;
     }
 
-    FillSelectionRects(&ts->result, pageNo, coords, textLen, glyph, length, mediabox);
+    FillSelectionRects(&ts->result, pageNo, coords, textLen, glyph, length, mediabox, quads);
 }
 
-#if defined(DEBUG)
+#if IS_DEBUG
 void TextSelection_UnitTests() {
     Rect coords[] = {
         {50, 100, 12, 10}, {60, 100, 12, 10}, {70, 100, 12, 10}, {56, 115, 12, 10},
@@ -240,6 +319,7 @@ void TextSelection_UnitTests() {
     utassert(result.rects[3] == Rect(56, 145, 10, 10));
     free(result.pages);
     free(result.rects);
+    free(result.quads);
 
     Rect superscript[] = {{10, 100, 12, 10}, {20, 97, 8, 6}, {28, 100, 12, 10}};
     result = {};
@@ -248,27 +328,52 @@ void TextSelection_UnitTests() {
     utassert(result.rects[0] == Rect(10, 97, 30, 13));
     free(result.pages);
     free(result.rects);
+    free(result.quads);
+
+    // 45-degree run: keep per-glyph quads instead of one axis-aligned union
+    Rect rotCoords[] = {{10, 10, 20, 20}, {20, 20, 20, 20}};
+    QuadF rotQuads[] = {
+        {PointF(10, 20), PointF(24, 10), PointF(20, 30), PointF(34, 20)},
+        {PointF(20, 30), PointF(34, 20), PointF(30, 40), PointF(44, 30)},
+    };
+    result = {};
+    FillSelectionRects(&result, 1, rotCoords, dimof(rotCoords), 0, dimof(rotCoords), {0, 0, 200, 200}, rotQuads);
+    utassert(result.len == 2);
+    utassert(result.quads);
+    utassert(result.quads[0].ul.x == 10 && result.quads[0].ur.y == 10);
+    utassert(result.quads[1].ul.x == 20 && result.quads[1].lr.x == 44);
+    free(result.pages);
+    free(result.rects);
+    free(result.quads);
 }
 #endif
 
 bool TextSelection::IsOverGlyph(int pageNo, double x, double y) {
     Rect* coords;
+    QuadF* quads = nullptr;
     int textLen = 0;
-    if (!engine->TryGetTextForPage(pageNo, &textLen, &coords)) {
+    if (!engine->TryGetTextForPage(pageNo, &textLen, &coords, &quads)) {
         return false;
     }
 
     int glyphIx = FindClosestGlyph(this, pageNo, x, y);
-    Point pt = ToPoint(PointF((float)x, (float)y));
+    PointF ptf((float)x, (float)y);
+    Point pt = ToPoint(ptf);
+    auto contains = [&](int i) -> bool {
+        if (i < 0 || i >= textLen) {
+            return false;
+        }
+        return GlyphContains(coords[i], quads, i, ptf, pt);
+    };
     // when over the right half of a glyph, FindClosestGlyph returns the
     // index of the next glyph, in which case glyphIx must be decremented
-    if (glyphIx == textLen || !coords[glyphIx].Contains(pt)) {
+    if (glyphIx == textLen || !contains(glyphIx)) {
         glyphIx--;
     }
     if (-1 == glyphIx) {
         return false;
     }
-    return coords[glyphIx].Contains(pt);
+    return contains(glyphIx);
 }
 
 // index of the glyph closest to (x, y) on pageNo, without mutating the

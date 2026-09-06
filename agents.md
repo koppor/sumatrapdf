@@ -1,4 +1,4 @@
-This is a C++ program for Windows, using mostly win32 windows API functions. The full Windows GUI app remains Windows-only for now; we are porting **non-UI** code so it also compiles on macOS and Linux, starting with `src/base/`. There is also an early Cocoa macOS app under `src/mac/` that can open a command-line document, render the first page through the existing engines, and display it.
+This is a C++ program for Windows, using mostly win32 windows API functions. It is Windows-only: the macOS and Linux ports (`src/mac/`, `src/linux/`, their GUI backends and their CI) were removed.
 
 We don't use STL but our own string / helper / container functions implemented in src\base directory
 
@@ -6,15 +6,19 @@ Assume that Visual Studio command-line tools are available in the PATH environme
 
 Our code is in src/ directory. External dependencies are in ext/ directory
 
+`ext/mupdf` is vendored and we edit it in place. Every change we make there must
+also be recorded as a patch in `ext/patches/` (one logical change per `.patch`,
+against the mupdf revision in `ext/versions.txt`) in the **same commit** — see
+`ext/patches/README.md`. A change that only lives in the vendored tree is one
+the next mupdf update silently drops.
+
 To build run: `bun cmd/build.ts -debug` (or `-release`, `-asan`, and the other modes shown by `bun cmd/build.ts -help`). Called with no options it prints usage and exits; unknown options print an error plus usage and exit unsuccessfully.
 
 Keep `cmd/build.ts` as the single build entry point. Build-mode implementation modules live under `cmd/helper/` and are not invoked directly, except for internal delegation such as the WSL launcher.
 
 This creates ./out/dbg64/SumatraPDF.exe executable. The static build target is SumatraPDF-static and produces ./out/<config>/SumatraPDF-static.exe.
 
-To run a Linux build from Windows, use `bun cmd/build.ts -linux` (defaults to `-asan`) or add `-debug` / `-release`. To cross-compile the Windows exe with mingw inside WSL, use `bun cmd/build.ts -wine` (optional `-clean`, `-run`). The unified build command delegates these Windows-hosted modes to `cmd/helper/wsl-build.ts`. Both require a WSL distro named `Ubuntu` and bun in that distro; Linux deps are `sudo sh cmd/ubuntu-install-deps.sh`.
-
-To run the macOS build on the remote Mac, use `bun cmd/build.ts -mac-remote -branch <temporary-branch> -debug` (or `-release` / `-asan`, optionally with `-clean`). It connects with `ssh kjk@macbook-pro-14`, changes to `src/sumatrapdf`, verifies that the remote checkout is clean, fetches and switches to the temporary branch, runs `cmd/build.ts -mac`, and restores the original remote checkout on success or failure. The macOS build compiles the dependency/base libraries, builds `out/mac-<config>64/test_util`, runs it with `-for-ai`, builds `test_engines`, and builds `SumatraPDF.app`.
+To cross-compile the Windows exe with mingw inside WSL, use `bun cmd/build.ts -wine` (optional `-clean`, `-run`); the unified build command delegates it to `cmd/helper/wsl-build.ts`. It needs a WSL distro named `Ubuntu` with bun in it, plus `sudo apt install g++-mingw-w64-x86-64 unzip` (and `wine wine64` to run).
 
 To run unit tests with AI-friendly diagnostics, run `bun cmd/run-unit-tests.ts -dbg` (or `-rel` / `-asan`). It builds the 64-bit `test_util.exe`, runs it with `-for-ai`, captures output under the matching `out/<config>/unit-tests-*.txt`, and prints assertion/crash callstacks without waiting for debugger UI.
 
@@ -24,7 +28,7 @@ When launching SumatraPDF.exe for ad-hoc testing, always pass the `-for-testing`
 
 After making a change to a .cpp, .c or .h file under `src/` (and before running build.ts), run clang-format on those files to reformat them in place. Do **not** clang-format third-party / vendored code (`ext/`, etc.) — keep edits there minimal and match the existing local style.
 
-For .ts / .js / .json / .md files, the equivalent is `bunx prettier --write <files>`. Settings live in `.prettierrc.json` (`printWidth` 120, `endOfLine` lf) and `.prettierignore` (vendored code, build output, and the generated `docs/md/Advanced-options-settings.md`). Format only the files you touched: most of `cmd/` and `tests/` predates the config and would produce large unrelated diffs.
+After changing a .ts file under `cmd/` or `tests/`, run `bun cmd/format.ts` — it runs prettier over `cmd/**/*.ts` and `tests/**/*.ts` and then clang-formats the C/C++ sources. Use `bun cmd/format.ts -ts` to run only the prettier pass (no Visual Studio / clang-format needed). Prettier settings live in `.prettierrc.json` (`printWidth` 120, `endOfLine` lf) and `.prettierignore` (vendored code, build output, scratch `tmp/` dirs, and the generated `docs/md/Advanced-options-settings.md`). For other prettier-owned files (.js / .json / .md) run `bunx prettier --write <files>` on the files you touched.
 
 Never commit changes automatically. Always wait for explicit command to commit changes.
 
@@ -32,68 +36,43 @@ When committing a fix for a GitHub issue, end the commit message's **first line*
 
 When committing work done with AI assistance, append the user prompt(s) that produced the change at the very end of the commit message as a single line: `prompt: ...`. If there were multiple prompts, squash them into one concise line. Record the substantive request only — omit meta-instructions such as "commit", "push", "check work", or "verify".
 
-## Cross-platform porting (macOS / Linux)
+# Generic coding rules
 
-We are making non-UI library code compile on macOS and Linux while keeping the Windows build working. **Start with `src/base/`**; other `src/` areas follow once base is portable.
+- When writing something intended for human consumption, (comment, commit message, reply to prompt) use as few words as possible. Pick every word meticulously to reduce the volume to a strict minimum. Be down to the point. Less is more.
 
-### Scope
+- Avoid superlatives and praise. Stop telling me I am absolutely right. Give me the cold hard truth.
 
-- **In scope:** platform-neutral logic and OS abstractions (files, paths, time, threading, memory, strings, etc.) under `src/base/` and later other non-UI `src/` trees; the early native macOS viewer under `src/mac/`.
-- **Out of scope for now:** porting the full Windows UI, Win32 windowing, Windows menus, printing UI, installer, and anything that depends on those.
+- Avoid magic numbers and strings by extracting recurring or meaningful values into descriptive constants (const) or enums. Keep self-explanatory, one-off values inline to avoid clutter. If a value comes from a spec (e.g. HTTP 200 OK), use a constant regardless.
 
-### macOS app (`src/mac/`)
+- Reduce code indentation. Avoid Arrow Anti-Pattern. Leverage early return and continue.
 
-`src/mac/` is an early Cocoa application, not a port of the Windows UI. Keep it small and native for now:
+- Keep function names short. Less than 30 characters.
 
-- Build it with `bun cmd/build.ts -mac -debug` (or `-release` / `-asan`). The app bundle is `out/mac-dbg64/SumatraPDF.app` for debug builds.
-- Run it with a document path using `open out/mac-dbg64/SumatraPDF.app --args <path>`, for example `open out/mac-dbg64/SumatraPDF.app --args ./ext/a-zlib/zlib.3.pdf`. Relative paths from the repo should work; absolute paths are fine.
-- The current app only opens the first command-line file, renders page 1 through the existing engine layer, displays it, and supports standard macOS Quit / `Cmd-Q`.
-- Keep Objective-C / Cocoa code in `.mm` files under `src/mac/`. Do **not** include `base/Base.h` or other Sumatra headers in files that import Cocoa/AppKit: Apple headers define names such as `Size` that conflict with Sumatra types. Use a small C/C++ bridge (`SumatraMacEngine.*`) between Cocoa code and engine/base code.
-- When adding mac-specific build inputs, update `MAC_APP_SOURCES` in `cmd/helper/mac-build.ts`.
+- Use enums instead of booleans for function parameters.
 
-### Platform-specific source files
+- Let the reader of the code breathe. Add empty lines between logical blocks of code.
 
-When a source file needs platform-specific code, keep the files in the same module directory and use a platform suffix:
+- Add a small, to the point, comment to explain *what* the block does and *why*. Use examples when possible. Propose ASCII drawings to explain complete systems.
 
-| Suffix   | Used on             | Purpose                                      |
-| -------- | ------------------- | -------------------------------------------- |
-| `_win`   | Windows             | Win32 and other Windows-only implementations |
-| `_posix` | macOS **and** Linux | Code shared by both Unix-like targets        |
-| `_mac`   | macOS only          | Darwin-specific code not shared with Linux   |
-| `_linux` | Linux only          | Linux-specific code not shared with macOS    |
+- Program to levels of abstraction. Lower-level mechanics (e.g., raw hardware I/O, sector parsing, direct socket streams) must be encapsulated in a dedicated driver/abstraction layer. Expose clean, high-level APIs to the rest of the application so calling code works with domain concepts, not raw implementation details.
 
-**`_posix` is for code common to Linux and macOS** — prefer it over duplicating the same logic in `_mac` and `_linux`. Use `_mac` or `_linux` only when the two Unix platforms genuinely diverge.
+- Don't touch blocks of code unrelated to the feature you implement. e.g. Don't add comments to a block of code if you did not create it or modify it. As much as possible try to minimize the number of changed lines when implementing a feature.
 
-Example layout:
+- Strictly adhere to the layered boundary hierarchy: each layer may only communicate with its immediate neighbor directly below it. Never "punch holes" through layers (e.g., controllers or UI components must never directly call database queries, raw hardware drivers, or low-level network clients; always route through the intermediate service/abstraction layer).
 
-```
-src/base/File.h          # shared declaration (platform-neutral API)
-src/base/File.cpp        # shared implementation, if any
-src/base/File_win.cpp    # Windows implementation
-src/base/File_posix.cpp  # macOS + Linux implementation
-src/base/File_mac.cpp    # macOS-only pieces (when posix isn't enough)
-src/base/File_linux.cpp  # Linux-only pieces (when posix isn't enough)
-```
+When you write a commit message, follow these 7 rules:
+Rule 1: Separate the subject line from the body with a single blank line.
+Rule 2: Limit the subject line to 50 characters (72 is the absolute hard limit).
+Rule 3: Capitalize the first letter of the subject line.
+Rule 4: Do not end the subject line with a period.
+Rule 5: Use the imperative mood in the subject line (e.g., "Fix bug," "Add feature," 
+        not "Fixed" or "Adds"). Test formula: It must complete the sentence: "If applied,
+        this commit will [your subject line here]".
+Rule 6: Wrap the body text manually at 72 characters to prevent Git formatting issues.
+Rule 7: Use the body to explain what and why vs. how. Assume the code explains the how;
+        the message must explain the context and reasoning. 
 
-Not every file needs all four platform variants — only split when the implementation is platform-dependent. Keep portable code in the unsuffixed file (`src/base/Foo.cpp`) and move **only** the non-portable parts into the appropriate `_win` / `_posix` / `_mac` / `_linux` file.
-
-### Guidelines
-
-- **Preserve the public API.** Headers at the module root (`src/base/Foo.h`) should expose the same functions/types on every platform; platform differences stay in suffixed `.cpp` files.
-- **No `#ifdef` sprawl in shared headers** when a platform-specific `.cpp` split is clearer. Small include-guarded typedefs or macros in a shared header are fine.
-- **Prefer POSIX APIs in `_posix` files** (`open`, `read`, `stat`, `pthread`, etc.) and native APIs in `_win` files (Win32). Use `_mac` / `_linux` files for OS-specific extensions (e.g. FSEvents vs inotify).
-- **Keep Windows green.** Every change must still build and pass tests on Windows (`bun cmd/build.ts -debug`; use `bun cmd/run-unit-tests.ts -dbg` for base/test_util work). Do not break the existing Windows target while adding macOS/Linux support.
-- **Keep macOS green.** `bun cmd/build.ts -mac -debug` builds the macOS dependency/base libraries, builds and runs `test_util` with `-for-ai`, builds `test_engines`, and links `SumatraPDF.app`. From Windows, use `-mac-remote` on a temporary branch for portability changes.
-- **Keep Linux green.** From Windows, `bun cmd/build.ts -linux -debug` (or `-release` / `-asan`) uses the Ubuntu WSL distro. Use `bun cmd/build.ts -wine` to cross-compile the Windows exe with mingw inside WSL.
-- **Make tests platform-aware.** Preserve shared behavior tests on every platform where possible. Guard Windows-only expectations (drive letters, backslash-only paths, Win32 command-line parsing, UI/printing behavior, and similar platform specifics) with `#if OS_WIN`, and add POSIX expectations when the behavior is meant to be portable.
-
-### Remote macOS verification from Windows
-
-When doing macOS/Linux portability changes from a Windows machine, test them on the remote Mac by building from a temporary branch:
-
-1. Create a temporary branch locally, e.g. `git switch -c tmp/mac-port-<topic>`.
-2. Commit the portability changes on that temporary branch and push it to origin, e.g. `git push -u origin tmp/mac-port-<topic>`. This temporary commit is for remote build verification; still do not make the final feature commit unless the user explicitly asks.
-3. Run the remote build from Windows with `bun cmd/build.ts -mac-remote -branch tmp/mac-port-<topic> -debug`. The command aborts if the remote checkout is dirty, fetches and switches to the temporary branch, builds, runs macOS `test_util`, and restores the original remote branch or detached checkout on success or failure.
+- If the prompt indicates that a bug is being fixed, don't write the fix right away. First write the test. Observe it failing. Then write the fix. And observe the test passing
 
 ## C/C++ #include conventions
 
@@ -106,6 +85,10 @@ We rely on a controlled include order rather than self-sufficient headers (this 
 
 Do **not** use `#pragma once` in `.h` files.
 
+## Comments
+
+Use comments rarely. Most comments should be at the request of the user. When something warrants a comment, keep it to one or two lines: what the code does and why it's necessary. No background narrative, no replaying the investigation or failure mode, nothing a test name or the commit message already says. Applies to specs too. If a comment needs a paragraph, make the code clearer instead
+
 ## Put explanatory comments in `.cpp`, not `.h`
 
 **Do not put prose function comments in headers.** Headers are re-parsed by every
@@ -113,9 +96,9 @@ translation unit that includes them, so comments in a `.h` cost compilation time
 on every include. Keep the header declaration terse (ideally a single line) and
 put the explaining comment on the **definition** in the corresponding `.cpp`.
 
-For a function declared in `Foo.h` and defined in `Foo.cpp` (or `Foo_win.cpp` /
-`Foo_posix.cpp` / etc.), the doc comment lives **only** above the definition in
-the `.cpp` — not on the declaration in the `.h`.
+For a function declared in `Foo.h` and defined in `Foo.cpp` (or `Foo_win.cpp`),
+the doc comment lives **only** above the definition in the `.cpp` — not on the
+declaration in the `.h`.
 
 ```cpp
 // Foo.h — declaration only, no prose comment
@@ -138,15 +121,15 @@ body: put the comment in the `.cpp`.
 
 We use our own `Str` value type (a `char*` + `int len`) for strings instead of
 raw `char*` / `std::string`. The most-used formatter is `fmt()`, a macro
-`#define fmt(...) str::FormatTemp(__VA_ARGS__)` (base/StrFormatParse.h). It formats into
+`#define fmt(...) str::FormatTemp(__VA_ARGS__)` (base/Base.h). It formats into
 the temp arena and returns a `TempStr`, so call sites read `fmt("page %d", n)`.
 
 `fmt()` is **type-safe**, not a raw `vsnprintf` wrapper:
 
 - The **format string** is a plain `const char*` (almost always a string
-  literal). When it's a `Str` instead — most commonly a `_TRA("...")`
+  literal). When it's a `Str` instead — most commonly a `Tr("...")`
   translation, which returns a `Str` — pass its `.s`, e.g.
-  `fmt(_TRA("page %d").s, n)`.
+  `fmt(Tr("page %d").s, n)`.
 - Each **variadic arg** is wrapped in a `str::FmtArg`, which has explicit
   constructors for `Str`, `WStr`, `char`, the integer/float types, and
   `const void*`. Raw `char*` / `const char*` / `wchar_t*` constructors are
@@ -159,10 +142,10 @@ the temp arena and returns a `TempStr`, so call sites read `fmt("page %d", n)`.
 For a `%s` fed a **string literal**, wrap it with `StrL(...)` (see next section)
 so the length is computed at compile time: `fmt("%s", StrL("done"))`.
 
-`logf` / `logfa` are macros in `base/Base.h` that format via `::fmt(...)` and
-route the result through `log()` / `loga()`, so they follow the same type-safe
-rules. Base only declares those two; the app implements them (`SumatraLog.cpp`,
-declared in `SumatraLog.h`).
+`logf` is a variadic function template in `base/Base.h` that formats via
+`str::FormatTemp(...)` and routes the result through `log()`, so it follows the
+same type-safe rules. Base only declares `log()`; the app implements it
+(`SumatraLog.cpp`, declared in `SumatraLog.h`).
 
 Functions that take an already-formatted `Str` (so the caller formats with
 `fmt(...)`): `str::Builder::Append`, `dbglayout`, `MaybeDelayedWarningNotification`.
@@ -297,11 +280,28 @@ Instead, run only what the change can plausibly break:
   manual check (launch with `-for-testing`, screenshot, probe log) is worth more than a
   green suite that never touched the code.
 
+When the user reports a failing test (from a release run or their own run), fix and verify **that test alone**: run it
+by itself several times in a row, since the failures that reach you this way are usually intermittent. Do not run a
+full suite afterwards to see what fails next - each run costs minutes and drags you into unrelated flakes. Fix the one
+test, say what you found, and let the next release run surface anything else.
+
 Never edit `tests/run-almost-all.ts` or `tests/run-all.ts` to skip tests so a run gets further. If a test fails and you
 suspect it is unrelated, check it out on a clean tree (`git stash`) and run it standalone
 several times - some are environment- and focus-dependent and fail intermittently
 regardless of the change (`issue-1136` and `issue-2254` have both done this). One passing
 run and one failing run is not evidence; compare several runs on each side.
+
+After fixing a failing or flaky test, move it to the beginning of `tests/run-pre-release.ts`,
+so the next pre-release run retries it in the first seconds rather than minutes in. That run
+is the only thing that can tell you the fix held, and a re-flake should be cheap to reach.
+
+`run-pre-release.ts` opens with `runAlmostAll`, so "the beginning" is the top of the `tests`
+array in `tests/run-almost-all.ts`: move the test's entry there (its import stays where it
+is), below `issue-5978`, which has to stay first because it is the one test that cares what
+the machine was doing before it. `tests/run-all.ts` splices that same array in and
+`tests/run-github-ci.ts` filters `run-all.ts`, so the one move covers every suite. A test
+registered in `run-pre-release.ts` itself (`issue-5842`, `issue-6003`, `latex`) moves above
+the `runAlmostAll` call instead.
 
 Structure of each test (so they compose in tests/run-almost-all.ts / tests/run-all.ts):
 
@@ -315,6 +315,10 @@ Structure of each test (so they compose in tests/run-almost-all.ts / tests/run-a
   `runStandalone` (from `tests/util.ts`) builds the app (unless `--no-build`), runs `testit()`, and exits 0 on pass / 1 on failure.
 - shared helpers (`EXE` path, `buildApp`, `runStandalone`) live in `tests/util.ts` — use them instead of re-implementing per file.
 - register every new test in `tests/run-almost-all.ts` (import its `testit` and add it to the `tests` array). If the test cannot be made faster (print-to-PDF, LaTeX, a measured wait, high-zoom tile settle, a huge fixture, copying the exe next to restrict.ini), add it to `slowTests` in `tests/run-all.ts` instead. `bun tests/run-almost-all.ts` is the fast suite; `bun tests/run-all.ts` runs that then the slow tests, stopping at the first failure.
+- the daily GitHub Actions job (`.github/workflows/windows-daily.yml`) builds the debug ASan target and runs `bun tests/run-github-ci.ts`. That runner takes the `run-all.ts` list minus `excludedTests` (each with the reason it can't run on a hosted runner), runs **all** of them instead of stopping at the first failure, prints the failures at the end and exits non-zero. It doesn't build: the workflow does, and points `SUMATRA_TEST_EXE` at `out/dbg64_asan/SumatraPDF-static.exe` (`tests/util.ts` `EXE` reads that env var at import time). If a test can't work on a runner, add it to `excludedTests` with the reason rather than deleting it.
+- the runner picks the window layout with `setTestWindowLayout()` (`tests/winapi.ts`): `"quarter"` (the default, what `run-almost-all.ts` asks for) keeps the window out of a developer's way and renders/captures fewer pixels; `"workArea"` (what `run-github-ci.ts` asks for) uses the whole work area, because a runner's screen is small and nobody is looking at it. Every launch path (`launchSumatra`, `launchControlled`, `withControlledSumatra`) takes its geometry from `testWindowPos()`, so that one call covers all of them.
+- an ASan build is 2-3x slower, so a test that sleeps a fixed number of ms for a repaint or a layout passes locally and fails in CI. Poll for the condition (see `sampleStableChrome` / `waitForChromeRestored` in `tests/issue-5866.ts`) instead of sleeping longer.
+- a test that reads pixels off the document should call `client.setNotificationsEnabled(false)` (`-dbg-control`) first: notifications are drawn over the page and linger ~2s, so otherwise the test waits them out. Disabling also takes down any already on screen (e.g. the `Zoom: N%` one that `-zoom` shows). It was 8 of the 15 seconds `tests/issue-1195.ts` used to take.
 
 ### Ad-hoc tests
 

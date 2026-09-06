@@ -14,7 +14,6 @@
 
 #include "Settings.h"
 #include "AppSettings.h"
-#include "GlobalPrefs.h"
 #include "MainWindow.h"
 #include "Theme.h"
 #include "SumatraConfig.h"
@@ -22,7 +21,7 @@
 #include "Translations.h"
 #include "DarkMode_win.h"
 #include "PdfDarkMode.h"
-#include "ChangeThemeDialog.h"
+#include "SumatraDialogs.h"
 
 // The theme list, the label and the buttons are virtual controls (VirtCtrl);
 // only the drop-down is a real HWND. They all sit in the same layout tree,
@@ -47,12 +46,19 @@ struct ChangeThemeWnd : WindowBase {
     void OnSelectionChanged();
     void OnDocumentColorsFollowThemeChanged();
     void PreviewDocumentColors();
+    void ApplyPreview();
+    void SchedulePreview();
+    void KillPreviewTimer();
+    void OnTimer(WindowBase::TimerEvent*);
     void OnCancel(VirtMouseEvent* ev = nullptr);
     void OnChange(VirtMouseEvent* ev = nullptr);
 };
 
 static ChangeThemeWnd* gChangeThemeWnd = nullptr;
 
+static constexpr int kFollowWindowsThemeListIndex = 0;
+static constexpr UINT_PTR kThemePreviewTimerId = 1;
+static constexpr UINT kThemePreviewDebounceMs = 300;
 static SeqStrings gDocumentColorsFollowThemeNames = "off\0smart\0legacy\0";
 
 static int DocumentColorsFollowThemeToDropDownIndex(DocumentColorsFollowTheme mode) {
@@ -76,6 +82,7 @@ static DocumentColorsFollowTheme DocumentColorsFollowThemeFromDropDownIndex(int 
 }
 
 ChangeThemeWnd::~ChangeThemeWnd() {
+    KillPreviewTimer();
     str::Free(startThemePref);
 }
 
@@ -137,19 +144,55 @@ void ChangeThemeWnd::KeepFocus() {
     HwndSetFocus(hwnd);
 }
 
-void ChangeThemeWnd::OnSelectionChanged() {
+void ChangeThemeWnd::KillPreviewTimer() {
+    if (hwnd) {
+        KillTimer(hwnd, kThemePreviewTimerId);
+    }
+}
+
+// Live-preview the list's current theme. Arrowing through the list would
+// rebuild chrome on every item; SchedulePreview waits 300ms after the last
+// change. Change/Enter calls this so the saved theme matches the highlight.
+void ChangeThemeWnd::ApplyPreview() {
+    KillPreviewTimer();
+    if (!listBox) {
+        return;
+    }
     int idx = listBox->GetCurrentSelection();
     if (idx < 0) {
         return;
     }
-    SetThemeByIndex(idx);
+    if (idx == kFollowWindowsThemeListIndex) {
+        SetTheme(StrL("System"));
+    } else {
+        SetThemeByIndex(idx - 1);
+    }
     UpdateTheme();
     PreviewDocumentColors();
     KeepFocus();
 }
 
+void ChangeThemeWnd::SchedulePreview() {
+    if (!hwnd) {
+        return;
+    }
+    KillTimer(hwnd, kThemePreviewTimerId);
+    SetTimer(hwnd, kThemePreviewTimerId, kThemePreviewDebounceMs, nullptr);
+}
+
+void ChangeThemeWnd::OnTimer(WindowBase::TimerEvent* ev) {
+    if (ev->timerId != kThemePreviewTimerId) {
+        return;
+    }
+    ApplyPreview();
+}
+
+void ChangeThemeWnd::OnSelectionChanged() {
+    SchedulePreview();
+}
+
 void ChangeThemeWnd::OnDocumentColorsFollowThemeChanged() {
-    int idx = dropDownDocumentColorsFollowTheme->GetCurrentSelection();
+    int idx = CbGetCurrentSelection(dropDownDocumentColorsFollowTheme);
     if (idx < 0) {
         return;
     }
@@ -159,6 +202,7 @@ void ChangeThemeWnd::OnDocumentColorsFollowThemeChanged() {
 }
 
 void ChangeThemeWnd::OnCancel(VirtMouseEvent*) {
+    KillPreviewTimer();
     if (!documentColorsFollowThemeOnly) {
         SetTheme(startThemePref);
     }
@@ -168,6 +212,7 @@ void ChangeThemeWnd::OnCancel(VirtMouseEvent*) {
 }
 
 void ChangeThemeWnd::OnChange(VirtMouseEvent*) {
+    ApplyPreview();
     SaveSettings();
     ScheduleDelete();
 }
@@ -186,12 +231,12 @@ static void OnDestroy(WindowBase::DestroyEvent* /*ev*/) {
 
 bool ChangeThemeWnd::Create(MainWindow* mainWin) {
     win = mainWin;
-    startThemePref = str::Dup(gGlobalPrefs->theme);
+    startThemePref = str::Dup(gSettings->theme);
     startDocumentColorsFollowTheme = GetDocumentColorsFollowTheme();
 
     {
         CreateCustomArgs args;
-        args.title = documentColorsFollowThemeOnly ? _TRA("Make Document Colors Follow Theme") : _TRA("Change Theme");
+        args.title = documentColorsFollowThemeOnly ? Tr("Make Document Colors Follow Theme") : Tr("Change Theme");
         args.visible = false;
         args.style = WS_POPUPWINDOW | WS_CAPTION;
         args.font = GetFont();
@@ -201,6 +246,7 @@ bool ChangeThemeWnd::Create(MainWindow* mainWin) {
     if (!hwnd) {
         return false;
     }
+    onTimer = MkMethod1<ChangeThemeWnd, WindowBase::TimerEvent*, &ChangeThemeWnd::OnTimer>(this);
 
     bool isRtl = IsUIRtl();
 
@@ -209,25 +255,31 @@ bool ChangeThemeWnd::Create(MainWindow* mainWin) {
     vbox->alignCross = CrossAxisAlign::Stretch;
 
     if (!documentColorsFollowThemeOnly) {
-        int n = ThemeGetCount();
+        int nThemes = ThemeGetCount();
         auto* c = new VirtListBox();
         c->dpi = GetDpi();
         c->font = font;
         listBox = c;
         model = new ListBoxModelStrings();
-        for (int i = 0; i < n; i++) {
+        // This is a mode, not another color theme, so keep its user-facing
+        // name distinct from the persisted Theme = System value.
+        model->strings.Append(Tr("Follow Windows"));
+        for (int i = 0; i < nThemes; i++) {
             model->strings.Append(ThemeGetNameAt(i));
         }
         c->onSelectionChanged = MkMethod0<ChangeThemeWnd, &ChangeThemeWnd::OnSelectionChanged>(this);
         c->SetModel(model);
-        int currIdx = ThemeGetCurrentIndex();
-        if (currIdx >= 0 && currIdx < n) {
+        int currIdx = kFollowWindowsThemeListIndex;
+        if (!str::EqI(gSettings->theme, StrL("System"))) {
+            currIdx = ThemeGetCurrentIndex() + 1;
+        }
+        if (currIdx >= 0 && currIdx < len(model->strings)) {
             c->SetCurrentSelection(currIdx);
         }
         vbox->AddChild(c);
 
         auto* label = NewVirtText({
-            .s = _TRA("Document colors follow theme"),
+            .s = Tr("Document colors follow theme"),
             .font = font,
             .isRtl = isRtl,
             .padding = DpiScaledInsets(8, 0, 0, 0),
@@ -248,7 +300,7 @@ bool ChangeThemeWnd::Create(MainWindow* mainWin) {
         c->onSelectionChanged = MkMethod0<ChangeThemeWnd, &ChangeThemeWnd::OnDocumentColorsFollowThemeChanged>(this);
         c->onCloseUp = MkMethod0<ChangeThemeWnd, &ChangeThemeWnd::KeepFocus>(this);
         dropDownDocumentColorsFollowTheme = c;
-        c->SetCurrentSelection(DocumentColorsFollowThemeToDropDownIndex(startDocumentColorsFollowTheme));
+        CbSetCurrentSelection(c, DocumentColorsFollowThemeToDropDownIndex(startDocumentColorsFollowTheme));
         vbox->AddChild(c);
     }
 
@@ -259,12 +311,12 @@ bool ChangeThemeWnd::Create(MainWindow* mainWin) {
         hbox->gap = font->averageCharWidth;
         auto pad = Insets{4, 0, 4, 0};
 
-        btnCancel = NewThemedButton(hwnd, _TRA("Cancel"), font, false);
+        btnCancel = NewThemedButton(hwnd, Tr("Cancel"), font, false);
         btnCancel->onClick = MkMethod1<ChangeThemeWnd, VirtMouseEvent*, &ChangeThemeWnd::OnCancel>(this);
         hbox->AddChild(new Padding(btnCancel, pad));
         // Enter runs this one (WindowBase::ActivateOnEnter), so draw it
         // as the default button to say so
-        btnChange = NewThemedButton(hwnd, _TRA("Change"), font, true);
+        btnChange = NewThemedButton(hwnd, Tr("Change"), font, true);
         btnChange->onClick = MkMethod1<ChangeThemeWnd, VirtMouseEvent*, &ChangeThemeWnd::OnChange>(this);
         hbox->AddChild(new Padding(btnChange, pad));
         vbox->AddChild(hbox);

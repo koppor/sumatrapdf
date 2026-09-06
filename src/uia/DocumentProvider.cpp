@@ -17,11 +17,11 @@ __CRT_UUID_DECL(IAccIdentity, 0x7852B78D, 0x1CFD, 0x41C1, 0xA6, 0x15, 0x9C, 0x0C
 #include "DisplayModel.h"
 #include "TextSelection.h"
 #include "base/File.h"
-#include "uia/DocumentProvider.h"
 #include "uia/Constants.h"
 #include "uia/PageProvider.h"
 #include "uia/Provider.h"
 #include "uia/TextRange.h"
+#include "uia/DocumentProvider.h"
 
 SumatraUIAutomationDocumentProvider::SumatraUIAutomationDocumentProvider(HWND canvasHwnd,
                                                                          SumatraUIAutomationProvider* root)
@@ -179,7 +179,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationDocumentProvider::GetRuntimeId(SAFE
     }
 
     // RuntimeID magic, use hwnd to differentiate providers of different windows
-    LONG rId[] = {HandleToLong(canvasHwnd), SUMATRA_UIA_DOCUMENT_RUNTIME_ID};
+    LONG rId[] = {HandleToLong(canvasHwnd), kSumatraUiaDocumentRuntimeId};
     for (LONG i = 0; i < 2; i++) {
         HRESULT hr = SafeArrayPutElement(psa, &i, (void*)&(rId[i]));
         ReportIf(FAILED(hr));
@@ -337,7 +337,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationDocumentProvider::GetVisibleRanges(
     while (it && len(rangeArray) < (ULONG_MAX / 2)) {
         PageInfo* pi = it->dm->GetPageInfo(it->pageNum);
         if (pi && pi->isShown && pi->visibleRatio > 0.0f) {
-            rangeArray.Append(new SumatraUIAutomationTextRange(this, it->pageNum));
+            VecAppend(rangeArray, new SumatraUIAutomationTextRange(this, it->pageNum));
         }
         it = it->sibling_next;
     }

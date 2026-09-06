@@ -11,7 +11,7 @@ static Str GumboElementTagName(const GumboNode* node) {
         return {};
     }
     if (node->v.element.tag != GUMBO_TAG_UNKNOWN) {
-        return {gumbo_normalized_tagname(node->v.element.tag)};
+        return Str(gumbo_normalized_tagname(node->v.element.tag));
     }
     Str orig = Str((char*)node->v.element.original_tag.data, (int)node->v.element.original_tag.length);
     int off = 0;
@@ -75,9 +75,9 @@ static const GumboNode* GumboFindDescendantByTagImpl(const GumboNode* node, Str 
     // iterative pre-order DFS so a deeply nested document can't overflow the
     // stack (gumbo builds the tree iteratively, but recursing over it doesn't)
     Vec<const GumboNode*> toVisit;
-    toVisit.Append(node);
+    VecAppend(toVisit, node);
     while (len(toVisit) > 0) {
-        const GumboNode* n = toVisit.Pop();
+        const GumboNode* n = VecPop(toVisit);
         if (!n) {
             continue;
         }
@@ -94,7 +94,7 @@ static const GumboNode* GumboFindDescendantByTagImpl(const GumboNode* node, Str 
         if (children) {
             // push in reverse so children are visited in document order
             for (unsigned int i = children->length; i > 0; i--) {
-                toVisit.Append((const GumboNode*)children->data[i - 1]);
+                VecAppend(toVisit, (const GumboNode*)children->data[i - 1]);
             }
         }
     }
@@ -136,7 +136,7 @@ TempStr GumboTextContentTemp(const GumboNode* node) {
             sb.Append(Str(child->v.text.text));
         }
     }
-    if (sb.IsEmpty()) {
+    if (len(sb) == 0) {
         return {};
     }
     return ToStrTemp(sb);

@@ -16,6 +16,7 @@
 struct VirtCtrl;
 struct VirtRoot;
 struct Pixmap;
+struct GfxDoubleBuffer;
 struct WindowBase;
 struct ControlBase;
 struct Tooltip;
@@ -80,7 +81,7 @@ struct VirtKeyEvent {
 
 struct VirtSetCursorEvent {
     VirtCtrl* w = nullptr;
-    Point ptLocal{};
+    Point ptLocal;
     bool didHandle = false;
 };
 
@@ -97,7 +98,7 @@ struct VirtFocusEvent {
 
 struct VirtTooltipEvent {
     VirtCtrl* w = nullptr;
-    Point ptLocal{};
+    Point ptLocal;
     TempStr tip; // set by handler
 };
 
@@ -120,6 +121,10 @@ struct VirtCtrl : ILayout {
     Insets padding{};
     int id = 0;
     uintptr_t userData = 0;
+    // keyboard mnemonic ("&File" => 'F', 0 = none). Parsed when the text is
+    // set, so readers (mnemonic navigation in WindowBase) don't re-parse the
+    // text every time
+    char mnemonic = 0;
     // for debugging; not owned
     Str name;
     // static tooltip (owned); used when onGetTooltip is empty
@@ -283,6 +288,7 @@ bool VirtTreeOnMessage(HWND, VirtRoot*, UINT, WPARAM, LPARAM, LRESULT&);
 // two - and they are not owned here; the layout tree owns them
 struct VirtRoot {
     HWND hwnd = nullptr;
+    GfxDoubleBuffer* gfxBuf = nullptr;
     Vec<VirtCtrl*> tops;
     // set only by SetChild(), which owns what it is given
     VirtCtrl* owned = nullptr;
@@ -371,6 +377,38 @@ struct VirtScroll : VirtCtrl {
     void NotifyVisibleRange();
 };
 
+// Scrolls an ILayout child (VBox/HBox/Table) inside a clipped viewport.
+struct ScrollBox : VirtCtrl {
+    ILayout* child = nullptr; // owned
+    int scrollY = 0;
+    Size contentSize;
+    int lineDy = 16;
+    bool syncScrollbar = true;
+
+    explicit ScrollBox(ILayout* child);
+    ~ScrollBox() override;
+
+    Size Layout(Constraints bc) override;
+    void SetBounds(Rect) override;
+    Point ScrollOffset() override;
+    void Paint(VirtPaintCtx&) override;
+    int MinIntrinsicHeight(int width) override;
+    int MinIntrinsicWidth(int height) override;
+    Size GetIdealSize() override;
+    int LayoutChildCount() override;
+    ILayout* LayoutChildAt(int) override;
+
+    int MaxScrollY() const;
+    bool ScrollTo(int y);
+    bool ScrollBy(int dy);
+    bool ScrollPage(int dir);
+    void OnMouseWheel(VirtMouseEvent*);
+    void OnVScroll(WPARAM);
+
+  private:
+    void UpdateScrollbar();
+};
+
 // A list of rows: it owns the model, the selection and the scroll position, and
 // paints only the rows that are visible. The virtual counterpart of the HWND
 // ListBox, minus the win32 listbox's habits (it doesn't steal the keyboard
@@ -411,6 +449,9 @@ struct VirtListBox : VirtCtrl {
     int dpi = 96;
 
     int scrollY = 0;
+    // Shift/Ctrl click, Shift+arrows and Ctrl+A; off by default so other
+    // lists stay single-select
+    bool multiSelect = false;
 
     VirtListBox();
     ~VirtListBox() override;
@@ -434,6 +475,12 @@ struct VirtListBox : VirtCtrl {
     int GetCurrentSelection();
     // -1 clears the selection; doesn't call onSelectionChanged
     bool SetCurrentSelection(int);
+    bool IsSelected(int idx);
+    int SelectedCount();
+    void GetSelectedIndices(Vec<int>& out);
+    void SelectAll();
+    void SelectRange(int from, int to);
+    void ToggleSelected(int idx);
     int ItemFromPoint(Point ptLocal);
     // the row's rectangle in window coords; empty when the row isn't visible
     Rect ItemRect(int idx);
@@ -447,6 +494,8 @@ struct VirtListBox : VirtCtrl {
 
   private:
     int selIdx = -1;
+    int anchorIdx = -1;
+    Vec<u8> selected;
     // EnsureVisible() called before the first layout; applied by SetBounds()
     int pendingVisibleIdx = -1;
     bool draggingThumb = false;
@@ -455,6 +504,9 @@ struct VirtListBox : VirtCtrl {
     int dragStartY = 0;
     int dragStartScrollY = 0;
 
+    void EnsureSelectedSize();
+    void ApplyClick(int idx, bool ctrl, bool shift);
+    void ApplyNav(int idx, bool ctrl, bool shift);
     int GetDpi();
     int ScrollbarDx();
     Rect ContentRectLocal();
@@ -596,6 +648,8 @@ struct VirtText : VirtCtrl {
 
 VirtText* NewVirtText(const VirtTextArgs&);
 
+char MnemonicCharInStr(Str s);
+
 // Checked downcasts: null unless the layout really is that control. Code that
 // walks a layout tree it didn't build (the toolbar, whose items are a mix of
 // icon buttons, text buttons, labels and separators) must go through these
@@ -618,7 +672,7 @@ struct VirtLink : VirtText {
 
 struct VirtButton : VirtText {
     // colors: kColBtn*, defaulting to gColsBtnDefault when isDefault
-    Insets textPadding{4, 8, 4, 8};
+    Insets textPadding{.top = 4, .right = 8, .bottom = 4, .left = 8};
 
     VirtButton(Str s, PlatformFont* font = nullptr);
     ~VirtButton() override;
@@ -629,6 +683,7 @@ struct VirtButton : VirtText {
     void SetIsDefault(bool);
 
     Size GetIdealSize() override;
+    Color TextColor(Color bg) const;
     void Paint(VirtPaintCtx&) override;
     void OnMouseEnter();
     void OnMouseLeave();
@@ -695,7 +750,9 @@ struct LabelWithClose {
     VirtCloseButton* closeBtn = nullptr;
 };
 
+VirtCloseButton* AsVirtCloseButton(ILayout*);
 LabelWithClose NewLabelWithClose(HWND hwndForDpi, PlatformFont*, const VirtMouseHandler& onClose);
+void ApplyLabelWithCloseDpi(VirtText*, VirtCloseButton*, int dpi);
 
 struct VirtImage : VirtCtrl {
     Pixmap* pixmap = nullptr; // not owned
@@ -733,6 +790,41 @@ struct VirtLine : VirtCtrl {
 };
 
 VirtLine* AsVirtLine(ILayout*);
+
+// Discrete horizontal slider: a bar with a circle thumb. value is minVal..maxVal.
+struct VirtSlider : VirtCtrl {
+    int minVal = 0;
+    int maxVal = 0;
+    int value = 0;
+    int idealDx = 0;
+    Func0 onValueChanged;
+    Func0 onValueCommitted;
+
+    VirtSlider();
+    ~VirtSlider() override;
+
+    void SetValue(int v, bool notify);
+    bool IsAdjusting() const;
+    int ValueFromLocalX(int xLocal);
+    Size GetIdealSize() override;
+    void Paint(VirtPaintCtx&) override;
+    void OnMouseDown(VirtMouseEvent*);
+    void OnMouseMove(VirtMouseEvent*);
+    void OnMouseUp(VirtMouseEvent*);
+    void OnMouseWheel(VirtMouseEvent*);
+    void OnMouseEnter();
+    void OnMouseLeave();
+    void OnCaptureLost();
+
+  private:
+    bool adjusting = false;
+    int committed = 0;
+    int ThumbRadius() const;
+    Rect TrackRectLocal() const;
+    void ApplyFromEvent(const VirtMouseEvent&, bool commit);
+};
+
+VirtSlider* AsVirtSlider(ILayout*);
 
 struct VirtSpacer : VirtCtrl {
     Size idealSize;

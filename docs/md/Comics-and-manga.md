@@ -11,7 +11,7 @@ SumatraPDF can open comic-book archives and folders of images as multi-page docu
 | Image folder        | open a directory of images (each file is a page)                                                                     |
 | Single image        | PNG, JPEG, WebP, AVIF, HEIC, GIF (including animation), TIFF, and [other image types](Supported-document-formats.md) |
 
-Encrypted `.cbz` / `.cbr` files are supported (password prompt when needed). Archives opened from a **network drive** may be copied into a local cache (`cbx-cache` under the [settings data directory](How-we-store-settings.md)) so page turns stay fast. Clear that cache with **Delete Cached Files** in the [command palette](Command-Palette.md) (`CmdDeleteCachedFiles`).
+Encrypted `.cbz` / `.cbr` files are supported (password prompt when needed). Archives opened from a **network drive** that are 32 MB or smaller are loaded into memory; larger ones may be copied into a local cache (`cbx-cache` under the [settings data directory](How-we-store-settings.md)) so page turns stay fast. Clear that cache with **Delete Cached Files** in the [command palette](Command-Palette.md) (`CmdDeleteCachedFiles`).
 
 Document properties (`Ctrl + D`) for comic archives list image files and, where present, EXIF and ComicInfo / ComicBookInfo metadata.
 
@@ -33,7 +33,7 @@ Use the same page layout commands as for PDF:
 | Book view (facing, first page alone) | `Ctrl + 8` (`CmdBookView`)       |
 | Continuous scroll                    | `c` (`CmdToggleContinuousView`)  |
 
-Facing or book view is useful for double-page spreads. Continuous mode is natural for long webtoon-style strips. See [Scrolling and zooming](Scrolling-and-zooming.md).
+Facing or book view is useful for double-page spreads. A landscape page (wider than it is tall) occupies the **whole two-page row** instead of sitting next to the following page — comics that store a centerfold as one image show it that way. Turn this off with `LandscapeAsSpread = false` under `ComicBookUI` (or `ImageUI` for image folders) if you want every page in a single-page slot even in double-page mode. Continuous mode is natural for long webtoon-style strips. See [Scrolling and zooming](Scrolling-and-zooming.md).
 
 To turn the page by clicking the left or right edge of the window (like many comic readers), set `ClickEdgeToTurnPage = true` in [advanced settings](Advanced-options-settings.md). In manga mode the sides are reversed so a click on the left still advances.
 
@@ -88,6 +88,22 @@ Enable **both** to cap at Fit Page. Caps apply **per page**, so:
 
 Virtual zoom modes (**Fit Width**, **Fit Page**, **Shrink to Fit**, etc.) already size relative to the window; the limit settings only affect **percentage** zooms.
 
+### Landscape pages as spreads (ver 3.7+)
+
+In **facing** and **book view**, a page wider than it is tall is treated as a double-page spread: it takes the full row and is not paired with the next page. Book view still keeps the cover (page 1) alone.
+
+```
+ComicBookUI [
+    LandscapeAsSpread = true
+]
+
+ImageUI [
+    LandscapeAsSpread = true
+]
+```
+
+Default is **true**. Set it to `false` to keep the old pairing: every page occupies one slot of the two-page row, even if it is landscape (issue #872).
+
 ### Other useful zoom modes
 
 | Mode                       | When it helps                                                                                                                                 |
@@ -98,7 +114,7 @@ Virtual zoom modes (**Fit Width**, **Fit Page**, **Shrink to Fit**, etc.) alread
 | **Fit by Orientation**     | Fit width in landscape viewports, fit page in portrait                                                                                        |
 | **Fit Height**             | Page height fills the window (handy for landscape pages)                                                                                      |
 
-Default zoom for **single image files** is controlled by `ImageUI.DefaultZoom` (default `shrink to fit`). Comic archives use `ComicBookUI.DefaultZoom` on first open (empty keeps the global `DefaultZoom`); a remembered zoom for that file still wins. Set `ComicBookUI.DefaultZoom = fit width` to open new comics at Fit Width while PDFs stay at Fit Page.
+Default zoom for **single image files** is controlled by `ImageUI.DefaultZoom` (default `shrink to fit`). Comic archives use `ComicBookUI.DefaultZoom` on first open (empty uses Fit Page, not the global `DefaultZoom`); a remembered zoom for that file still wins. Set `ComicBookUI.DefaultZoom = fit width` to open new comics at Fit Width while PDFs stay at Fit Page.
 
 ## Background color
 
@@ -126,7 +142,7 @@ ComicBookUI [
 ```
 
 - `WindowMargin` — top, right, bottom, left gap between the window and the document (default all zeros for comics)
-- `PageSpacing` — horizontal and vertical gap between pages in facing / book view
+- `PageSpacing` — horizontal and vertical gap between pages (between columns in facing / book view, between rows in continuous view)
 
 Sizes are in pixels at 100% display scaling and are DPI-scaled.
 
@@ -146,7 +162,7 @@ Right-click a comic or image page and choose **Copy Image** (`CmdCopyImage`) to 
 
 ## Image folders
 
-Opening a **folder of images** treats each image as a page (ordered by file name). Bookmarks sidebar lists the files. The same `ImageUI` settings apply (`DefaultZoom`, `LimitToWindowWidth` / `Height`, `WindowBgCol`).
+Opening a **folder of images** treats each image as a page (ordered by file name). Bookmarks sidebar lists the files. The same `ImageUI` settings apply (`DefaultZoom`, `LimitToWindowWidth` / `Height`, `LandscapeAsSpread`, `WindowBgCol`).
 
 ## What is not available for comics / images
 
@@ -171,6 +187,7 @@ ComicBookUI [
     LimitToWindowHeight = false
     DefaultDisplayMode =
     DefaultZoom =
+    LandscapeAsSpread = true
 ]
 ```
 
@@ -182,6 +199,7 @@ ImageUI [
     DefaultZoom = shrink to fit
     LimitToWindowWidth = false
     LimitToWindowHeight = false
+    LandscapeAsSpread = true
 ]
 ```
 

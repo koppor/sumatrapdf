@@ -11,8 +11,8 @@ import { testit as adHocSynctexChinese } from "./ad-hoc-synctex-chinese.ts";
 import { testit as adHocSynctexWsl } from "./ad-hoc-synctex-wsl.ts";
 
 const tests: [string, () => void | Promise<void>][] = [
-  ["issue-5633", issue5633],
   ["ad-hoc-synctex-chinese", adHocSynctexChinese],
+  ["issue-5633", issue5633],
   ["ad-hoc-synctex-wsl", adHocSynctexWsl],
 ];
 
@@ -22,9 +22,7 @@ export async function testit(): Promise<void> {
     console.log(`\n========== ${name} ==========`);
     await runTest(name, fn);
   }
-  console.log(
-    `\n✅ all ${tests.length} LaTeX test(s) passed in ${formatDuration(performance.now() - t0)}`,
-  );
+  console.log(`\n✅ all ${tests.length} LaTeX test(s) passed in ${formatDuration(performance.now() - t0)}`);
 }
 
 if (import.meta.main) {

@@ -68,7 +68,7 @@ static void logToPipe(Str s) {
     if (!gLogToPipe) {
         return;
     }
-    if (!s) {
+    if (len(s) == 0) {
         return;
     }
     size_t n = (size_t)s.len;
@@ -102,8 +102,8 @@ static void logToPipe(Str s) {
     gPipeMutex.Unlock();
 }
 
-static void log2(Str s, bool always) {
-    bool skipLog = !always && gSkipDuplicateLines && gLogBuf && str::Contains(*gLogBuf, s);
+void log(Str s) {
+    bool skipLog = gSkipDuplicateLines && gLogBuf && str::Contains(*gLogBuf, s);
 
     if (!skipLog) {
         // in reduced logging mode, we do want to log to at least the debugger
@@ -130,8 +130,8 @@ static void log2(Str s, bool always) {
 
     if (!gLogBuf) {
         gLogAllocator = ArenaNew();
-        gLogBuf = new str::Builder(32 * 1024);
-        gLogBuf->a = gLogAllocator;
+        gLogBuf = new str::Builder(gLogAllocator);
+        gLogBuf->Reserve(32 * 1024);
     } else {
         if (len(*gLogBuf) > kMaxLogBuf) {
             // TODO: use gLogBuf->Clear(), which doesn't free the allocated space
@@ -163,19 +163,8 @@ static void log2(Str s, bool always) {
     gLogMutex.Unlock();
 }
 
-void log(Str s) {
-    log2(s, false);
-}
-
-void loga(Str s) {
-    if (gDestroyedLogging) {
-        return;
-    }
-    log2(s, true);
-}
-
 void StartLogToFile(Str path, bool removeIfExists) {
-    ReportIf(gLogFilePath);
+    ReportIf(len(gLogFilePath) != 0);
     gLogFilePath = str::Dup(path);
     FileWatcherSetSkipPath(gLogFilePath);
     if (removeIfExists) {
@@ -322,7 +311,7 @@ static TempStr GetProcessCommandLineTemp(DWORD pid) {
 // Log parent → grandparent → … (path + command line when readable).
 // Walk parent PIDs and log path + command line for each (startup diagnostics).
 void LogParentProcessChain() {
-    log("Parent process chain:\n");
+    log(StrL("Parent process chain:\n"));
     DWORD pid = GetCurrentProcessId();
     DWORD seen[16]{};
     int nSeen = 0;
@@ -330,7 +319,7 @@ void LogParentProcessChain() {
         DWORD parentPid = GetProcessParentPid(pid);
         if (parentPid == 0 || parentPid == pid) {
             if (depth == 0) {
-                log("  (none / unknown)\n");
+                log(StrL("  (none / unknown)\n"));
             }
             break;
         }

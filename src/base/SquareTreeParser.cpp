@@ -162,7 +162,7 @@ SquareTreeNode::~SquareTreeNode() {
 
 void SquareTreeNode::RemoveDataAt(int idx) {
     FreeDataItem(data[idx]);
-    data.RemoveAt(idx);
+    VecRemoveAt(data, idx);
 }
 
 // wantChild: match items with a child node; otherwise match value items (no child).
@@ -278,18 +278,18 @@ static SquareTreeNode* ParseSquareTreeRec(Str data, int& off, bool isTopLevel, i
 
 // Appends one or more child nodes under keyView. off is the first char after '['.
 static void AppendChildNodes(SquareTreeNode* node, Str data, Str keyView, int& off, int depth) {
-    node->data.Append(AllocDataItem(keyView, {}, ParseSquareTreeRec(data, off, false, depth + 1)));
+    VecAppend(node->data, AllocDataItem(keyView, {}, ParseSquareTreeRec(data, off, false, depth + 1)));
     // arrays: reuse key for more children, or concatenate ("[ \n ] [ \n ]")
     while (IsBracketLine(data, (off = SkipWsAndComments(data, off)))) {
         off++;
-        node->data.Append(AllocDataItem(keyView, {}, ParseSquareTreeRec(data, off, false, depth + 1)));
+        VecAppend(node->data, AllocDataItem(keyView, {}, ParseSquareTreeRec(data, off, false, depth + 1)));
     }
 }
 
 static void AppendKeyValue(SquareTreeNode* node, Str data, const LineScan& line) {
     Str keyView = ExtractTrimmed(data, line.keyOff, line.sepOff);
     Str valView = ExtractTrimmed(data, line.valOff, line.lineEnd);
-    node->data.Append(AllocDataItem(keyView, valView, nullptr));
+    VecAppend(node->data, AllocDataItem(keyView, valView, nullptr));
 }
 
 // [Section] at top level becomes Section [ ... ] until the next section or EOF.
@@ -299,7 +299,7 @@ static void AppendIniSection(SquareTreeNode* node, Str data, const LineScan& lin
     int nameEnd = SkipWsRev(data, nameStart, closeOff);
     Str sectionKey = Str(data.s + nameStart, nameEnd - nameStart);
     int sectionChildOff = line.lineEnd;
-    node->data.Append(AllocDataItem(sectionKey, {}, ParseSquareTreeRec(data, sectionChildOff, false, depth + 1)));
+    VecAppend(node->data, AllocDataItem(sectionKey, {}, ParseSquareTreeRec(data, sectionChildOff, false, depth + 1)));
     off = sectionChildOff;
 }
 
@@ -373,14 +373,14 @@ void SerializeSquareTreeNode(str::Builder& out, SquareTreeNode* node, Str indent
         AppendIndent(out, indentUnit, depth);
         out.Append(item->key);
         if (item->child) {
-            out.Append(" [");
+            out.Append(StrL(" ["));
             out.Append(lineEnd);
             SerializeSquareTreeNode(out, item->child, indentUnit, lineEnd, depth + 1);
             AppendIndent(out, indentUnit, depth);
-            out.Append("]");
+            out.Append(StrL("]"));
             out.Append(lineEnd);
         } else {
-            out.Append(" = ");
+            out.Append(StrL(" = "));
             if (item->str) {
                 out.Append(item->str);
             }

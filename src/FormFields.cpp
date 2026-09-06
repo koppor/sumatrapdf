@@ -8,8 +8,10 @@
 #include <mupdf/pdf.h>
 
 #include "gui/UIModels.h"
+#include "gui/Gfx.h"
 
 #include "Settings.h"
+#include "AppSettings.h"
 #include "DocController.h"
 #include "EngineBase.h"
 #include "base/GuessFileType.h"
@@ -18,7 +20,9 @@
 #include "MainWindow.h"
 #include "Annotation.h"
 #include "SumatraPDF.h"
+#include "Commands.h"
 #include "Toolbar.h"
+#include "SumatraDialogs.h"
 #include "FormFields.h"
 
 // One field is edited at a time: either a text edit box or a choice list box
@@ -39,6 +43,47 @@ static bool gCommitting = false;
 // True while a form field is being edited in place.
 bool IsFormFieldEditActive() {
     return gEdit.hwnd != nullptr;
+}
+
+// Acrobat / Chrome pale blue, translucent so the page still shows through.
+constexpr Color kFormFieldHighlightCol = MkRgb(166, 202, 240);
+constexpr u8 kFormFieldHighlightAlpha = 96;
+
+// Tint empty fillable fields so they are visible without hovering (issue #5966).
+void PaintFormFieldHighlights(MainWindow* win, Gfx* gfx) {
+    if (!gSettings || !gSettings->highlightFormFields || !gfx) {
+        return;
+    }
+    if (!win || !win->IsDocLoaded()) {
+        return;
+    }
+    DisplayModel* dm = win->AsFixed();
+    if (!dm) {
+        return;
+    }
+    EngineBase* engine = dm->GetEngine();
+    if (!EngineMupdfIsPdf(engine)) {
+        return;
+    }
+    Vec<Rect> screenRects;
+    int pageCount = dm->PageCount();
+    for (int pageNo = 1; pageNo <= pageCount; pageNo++) {
+        PageInfo* pi = dm->GetPageInfo(pageNo);
+        if (!pi || !pi->isShown || pi->visibleRatio == 0) {
+            continue;
+        }
+        Vec<RectF> pageRects;
+        EngineMupdfGetFormFieldHighlightRects(engine, pageNo, gEdit.widget, pageRects);
+        for (RectF& pr : pageRects) {
+            Rect rc = dm->CvtToScreen(pageNo, pr);
+            if (!rc.IsEmpty()) {
+                VecAppend(screenRects, rc);
+            }
+        }
+    }
+    if (len(screenRects) > 0) {
+        gfx->FillRects(screenRects.els, len(screenRects), kFormFieldHighlightCol, kFormFieldHighlightAlpha);
+    }
 }
 
 // Cancel the active form edit if it is for this widget (no save). Safe no-op
@@ -207,7 +252,7 @@ static bool StartTextEdit(MainWindow* win, Annotation* widget, Rect rc, int flag
     gEdit.isChoice = false;
 
     HwndSetFocus(hEdit);
-    Edit_SetSel(hEdit, 0, -1);
+    EditSelectAll(hEdit);
     return true;
 }
 
@@ -268,6 +313,35 @@ static bool StartChoiceEdit(MainWindow* win, Annotation* widget, Rect rc) {
 
 // Start editing a text form field in place (floats an edit box over the field).
 // Returns false if `widget` isn't an editable (non-read-only) text widget.
+// Clicking a signature field the document's author left unsigned opens Sign
+// Document with that field selected. Signed fields are left alone (clicking one
+// shouldn't offer to overwrite it), and so is everything else (issue #5964).
+bool StartSignatureFieldSigning(MainWindow* win, Annotation* widget) {
+    if (!win || !AnnotationIsLive(widget)) {
+        return false;
+    }
+    if (GetWidgetType(widget) != PDF_WIDGET_TYPE_SIGNATURE) {
+        return false;
+    }
+    if (GetWidgetFieldFlags(widget) & PDF_FIELD_IS_READ_ONLY) {
+        return false;
+    }
+    // signing rewrites the PDF, so it needs the same engine support annotations
+    // do - and the same gate that decides whether the Sign Document command is
+    // shown at all, so a click can't reach a dialog the menu is hiding
+    DisplayModel* dm = win->AsFixed();
+    if (!dm || !EngineSupportsAnnotations(dm->GetEngine()) || win->isFullScreen) {
+        return false;
+    }
+    TempStr fieldName;
+    if (!IsUnsignedSignatureWidget(widget, &fieldName)) {
+        return false;
+    }
+    CommitFormFieldEdit(true); // don't leave an in-place edit hanging
+    ShowSignDocumentDialog(win, fieldName, true);
+    return true;
+}
+
 bool StartFormFieldEdit(MainWindow* win, Annotation* widget) {
     if (!win || !AnnotationIsLive(widget)) {
         return false;

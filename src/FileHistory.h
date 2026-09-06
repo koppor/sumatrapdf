@@ -4,9 +4,9 @@
 // number of most recently used files that will be shown in the menu
 // (and remembered in the preferences file, if just filenames are
 //  to be remembered and not individual view settings per document)
-#define kFileHistoryMaxRecent 10
+constexpr int kFileHistoryMaxRecent = 10;
 
-// the file history list, owned by gGlobalPrefs->fileStates (can be null)
+// the file history list, owned by gSettings->fileStates (can be null)
 Vec<FileState*>* FileHistoryStates();
 void FileHistorySetStates(Vec<FileState*>* states);
 

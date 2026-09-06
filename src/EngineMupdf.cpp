@@ -13,6 +13,7 @@
 #include "base/Win.h"
 #endif
 #include "base/Timer.h"
+#include "base/UITask.h"
 
 extern "C" {
 #include <mupdf/pdf.h>
@@ -24,9 +25,8 @@ extern "C" {
 
 #include "Annotation.h"
 #include "DocProperties.h"
-#include "TreeModel.h"
+#include "gui/UIModels.h"
 #include "EngineBase.h"
-#include "EngineMupdf.h"
 #include "PdfCadEnhanceDevice.h"
 #include "PdfDarkMode.h"
 #include "PdfDarkModeInternal.h"
@@ -34,6 +34,7 @@ extern "C" {
 #include "EbookBase.h"
 #include "EbookDoc.h"
 #include "Settings.h"
+#include "EngineMupdf.h"
 
 // A5
 static float layoutA5DxPt = 420.F;
@@ -51,14 +52,16 @@ static float layoutFontEm = 11.F;
 // width-fitted page is ~1.4x taller than any landscape window and has to be
 // scrolled through before turning it (issue #3472). Deriving the layout height
 // from the window's shape makes one page one screen. 0 keeps the fixed page.
-static float gEbookLayoutAspect = 0.F;
+static thread_local float gEbookLayoutAspect = 0.F;
 // layout height for ebooks loaded after this call, as a fraction of the layout
 // width; 0 restores the fixed A5 page. EBookUI.LayoutDy overrides it
-void EngineMupdfSetEbookLayoutAspect(float dyOverDx) {
+float EngineMupdfSetEbookLayoutAspect(float dyOverDx) {
     if (dyOverDx < 0.05f || dyOverDx > 20.f) {
         dyOverDx = 0.f;
     }
+    float prev = gEbookLayoutAspect;
     gEbookLayoutAspect = dyOverDx;
+    return prev;
 }
 
 // in mupdf_load_system_font.c
@@ -74,7 +77,7 @@ Kind kindEngineMupdf = "enginePdf";
 
 // Whether to enable mupdf's JavaScript engine for newly loaded PDFs (form-field
 // calculate/validate/format). Set by the app from the DisableJavaScript pref;
-// PdfPreview/PdfFilter don't link GlobalPrefs, so they keep the default.
+// PdfPreview/PdfFilter don't link Settings, so they keep the default.
 static bool gDisableFormJavaScript = false;
 // disable mupdf's JavaScript engine for PDFs loaded after this call
 void EngineMupdfSetDisableJavaScript(bool disable) {
@@ -83,12 +86,17 @@ void EngineMupdfSetDisableJavaScript(bool disable) {
 
 // Whether a PDF may load an image from an external sibling file (issue #3731).
 // Set by the app from the AllowExternalImages pref; off by default (and in the
-// PdfPreview/PdfFilter DLLs, which don't link GlobalPrefs).
+// PdfPreview/PdfFilter DLLs, which don't link Settings).
 static bool gAllowExternalImages = false;
 // allow PDFs to load images from an external sibling file (#3731), for PDFs
-// loaded after this call; set from gGlobalPrefs->allowExternalImages
+// loaded after this call; set from gSettings->allowExternalImages
 void EngineMupdfSetAllowExternalImages(bool allow) {
     gAllowExternalImages = allow;
+}
+
+static bool gShowAnnotAuthorInTooltip = false;
+void EngineMupdfSetAnnotAuthorInTooltip(AnnotAuthorVisibility visibility) {
+    gShowAnnotAuthorInTooltip = visibility == AnnotAuthorVisibility::Show;
 }
 
 EngineMupdf* AsEngineMupdf(EngineBase* engine) {
@@ -96,6 +104,38 @@ EngineMupdf* AsEngineMupdf(EngineBase* engine) {
         return nullptr;
     }
     return (EngineMupdf*)engine;
+}
+
+bool EngineMupdfHeadingTocPending(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    return e && e->HeadingTocPending();
+}
+
+void EngineMupdfStartHeadingToc(EngineBase* engine, const Func0& onDone) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e) {
+        return;
+    }
+    e->headingTocDoneCb = onDone;
+    e->StartHeadingTocIfNeeded();
+}
+
+void EngineMupdfCancelHeadingToc(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e) {
+        return;
+    }
+    AtomicIntSet(&e->headingTocCancel, 1);
+    e->headingTocDoneCb = {};
+}
+
+void EngineMupdfCancelLoadAllAnnotations(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e) {
+        return;
+    }
+    AtomicIntSet(&e->annotLoadCancel, 1);
+    e->annotLoadDoneCb = {};
 }
 
 // lets the UI ask without pulling in mupdf headers (declared in EngineAll.h)
@@ -118,7 +158,7 @@ class FitzAbortCookie : public AbortCookie {
 
 // copy of fz_is_external_link without ctx
 static bool IsExternalLink(Str uri) {
-    if (!uri) {
+    if (len(uri) == 0) {
         return false;
     }
     int i = 0;
@@ -145,11 +185,14 @@ struct PageDestinationMupdf : IPageDestination {
     Str value;
     Str name;
 
-    // anchor (x, y) on the destination page resolved from the link URI.
-    // Valid after hasResolvedCoords; values may be kDestUseDefault when the
+    // destination on the target page, resolved from the link URI.
+    // Valid after hasResolvedCoords; x/y/w/h may be kDestUseDefault when the
     // PDF destination left a coordinate unspecified (null / Fit).
+    // IPageDestination::rect stays the source annotation box (issue #5944).
     float destX = 0.f;
     float destY = 0.f;
+    float destW = kDestUseDefault;
+    float destH = kDestUseDefault;
     bool hasResolvedCoords = false;
     // /XYZ zoom level requested by the link (1.0 = 100%). 0 means
     // "not specified" — caller should use document default.
@@ -165,12 +208,11 @@ struct PageDestinationMupdf : IPageDestination {
     RectF GetRect2() override {
         // Prefer URI-resolved coords (page-level /Fit and /XYZ nulls become
         // kDestUseDefault). outline->x/y are often 0 and would scroll to the
-        // bottom of the page in PDF space. FitR keeps width/height on `rect`.
+        // bottom of the page in PDF space. FitR keeps width/height on destW/H;
+        // `rect` is the source annotation and must not be used as the dest
+        // (issue #5944).
         if (hasResolvedCoords) {
-            if (rect.dx != kDestUseDefault && rect.dy != kDestUseDefault && rect.dx > 0 && rect.dy > 0) {
-                return rect;
-            }
-            return RectF{destX, destY, kDestUseDefault, kDestUseDefault};
+            return RectF{destX, destY, destW, destH};
         }
         if (outline) {
             RectF r{outline->x, outline->y, 0, 0};
@@ -217,7 +259,7 @@ Str PageDestinationMupdf::GetName2() {
         return name;
     }
     if (outline && outline->title) {
-        name = str::Dup(outline->title);
+        name = str::Dup(Str(outline->title));
     }
     return name;
 }
@@ -292,7 +334,7 @@ static void DestFromFzLinkDest(const fz_link_dest& ldest, RectF* rectOut, float*
 
 static int ResolveLink(fz_context* ctx, fz_document* doc, Str uri, float* xp, float* yp, float* zoomp = nullptr,
                        RectF* rectp = nullptr) {
-    if (!uri) {
+    if (len(uri) == 0) {
         return -1;
     }
     int pageNo = -1;
@@ -334,11 +376,30 @@ static int ResolveLink(fz_context* ctx, fz_document* doc, Str uri, float* xp, fl
     return pageNo + 1;
 }
 
-static int FzGetPageNo(fz_context* ctx, fz_document* doc, fz_link* link, fz_outline* outline) {
-    float x, y;
-    Str uri = FzGetURL(link, outline);
-    int pageNo = ResolveLink(ctx, doc, uri, &x, &y);
-    return pageNo;
+// resolves just the chapter a uri targets, without laying it out. epub only
+// lays out a chapter to find a #fragment inside it, so strip the fragment first
+static int ResolveLinkChapterOnly(fz_context* ctx, fz_document* doc, Str uri) {
+    if (len(uri) == 0) {
+        return -1;
+    }
+    Str path = uri;
+    Str fragment = str::SliceFromChar(path, '#');
+    if (fragment) {
+        path = Str(path.s, (int)(fragment.s - path.s));
+    }
+    fz_link_dest ldest{};
+    fz_var(ldest);
+    fz_try(ctx) {
+        ldest = fz_resolve_link_dest(ctx, doc, CStrTemp(path));
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        return -1;
+    }
+    if (ldest.loc.chapter < 0) {
+        return -1;
+    }
+    return ldest.loc.chapter + 1;
 }
 
 // MuPDF html/md link URIs for relative hrefs are built with an empty base file,
@@ -352,7 +413,7 @@ static void SkipLeadingPathSeparators(Str& path) {
 }
 
 static bool IsMupdfLocalFileLink(Str uri, TempStr* pathOut, Str* fragmentOut) {
-    if (!uri || uri.s[0] == '#') {
+    if (len(uri) == 0 || uri.s[0] == '#') {
         return false;
     }
     if (str::StartsWith(uri, StrL("file:")) || IsExternalUrl(uri) || IsExternalLink(uri)) {
@@ -368,7 +429,7 @@ static bool IsMupdfLocalFileLink(Str uri, TempStr* pathOut, Str* fragmentOut) {
     }
     // MuPDF uses unix paths; strip a leading slash from relative URIs.
     SkipLeadingPathSeparators(pathStr);
-    if (!pathStr) {
+    if (len(pathStr) == 0) {
         return false;
     }
     path = str::ReplaceTemp(pathStr, StrL("/"), StrL("\\"));
@@ -382,10 +443,20 @@ static bool IsMupdfLocalFileLink(Str uri, TempStr* pathOut, Str* fragmentOut) {
     return true;
 }
 
-static IPageDestination* NewPageDestinationMupdf(fz_context* ctx, fz_document* doc, fz_link* link,
-                                                 fz_outline* outline) {
+template <typename T, typename... Args>
+static T* AllocDest(Arena* a, Args&&... args) {
+    if (a) {
+        return New<T>(a, std::forward<Args>(args)...);
+    }
+    return new T(std::forward<Args>(args)...);
+}
+
+static IPageDestination* NewPageDestinationMupdf(EngineMupdf* e, fz_link* link, fz_outline* outline,
+                                                 Arena* destArena = nullptr) {
     ReportIf(link && outline);
     ReportIf(!link && !outline);
+    fz_context* ctx = e->Ctx();
+    fz_document* doc = e->_doc;
     Str uri = FzGetURL(link, outline);
     Str maybePath = uri;
 
@@ -422,13 +493,13 @@ static IPageDestination* NewPageDestinationMupdf(fz_context* ctx, fz_document* d
             // degenerate bare "file:" uri (seen in broken PDFs)
             return nullptr;
         }
-        auto* res = new PageDestinationFile(path, destStr);
+        auto* res = AllocDest<PageDestinationFile>(destArena, path, destStr);
         res->rect = FzGetRectF(link);
         return res;
     }
 
     if (IsExternalUrl(uri)) {
-        auto* res = new PageDestinationURL(uri);
+        auto* res = AllocDest<PageDestinationURL>(destArena, uri);
         res->rect = FzGetRectF(link);
         return res;
     }
@@ -438,32 +509,53 @@ static IPageDestination* NewPageDestinationMupdf(fz_context* ctx, fz_document* d
     // must navigate internally, not launch an external file. Only when the URI
     // doesn't resolve internally do we treat a relative href to a supported file
     // as a sibling file to launch (e.g. markdown "[other](other.md)").
-    float x = 0, y = 0, z = 0;
+    //
+    // A chaptered doc only resolves the chapter here (cheap: no layout unless
+    // the uri has a #fragment); the page and on-page coords are resolved lazily
+    // by EngineMupdf::ResolveDest() when the destination is actually navigated to.
+    bool resolvedInternal = false;
+    int pageNo = -1;
+    Location loc{};
     RectF destRect{};
-    int pageNo = ResolveLink(ctx, doc, uri, &x, &y, &z, &destRect);
+    float x = 0, y = 0, z = 0;
+    bool hasResolvedCoords = false;
 
-    if (pageNo <= 0) {
+    if (e->HasChapters()) {
+        int chapter = ResolveLinkChapterOnly(ctx, doc, uri);
+        if (chapter >= 1) {
+            resolvedInternal = true;
+            loc = {chapter, 0};
+        }
+    } else {
+        pageNo = ResolveLink(ctx, doc, uri, &x, &y, &z, &destRect);
+        if (pageNo > 0) {
+            resolvedInternal = true;
+            loc = LocFromPageNo(pageNo);
+            hasResolvedCoords = true;
+        }
+    }
+
+    if (!resolvedInternal) {
         TempStr localPath;
         Str localFragment;
         if (IsMupdfLocalFileLink(uri, &localPath, &localFragment)) {
-            auto* res = new PageDestinationFile(localPath, localFragment);
+            auto* res = AllocDest<PageDestinationFile>(destArena, localPath, localFragment);
             res->rect = FzGetRectF(link);
             return res;
         }
     }
 
-    auto* dest = new PageDestinationMupdf(link, outline);
+    auto* dest = AllocDest<PageDestinationMupdf>(destArena, link, outline);
     dest->rect = FzGetRectF(link);
     dest->pageNo = pageNo;
-    if (pageNo > 0) {
+    dest->loc = loc;
+    if (hasResolvedCoords) {
         dest->destX = destRect.x;
         dest->destY = destRect.y;
+        dest->destW = destRect.dx;
+        dest->destH = destRect.dy;
         dest->destZoom = z;
         dest->hasResolvedCoords = true;
-        // For FitR, w/h must reach ScrollTo; store on base rect as well.
-        if (destRect.dx != kDestUseDefault || destRect.dy != kDestUseDefault) {
-            dest->rect = destRect;
-        }
     }
     return dest;
 }
@@ -513,9 +605,8 @@ static Str PdfLinkContents(fz_context* ctx, pdf_document* pdfdoc, pdf_page* pdfp
     return res;
 }
 
-static PageElementDestination* NewLinkDestination(int srcPageNo, fz_context* ctx, fz_document* doc, fz_link* link,
-                                                  fz_outline* outline) {
-    auto* dest = NewPageDestinationMupdf(ctx, doc, link, outline);
+static PageElementDestination* NewLinkDestination(int srcPageNo, EngineMupdf* e, fz_link* link, fz_outline* outline) {
+    auto* dest = NewPageDestinationMupdf(e, link, outline);
     if (!dest) {
         return nullptr;
     }
@@ -594,14 +685,14 @@ static float FzRectOverlap(fz_rect r1, RectF r2f) {
 
 static TempWStr PdfToWStrTemp(fz_context* ctx, pdf_obj* obj) {
     char* s = pdf_new_utf8_from_pdf_string_obj(ctx, obj);
-    TempWStr res = ToWStrTemp(s);
+    TempWStr res = ToWStrTemp(Str(s));
     fz_free(ctx, s);
     return res;
 }
 
 static TempStr PdfToUtf8Temp(fz_context* ctx, pdf_obj* obj) {
     char* s = pdf_new_utf8_from_pdf_string_obj(ctx, obj);
-    TempStr res = str::DupTemp(s);
+    TempStr res = str::DupTemp(Str(s));
     fz_free(ctx, s);
     return res;
 }
@@ -609,7 +700,7 @@ static TempStr PdfToUtf8Temp(fz_context* ctx, pdf_obj* obj) {
 // some PDF documents contain control characters in outline titles or /Info properties
 // we replace them with spaces and cleanup for display with NormalizeWSInPlace()
 static void PdfCleanStringInPlace(WStr& ws) {
-    if (!ws) {
+    if (len(ws) == 0) {
         return;
     }
     for (int i = 0; i < ws.len; i++) {
@@ -725,9 +816,23 @@ static fz_stream* FzReadMaybeFixPDF(fz_context* ctx, Str path) {
 }
 
 static fz_stream* FzOpenOrReadFile(fz_context* ctx, Str path) {
-    fz_stream* stm = FzReadFileIfSmall(ctx, path);
-    if (stm) {
-        return stm;
+    fz_stream* stm = nullptr;
+    // OneNote/Outlook cache files: always load fully so we drop the original
+    // handle even when the copy-on-open path could not run (issue #4705).
+    if (path::IsEphemeralHostFile(path)) {
+        Str d = file::ReadFile(path);
+        if (len(d) > 0) {
+            stm = FzStreamFromData(ctx, (u8*)d.s, len(d));
+        }
+        str::Free(d);
+        if (stm) {
+            return stm;
+        }
+    } else {
+        stm = FzReadFileIfSmall(ctx, path);
+        if (stm) {
+            return stm;
+        }
     }
 #if OS_WIN
     WCHAR* pathW = CWStrTemp(path);
@@ -798,19 +903,20 @@ static Str FzExtractStreamData(fz_context* ctx, fz_stream* stream) {
 
 struct SeenGlyph {
     int rune;
-    Rect r;
+    RectF r;
 };
 
-static bool HasSeenGlyph(const Vec<SeenGlyph>& seen, int rune, const Rect& r) {
+static bool HasSeenGlyph(const Vec<SeenGlyph>& seen, int rune, const RectF& r) {
     // A "duplicate" glyph is one drawn on top of an earlier one (e.g. faux-bold
     // double-strike or an overprinted shadow); its box overlaps the earlier one
     // almost entirely. Two *adjacent* identical letters (e.g. the "ll" in
     // "Yellow") sit side by side and barely overlap, so they must NOT be treated
-    // as duplicates. Comparing coordinates with a fixed +-1px tolerance can't
-    // tell them apart once the glyph advance rounds to <=1px (small fonts),
-    // which dropped a letter on copy (issue #5766). Require the boxes to overlap
-    // by more than half the smaller glyph instead.
-    i64 area = (i64)r.dx * (i64)r.dy;
+    // as duplicates. Comparing integer-rounded boxes can't tell them apart
+    // once the glyph is ~1px wide (small CAD net names, issue #5968):
+    // RectF::Round() expands outward, so "II" / "22" share most of a 1–2px
+    // box and the second letter was dropped. Compare the float boxes instead
+    // (#5766 still holds: adjacent "ll" barely overlap in float space).
+    float area = r.dx * r.dy;
     if (area <= 0) {
         return false;
     }
@@ -818,13 +924,13 @@ static bool HasSeenGlyph(const Vec<SeenGlyph>& seen, int rune, const Rect& r) {
         if (glyph.rune != rune) {
             continue;
         }
-        Rect inter = glyph.r.Intersect(r);
+        RectF inter = glyph.r.Intersect(r);
         if (inter.IsEmpty()) {
             continue;
         }
-        i64 interArea = (i64)inter.dx * (i64)inter.dy;
-        i64 seenArea = (i64)glyph.r.dx * (i64)glyph.r.dy;
-        i64 minArea = std::min(area, seenArea);
+        float interArea = inter.dx * inter.dy;
+        float seenArea = glyph.r.dx * glyph.r.dy;
+        float minArea = std::min(area, seenArea);
         if (minArea > 0 && interArea * 2 > minArea) {
             return true;
         }
@@ -832,8 +938,8 @@ static bool HasSeenGlyph(const Vec<SeenGlyph>& seen, int rune, const Rect& r) {
     return false;
 }
 
-static void AddSeenGlyph(Vec<SeenGlyph>& seen, int rune, const Rect& r) {
-    seen.Append({rune, r});
+static void AddSeenGlyph(Vec<SeenGlyph>& seen, int rune, const RectF& r) {
+    VecAppend(seen, {rune, r});
 }
 
 // True Unicode scalar (not surrogate, not out of range). fz_runetochar will still
@@ -852,31 +958,28 @@ static bool IsUnicodeScalar(int rune) {
     return true;
 }
 
-// Horizontal gap between the previous glyph and the next, in page units.
-// Used to drop "tracking" spaces that PDF writers insert between syllables
-// (look like word breaks to MuPDF but have near-zero visual gap) — #5627.
-static float GlyphGapX(const fz_stext_char* prev, const fz_stext_char* next) {
-    if (!prev || !next) {
-        return 1e9f;
-    }
-    fz_rect pr = fz_rect_from_quad(prev->quad);
-    // next origin vs previous glyph's right edge
-    return next->origin.x - pr.x1;
-}
-
 // True if this space is only tracking/justification between syllables, not a
 // real word break. PDFs that place space operators (or MuPDF synthetic spaces)
 // between every syllable produce "Kro nik, im mün" on copy (#5627).
-static bool IsTrackingSpace(const fz_stext_char* prevNonSpace, const fz_stext_char* nextNonSpace) {
-    if (!prevNonSpace || !nextNonSpace) {
+//
+// Measure from the space's own origin to the next letter, not from the previous
+// letter's font-box right edge. Without FZ_STEXT_ACCURATE_BBOXES the quad is
+// font-height, so italic shear of the full ascender can push prev.quad.x1 past
+// the next origin and a real ~0.25em word space looks negative (bug-5627
+// "Helicobacter pylori" after matching 3.6.1 selection boxes).
+static bool IsTrackingSpace(const fz_stext_char* space, const fz_stext_char* nextNonSpace) {
+    if (!space || !nextNonSpace) {
         return false;
     }
-    float gap = GlyphGapX(prevNonSpace, nextNonSpace);
-    float size = std::max(prevNonSpace->size, nextNonSpace->size);
+    float gap = nextNonSpace->origin.x - space->origin.x;
+    float size = space->size;
+    if (size <= 0) {
+        size = nextNonSpace->size;
+    }
     if (size <= 0) {
         size = 1.f;
     }
-    // Measured gap/size across tracking (#5627), ordinary body text, and
+    // Measured advance/size across tracking (#5627), ordinary body text, and
     // condensed headers (#5871 CompTIA / MyriadPro-BoldCond):
     //   tracking syllables: ~0.00-0.02em (often near zero)
     //   condensed real word spaces: ~0.16em
@@ -892,12 +995,33 @@ static bool IsTrackingSpace(const fz_stext_char* prevNonSpace, const fz_stext_ch
     return gap < size * 0.1f;
 }
 
-static void AddCharUtf8(fz_stext_line* /*line*/, fz_stext_char* c, str::Builder& s, Vec<Rect>& rects,
+struct GlyphBox {
+    Rect rect;
+    QuadF quad;
+};
+
+static QuadF QuadFromFz(const fz_quad& q) {
+    QuadF r;
+    r.ul = PointF(q.ul.x, q.ul.y);
+    r.ur = PointF(q.ur.x, q.ur.y);
+    r.ll = PointF(q.ll.x, q.ll.y);
+    r.lr = PointF(q.lr.x, q.lr.y);
+    return r;
+}
+
+static GlyphBox BoxFromChar(fz_stext_char* c) {
+    GlyphBox b;
+    b.rect = ToRectF(fz_rect_from_quad(c->quad)).Round();
+    b.quad = QuadFromFz(c->quad);
+    return b;
+}
+
+static void AddCharUtf8(fz_stext_line* /*line*/, fz_stext_char* c, str::Builder& s, Vec<GlyphBox>& boxes,
                         Vec<SeenGlyph>& seen) {
-    fz_rect bbox = fz_rect_from_quad(c->quad);
-    Rect r = ToRectF(bbox).Round();
+    GlyphBox box = BoxFromChar(c);
+    RectF rf = ToRectF(fz_rect_from_quad(c->quad));
     int rune = c->c;
-    if (HasSeenGlyph(seen, rune, r)) {
+    if (HasSeenGlyph(seen, rune, rf)) {
         return;
     }
 
@@ -907,19 +1031,19 @@ static void AddCharUtf8(fz_stext_line* /*line*/, fz_stext_char* c, str::Builder&
     // that produces illegal UTF-8 that Utf8CodepointCount splits into multiple units.
     if (!IsUnicodeScalar(rune) || (isNonPrintable && !isWhitespace)) {
         s.AppendChar('?');
-        rects.Append(r);
-        AddSeenGlyph(seen, rune, r);
+        VecAppend(boxes, box);
+        AddSeenGlyph(seen, rune, rf);
         return;
     }
     if (isWhitespace) {
         // collapse multiple whitespace characters into one
-        char prev = s.IsEmpty() ? 0 : s.LastChar();
+        char prev = len(s) == 0 ? 0 : s.LastChar();
         if (prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r') {
             return;
         }
         s.AppendChar(' ');
-        rects.Append(r);
-        AddSeenGlyph(seen, rune, r);
+        VecAppend(boxes, box);
+        AddSeenGlyph(seen, rune, rf);
         return;
     }
     char buf[4];
@@ -928,23 +1052,23 @@ static void AddCharUtf8(fz_stext_line* /*line*/, fz_stext_char* c, str::Builder&
     if (n <= 0 || !s.Append(Str(buf, n))) {
         return;
     }
-    rects.Append(r);
-    AddSeenGlyph(seen, rune, r);
+    VecAppend(boxes, box);
+    AddSeenGlyph(seen, rune, rf);
 }
 
-static void AddLineSepUtf8(str::Builder& s, Vec<Rect>& rects, Str lineSep) {
+static void AddLineSepUtf8(str::Builder& s, Vec<GlyphBox>& boxes, Str lineSep) {
     size_t lineSepLen = (size_t)lineSep.len;
     if (lineSepLen == 0) {
         return;
     }
     // remove trailing space
-    if (!s.IsEmpty() && s.LastChar() == ' ') {
+    if (len(s) > 0 && s.LastChar() == ' ') {
         s.RemoveLast();
-        rects.RemoveLast();
+        VecRemoveLast(boxes);
     }
     s.Append(lineSep);
     for (size_t i = 0; i < lineSepLen; i++) {
-        rects.Append(Rect());
+        VecAppend(boxes, GlyphBox{});
     }
 }
 
@@ -1001,8 +1125,8 @@ static bool IsUnicodeHyphenRune(int c) {
 // Drop a trailing hyphen used for line wrapping before joining the next line
 // so "some-\\nthing" becomes "something" (#5793, #1189). Handles multi-byte
 // UTF-8 hyphens (U+00AD soft hyphen, U+2010/U+2011), not just ASCII '-'.
-static void MaybeDropTrailingSoftHyphen(str::Builder& s, Vec<Rect>& rects) {
-    if (s.IsEmpty() || len(rects) == 0) {
+static void MaybeDropTrailingSoftHyphen(str::Builder& s, Vec<GlyphBox>& boxes) {
+    if (len(s) == 0 || len(boxes) == 0) {
         return;
     }
     Str text = ToStr(s);
@@ -1016,103 +1140,133 @@ static void MaybeDropTrailingSoftHyphen(str::Builder& s, Vec<Rect>& rects) {
     while (dropBytes-- > 0) {
         s.RemoveLast();
     }
-    rects.RemoveLast();
+    VecRemoveLast(boxes);
 }
 
-static Str FzTextPageToUtf8(fz_stext_page* text, Rect** coordsOut) {
-    Str hardLineSep = StrL("\n");
-    Str softLineSep = StrL(" ");
-    str::Builder content;
-    Vec<Rect> rects;
-    Vec<SeenGlyph> seen;
-
-    fz_stext_block* block = text->first_block;
-    while (block) {
-        if (block->type != FZ_STEXT_BLOCK_TEXT) {
-            block = block->next;
-            continue;
-        }
-        fz_stext_line* line = block->u.t.first_line;
-        while (line) {
-            // Walk each line with prev/next non-space so tracking spaces can be
-            // dropped (issue #5627: Turkish PDFs that space every syllable).
-            fz_stext_char* prevNonSpace = nullptr;
-            fz_stext_char* c = line->first_char;
-            while (c) {
-                int rune = c->c;
-                // Soft hyphens (U+00AD) are never typed by the user; drop them
-                // so search for "softhyphen" matches text that contains SHY
-                // mid-word (issue #1189). End-of-line hard hyphens are dropped
-                // when joining via MaybeDropTrailingSoftHyphen below.
-                if (rune == 0xAD) {
+static void AppendStextTextBlock(const fz_stext_block* block, str::Builder& content, Vec<GlyphBox>& boxes,
+                                 Vec<SeenGlyph>& seen, Str hardLineSep, Str softLineSep) {
+    fz_stext_line* line = block->u.t.first_line;
+    while (line) {
+        // Walk each line so tracking spaces can be dropped (issue #5627:
+        // Turkish PDFs that space every syllable).
+        fz_stext_char* c = line->first_char;
+        while (c) {
+            int rune = c->c;
+            // Soft hyphens (U+00AD) are never typed by the user; drop them
+            // so search for "softhyphen" matches text that contains SHY
+            // mid-word (issue #1189). End-of-line hard hyphens are dropped
+            // when joining via MaybeDropTrailingSoftHyphen below.
+            if (rune == 0xAD) {
+                c = c->next;
+                continue;
+            }
+            bool isWs = rune > 0 && rune <= 0x7f && str::IsWs((char)rune);
+            if (isWs) {
+                fz_stext_char* nextNonSpace = c->next;
+                while (nextNonSpace) {
+                    int nr = nextNonSpace->c;
+                    bool nWs = nr > 0 && nr <= 0x7f && str::IsWs((char)nr);
+                    if (!nWs) {
+                        break;
+                    }
+                    nextNonSpace = nextNonSpace->next;
+                }
+                if (IsTrackingSpace(c, nextNonSpace)) {
                     c = c->next;
                     continue;
                 }
-                bool isWs = rune > 0 && rune <= 0x7f && str::IsWs((char)rune);
-                if (isWs) {
-                    fz_stext_char* nextNonSpace = c->next;
-                    while (nextNonSpace) {
-                        int nr = nextNonSpace->c;
-                        bool nWs = nr > 0 && nr <= 0x7f && str::IsWs((char)nr);
-                        if (!nWs) {
-                            break;
-                        }
-                        nextNonSpace = nextNonSpace->next;
-                    }
-                    if (IsTrackingSpace(prevNonSpace, nextNonSpace)) {
-                        c = c->next;
-                        continue;
-                    }
-                }
-                AddCharUtf8(line, c, content, rects, seen);
-                if (!isWs) {
-                    prevNonSpace = c;
-                }
-                c = c->next;
             }
-            // Soft-join reflow lines within a paragraph for better copy (#5793);
-            // keep a hard newline between paragraphs / blocks.
-            // Dehyphenation (#1189): when MuPDF marked the line JOINED (EOL
-            // hyphen + DEHYPHENATE), or we soft-break after a trailing hyphen,
-            // drop the hyphen and join with no separator so "hyphen-\\nated"
-            // becomes searchable as "hyphenated". Plain soft wraps still get a
-            // space.
-            fz_stext_line* nextLine = line->next;
-            bool dehyphen = nextLine && (line->flags & FZ_STEXT_LINE_FLAGS_JOINED) != 0;
-            bool soft = nextLine && IsSoftLineBreak(line, nextLine, block);
-            if (dehyphen || soft) {
-                bool hadHyphen = false;
-                {
-                    Str cur = ToStr(content);
-                    if (cur && cur.len > 0) {
-                        int bi = cur.len;
-                        int last = Utf8CodepointPrev(cur, bi);
-                        hadHyphen = IsUnicodeHyphenRune(last);
-                    }
+            AddCharUtf8(line, c, content, boxes, seen);
+            c = c->next;
+        }
+        // Soft-join reflow lines within a paragraph for better copy (#5793);
+        // keep a hard newline between paragraphs / blocks.
+        // Dehyphenation (#1189): when MuPDF marked the line JOINED (EOL
+        // hyphen + DEHYPHENATE), or we soft-break after a trailing hyphen,
+        // drop the hyphen and join with no separator so "hyphen-\\nated"
+        // becomes searchable as "hyphenated". Plain soft wraps still get a
+        // space.
+        fz_stext_line* nextLine = line->next;
+        bool dehyphen = nextLine && (line->flags & FZ_STEXT_LINE_FLAGS_JOINED) != 0;
+        bool soft = nextLine && IsSoftLineBreak(line, nextLine, block);
+        if (dehyphen || soft) {
+            bool hadHyphen = false;
+            {
+                Str cur = ToStr(content);
+                if (cur && cur.len > 0) {
+                    int bi = cur.len;
+                    int last = Utf8CodepointPrev(cur, bi);
+                    hadHyphen = IsUnicodeHyphenRune(last);
                 }
-                if (dehyphen || hadHyphen) {
-                    MaybeDropTrailingSoftHyphen(content, rects);
-                    // no separator: dehyphenated word continues on next line
-                } else {
-                    AddLineSepUtf8(content, rects, softLineSep);
-                }
+            }
+            if (dehyphen || hadHyphen) {
+                MaybeDropTrailingSoftHyphen(content, boxes);
+                // no separator: dehyphenated word continues on next line
             } else {
-                AddLineSepUtf8(content, rects, hardLineSep);
+                AddLineSepUtf8(content, boxes, softLineSep);
             }
-            // each line has independent glyph positions; reset duplicate detection
-            seen.Reset();
-            line = line->next;
+        } else {
+            AddLineSepUtf8(content, boxes, hardLineSep);
+        }
+        // each line has independent glyph positions; reset duplicate detection
+        VecReset(seen);
+        line = line->next;
+    }
+}
+
+static void AppendStextBlocks(fz_stext_block* block, str::Builder& content, Vec<GlyphBox>& boxes, Vec<SeenGlyph>& seen,
+                              Str hardLineSep, Str softLineSep) {
+    while (block) {
+        if (block->type == FZ_STEXT_BLOCK_TEXT) {
+            AppendStextTextBlock(block, content, boxes, seen, hardLineSep, softLineSep);
+        } else if (block->type == FZ_STEXT_BLOCK_STRUCT && block->u.s.down) {
+            // Tagged-PDF structure nodes; MuPDF's do_as_text walks these too.
+            // They only appear when FZ_STEXT_COLLECT_STRUCTURE is set (#4859).
+            AppendStextBlocks(block->u.s.down->first_block, content, boxes, seen, hardLineSep, softLineSep);
         }
         block = block->next;
     }
+}
 
-    ReportIf(Utf8CodepointCount(ToStr(content)) != len(rects));
+static Str FzTextPageToUtf8(fz_stext_page* text, Rect** coordsOut, QuadF** quadsOut = nullptr) {
+    Str hardLineSep = StrL("\n");
+    Str softLineSep = StrL(" ");
+    str::Builder content;
+    Vec<GlyphBox> boxes;
+    Vec<SeenGlyph> seen;
 
+    AppendStextBlocks(text->first_block, content, boxes, seen, hardLineSep, softLineSep);
+
+    ReportIf(Utf8CodepointCount(ToStr(content)) != len(boxes));
+
+    int n = len(boxes);
     if (coordsOut) {
-        if (len(rects) > 0) {
-            *coordsOut = rects.Take();
+        if (n > 0) {
+            Rect* rects = AllocArray<Rect>(n);
+            for (int i = 0; i < n; i++) {
+                rects[i] = boxes[i].rect;
+            }
+            *coordsOut = rects;
         } else {
             *coordsOut = nullptr;
+        }
+    }
+    if (quadsOut) {
+        // quads (32 bytes/glyph, cached for the engine's lifetime) only add
+        // information over coords for rotated text; consumers fall back to
+        // coords when null, so skip them for the common all-upright page
+        bool hasRotated = false;
+        for (int i = 0; !hasRotated && i < n; i++) {
+            hasRotated = boxes[i].quad.IsRotated();
+        }
+        if (hasRotated) {
+            QuadF* quads = AllocArray<QuadF>(n);
+            for (int i = 0; i < n; i++) {
+                quads[i] = boxes[i].quad;
+            }
+            *quadsOut = quads;
+        } else {
+            *quadsOut = nullptr;
         }
     }
     return content.TakeStr();
@@ -1120,12 +1274,12 @@ static Str FzTextPageToUtf8(fz_stext_page* text, Rect** coordsOut) {
 
 static fz_stext_options NewTextPageOptions(int flags = 0) {
     fz_stext_options opts{};
-    // Use glyph outline bounds so text selection rectangles match visible text
-    // instead of the looser line-height boxes from default MuPDF extraction.
-    // DEHYPHENATE: mark end-of-line hyphens as soft joins so FzTextPageToUtf8
-    // can drop them and stitch "hyphen-\\nated" into "hyphenated" for search
-    // (issue #1189; MuPDF FZ_STEXT_DEHYPHENATE since 2020).
-    opts.flags = flags | FZ_STEXT_ACCURATE_BBOXES | FZ_STEXT_DEHYPHENATE;
+    // Font ascender/descender boxes, like 3.6.1: FZ_STEXT_ACCURATE_BBOXES uses
+    // tight glyph ink, so a word such as "compass" (no d/h/l) has almost no
+    // padding above the letters. DEHYPHENATE: mark end-of-line hyphens as
+    // soft joins so FzTextPageToUtf8 can drop them and stitch
+    // "hyphen-\\nated" into "hyphenated" for search (issue #1189).
+    opts.flags = flags | FZ_STEXT_DEHYPHENATE;
     return opts;
 }
 
@@ -1210,17 +1364,50 @@ static bool IsWhitespaceRune(int c) {
     return c <= 0xffff && iswspace((wint_t)c);
 }
 
-static bool LinkifyCheckMultiline(Utf8PageText pageText, int posOff, Rect* coords) {
+// True when the glyph at posOff is a newline that continues a URL started at
+// startOff. Wrapped URLs end in a non-alphanumeric, resume slightly below and
+// to the left of the previous line's end, and do not start a new column
+// (issue #2239: a two-column table glued "Languagehat" onto archive.org/).
+static bool LinkifyCheckMultiline(Utf8PageText pageText, int startOff, int posOff, Rect* coords) {
     int pageLen = pageText.len;
-    // multiline links end in a non-alphanumeric character and continue on a line
-    // that starts left and only slightly below where the current line ended
-    // (and that doesn't start with http or a footnote numeral)
-    return posOff > 0 && posOff < pageLen && '\n' == RuneAt(pageText, posOff) && (posOff + 1) < pageLen &&
-           !IsAlphaNumRune(RuneAt(pageText, posOff - 1)) && !IsWhitespaceRune(RuneAt(pageText, posOff + 1)) &&
-           coords[posOff + 1].BR().y > coords[posOff - 1].y &&
-           coords[posOff + 1].y <= coords[posOff - 1].BR().y + (coords[posOff - 1].dy * 0.35) &&
-           coords[posOff + 1].x < coords[posOff - 1].BR().x && coords[posOff + 1].dy >= coords[posOff - 1].dy * 0.85 &&
-           coords[posOff + 1].dy <= coords[posOff - 1].dy * 1.2 && !StartsWithAscii(pageText, posOff + 1, "http");
+    if (startOff < 0 || startOff >= posOff || posOff <= 0 || posOff >= pageLen || (posOff + 1) >= pageLen) {
+        return false;
+    }
+    if ('\n' != RuneAt(pageText, posOff)) {
+        return false;
+    }
+    if (IsAlphaNumRune(RuneAt(pageText, posOff - 1)) || IsWhitespaceRune(RuneAt(pageText, posOff + 1))) {
+        return false;
+    }
+    if (StartsWithAscii(pageText, posOff + 1, "http")) {
+        return false;
+    }
+    Rect next = coords[posOff + 1];
+    Rect last = coords[posOff - 1];
+    Rect first = coords[startOff];
+    // stext glyph boxes use page space with y growing down.
+    if (next.BR().y <= last.y) {
+        return false;
+    }
+    if (next.y > last.BR().y + last.dy * 1.5f) {
+        return false;
+    }
+    if (next.x >= last.BR().x) {
+        return false;
+    }
+    // Continuation stays near the URL's left edge. The next row of a
+    // left-hand column starts much further left than that.
+    float slack = last.dy * 1.5f;
+    if (first.dx > 0) {
+        slack = std::max(slack, (float)first.dx * 3);
+    }
+    if (next.x < first.x - slack) {
+        return false;
+    }
+    if (next.dy < last.dy * 0.85f || next.dy > last.dy * 1.2f) {
+        return false;
+    }
+    return true;
 }
 
 static bool EndsURL(int c) {
@@ -1295,12 +1482,12 @@ static int LinkifyMultilineText(LinkRectList* list, Utf8PageText pageText, int s
     do {
         int prevChar = startOff > 0 ? RuneAt(pageText, startOff - 1) : ' ';
         endOff = LinkifyFindEndOff(nextOff, prevChar, pageText);
-        multiline = LinkifyCheckMultiline(pageText, endOff, coords);
+        multiline = LinkifyCheckMultiline(pageText, startOff, endOff, coords);
 
         Str part = SliceByRuneOff(pageText, nextOff, endOff);
         uri = str::JoinTemp(uri, part);
         Rect bbox = coords[nextOff].Union(coords[endOff - 1]);
-        list->coords.Append(ToFzRect(ToRectF(bbox)));
+        VecAppend(list->coords, ToFzRect(ToRectF(bbox)));
 
         nextOff = endOff + 1;
     } while (multiline);
@@ -1421,11 +1608,11 @@ static LinkRectList* LinkifyText(Utf8PageText pageText, Rect* coords) {
                                         StartsWithAscii(pageText, startOff, "https://"))) {
             int prevChar = startOff > 0 ? RuneAt(pageText, startOff - 1) : ' ';
             endOff = LinkifyFindEndOff(startOff, prevChar, pageText);
-            multiline = LinkifyCheckMultiline(pageText, endOff, coords);
+            multiline = LinkifyCheckMultiline(pageText, startOff, endOff, coords);
         } else if ('w' == startChar && StartsWithAscii(pageText, startOff, "www.")) {
             int prevChar = startOff > 0 ? RuneAt(pageText, startOff - 1) : ' ';
             endOff = LinkifyFindEndOff(startOff, prevChar, pageText);
-            multiline = LinkifyCheckMultiline(pageText, endOff, coords);
+            multiline = LinkifyCheckMultiline(pageText, startOff, endOff, coords);
             protocol = StrL("http://");
             // ignore www. links without a top-level domain
             int dotOff = IndexOfRune(pageText, startOff + 5, endOff, '.');
@@ -1453,7 +1640,7 @@ static LinkRectList* LinkifyText(Utf8PageText pageText, Rect* coords) {
         }
         list->links.Append(uri);
         Rect bbox = coords[startOff].Union(coords[endOff - 1]);
-        list->coords.Append(ToFzRect(ToRectF(bbox)));
+        VecAppend(list->coords, ToFzRect(ToRectF(bbox)));
         if (multiline) {
             endOff = LinkifyMultilineText(list, pageText, startOff, endOff + 1, coords);
         }
@@ -1606,11 +1793,13 @@ static fz_pixmap* FzConvertPixmap2(fz_context* ctx, fz_pixmap* pix, fz_colorspac
 }
 
 #if OS_WIN
-static RenderedBitmap* NewRenderedFzPixmap(fz_context* ctx, fz_pixmap* pixmap) {
+// preserveAlpha: palettizing drops the alpha channel, so skip it when the
+// caller needs transparent holes to composite over the canvas (issue #1809).
+static RenderedBitmap* NewRenderedFzPixmap(fz_context* ctx, fz_pixmap* pixmap, bool preserveAlpha = false) {
     if (!pixmap) {
         return nullptr;
     }
-    if (pixmap->n == 4 && fz_colorspace_is_rgb(ctx, pixmap->colorspace)) {
+    if (!preserveAlpha && pixmap->n == 4 && fz_colorspace_is_rgb(ctx, pixmap->colorspace)) {
         RenderedBitmap* res = TryRenderAsPaletteImage(pixmap);
         if (res) {
             return res;
@@ -1685,9 +1874,9 @@ static RenderedBitmap* NewRenderedFzPixmap(fz_context* ctx, fz_pixmap* pixmap) {
 }
 #endif
 
-static Pixmap* NewPixmapFromFzPixmap(fz_context* ctx, fz_pixmap* pixmap) {
+static Pixmap* NewPixmapFromFzPixmap(fz_context* ctx, fz_pixmap* pixmap, bool preserveAlpha = false) {
 #if OS_WIN
-    return PixmapFromRenderedBitmap(NewRenderedFzPixmap(ctx, pixmap));
+    return PixmapFromRenderedBitmap(NewRenderedFzPixmap(ctx, pixmap, preserveAlpha));
 #else
     fz_pixmap* bgrPixmap = nullptr;
     fz_var(bgrPixmap);
@@ -1724,8 +1913,8 @@ static Pixmap* NewPixmapFromFzPixmap(fz_context* ctx, fz_pixmap* pixmap) {
 #endif
 }
 
-static TocItem* NewTocItemWithDestination(TocItem* parent, Str title, IPageDestination* dest) {
-    auto* res = AllocTocItem(nullptr, title, 0);
+static TocItem* NewTocItemWithDestination(Arena* arena, TocItem* parent, Str title, IPageDestination* dest) {
+    auto* res = AllocTocItem(arena, title, 0);
     res->parent = parent;
     res->dest = dest;
     return res;
@@ -1752,8 +1941,8 @@ static bool RemoveHeWhoFullyContains(Vec<IPageElement*>& els) {
             }
             auto r2 = els[j]->GetRect();
             if (RectFullyContains(r1, r2)) {
-                // logfa("el %d fully obscures %d\n", i, j);
-                els.RemoveAtFast(i);
+                // logf("el %d fully obscures %d\n", i, j);
+                VecRemoveAtFast(els, i);
                 return true;
             }
         }
@@ -1802,19 +1991,19 @@ NO_INLINE static IPageElement* FzGetElementAtPos(FzPageInfo* pageInfo, PointF pt
 
     for (auto* pel : pageInfo->links) {
         if (pel->GetRect().Contains(pt)) {
-            res.Append(pel);
+            VecAppend(res, pel);
         }
     }
 
     for (auto* pel : pageInfo->autoLinks) {
         if (pel->GetRect().Contains(pt)) {
-            res.Append(pel);
+            VecAppend(res, pel);
         }
     }
 
     for (auto* pel : pageInfo->comments) {
         if (pel->GetRect().Contains(pt)) {
-            res.Append(pel);
+            VecAppend(res, pel);
         }
     }
 
@@ -1822,16 +2011,7 @@ NO_INLINE static IPageElement* FzGetElementAtPos(FzPageInfo* pageInfo, PointF pt
     for (auto& img : pageInfo->images) {
         fz_rect ir = img->rect;
         if (IsPointInRect(ir, p)) {
-            res.Append(img->imageElement);
-        }
-    }
-
-    if (false) {
-        int i = 0;
-        for (auto&& el : res) {
-            Rect r = el->GetRect().Round();
-            logfa("el %d: pos: %d-%d, size: %d-%d, kind: %s\n", (int)i, r.x, r.y, r.dx, r.dy, Str(el->GetKind()));
-            i++;
+            VecAppend(res, img->imageElement);
         }
     }
     return PickBestElement(res);
@@ -1845,22 +2025,22 @@ static void BuildElementsInfo(FzPageInfo* pageInfo) {
     auto& els = pageInfo->allElements;
 
     int total = len(pageInfo->images) + len(pageInfo->links) + len(pageInfo->autoLinks) + len(pageInfo->comments);
-    els.Clear();
+    VecClear(els);
     VecReserve(els, total);
 
     // since all elements lists are in last-to-first order, append
     // item types in inverse order and reverse the whole list at the end
     for (auto& img : pageInfo->images) {
-        els.Append(img->imageElement);
+        VecAppend(els, img->imageElement);
     }
     for (auto& pel : pageInfo->links) {
-        els.Append(pel);
+        VecAppend(els, pel);
     }
     for (auto& pel : pageInfo->autoLinks) {
-        els.Append(pel);
+        VecAppend(els, pel);
     }
     for (auto& comment : pageInfo->comments) {
-        els.Append(comment);
+        VecAppend(els, comment);
     }
     VecReverse(els);
 }
@@ -1872,7 +2052,7 @@ static void FzLinkifyPageText(FzPageInfo* pageInfo, fz_stext_page* stext) {
 
     Rect* coords;
     Str pageTextUtf8 = FzTextPageToUtf8(stext, &coords);
-    if (!pageTextUtf8) {
+    if (len(pageTextUtf8) == 0) {
         // even for empty text FzTextPageToUtf8 allocates coords via Vec::Take
         free(coords);
         str::Free(pageTextUtf8);
@@ -1887,14 +2067,17 @@ static void FzLinkifyPageText(FzPageInfo* pageInfo, fz_stext_page* stext) {
         fz_rect bbox = list->coords[i];
         bool overlaps = false;
         for (auto* pel : pageInfo->links) {
-            overlaps = FzRectOverlap(bbox, pel->GetRect()) >= 0.25f;
+            if (FzRectOverlap(bbox, pel->GetRect()) >= 0.25f) {
+                overlaps = true;
+                break;
+            }
         }
         if (overlaps) {
             continue;
         }
 
         TempStr uri = list->links[i];
-        if (!uri) {
+        if (len(uri) == 0) {
             continue;
         }
 
@@ -1902,13 +2085,14 @@ static void FzLinkifyPageText(FzPageInfo* pageInfo, fz_stext_page* stext) {
         auto* dest = new PageDestinationURL(uri);
         auto* pel = new PageElementDestination(dest);
         pel->rect = ToRectF(bbox);
-        pageInfo->autoLinks.Append(pel);
+        VecAppend(pageInfo->autoLinks, pel);
     }
     delete list;
     free(coords);
 }
 
-static void FzFindImagePositions(fz_context* ctx, int pageNo, Vec<FitzPageImageInfo*>& images, fz_stext_page* stext) {
+static void FzFindImagePositions(fz_context* ctx, int pageNo, Location loc, Vec<FitzPageImageInfo*>& images,
+                                 fz_stext_page* stext) {
     if (!stext) {
         return;
     }
@@ -1928,10 +2112,11 @@ static void FzFindImagePositions(fz_context* ctx, int pageNo, Vec<FitzPageImageI
             img->image = fz_keep_image(ctx, image);
             auto* pel = new PageElementImage();
             pel->pageNo = pageNo;
+            pel->loc = loc;
             pel->rect = ToRectF(block->bbox);
             pel->imageID = len(images);
             img->imageElement = pel;
-            images.Append(img);
+            VecAppend(images, img);
         }
         block = block->next;
     }
@@ -1978,8 +2163,8 @@ static fz_image* FzFindImageAtIdx(fz_context* ctx, FzPageInfo* pageInfo, int idx
 
 // --- dark-mode image preservation helpers (ported from dengxibo/sumatrapdf-plus) ---
 
-static void FzAppendPageImageRect(fz_context* ctx, Vec<FitzPageImageInfo*>& images, int pageNo, fz_rect bbox,
-                                  fz_image* image) {
+static void FzAppendPageImageRect(fz_context* ctx, Vec<FitzPageImageInfo*>& images, int pageNo, Location loc,
+                                  fz_rect bbox, fz_image* image) {
     if (fz_is_empty_rect(bbox) || fz_is_infinite_rect(bbox)) {
         return;
     }
@@ -2001,34 +2186,36 @@ static void FzAppendPageImageRect(fz_context* ctx, Vec<FitzPageImageInfo*>& imag
     }
     auto* pel = new PageElementImage();
     pel->pageNo = pageNo;
+    pel->loc = loc;
     pel->rect = rf;
     pel->imageID = len(images);
     img->imageElement = pel;
-    images.Append(img);
+    VecAppend(images, img);
 }
 
 // A pass-through-free device that records the page rects of drawn images,
 // including content-stream images that text extraction doesn't see. Tracks
 // the clip stack so recorded rects are clipped to what's actually visible.
-#define IMG_COLLECT_STACK_SIZE 96
+constexpr int kImgCollectStackSize = 96;
 
 typedef struct {
     fz_device super;
     Vec<FitzPageImageInfo*>* images;
     int pageNo;
+    Location loc;
     int top;
-    fz_rect stack[IMG_COLLECT_STACK_SIZE];
+    fz_rect stack[kImgCollectStackSize];
 } fz_image_collect_device;
 
 static void fz_img_collect_add(fz_context* ctx, fz_device* dev, fz_rect rect, bool clip, fz_image* image) {
     fz_image_collect_device* d = (fz_image_collect_device*)dev;
-    if (d->top > 0 && d->top <= IMG_COLLECT_STACK_SIZE) {
+    if (d->top > 0 && d->top <= kImgCollectStackSize) {
         rect = fz_intersect_rect(rect, d->stack[d->top - 1]);
     }
     if (!clip && !fz_is_empty_rect(rect)) {
-        FzAppendPageImageRect(ctx, *d->images, d->pageNo, rect, image);
+        FzAppendPageImageRect(ctx, *d->images, d->pageNo, d->loc, rect, image);
     }
-    if (clip && ++d->top <= IMG_COLLECT_STACK_SIZE) {
+    if (clip && ++d->top <= kImgCollectStackSize) {
         d->stack[d->top - 1] = rect;
     }
 }
@@ -2108,7 +2295,7 @@ static int fz_img_collect_begin_tile(fz_context* ctx, fz_device* dev, fz_rect ar
 
 static void fz_img_collect_end_tile(fz_context* /*ctx*/, fz_device* /*dev*/) {}
 
-static fz_device* FzNewImageCollectDevice(fz_context* ctx, Vec<FitzPageImageInfo*>* images, int pageNo) {
+static fz_device* FzNewImageCollectDevice(fz_context* ctx, Vec<FitzPageImageInfo*>* images, int pageNo, Location loc) {
     fz_image_collect_device* dev = fz_new_derived_device(ctx, fz_image_collect_device);
     dev->super.fill_image = fz_img_collect_fill_image;
     dev->super.fill_image_mask = fz_img_collect_fill_image_mask;
@@ -2126,6 +2313,7 @@ static fz_device* FzNewImageCollectDevice(fz_context* ctx, Vec<FitzPageImageInfo
     dev->super.end_tile = fz_img_collect_end_tile;
     dev->images = images;
     dev->pageNo = pageNo;
+    dev->loc = loc;
     dev->top = 0;
     return &dev->super;
 }
@@ -2135,7 +2323,7 @@ static void FzCollectImagesFromPageContent(fz_context* ctx, int pageNo, FzPageIn
     fz_device* dev = nullptr;
     fz_var(dev);
     fz_try(ctx) {
-        dev = FzNewImageCollectDevice(ctx, &pageInfo->images, pageNo);
+        dev = FzNewImageCollectDevice(ctx, &pageInfo->images, pageNo, pageInfo->loc);
         fz_run_page(ctx, page, dev, fz_identity, cookie);
     }
     fz_always(ctx) {
@@ -2306,6 +2494,379 @@ static fz_link* MakePushButtonWidgetLinks(fz_context* ctx, pdf_document* doc, pd
     return head;
 }
 
+static void SkipJsWs(const char*& p, const char* end) {
+    while (p < end && str::IsWs(*p)) {
+        p++;
+    }
+}
+
+static bool IsJsIdentStart(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c == '$';
+}
+
+static bool IsJsIdentChar(char c) {
+    return IsJsIdentStart(c) || (c >= '0' && c <= '9');
+}
+
+static int JsHexNibble(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+static bool IsJsReservedCallName(Str ident) {
+    return str::Eq(ident, StrL("function")) || str::Eq(ident, StrL("if")) || str::Eq(ident, StrL("for")) ||
+           str::Eq(ident, StrL("while")) || str::Eq(ident, StrL("switch")) || str::Eq(ident, StrL("catch")) ||
+           str::Eq(ident, StrL("with")) || str::Eq(ident, StrL("return")) || str::Eq(ident, StrL("typeof")) ||
+           str::Eq(ident, StrL("void")) || str::Eq(ident, StrL("delete")) || str::Eq(ident, StrL("new")) ||
+           str::Eq(ident, StrL("throw")) || str::Eq(ident, StrL("else")) || str::Eq(ident, StrL("do")) ||
+           str::Eq(ident, StrL("try"));
+}
+
+// Decode one JS '...' or "..." string at p. Advances p past the closing quote.
+static bool ParseJsQuotedString(const char*& p, const char* end, Str* out) {
+    *out = {};
+    if (p >= end || (*p != '"' && *p != '\'')) {
+        return false;
+    }
+    char quote = *p++;
+    str::Builder b;
+    while (p < end && *p != quote) {
+        char c = *p++;
+        if (c != '\\') {
+            b.AppendChar(c);
+            continue;
+        }
+        if (p >= end) {
+            break;
+        }
+        char e = *p++;
+        switch (e) {
+            case 'n':
+                b.AppendChar('\n');
+                break;
+            case 'r':
+                b.AppendChar('\r');
+                break;
+            case 't':
+                b.AppendChar('\t');
+                break;
+            case 'b':
+                b.AppendChar('\b');
+                break;
+            case 'f':
+                b.AppendChar('\f');
+                break;
+            case 'v':
+                b.AppendChar('\v');
+                break;
+            case '0':
+                b.AppendChar('\0');
+                break;
+            case '\\':
+            case '\'':
+            case '"':
+                b.AppendChar(e);
+                break;
+            case 'x': {
+                if (p + 2 > end) {
+                    b.AppendChar(e);
+                    break;
+                }
+                int h1 = JsHexNibble(p[0]);
+                int h2 = JsHexNibble(p[1]);
+                if (h1 < 0 || h2 < 0) {
+                    b.AppendChar(e);
+                    break;
+                }
+                p += 2;
+                b.AppendChar((char)((h1 << 4) | h2));
+                break;
+            }
+            case 'u': {
+                if (p + 4 > end) {
+                    b.AppendChar(e);
+                    break;
+                }
+                int cp = 0;
+                bool ok = true;
+                for (int i = 0; i < 4; i++) {
+                    int h = JsHexNibble(p[i]);
+                    if (h < 0) {
+                        ok = false;
+                        break;
+                    }
+                    cp = (cp << 4) | h;
+                }
+                if (!ok) {
+                    b.AppendChar(e);
+                    break;
+                }
+                p += 4;
+                char utf8[4];
+                int off = 0;
+                str::Utf8Encode(utf8, off, cp);
+                b.Append(Str(utf8, off));
+                break;
+            }
+            default:
+                b.AppendChar(e);
+                break;
+        }
+    }
+    if (p >= end || *p != quote) {
+        return false;
+    }
+    p++;
+    *out = b.TakeStr();
+    return true;
+}
+
+static bool SkipJsNested(const char*& p, const char* end, char open, char close) {
+    if (p >= end || *p != open) {
+        return false;
+    }
+    int depth = 1;
+    p++;
+    while (p < end && depth > 0) {
+        if (*p == '"' || *p == '\'') {
+            Str dummy;
+            if (!ParseJsQuotedString(p, end, &dummy)) {
+                str::Free(dummy);
+                return false;
+            }
+            str::Free(dummy);
+            continue;
+        }
+        if (*p == open) {
+            depth++;
+        } else if (*p == close) {
+            depth--;
+        }
+        p++;
+    }
+    return depth == 0;
+}
+
+// Collect the quoted arguments of app.popUpMenu(...) / app.popUpMenuEx(...).
+static bool ParseJsPopUpMenuItems(Str js, StrVec& items) {
+    int idx = str::IndexOf(js, StrL("popUpMenu"));
+    if (idx < 0) {
+        return false;
+    }
+    const char* p = js.s + idx + 9; // strlen("popUpMenu")
+    const char* end = js.s + len(js);
+    if (p + 2 <= end && p[0] == 'E' && p[1] == 'x') {
+        p += 2;
+    }
+    SkipJsWs(p, end);
+    if (p >= end || *p != '(') {
+        return false;
+    }
+    p++;
+    while (p < end) {
+        SkipJsWs(p, end);
+        if (p >= end) {
+            break;
+        }
+        if (*p == ')') {
+            break;
+        }
+        if (*p == ',') {
+            p++;
+            continue;
+        }
+        if (*p == '[') {
+            if (!SkipJsNested(p, end, '[', ']')) {
+                break;
+            }
+            continue;
+        }
+        if (*p == '"' || *p == '\'') {
+            Str item;
+            if (!ParseJsQuotedString(p, end, &item)) {
+                str::Free(item);
+                break;
+            }
+            items.Append(item);
+            str::Free(item);
+            continue;
+        }
+        p++;
+    }
+    return len(items) > 0;
+}
+
+// First identifier that is followed by '(', skipping JS keywords.
+static Str ExtractJsCallName(Str js) {
+    if (len(js) == 0) {
+        return {};
+    }
+    const char* p = js.s;
+    const char* end = js.s + len(js);
+    while (p < end) {
+        SkipJsWs(p, end);
+        if (p >= end) {
+            break;
+        }
+        if (!IsJsIdentStart(*p)) {
+            p++;
+            continue;
+        }
+        const char* start = p;
+        p++;
+        while (p < end && IsJsIdentChar(*p)) {
+            p++;
+        }
+        Str ident{start, (int)(p - start)};
+        SkipJsWs(p, end);
+        if (p < end && *p == '(' && !IsJsReservedCallName(ident)) {
+            return ident;
+        }
+    }
+    return {};
+}
+
+static char* LookupNamedJavaScript(fz_context* ctx, pdf_document* doc, Str name) {
+    if (!ctx || !doc || len(name) == 0) {
+        return nullptr;
+    }
+    pdf_obj* needle = nullptr;
+    char* js = nullptr;
+    fz_var(needle);
+    fz_var(js);
+    fz_try(ctx) {
+        needle = pdf_new_string(ctx, name.s, (size_t)len(name));
+        pdf_obj* found = pdf_lookup_name(ctx, doc, PDF_NAME(JavaScript), needle);
+        if (found) {
+            if (pdf_is_dict(ctx, found)) {
+                found = pdf_dict_get(ctx, found, PDF_NAME(JS));
+            }
+            if (found) {
+                js = pdf_load_stream_or_string_as_utf8(ctx, found);
+            }
+        }
+    }
+    fz_always(ctx) {
+        pdf_drop_obj(ctx, needle);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        js = nullptr;
+    }
+    return js;
+}
+
+// Altium schematic PDFs (and similar) put component metadata on /Link annots
+// whose action is Acrobat JavaScript: either app.popUpMenu("...") inline, or a
+// call to a named ShowCompProps_* function in catalog /Names /JavaScript.
+// MuPDF does not turn JavaScript actions into fz_links (pdf_parse_link_action
+// returns null), and pdf_first_annot skips /Link annots, so walk /Annots.
+// Parse the menu strings without executing JS (issue #1198).
+static void AppendJsMenuLinks(fz_context* ctx, pdf_document* doc, pdf_page* pdfpage, int pageNo,
+                              Vec<PageElementDestination*>& links) {
+    if (!ctx || !doc || !pdfpage) {
+        return;
+    }
+    pdf_obj* annots = nullptr;
+    int n = 0;
+    fz_matrix ctm{};
+    fz_try(ctx) {
+        fz_rect mediabox;
+        pdf_page_transform(ctx, pdfpage, &mediabox, &ctm);
+        pdf_obj* pageObj = pdf_lookup_page_obj(ctx, doc, pageNo - 1);
+        annots = pdf_dict_get(ctx, pageObj, PDF_NAME(Annots));
+        n = pdf_array_len(ctx, annots);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        return;
+    }
+
+    for (int i = 0; i < n; i++) {
+        char* js = nullptr;
+        fz_rect rect{};
+        fz_var(js);
+        fz_try(ctx) {
+            pdf_obj* annot = pdf_array_get(ctx, annots, i);
+            pdf_obj* subtype = pdf_dict_get(ctx, annot, PDF_NAME(Subtype));
+            if (pdf_name_eq(ctx, subtype, PDF_NAME(Link))) {
+                pdf_obj* action = pdf_dict_get(ctx, annot, PDF_NAME(A));
+                pdf_obj* s = pdf_dict_get(ctx, action, PDF_NAME(S));
+                if (pdf_name_eq(ctx, s, PDF_NAME(JavaScript))) {
+                    pdf_obj* jsObj = pdf_dict_get(ctx, action, PDF_NAME(JS));
+                    if (jsObj) {
+                        js = pdf_load_stream_or_string_as_utf8(ctx, jsObj);
+                        rect = pdf_dict_get_rect(ctx, annot, PDF_NAME(Rect));
+                        rect = fz_transform_rect(rect, ctm);
+                    }
+                }
+            }
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            js = nullptr;
+        }
+        if (!js) {
+            continue;
+        }
+        StrVec items;
+        ParseJsPopUpMenuItems(Str(js), items);
+        if (len(items) == 0) {
+            Str name = ExtractJsCallName(Str(js));
+            if (name) {
+                char* namedJs = LookupNamedJavaScript(ctx, doc, name);
+                if (namedJs) {
+                    ParseJsPopUpMenuItems(Str(namedJs), items);
+                    fz_free(ctx, namedJs);
+                }
+            }
+        }
+        fz_free(ctx, js);
+        if (len(items) == 0) {
+            continue;
+        }
+        auto* dest = new PageDestinationJsMenu();
+        dest->items = items;
+        dest->rect = ToRectF(rect);
+        auto* pel = new PageElementDestination(dest);
+        pel->pageNo = pageNo;
+        pel->rect = dest->rect;
+        VecAppend(links, pel);
+    }
+}
+
+// Acrobat keeps /Info from an earlier trailer when an incremental update omits it (issue #1846).
+static pdf_obj* PdfInfoFromTrailers(fz_context* ctx, pdf_document* doc) {
+    if (!doc) {
+        return nullptr;
+    }
+    pdf_obj* info = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Info));
+    if (info) {
+        return info;
+    }
+    int n = doc->num_xref_sections;
+    int start = doc->xref_base + 1;
+    for (int i = start; i < n; i++) {
+        pdf_obj* trailer = doc->xref_sections[i].trailer;
+        if (!trailer) {
+            continue;
+        }
+        info = pdf_dict_get(ctx, trailer, PDF_NAME(Info));
+        if (info) {
+            return info;
+        }
+    }
+    return nullptr;
+}
+
 static pdf_obj* PdfCopyStrDict(fz_context* ctx, pdf_document* /*doc*/, pdf_obj* dict) {
     pdf_obj* copy = pdf_copy_dict(ctx, dict);
     for (int i = 0; i < pdf_dict_len(ctx, copy); i++) {
@@ -2320,6 +2881,356 @@ static pdf_obj* PdfCopyStrDict(fz_context* ctx, pdf_document* /*doc*/, pdf_obj* 
         }
     }
     return copy;
+}
+
+static Str XmlLocalName(const char* tag) {
+    if (!tag) {
+        return {};
+    }
+    const char* colon = strrchr(tag, ':');
+    if (colon) {
+        return Str(colon + 1);
+    }
+    return Str(tag);
+}
+
+// local XMP name, then Info key; next pair starts after the Info key
+static SeqStrings kXmpLocalMap =
+    "title\0"
+    "Title\0"
+    "Title\0"
+    "Title\0"
+    "creator\0"
+    "Author\0"
+    "Author\0"
+    "Author\0"
+    "description\0"
+    "Subject\0"
+    "Subject\0"
+    "Subject\0"
+    "subject\0"
+    "Keywords\0"
+    "Keywords\0"
+    "Keywords\0"
+    "rights\0"
+    "Copyright\0"
+    "Copyright\0"
+    "Copyright\0"
+    "CreatorTool\0"
+    "Creator\0"
+    "Creator\0"
+    "Creator\0"
+    "Producer\0"
+    "Producer\0"
+    "CreateDate\0"
+    "CreationDate\0"
+    "CreationDate\0"
+    "CreationDate\0"
+    "ModifyDate\0"
+    "ModDate\0"
+    "ModDate\0"
+    "ModDate\0";
+
+static SeqStrings kXmpPrefixes = "dc\0pdf\0xmp\0xap\0";
+
+// order must match XmpSlot cases
+static SeqStrings kXmpInfoKeys =
+    "Title\0"
+    "Author\0"
+    "Subject\0"
+    "Keywords\0"
+    "Copyright\0"
+    "Creator\0"
+    "Producer\0"
+    "CreationDate\0"
+    "ModDate\0";
+
+static Str XmpInfoKey(Str local) {
+    for (Str name = SeqStrFirst(kXmpLocalMap); len(name);) {
+        Str info = SeqStrNext(name);
+        if (str::Eq(name, local)) {
+            return info;
+        }
+        name = SeqStrNext(info);
+    }
+    return {};
+}
+
+struct XmpFields {
+    TempStr title;
+    TempStr author;
+    TempStr subject;
+    TempStr keywords;
+    TempStr copyright;
+    TempStr creator;
+    TempStr producer;
+    TempStr creationDate;
+    TempStr modDate;
+};
+
+static TempStr* XmpSlot(XmpFields* f, Str key) {
+    switch (SeqStrIndex(kXmpInfoKeys, key)) {
+        case 0:
+            return &f->title;
+        case 1:
+            return &f->author;
+        case 2:
+            return &f->subject;
+        case 3:
+            return &f->keywords;
+        case 4:
+            return &f->copyright;
+        case 5:
+            return &f->creator;
+        case 6:
+            return &f->producer;
+        case 7:
+            return &f->creationDate;
+        case 8:
+            return &f->modDate;
+        default:
+            return nullptr;
+    }
+}
+
+static void XmpSetIfEmpty(TempStr* slot, Str val) {
+    if (!slot || len(*slot) > 0 || len(val) == 0) {
+        return;
+    }
+    *slot = val;
+}
+
+static void XmlAppendText(fz_xml* n, str::Builder& b) {
+    if (!n) {
+        return;
+    }
+    const char* t = fz_xml_text(n);
+    if (t) {
+        b.Append(Str(t));
+        return;
+    }
+    for (fz_xml* c = fz_xml_down(n); c; c = fz_xml_next(c)) {
+        XmlAppendText(c, b);
+    }
+}
+
+static TempStr XmlTrimTextTemp(Str raw) {
+    if (len(raw) == 0) {
+        return {};
+    }
+    TempStr s = str::DupTemp(raw);
+    str::TrimWSInPlace(s, str::TrimOpt::Both);
+    s.len -= str::NormalizeWSInPlace(s);
+    return s;
+}
+
+static void XmlCollectLi(fz_xml* n, StrVec& vals, StrVec& langs) {
+    if (!n || fz_xml_text(n)) {
+        return;
+    }
+    if (str::Eq(XmlLocalName(fz_xml_tag(n)), StrL("li"))) {
+        str::Builder b;
+        XmlAppendText(n, b);
+        TempStr s = XmlTrimTextTemp(ToStr(b));
+        if (len(s) == 0) {
+            return;
+        }
+        vals.Append(s);
+        const char* lang = fz_xml_att(n, "xml:lang");
+        langs.Append(lang ? Str(lang) : Str{});
+        return;
+    }
+    for (fz_xml* c = fz_xml_down(n); c; c = fz_xml_next(c)) {
+        XmlCollectLi(c, vals, langs);
+    }
+}
+
+static TempStr XmlValueTemp(fz_xml* node) {
+    StrVec vals;
+    StrVec langs;
+    XmlCollectLi(node, vals, langs);
+    if (len(vals) > 0) {
+        bool anyLang = false;
+        for (int i = 0; i < len(langs); i++) {
+            if (len(langs[i]) > 0) {
+                anyLang = true;
+                break;
+            }
+        }
+        if (anyLang) {
+            for (int i = 0; i < len(langs); i++) {
+                if (str::EqI(langs[i], StrL("x-default"))) {
+                    return str::DupTemp(vals[i]);
+                }
+            }
+            return str::DupTemp(vals[0]);
+        }
+        return JoinTemp(&vals, StrL(", "));
+    }
+    str::Builder b;
+    XmlAppendText(node, b);
+    return XmlTrimTextTemp(ToStr(b));
+}
+
+static void XmpTakeAtts(fz_xml* n, XmpFields* f) {
+    for (Str local = SeqStrFirst(kXmpLocalMap); len(local);) {
+        Str info = SeqStrNext(local);
+        const char* v = fz_xml_att(n, CStrTemp(local));
+        if (!v) {
+            for (Str pfx = SeqStrFirst(kXmpPrefixes); len(pfx); pfx = SeqStrNext(pfx)) {
+                v = fz_xml_att(n, CStrTemp(fmt("%s:%s", pfx, local)));
+                if (v) {
+                    break;
+                }
+            }
+        }
+        if (v && v[0]) {
+            XmpSetIfEmpty(XmpSlot(f, info), XmlTrimTextTemp(Str(v)));
+        }
+        local = SeqStrNext(info);
+    }
+}
+
+static void XmlWalkXmp(fz_xml* n, XmpFields* f) {
+    if (!n) {
+        return;
+    }
+    // parsed XML's root is a document node, not an element
+    if (!fz_xml_up(n)) {
+        for (fz_xml* c = fz_xml_down(n); c; c = fz_xml_next(c)) {
+            XmlWalkXmp(c, f);
+        }
+        return;
+    }
+    if (fz_xml_text(n)) {
+        return;
+    }
+    XmpTakeAtts(n, f);
+    Str key = XmpInfoKey(XmlLocalName(fz_xml_tag(n)));
+    if (len(key) > 0) {
+        XmpSetIfEmpty(XmpSlot(f, key), XmlValueTemp(n));
+    }
+    for (fz_xml* c = fz_xml_down(n); c; c = fz_xml_next(c)) {
+        XmlWalkXmp(c, f);
+    }
+}
+
+// XMP dates are ISO-8601; Document Properties parses Info dates as PDF D:YYYYMMDD...
+static TempStr XmpDateToPdfTemp(Str iso) {
+    if (len(iso) < 4) {
+        return {};
+    }
+    int y = 0;
+    int m = 1;
+    int d = 1;
+    int h = 0;
+    int mi = 0;
+    int s = 0;
+    Str rest = str::Parse(iso, "%4d-%2d-%2d", &y, &m, &d);
+    if (!rest.s) {
+        return {};
+    }
+    // e.g. Visagesoft's 10000-01-01
+    if (y < 1900 || y > 2200) {
+        return {};
+    }
+    if (len(rest) > 0 && rest.s[0] == 'T') {
+        Str t = str::Parse(rest, "T%2d:%2d:%2d", &h, &mi, &s);
+        if (t.s) {
+            rest = t;
+        }
+        if (len(rest) > 0 && rest.s[0] == '.') {
+            int i = 1;
+            while (i < len(rest) && rest.s[i] >= '0' && rest.s[i] <= '9') {
+                i++;
+            }
+            rest = Str(rest.s + i, rest.len - i);
+        }
+    }
+    char tzSign = 0;
+    int tzH = 0;
+    int tzM = 0;
+    if (len(rest) > 0 && rest.s[0] == 'Z') {
+        tzSign = 'Z';
+    } else if (len(rest) > 0 && (rest.s[0] == '+' || rest.s[0] == '-')) {
+        tzSign = rest.s[0];
+        str::Parse(Str(rest.s + 1, rest.len - 1), "%2d:%2d", &tzH, &tzM);
+    }
+    if (tzSign == 'Z') {
+        return fmt("D:%04d%02d%02d%02d%02d%02dZ", y, m, d, h, mi, s);
+    }
+    if (tzSign == '+' || tzSign == '-') {
+        return fmt("D:%04d%02d%02d%02d%02d%02d%c%02d'%02d'", y, m, d, h, mi, s, tzSign, tzH, tzM);
+    }
+    return fmt("D:%04d%02d%02d%02d%02d%02d", y, m, d, h, mi, s);
+}
+
+static bool PdfInfoHasValue(fz_context* ctx, pdf_obj* info, Str key) {
+    pdf_obj* obj = pdf_dict_gets(ctx, info, CStrTemp(key));
+    if (!obj) {
+        return false;
+    }
+    const char* s = pdf_to_text_string(ctx, obj);
+    return s && s[0];
+}
+
+enum class XmpValKind {
+    Text,
+    Date
+};
+
+static void PdfInfoPutMissing(fz_context* ctx, pdf_obj* info, Str key, Str val, XmpValKind kind) {
+    if (len(val) == 0 || PdfInfoHasValue(ctx, info, key)) {
+        return;
+    }
+    TempStr stored = val;
+    if (kind == XmpValKind::Date) {
+        stored = XmpDateToPdfTemp(val);
+        if (len(stored) == 0) {
+            return;
+        }
+    }
+    pdf_dict_puts_drop(ctx, info, CStrTemp(key), pdf_new_text_string(ctx, CStrTemp(stored)));
+}
+
+// Fill Info keys the trailer dict omitted from Catalog /Metadata (XMP).
+static void PdfFillInfoFromXmp(fz_context* ctx, pdf_document* doc, pdf_obj* info) {
+    if (!doc || !info) {
+        return;
+    }
+    pdf_obj* root = pdf_dict_get(ctx, pdf_trailer(ctx, doc), PDF_NAME(Root));
+    pdf_obj* meta = pdf_dict_get(ctx, root, PDF_NAME(Metadata));
+    if (!meta) {
+        return;
+    }
+
+    fz_buffer* buf = nullptr;
+    fz_xml* xml = nullptr;
+    fz_var(buf);
+    fz_var(xml);
+    fz_try(ctx) {
+        buf = pdf_load_stream(ctx, meta);
+        xml = fz_parse_xml(ctx, buf, 0);
+        XmpFields fields{};
+        XmlWalkXmp(xml, &fields);
+        PdfInfoPutMissing(ctx, info, SeqStrByIndex(kXmpInfoKeys, 0), fields.title, XmpValKind::Text);
+        PdfInfoPutMissing(ctx, info, SeqStrByIndex(kXmpInfoKeys, 1), fields.author, XmpValKind::Text);
+        PdfInfoPutMissing(ctx, info, SeqStrByIndex(kXmpInfoKeys, 2), fields.subject, XmpValKind::Text);
+        PdfInfoPutMissing(ctx, info, SeqStrByIndex(kXmpInfoKeys, 3), fields.keywords, XmpValKind::Text);
+        PdfInfoPutMissing(ctx, info, SeqStrByIndex(kXmpInfoKeys, 4), fields.copyright, XmpValKind::Text);
+        PdfInfoPutMissing(ctx, info, SeqStrByIndex(kXmpInfoKeys, 5), fields.creator, XmpValKind::Text);
+        PdfInfoPutMissing(ctx, info, SeqStrByIndex(kXmpInfoKeys, 6), fields.producer, XmpValKind::Text);
+        PdfInfoPutMissing(ctx, info, SeqStrByIndex(kXmpInfoKeys, 7), fields.creationDate, XmpValKind::Date);
+        PdfInfoPutMissing(ctx, info, SeqStrByIndex(kXmpInfoKeys, 8), fields.modDate, XmpValKind::Date);
+    }
+    fz_always(ctx) {
+        fz_drop_xml(ctx, xml);
+        fz_drop_buffer(ctx, buf);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        fz_warn(ctx, "Couldn't load XMP metadata");
+    }
 }
 
 // Note: make sure to only call with docLock
@@ -2358,7 +3269,7 @@ static Str PdfLoadAttachment(fz_context* ctx, pdf_document* doc, int no) {
     }
     fz_catch(ctx) {
         fz_report_error(ctx);
-        logfa("PdfLoadAttachment() failed\n");
+        logf("PdfLoadAttachment() failed\n");
     }
     return res;
 }
@@ -2382,7 +3293,7 @@ static Str PdfLoadAnnotationAttachment(fz_context* ctx, pdf_document* doc, int o
     }
     fz_catch(ctx) {
         fz_report_error(ctx);
-        logfa("PdfLoadAnnotationAttachment(objNum=%d) failed\n", objNum);
+        logf("PdfLoadAnnotationAttachment(objNum=%d) failed\n", objNum);
     }
     return res;
 }
@@ -2430,7 +3341,7 @@ static fz_outline* PdfLoadAttachments(fz_context* ctx, pdf_document* doc, Str pa
     }
     fz_catch(ctx) {
         fz_report_error(ctx);
-        logfa("PdfLoadAttachments() failed for '%s'\n", path);
+        logf("PdfLoadAttachments() failed for '%s'\n", path);
     }
     return root.next;
 }
@@ -2528,20 +3439,25 @@ static void BuildPageLabelRec(fz_context* ctx, pdf_obj* node, int pageCount, Vec
     for (int i = 0; i < n; i += 2) {
         pdf_obj* info = pdf_array_get(ctx, obj, i + 1);
         PageLabelInfo pli;
-        pli.startAt = pdf_to_int(ctx, pdf_array_get(ctx, obj, i)) + 1;
-        if (pli.startAt < 1) {
+        // the key is attacker-controlled: INT_MAX + 1 in int is signed
+        // overflow, undefined behavior (issue #5952)
+        i64 startAt = (i64)pdf_to_int(ctx, pdf_array_get(ctx, obj, i)) + 1;
+        if (startAt < 1 || startAt > (i64)pageCount) {
             continue;
         }
+        pli.startAt = (int)startAt;
 
-        pli.type = pdf_to_name(ctx, pdf_dict_gets(ctx, info, "S"));
+        pli.type = Str(pdf_to_name(ctx, pdf_dict_gets(ctx, info, "S")));
         pli.prefix = pdf_dict_gets(ctx, info, "P");
         pli.countFrom = pdf_to_int(ctx, pdf_dict_gets(ctx, info, "St"));
-        pli.countFrom = std::max(pli.countFrom, 1);
-        data.Append(pli);
+        // BuildPageLabelVec computes countFrom + j for j < pageCount: keep the
+        // sum representable for an attacker-controlled /St near INT_MAX
+        pli.countFrom = limitValue(pli.countFrom, 1, INT_MAX - pageCount);
+        VecAppend(data, pli);
     }
 }
 
-static StrVec* BuildPageLabelVec(fz_context* ctx, pdf_obj* root, int pageCount) {
+static StrVec* BuildPageLabelVec(Arena* arena, fz_context* ctx, pdf_obj* root, int pageCount) {
     Vec<PageLabelInfo> data;
     BuildPageLabelRec(ctx, root, pageCount, data, 0);
     VecSort(data, CmpPageLabelInfo);
@@ -2560,9 +3476,9 @@ static StrVec* BuildPageLabelVec(fz_context* ctx, pdf_obj* root, int pageCount) 
         return nullptr;
     }
 
-    StrVec* labels = new StrVec();
+    StrVec* labels = New<StrVec>(arena);
     for (int i = 0; i < pageCount; i++) {
-        labels->Append("");
+        labels->Append(StrL(""));
     }
 
     for (int i = 0; i < n; i++) {
@@ -2582,12 +3498,12 @@ static StrVec* BuildPageLabelVec(fz_context* ctx, pdf_obj* root, int pageCount) 
         }
     }
 
-    for (int idx = 0; (idx = labels->Find(nullptr, idx)) != -1; idx++) {
-        labels->SetAt(idx, "");
+    for (int idx = 0; (idx = labels->Find(Str(), idx)) != -1; idx++) {
+        labels->SetAt(idx, StrL(""));
     }
 
     if (PageLabelsContainInternalPdgNames(labels, pageCount)) {
-        delete labels;
+        labels->~StrVec();
         return nullptr;
     }
     return labels;
@@ -2637,10 +3553,20 @@ static void fz_print_cb(void* user, const char* msg) {
     }
     log(msgStr);
     EngineMupdf* engine = (EngineMupdf*)user;
-    if (engine && !str::Contains(msgStr, StrL("unknown epub version"))) {
-        // epub 3.0 is rendered fine, so don't treat the version warning as an error
-        engine->AppendError(msgStr);
+    if (!engine) {
+        return;
     }
+    // logged above, not shown as "Errors in document": epub 3.0 is rendered
+    // fine, a missing system font falls back to a default (issue #6027),
+    // Movie (etc.) appearance streams are a MuPDF limitation, not a PDF defect,
+    // and hyphen tables are compiled out (issue #6109)
+    if (str::Contains(msgStr, StrL("unknown epub version")) ||
+        str::Contains(msgStr, StrL("couldn't find system font")) ||
+        str::Contains(msgStr, StrL("cannot create appearance stream")) ||
+        str::Contains(msgStr, StrL("no hyphenation table"))) {
+        return;
+    }
+    engine->AppendError(msgStr);
 }
 
 static void InstallFitzErrorCallbacks(EngineMupdf* engine, fz_context* ctx) {
@@ -2695,7 +3621,7 @@ static fz_context* GetOrClonePerThreadContext(EngineMupdf* engine, fz_context* c
     {
         ScopedMutex cs(&gPerThreadContextsCs);
         ContextThreadID el{engine, newCtx, threadID};
-        gPerThreadContexts->Append(el);
+        VecAppend(*gPerThreadContexts, el);
     }
     return newCtx;
 }
@@ -2710,7 +3636,7 @@ static void ReleasePerThreadContext(EngineMupdf* engine) {
             auto& el = (*gPerThreadContexts)[i];
             if (el.engine == engine && el.threadID == threadID) {
                 ctxToDrop = el.ctx;
-                gPerThreadContexts->RemoveAtFast(i);
+                VecRemoveAtFast(*gPerThreadContexts, i);
                 break;
             }
         }
@@ -2728,8 +3654,8 @@ static void ReleaseAllPerThreadContexts(EngineMupdf* engine) {
         for (int i = len(*gPerThreadContexts) - 1; i >= 0; i--) {
             auto& el = (*gPerThreadContexts)[i];
             if (el.engine == engine) {
-                ctxsToDrop.Append(el.ctx);
-                gPerThreadContexts->RemoveAtFast(i);
+                VecAppend(ctxsToDrop, el.ctx);
+                VecRemoveAtFast(*gPerThreadContexts, i);
             }
         }
     }
@@ -2751,7 +3677,7 @@ EngineMupdf::EngineMupdf() {
     _ctx = fz_new_context(nullptr, &fz_locks_ctx, FZ_STORE_DEFAULT);
     if (!_ctx) {
         // can happen when out of memory. Load() will fail
-        log("EngineMupdf: fz_new_context() failed\n");
+        log(StrL("EngineMupdf: fz_new_context() failed\n"));
         return;
     }
     InstallFitzErrorCallbacks(this, _ctx);
@@ -2772,40 +3698,45 @@ fz_context* EngineMupdf::Ctx() const {
 
 EngineMupdf::~EngineMupdf() {
     pagesLock.Lock();
-    str::Free(ebookFontUnavailable);
 
     auto* ctx = _ctx;
     if (darkModeEngineCache) {
         PdfDarkModeEngineCacheFree(ctx, darkModeEngineCache);
         darkModeEngineCache = nullptr;
     }
-    for (FzPageInfo* pi : pages) {
-        DeleteVecMembers(pi->links);
-        DeleteVecMembers(pi->autoLinks);
-        DeleteVecMembers(pi->comments);
-        for (FitzPageImageInfo* img : pi->images) {
-            if (img && img->image) {
-                fz_drop_image(ctx, img->image);
-                img->image = nullptr;
+    for (Vec<FzPageInfo*>* v : chapterPages) {
+        if (!v) {
+            continue;
+        }
+        for (FzPageInfo* pi : *v) {
+            DeleteVecMembers(pi->links);
+            DeleteVecMembers(pi->autoLinks);
+            DeleteVecMembers(pi->comments);
+            for (FitzPageImageInfo* img : pi->images) {
+                if (img && img->image) {
+                    fz_drop_image(ctx, img->image);
+                    img->image = nullptr;
+                }
             }
+            DeleteVecMembers(pi->images);
+            DeleteVecMembers(pi->annotations);
+            DeleteVecMembers(pi->widgets);
+            if (pi->retainedLinks) {
+                fz_drop_link(ctx, pi->retainedLinks);
+            }
+            if (pi->displayList) {
+                fz_drop_display_list(ctx, pi->displayList);
+            }
+            PdfDarkModeInvalidatePage(ctx, pi);
+            if (pi->page) {
+                fz_drop_page(ctx, pi->page);
+            }
+            // storage is arena-owned; run the destructor in place so the inner
+            // Vec<>s free their heap-allocated els buffers, then leave the
+            // memory to the arena.
+            pi->~FzPageInfo();
         }
-        DeleteVecMembers(pi->images);
-        DeleteVecMembers(pi->annotations);
-        DeleteVecMembers(pi->widgets);
-        if (pi->retainedLinks) {
-            fz_drop_link(ctx, pi->retainedLinks);
-        }
-        if (pi->displayList) {
-            fz_drop_display_list(ctx, pi->displayList);
-        }
-        PdfDarkModeInvalidatePage(ctx, pi);
-        if (pi->page) {
-            fz_drop_page(ctx, pi->page);
-        }
-        // storage is arena-owned; run the destructor in place so the inner
-        // Vec<>s free their heap-allocated els buffers, then leave the
-        // memory to the arena.
-        pi->~FzPageInfo();
+        v->~Vec<FzPageInfo*>();
     }
 
     fz_drop_outline(ctx, outline);
@@ -2828,12 +3759,48 @@ EngineMupdf::~EngineMupdf() {
     fz_drop_context(ctx);
 
     str::Free(pdfPassword);
-    delete pageLabels;
-    delete tocTree;
+    if (pageLabels) {
+        pageLabels->~StrVec();
+        pageLabels = nullptr;
+    }
+    FreeTocItemRec(arena, pendingHeadingToc);
+    pendingHeadingToc = nullptr;
+    DestroyTocTree(tocTree);
+    tocTree = nullptr;
 
     pagesLock.Unlock();
 
     DeInitializeEngineMupdf();
+}
+
+// caller holds (or doesn't need) pagesLock; RecursiveMutex makes re-entry safe
+FzPageInfo* EngineMupdf::PageInfoByLoc(Location loc) {
+    ScopedRecursiveMutex scope(&pagesLock);
+    if (loc.chapter < 1 || loc.chapter > len(chapterPages)) {
+        return nullptr;
+    }
+    Vec<FzPageInfo*>* v = chapterPages[loc.chapter - 1];
+    if (!v || loc.page < 1 || loc.page > len(*v)) {
+        return nullptr;
+    }
+    return (*v)[loc.page - 1];
+}
+
+FzPageInfo* EngineMupdf::PageInfoByPageNo(int pageNo) {
+    return PageInfoByLoc(LocationFromPageNo(pageNo));
+}
+
+// runs fn on every FzPageInfo across every chapter, laid out or not
+template <typename Fn>
+static void ForEachPageInfo(EngineMupdf* e, const Fn& fn) {
+    for (Vec<FzPageInfo*>* v : e->chapterPages) {
+        if (!v) {
+            continue;
+        }
+        for (FzPageInfo* pi : *v) {
+            fn(pi);
+        }
+    }
 }
 
 class PasswordCloner : public PasswordUI {
@@ -2850,14 +3817,23 @@ class PasswordCloner : public PasswordUI {
 };
 
 EngineBase* EngineMupdf::Clone() {
-    ScopedRecursiveMutex scope(&docLock);
-    auto* ctx = Ctx();
     // use this document's encryption key (if any) to load the clone
+    u8 cryptKey[32]{};
+    bool hasCryptKey = false;
     PasswordCloner* pwdUI = nullptr;
-    if (pdfdoc) {
-        if (pdf_crypt_key(ctx, pdfdoc->crypt)) {
-            pwdUI = new PasswordCloner(pdf_crypt_key(ctx, pdfdoc->crypt));
+    {
+        ScopedRecursiveMutex scope(&docLock);
+        auto* ctx = Ctx();
+        if (pdfdoc) {
+            u8* key = pdf_crypt_key(ctx, pdfdoc->crypt);
+            if (key) {
+                memcpy(cryptKey, key, sizeof(cryptKey));
+                hasCryptKey = true;
+            }
         }
+    }
+    if (hasCryptKey) {
+        pwdUI = new PasswordCloner(cryptKey);
     }
 
     // prefer re-loading from the file: it streams large documents on demand
@@ -2889,17 +3865,20 @@ EngineBase* EngineMupdf::Clone() {
     }
     delete pwdUI;
 
-    clone->disableAntiAlias = disableAntiAlias;
-    clone->disableAutoLinks = disableAutoLinks;
-    clone->cadDetectDone = cadDetectDone;
-    clone->cadDetectEnable = cadDetectEnable;
-    clone->cadDetectScore = cadDetectScore;
-    clone->cadRasterDominant = cadRasterDominant;
-    clone->cadHairlineVector = cadHairlineVector;
-    clone->cadEnhanceOverride = cadEnhanceOverride;
+    {
+        ScopedRecursiveMutex scope(&docLock);
+        clone->disableAntiAlias = disableAntiAlias;
+        clone->disableAutoLinks = disableAutoLinks;
+        clone->cadDetectDone = cadDetectDone;
+        clone->cadDetectEnable = cadDetectEnable;
+        clone->cadDetectScore = cadDetectScore;
+        clone->cadRasterDominant = cadRasterDominant;
+        clone->cadHairlineVector = cadHairlineVector;
+        clone->cadEnhanceOverride = cadEnhanceOverride;
 
-    if (!decryptionKey.s && pdfdoc && pdfdoc->crypt) {
-        clone->decryptionKey = Str();
+        if (!decryptionKey.s && pdfdoc && pdfdoc->crypt) {
+            clone->decryptionKey = Str();
+        }
     }
 
     return clone;
@@ -2913,7 +3892,7 @@ TempStr ParseEmbeddedStreamNumber(Str path, int* streamNoOut) {
     Str streamNoStr = ParseEmbeddedPdfName(path2).streamNoStr;
     if (streamNoStr) {
         Str rest = str::Parse(streamNoStr, ":%d", &streamNo);
-        bool hasAttachmentName = rest && str::StartsWith(rest, StrL(":attachname="));
+        bool hasAttachmentName = str::StartsWith(rest, StrL(":attachname="));
         // there shouldn't be any left unparsed data except attachment name metadata
         ReportIf(!rest.s || (rest.s[0] && !hasAttachmentName));
         if (!rest.s || (rest.s[0] && !hasAttachmentName)) {
@@ -2985,20 +3964,20 @@ static Str TxtFileToHTML(Str path) {
 
     TempStr data = fd;
     data = str::ReplaceTemp(data, StrL("&"), StrL("&amp;"));
-    if (!data) {
+    if (len(data) == 0) {
         return {};
     }
     data = str::ReplaceTemp(data, StrL(">"), StrL("&gt;"));
-    if (!data) {
+    if (len(data) == 0) {
         return {};
     }
     data = str::ReplaceTemp(data, StrL("<"), StrL("&lt;"));
-    if (!data) {
+    if (len(data) == 0) {
         return {};
     }
 
     str::Builder d;
-    d.Append(R"(<html>
+    d.Append(StrL(R"(<html>
     <head>
 <style>
     body {
@@ -3010,14 +3989,14 @@ static Str TxtFileToHTML(Str path) {
 </style>
     </head>
 <body>
-    <pre>)");
+    <pre>)"));
     bool ok = d.Append(data);
     if (!ok) {
         return {};
     }
-    d.Append(R"(</pre>
+    d.Append(StrL(R"(</pre>
 </body>
-</html>)");
+</html>)"));
     return d.TakeStr();
 }
 
@@ -3161,7 +4140,7 @@ static TempStr EbookLineSpacingCssTemp(float lineSpacing) {
 // another inline element. pre, code, kbd, samp and tt are left out on purpose,
 // so code stays monospace
 static TempStr EbookFontFamilyCssTemp(Str fontName) {
-    if (!fontName) {
+    if (len(fontName) == 0) {
         return {};
     }
     return fmt(
@@ -3205,7 +4184,7 @@ TempStr EbookGeneratedCssTemp(Str fontName, const Vec<float>* margin, float line
     TempStr res = EbookFontFamilyCssTemp(EbookFontNameFromSetting(fontName));
     TempStr parts[] = {EbookMarginCssTemp(margin, displayDPI), EbookLineSpacingCssTemp(lineSpacing)};
     for (TempStr part : parts) {
-        if (!part) {
+        if (len(part) == 0) {
             continue;
         }
         res = res ? str::JoinTemp(res, part) : part;
@@ -3213,9 +4192,10 @@ TempStr EbookGeneratedCssTemp(Str fontName, const Vec<float>* margin, float line
     return res;
 }
 
-#if defined(DEBUG)
+#if IS_DEBUG
 bool EngineMupdf_UnitTestEbookLineSpacingCss() {
-    return !EbookLineSpacingCssTemp(0) && !EbookLineSpacingCssTemp(0.49f) && !EbookLineSpacingCssTemp(5.01f) &&
+    return len(EbookLineSpacingCssTemp(0)) == 0 && len(EbookLineSpacingCssTemp(0.49f)) == 0 &&
+           len(EbookLineSpacingCssTemp(5.01f)) == 0 &&
            str::Eq(EbookLineSpacingCssTemp(1.5f), StrL("body, body * { line-height: 1.5 !important; }\n"));
 }
 
@@ -3224,12 +4204,12 @@ bool EngineMupdf_UnitTestEbookFontFamilyCss() {
         return false;
     }
     TempStr css = EbookFontFamilyCssTemp(StrL("Segoe UI"));
-    if (!str::Contains(css, "font-family: \"Segoe UI\" !important;")) {
+    if (!str::Contains(css, StrL("font-family: \"Segoe UI\" !important;"))) {
         return false;
     }
     // the elements publishers actually hang fonts off, and no monospace ones
-    return str::Contains(css, "span,") && str::Contains(css, "div,") && str::Contains(css, "li,") &&
-           !str::Contains(css, "pre,") && !str::Contains(css, "code,");
+    return str::Contains(css, StrL("span,")) && str::Contains(css, StrL("div,")) && str::Contains(css, StrL("li,")) &&
+           !str::Contains(css, StrL("pre,")) && !str::Contains(css, StrL("code,"));
 }
 #endif
 
@@ -3293,28 +4273,28 @@ static EBookUISettings MergeEBookUI(const EBookUI* global, const FileEBookUI* pe
     return res;
 }
 
-#if defined(DEBUG)
+#if IS_DEBUG
 bool EngineMupdf_UnitTestEbookMarginCss() {
     Vec<float> m;
     // nothing set, and 3 values (not a CSS margin), leave mupdf's default alone
     if (EbookMarginCssTemp(nullptr, 96) || EbookMarginCssTemp(&m, 96)) {
         return false;
     }
-    m.Append(1);
-    m.Append(2);
-    m.Append(3);
+    VecAppend(m, 1);
+    VecAppend(m, 2);
+    VecAppend(m, 3);
     if (EbookMarginCssTemp(&m, 96)) {
         return false;
     }
     // 0 is a real value: no margin at all
-    m.Reset();
-    m.Append(0);
+    VecReset(m);
+    VecAppend(m, 0);
     if (!str::Eq(EbookMarginCssTemp(&m, 96), StrL("@page { margin: 0pt !important; }\n"))) {
         return false;
     }
     // one value for all four sides, and points, so it scales with the display
-    m.Reset();
-    m.Append(24);
+    VecReset(m);
+    VecAppend(m, 24);
     if (!str::Eq(EbookMarginCssTemp(&m, 96), StrL("@page { margin: 24pt !important; }\n"))) {
         return false;
     }
@@ -3322,29 +4302,29 @@ bool EngineMupdf_UnitTestEbookMarginCss() {
         return false;
     }
     // two and four values pass through in CSS order
-    m.Reset();
-    m.Append(36);
-    m.Append(24);
+    VecReset(m);
+    VecAppend(m, 36);
+    VecAppend(m, 24);
     if (!str::Eq(EbookMarginCssTemp(&m, 96), StrL("@page { margin: 36pt 24pt !important; }\n"))) {
         return false;
     }
-    m.Reset();
-    m.Append(1);
-    m.Append(2);
-    m.Append(3);
-    m.Append(4);
+    VecReset(m);
+    VecAppend(m, 1);
+    VecAppend(m, 2);
+    VecAppend(m, 3);
+    VecAppend(m, 4);
     if (!str::Eq(EbookMarginCssTemp(&m, 96), StrL("@page { margin: 1pt 2pt 3pt 4pt !important; }\n"))) {
         return false;
     }
     // out of range is ignored rather than clamped
-    m.Reset();
-    m.Append(-1);
+    VecReset(m);
+    VecAppend(m, -1);
     if (EbookMarginCssTemp(&m, 96)) {
         return false;
     }
-    m.Reset();
-    m.Append(200.1f);
-    return !EbookMarginCssTemp(&m, 96);
+    VecReset(m);
+    VecAppend(m, 200.1f);
+    return len(EbookMarginCssTemp(&m, 96)) == 0;
 }
 
 bool EngineMupdf_UnitTestMergeEBookUI() {
@@ -3352,7 +4332,7 @@ bool EngineMupdf_UnitTestMergeEBookUI() {
     g.fontName = StrL("Georgia");
     g.fontSize = 10;
     Vec<float> gMargin;
-    gMargin.Append(24);
+    VecAppend(gMargin, 24);
     g.margin = &gMargin;
     g.lineSpacing = 1.5f;
     g.layoutDx = 400;
@@ -3377,7 +4357,7 @@ bool EngineMupdf_UnitTestMergeEBookUI() {
     f.fontName = StrL("Segoe UI");
     f.fontSize = 14;
     Vec<float> fMargin; // this document has no margin at all, the global one has 24pt
-    fMargin.Append(0);
+    VecAppend(fMargin, 0);
     f.margin = &fMargin;
     f.ignoreDocumentCSS = StrL("false");
     s = MergeEBookUI(&g, &f);
@@ -3387,6 +4367,53 @@ bool EngineMupdf_UnitTestMergeEBookUI() {
     // the tri-state can turn the global true back off
     return !s.ignoreDocumentCSS;
 }
+
+static TempStr AssemblePdfTemp(const char* const* objs, int nObjs) {
+    str::Builder b;
+    b.Append(StrL("%PDF-1.4\n"));
+    Vec<int> offs;
+    VecReserve(offs, nObjs);
+    for (int i = 0; i < nObjs; i++) {
+        VecAppend(offs, len(b));
+        b.Append(fmt("%d 0 obj\n%s\nendobj\n", i + 1, Str(objs[i])));
+    }
+    int xref = len(b);
+    b.Append(fmt("xref\n0 %d\n0000000000 65535 f \n", nObjs + 1));
+    for (int i = 0; i < nObjs; i++) {
+        b.Append(fmt("%010d 00000 n \n", offs[i]));
+    }
+    b.Append(fmt("trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n", nObjs + 1, xref));
+    b.Append(StrL("%%EOF\n"));
+    return ToStrTemp(b);
+}
+
+bool EngineMupdf_UnitTestPageLabels() {
+    const char* objs[] = {
+        "<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /S /r >> 3 << /S /D >>] >> >>",
+        "<< /Type /Pages /Count 5 /Kids [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R] >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+    };
+    TempStr pdf = AssemblePdfTemp(objs, dimof(objs));
+    EngineBase* engine = CreateEngineMupdfFromData(pdf, StrL("labels.pdf"), nullptr);
+    if (!engine) {
+        return false;
+    }
+    bool ok = engine->HasPageLabels() && engine->PageCount() == 5 && engine->LogicalPageCount() == 2;
+    ok = ok && str::Eq(engine->GetPageLabeTemp(1), StrL("i"));
+    ok = ok && str::Eq(engine->GetPageLabeTemp(2), StrL("ii"));
+    ok = ok && str::Eq(engine->GetPageLabeTemp(3), StrL("iii"));
+    ok = ok && str::Eq(engine->GetPageLabeTemp(4), StrL("1"));
+    ok = ok && str::Eq(engine->GetPageLabeTemp(5), StrL("2"));
+    ok = ok && engine->GetPageByLabel(StrL("i")) == 1;
+    ok = ok && engine->GetPageByLabel(StrL("1")) == 4;
+    ok = ok && engine->GetPageByLabel(StrL("2")) == 5;
+    SafeEngineRelease(&engine);
+    return ok;
+}
 #endif
 
 // can mupdf turn this font-family into a font? mirrors fz_load_html_font():
@@ -3394,7 +4421,8 @@ bool EngineMupdf_UnitTestMergeEBookUI() {
 // used to tell the user their EBookUI.FontName didn't take (issue #4600)
 static bool EbookFontIsAvailable(fz_context* ctx, Str fontName) {
     const char* name = CStrTemp(fontName);
-    if (str::EqI(name, "serif") || str::EqI(name, "sans-serif") || str::EqI(name, "monospace")) {
+    if (str::EqI(Str(name), StrL("serif")) || str::EqI(Str(name), StrL("sans-serif")) ||
+        str::EqI(Str(name), StrL("monospace"))) {
         return true;
     }
     int size = 0;
@@ -3491,6 +4519,12 @@ bool EngineMupdf::LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI
         }
         usePublisherCss = s.ignoreDocumentCSS ? 0 : 1;
     }
+    ebookUserCss = str::Dup(arena, userCss);
+    ebookPublisherCss = usePublisherCss;
+    TempStr themeCss = ReflowDocumentThemeCssTemp();
+    if (themeCss) {
+        userCss = str::JoinTemp(userCss, themeCss);
+    }
     const char* userCssZ = CStrTemp(userCss);
 
     float dx, dy, fontDy;
@@ -3528,6 +4562,9 @@ bool EngineMupdf::LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI
         dx = DpiScale(ldx, displayDPI);
         dy = DpiScale(ldy, displayDPI);
         fontDy = DpiScale(lfontDy, displayDPI);
+        ebookLayoutW = dx;
+        ebookLayoutH = dy;
+        ebookLayoutEm = fontDy;
         fz_layout_document(ctx, _doc, dx, dy, fontDy);
     }
     fz_always(ctx) {
@@ -3549,7 +4586,7 @@ bool EngineMupdf::LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI
     // After fz_layout_document, so a font that was used is already cached.
     if (requestedFontName && isReflowable) {
         if (!EbookFontIsAvailable(ctx, requestedFontName)) {
-            ebookFontUnavailable = str::Dup(requestedFontName);
+            ebookFontUnavailable = str::Dup(arena, requestedFontName);
         }
     }
 
@@ -3576,7 +4613,7 @@ bool EngineMupdf::LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI
             decryptKey = pdf_crypt_key(ctx, pdfdoc->crypt);
         }
         Str pwd = pwdUI->GetPassword(FilePath(), digest, decryptKey, &saveKey);
-        if (!pwd) {
+        if (len(pwd) == 0) {
             // password not given or encryption key has been remembered
             ok = saveKey;
             break;
@@ -3590,12 +4627,9 @@ bool EngineMupdf::LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI
 #if OS_WIN
         if (!ok) {
             // TODO: this is only part of SASLprep
-            // NormalizeString() returns a TempStr; dup because pwd is owned and freed below
             TempStr normalized = NormalizeString(pwd, 5 /* NormalizationKC */);
-            str::Free(pwd);
-            pwd = str::Dup(normalized);
-            if (pwd) {
-                pwdA = pwd;
+            pwdA = normalized;
+            if (pwdA) {
                 ok = fz_authenticate_password(ctx, _doc, pwdA.s);
             }
         }
@@ -3604,7 +4638,7 @@ bool EngineMupdf::LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI
         // note: such passwords aren't portable when stored as Unicode text
 #if OS_WIN
         if (!ok && GetACP() != 1252) {
-            TempStr pwd_ansi = pwd;
+            TempStr pwd_ansi = pwdA;
             TempWStr pwdCp1252 = strconv::StrCPToWStrTemp(pwd_ansi, 1252);
             pwdA = ToUtf8Temp(pwdCp1252);
             ok = fz_authenticate_password(ctx, _doc, pwdA.s);
@@ -3625,6 +4659,9 @@ bool EngineMupdf::LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI
     return ok;
 }
 
+// Catalog /PageLayout (facing vs book) and /ViewerPreferences /Direction
+// (R2L vs L2R). Direction is a document-stated wish: r2lDeclared keeps a
+// remembered manga-mode "off" from silently overriding it (issue #2022).
 static PageLayout GetPreferredLayout(fz_context* ctx, fz_document* doc) {
     PageLayout layout(PageLayout::Type::Single);
     pdf_document* pdfdoc = pdf_specifics(ctx, doc);
@@ -3668,6 +4705,9 @@ static PageLayout GetPreferredLayout(fz_context* ctx, fz_document* doc) {
         direction = pdf_to_name(ctx, pdf_dict_gets(ctx, prefs, "Direction"));
         if (str::Eq(Str(direction), StrL("R2L"))) {
             layout.r2l = true;
+            layout.r2lDeclared = true;
+        } else if (str::Eq(Str(direction), StrL("L2R"))) {
+            layout.r2lDeclared = true;
         }
     }
     fz_catch(ctx) {
@@ -3769,19 +4809,54 @@ static bool IsLinearizedFile(EngineMupdf* e) {
     return isLinear;
 }
 
+// one vector, pageCount full entries: PDF, XPS and single-chapter reflow docs
+static void InitChapterPagesFlat(EngineMupdf* e) {
+    VecResize(e->chapterPages, 1);
+    auto* v = New<Vec<FzPageInfo*>>(e->arena);
+    e->chapterPages[0] = v;
+    for (int i = 0; i < e->pageCount; i++) {
+        auto* pi = New<FzPageInfo>(e->arena);
+        pi->loc = {1, i + 1};
+        pi->pageNo = i + 1;
+        VecAppend(*v, pi);
+    }
+}
+
+// nCh vectors; chapter 1 gets its real n1 pages, every other chapter gets a
+// single placeholder page that LayOutChapter() replaces on demand. Every
+// unlaid chapter counts as 1 page, so flat numbering is n1 pages for chapter
+// 1, then one more per following chapter -- computed directly (not via
+// chapters.PageNoFromLocation()) so creating a placeholder never triggers a
+// chapter layout.
+static void InitChapterPagesLazy(EngineMupdf* e, int nCh, int n1) {
+    VecResize(e->chapterPages, nCh);
+    for (int ch = 1; ch <= nCh; ch++) {
+        auto* v = New<Vec<FzPageInfo*>>(e->arena);
+        e->chapterPages[ch - 1] = v;
+        int cnt = (ch == 1) ? n1 : 1;
+        for (int p = 1; p <= cnt; p++) {
+            auto* pi = New<FzPageInfo>(e->arena);
+            pi->loc = {ch, p};
+            pi->pageNo = (ch == 1) ? p : (n1 + (ch - 1));
+            VecAppend(*v, pi);
+        }
+    }
+}
+
 static void FinishNonPDFLoading(EngineMupdf* e) {
     ScopedRecursiveMutex scope(&e->docLock);
 
     auto* ctx = e->Ctx();
-    for (int i = 0; i < e->pageCount; i++) {
+    if (e->isReflowable) {
+        // every page of a reflow layout shares one mediabox; load only page
+        // {1,1} to learn it instead of fz_load_page-ing (and laying out) every
+        // page, which for a chaptered doc would lay out every chapter
         fz_rect mbox{};
-        fz_matrix page_ctm{};
         fz_page* page = nullptr;
         fz_var(page);
         fz_var(mbox);
         fz_try(ctx) {
-            page = nullptr;
-            page = fz_load_page(ctx, e->_doc, i);
+            page = fz_load_chapter_page(ctx, e->_doc, 0, 0);
             mbox = fz_bound_page(ctx, page);
         }
         fz_always(ctx) {
@@ -3792,17 +4867,47 @@ static void FinishNonPDFLoading(EngineMupdf* e) {
             mbox = {};
         }
         if (fz_is_empty_rect(mbox)) {
-            fz_warn(ctx, "cannot find page size for page %d", i);
+            fz_warn(ctx, "cannot find page size for reflowable document");
             mbox.x0 = 0;
             mbox.y0 = 0;
             mbox.x1 = 612;
             mbox.y1 = 792;
         }
-        FzPageInfo* pageInfo = e->pages[i];
-        pageInfo->mediabox = ToRectF(mbox);
-        pageInfo->pageNo = i + 1;
+        RectF mediabox = ToRectF(mbox);
+        e->reflowMediabox = mediabox;
+        ForEachPageInfo(e, [mediabox](FzPageInfo* pi) { pi->mediabox = mediabox; });
+    } else {
+        Vec<FzPageInfo*>* v = e->chapterPages[0];
+        for (int i = 0; i < e->pageCount; i++) {
+            fz_rect mbox{};
+            fz_page* page = nullptr;
+            fz_var(page);
+            fz_var(mbox);
+            fz_try(ctx) {
+                page = fz_load_page(ctx, e->_doc, i);
+                mbox = fz_bound_page(ctx, page);
+            }
+            fz_always(ctx) {
+                fz_drop_page(ctx, page);
+            }
+            fz_catch(ctx) {
+                fz_report_error(ctx);
+                mbox = {};
+            }
+            if (fz_is_empty_rect(mbox)) {
+                fz_warn(ctx, "cannot find page size for page %d", i);
+                mbox.x0 = 0;
+                mbox.y0 = 0;
+                mbox.x1 = 612;
+                mbox.y1 = 792;
+            }
+            FzPageInfo* pageInfo = (*v)[i];
+            pageInfo->mediabox = ToRectF(mbox);
+        }
     }
 
+    // cheap for epub too: NCX/nav is parsed at open, fz_load_outline() just
+    // returns it, no chapter layout involved (verified in epub-doc.c)
     fz_try(ctx) {
         e->outline = fz_load_outline(ctx, e->_doc);
     }
@@ -3827,7 +4932,7 @@ static fz_buffer* EngineMupdfLoadExternalStream(fz_context* ctx, const char* fil
     EngineMupdf* e = (EngineMupdf*)opaque;
     Str pdfPath = e ? e->FilePath() : Str{};
     Str spec = Str(filespec);
-    if (!pdfPath || !spec) {
+    if (len(pdfPath) == 0 || len(spec) == 0) {
         return nullptr;
     }
     // sibling-only: reject anything with a path separator or drive spec so the
@@ -3860,17 +4965,61 @@ bool EngineMupdf::FinishLoading() {
     if (pdfdoc) {
         // allow loading external-file image streams from next to the PDF (#3731)
         pdf_set_load_external_stream_fn(ctx, pdfdoc, EngineMupdfLoadExternalStream, this);
+        // records every change so Undo / Redo can step through them. From here
+        // on MuPDF throws on a change made outside an operation, so anything
+        // that edits the document goes through EngineMupdfBeginOperation()
+        // (MuPDF's own annotation setters begin one themselves).
+        fz_try(ctx) {
+            pdf_enable_journal(ctx, pdfdoc);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            logf("FinishLoading: pdf_enable_journal() failed\n");
+        }
+    }
+
+    // only EPUB reports more than one chapter; every other format keeps the
+    // single flat fz_count_pages() path and behaves exactly as before
+    int nCh = 1;
+    fz_try(ctx) {
+        nCh = fz_count_chapters(ctx, _doc);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        nCh = 1;
+    }
+    if (nCh < 1) {
+        nCh = 1;
     }
 
     pageCount = 0;
     fz_var(pageCount);
-    fz_try(ctx) {
-        // this call might throw the first time
-        pageCount = fz_count_pages(ctx, _doc);
-    }
-    fz_catch(ctx) {
-        fz_report_error(ctx);
-        pageCount = 0;
+    bool lazyChapters = nCh > 1;
+    int n1 = 1;
+    if (lazyChapters) {
+        chapters.Init(nCh);
+        fz_try(ctx) {
+            n1 = fz_count_chapter_pages(ctx, _doc, 0);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            n1 = 1;
+        }
+        if (n1 < 1) {
+            n1 = 1;
+        }
+        chapters.SetPageCount(1, n1);
+        SetPageCountFromChapters();
+        logf("EngineMupdf::FinishLoading: %d chapters, chapter 1 has %d pages\n", nCh, n1);
+    } else {
+        fz_try(ctx) {
+            // this call might throw the first time
+            pageCount = fz_count_pages(ctx, _doc);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            pageCount = 0;
+        }
     }
     if (pageCount == 0) {
         fz_warn(ctx, "document has no pages");
@@ -3895,9 +5044,10 @@ bool EngineMupdf::FinishLoading() {
     allowsPrinting = fz_has_permission(ctx, _doc, FZ_PERMISSION_PRINT);
     allowsCopyingText = fz_has_permission(ctx, _doc, FZ_PERMISSION_COPY);
 
-    for (int i = 0; i < pageCount; i++) {
-        auto* pi = New<FzPageInfo>(arena);
-        pages.Append(pi);
+    if (lazyChapters) {
+        InitChapterPagesLazy(this, nCh, n1);
+    } else {
+        InitChapterPagesFlat(this);
     }
     if (!pdfdoc) {
         FinishNonPDFLoading(this);
@@ -3923,15 +5073,14 @@ bool EngineMupdf::FinishLoading() {
             mbox = {};
         }
         if (fz_is_empty_rect(mbox)) {
-            logfa("cannot find page size for page %d", pageNo);
+            logf("cannot find page size for page %d", pageNo);
             mbox.x0 = 0;
             mbox.y0 = 0;
             mbox.x1 = 612;
             mbox.y1 = 792;
         }
-        FzPageInfo* pageInfo = pages[pageNo];
+        FzPageInfo* pageInfo = (*chapterPages[0])[pageNo];
         pageInfo->mediabox = ToRectF(mbox);
-        pageInfo->pageNo = pageNo + 1;
     }
 
     fz_try(ctx) {
@@ -3943,7 +5092,7 @@ bool EngineMupdf::FinishLoading() {
         // this information is not critical and checking the
         // error might prevent loading some pdfs that would
         // otherwise get displayed
-        logfa("Couldn't load outline for '%s'\n", FilePath());
+        logf("Couldn't load outline for '%s'\n", FilePath());
     }
 
     attachments = PdfLoadAttachments(ctx, pdfdoc, FilePath());
@@ -3954,7 +5103,7 @@ bool EngineMupdf::FinishLoading() {
         // keep a copy of the Info dictionary, as accessing the original
         // isn't thread safe and we don't want to block for this when
         // displaying document properties
-        origInfo = pdf_dict_gets(ctx, pdf_trailer(ctx, pdfdoc), "Info");
+        origInfo = PdfInfoFromTrailers(ctx, pdfdoc);
 
         if (origInfo) {
             pdfInfo = PdfCopyStrDict(ctx, pdfdoc, origInfo);
@@ -3962,6 +5111,7 @@ bool EngineMupdf::FinishLoading() {
         if (!pdfInfo) {
             pdfInfo = pdf_new_dict(ctx, pdfdoc, 4);
         }
+        PdfFillInfoFromXmp(ctx, pdfdoc, pdfInfo);
         // also remember linearization and tagged states at this point
         if (IsLinearizedFile(this)) {
             pdf_dict_puts_drop(ctx, pdfInfo, "Linearized", PDF_TRUE);
@@ -3980,7 +5130,7 @@ bool EngineMupdf::FinishLoading() {
             for (int i = 0; i < n; i++) {
                 pdf_obj* intent = pdf_dict_gets(ctx, pdf_array_get(ctx, intents, i), "S");
                 if (pdf_is_name(ctx, intent) && !pdf_is_indirect(ctx, intent) &&
-                    str::StartsWith(pdf_to_name(ctx, intent), StrL("GTS_PDF"))) {
+                    str::StartsWith(Str(pdf_to_name(ctx, intent)), StrL("GTS_PDF"))) {
                     pdf_array_push(ctx, list, intent);
                 }
             }
@@ -4004,7 +5154,7 @@ bool EngineMupdf::FinishLoading() {
     fz_try(ctx) {
         labels = pdf_dict_getp(ctx, pdf_trailer(ctx, pdfdoc), "Root/PageLabels");
         if (labels) {
-            pageLabels = BuildPageLabelVec(ctx, labels, PageCount());
+            pageLabels = BuildPageLabelVec(arena, ctx, labels, PageCount());
         }
     }
     fz_catch(ctx) {
@@ -4013,6 +5163,15 @@ bool EngineMupdf::FinishLoading() {
     }
     if (pageLabels) {
         hasPageLabels = true;
+        int maxN = 0;
+        int n = len(*pageLabels);
+        for (int i = 0; i < n; i++) {
+            int v = 0;
+            if (str::Parse((*pageLabels)[i], "%d%$", &v).s && v > maxN) {
+                maxN = v;
+            }
+        }
+        logicalPageCount = maxN;
     }
 
     // enable mupdf's JavaScript engine so form-field calculate / validate /
@@ -4041,17 +5200,78 @@ bool EngineMupdf::FinishLoading() {
     return true;
 }
 
+// Lays out one EPUB chapter on demand; single-chapter docs are laid out at
+// FinishLoading. IsLaidOut() makes repeat/racing calls and a post-reset
+// re-layout idempotent, trusting the freshly counted page total each time.
+int EngineMupdf::LayOutChapter(int chapter) {
+    if (chapters.IsLaidOut(chapter)) {
+        return chapters.PageCount(chapter);
+    }
+
+    auto* ctx = Ctx();
+    int n = 1;
+    {
+        ScopedRecursiveMutex docScope(&docLock);
+        fz_var(n);
+        fz_try(ctx) {
+            n = fz_count_chapter_pages(ctx, _doc, chapter - 1);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            n = 1;
+        }
+    }
+    if (n < 1) {
+        n = 1;
+    }
+
+    {
+        ScopedRecursiveMutex pagesScope(&pagesLock);
+        if (chapter >= 1 && chapter <= len(chapterPages)) {
+            Vec<FzPageInfo*>* v = chapterPages[chapter - 1];
+            RectF mbox = len(*v) > 0 ? (*v)[0]->mediabox : RectF{};
+            while (len(*v) < n) {
+                int p = len(*v) + 1;
+                auto* pi = New<FzPageInfo>(arena);
+                pi->loc = {chapter, p};
+                pi->pageNo = chapters.PageNoFromLocation(pi->loc);
+                pi->mediabox = mbox;
+                VecAppend(*v, pi);
+            }
+            // stale tail from before a re-pagination that shrank this chapter
+            while (len(*v) > n) {
+                FzPageInfo* pi = (*v)[len(*v) - 1];
+                pi->~FzPageInfo();
+                VecRemoveLast(*v);
+            }
+        }
+    }
+
+    chapters.SetPageCount(chapter, n);
+    SetPageCountFromChapters();
+
+    logf("EngineMupdf::LayOutChapter: chapter %d -> %d pages\n", chapter, n);
+    return n;
+}
+
 static NO_INLINE IPageDestination* DestFromAttachment(EngineMupdf* engine, fz_outline* outline) {
-    PageDestination* dest = new PageDestination();
+    PageDestination* dest = New<PageDestination>(engine->arena);
     dest->kind = kindDestinationAttachment;
-    // WCHAR* path = ToWStr(outline->uri);
-    dest->name = str::Dup(outline->title);
-    // page is really a stream number
+    dest->name = str::Dup(Str(outline->title));
     Str title = outline->title ? Str(outline->title) : StrL("");
     TempStr nameHex = str::MemToHexTemp(title);
     dest->value = str::Dup(fmt("%s:%d:attachname=%s", engine->FilePath(), outline->page.page, nameHex));
     dest->pageNo = outline->page.page;
     return dest;
+}
+
+static bool HasAlnumW(const WStr& ws) {
+    for (int i = 0; i < ws.len; i++) {
+        if (IsCharAlphaNumericW(ws.s[i])) {
+            return true;
+        }
+    }
+    return false;
 }
 
 TocItem* EngineMupdf::BuildTocTree(TocItem* parent, fz_outline* outline, int& idCounter, bool isAttachment, int depth) {
@@ -4060,31 +5280,40 @@ TocItem* EngineMupdf::BuildTocTree(TocItem* parent, fz_outline* outline, int& id
     }
     TocItem* root = nullptr;
     TocItem* curr = nullptr;
+    int siblingNo = 0;
 
-    auto* ctx = Ctx();
     while (outline) {
+        siblingNo++;
         TempStr name;
+        TempWStr nameW;
         if (outline->title) {
             // must convert to Unicode because PdfCleanString() doesn't work on utf8
-            TempWStr nameW = ToWStrTemp(Str(outline->title));
+            nameW = ToWStrTemp(Str(outline->title));
             PdfCleanStringInPlace(nameW);
             name = ToUtf8Temp(nameW);
         }
+        if (!HasAlnumW(nameW)) {
+            // a label with no letter or digit (e.g. " . " in some epubs) tells
+            // the user nothing; number the item among its siblings instead
+            // (engines have no translations, so a bare number)
+            name = fmt("%d", siblingNo);
+        }
 
-        int pageNo = FzGetPageNo(ctx, _doc, nullptr, outline);
-
+        // for a chaptered doc, dest resolves only the chapter here (cheap);
+        // pageNo stays -1 until ResolveDest() runs the full resolve on click
         IPageDestination* dest = nullptr;
         if (isAttachment) {
             dest = DestFromAttachment(this, outline);
         } else {
-            dest = NewPageDestinationMupdf(ctx, _doc, nullptr, outline);
+            dest = NewPageDestinationMupdf(this, nullptr, outline, arena);
         }
-        TocItem* item = NewTocItemWithDestination(parent, name, dest);
+        TocItem* item = NewTocItemWithDestination(arena, parent, name, dest);
         item->isOpenDefault = outline->is_open;
         item->id = ++idCounter;
         // style (bold / italic / color) is filled in by ApplyOutlineStyles()
         item->fontFlags = 0;
-        item->pageNo = pageNo;
+        item->pageNo = dest ? dest->pageNo : -1;
+        item->loc = dest ? dest->loc : kInvalidLocation;
         ReportIf(!isAttachment && !item->PageNumbersMatch());
 
         if (outline->down) {
@@ -4122,8 +5351,8 @@ static void ApplyOutlineStyles(fz_context* ctx, fz_outline_iterator* iter, TocIt
         if (!it) {
             return;
         }
-        // our fontBit* are the /F bit numbers (fontBitItalic is bit 1 of /F,
-        // fontBitBold is bit 2) and mupdf keeps /F as-is, so the low two bits
+        // our kFontBit* are the /F bit numbers (kFontBitItalic is bit 1 of /F,
+        // kFontBitBold is bit 2) and mupdf keeps /F as-is, so the low two bits
         // carry over directly. Don't go by fz_outline's FZ_OUTLINE_FLAG_*
         // names, they have bold and italic the other way round from the spec
         item->fontFlags = it->flags & 3;
@@ -4174,18 +5403,353 @@ static void ApplyOutlineStyles(fz_context* ctx, fz_document* doc, TocItem* first
     fz_drop_outline_iterator(ctx, iter);
 }
 
-// TODO: maybe build in FinishLoading
+static void AppendTocChild(TocItem* parent, TocItem* item) {
+    item->parent = parent;
+    item->next = nullptr;
+    if (!parent->child) {
+        parent->child = item;
+        return;
+    }
+    TocItem* p = parent->child;
+    while (p->next) {
+        p = p->next;
+    }
+    p->next = item;
+}
+
+// Numbered heading prefix as in academic papers: "I.", "II.A.", "1.2."
+// (sioyek is_string_titlish). Match must start at the beginning of the title.
+static int HeadingNumberPrefixLen(Str s) {
+    int n = len(s);
+    int i = 0;
+    bool any = false;
+    while (i < n) {
+        int start = i;
+        while (i < n) {
+            char c = s.s[i];
+            if ((c >= '0' && c <= '9') || c == 'I' || c == 'V' || c == 'X' || c == 'C') {
+                i++;
+            } else {
+                break;
+            }
+        }
+        if (i == start || i >= n || s.s[i] != '.') {
+            break;
+        }
+        i++;
+        any = true;
+    }
+    if (!any) {
+        return 0;
+    }
+    return i;
+}
+
+static bool IsHeadingTitle(Str s) {
+    int n = len(s);
+    if (n < 6 || n > 160) {
+        return false;
+    }
+    int prefix = HeadingNumberPrefixLen(s);
+    if (prefix <= 0) {
+        return false;
+    }
+    int i = prefix;
+    while (i < n && s.s[i] == ' ') {
+        i++;
+    }
+    if (i >= n) {
+        return false;
+    }
+    unsigned char c = (unsigned char)s.s[i];
+    if (c >= 'a' && c <= 'z') {
+        return false;
+    }
+    return true;
+}
+
+// sioyek is_title_parent_of: walk until the parent hits a space. Same title if
+// the child hits a space there too (running headers). Else the parent owns
+// numbered children such as "II." → "II.A.".
+static bool HeadingIsParentOf(Str parent, Str child, bool* sameOut) {
+    *sameOut = false;
+    int n = std::min(len(parent), len(child));
+    for (int i = 0; i < n; i++) {
+        if (parent.s[i] == ' ') {
+            if (child.s[i] == ' ') {
+                *sameOut = true;
+                return false;
+            }
+            return true;
+        }
+        if (child.s[i] != parent.s[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void AppendHeadingLineText(fz_stext_line* line, str::Builder& b) {
+    for (fz_stext_char* c = line->first_char; c; c = c->next) {
+        int rune = c->c;
+        if (rune <= 0 || rune == 0xFFFD) {
+            continue;
+        }
+        bool isWs = rune > 0 && rune <= 0x7f && str::IsWs((char)rune);
+        if (isWs) {
+            if (len(b) == 0 || b.LastChar() == ' ') {
+                continue;
+            }
+            b.AppendChar(' ');
+            continue;
+        }
+        if (rune < 32) {
+            continue;
+        }
+        char buf[4];
+        int n = fz_runetochar(buf, rune);
+        if (n > 0) {
+            b.Append(Str(buf, n));
+        }
+    }
+}
+
+static constexpr int kMaxGeneratedTocEntries = 400;
+
+// When the PDF has no outline, build one from numbered headings (issue #5724),
+// same heuristic as sioyek: a short line starting with "I." / "1.2." / "II.A.".
+static TocItem* GenerateTocFromHeadings(EngineMupdf* e, int& idCounter) {
+    if (!e || !e->_doc || e->pageCount <= 0) {
+        return nullptr;
+    }
+    auto* ctx = e->Ctx();
+    if (!ctx) {
+        return nullptr;
+    }
+
+    Vec<TocItem*> stack;
+    TocItem* first = nullptr;
+    TocItem* lastTop = nullptr;
+    int nAdded = 0;
+    fz_stext_options opts = NewTextPageOptions();
+
+    auto addNode = [&](TocItem* node) {
+        bool same = false;
+        while (len(stack) > 0 && !HeadingIsParentOf(stack[len(stack) - 1]->title, node->title, &same) && !same) {
+            VecRemoveLast(stack);
+        }
+        if (same) {
+            FreeTocItemRec(e->arena, node);
+            return;
+        }
+        nAdded++;
+        if (len(stack) == 0) {
+            node->parent = nullptr;
+            if (lastTop) {
+                lastTop->next = node;
+            } else {
+                first = node;
+            }
+            lastTop = node;
+        } else {
+            AppendTocChild(stack[len(stack) - 1], node);
+        }
+        VecAppend(stack, node);
+    };
+
+    auto walkBlocks = [&](auto& self, fz_stext_block* block, int pageNo) -> void {
+        while (block && nAdded < kMaxGeneratedTocEntries) {
+            if (block->type == FZ_STEXT_BLOCK_STRUCT && block->u.s.down) {
+                self(self, block->u.s.down->first_block, pageNo);
+            } else if (block->type == FZ_STEXT_BLOCK_TEXT) {
+                for (fz_stext_line* line = block->u.t.first_line; line && nAdded < kMaxGeneratedTocEntries;
+                     line = line->next) {
+                    str::Builder b;
+                    AppendHeadingLineText(line, b);
+                    Str title = b.TakeStr();
+                    str::TrimWSInPlace(title, str::TrimOpt::Both);
+                    if (IsHeadingTitle(title)) {
+                        IPageDestination* dest = NewSimpleDest(e->arena, pageNo, RectF{0, line->bbox.y0, 0, 0}, 0, {});
+                        TocItem* item = NewTocItemWithDestination(e->arena, nullptr, title, dest);
+                        item->pageNo = pageNo;
+                        item->id = ++idCounter;
+                        item->isOpenDefault = true;
+                        addNode(item);
+                    }
+                    str::Free(title);
+                }
+            }
+            block = block->next;
+        }
+    };
+
+    TimeStamp t0 = TimeGet();
+    for (int i = 0; i < e->pageCount && nAdded < kMaxGeneratedTocEntries; i++) {
+        if (AtomicIntGet(&e->headingTocCancel)) {
+            break;
+        }
+        fz_page* page = nullptr;
+        fz_stext_page* stext = nullptr;
+        fz_var(page);
+        fz_var(stext);
+        // Take locks per page so a render thread can run between pages. Holding
+        // them for the whole document blocked the first page while every page
+        // was extracted (annot-stress-99.pdf).
+        ScopedRecursiveMutex csPages(&e->pagesLock);
+        ScopedMutex csRender(&e->renderLock);
+        ScopedRecursiveMutex csDoc(&e->docLock);
+        fz_try(ctx) {
+            page = fz_load_page(ctx, e->_doc, i);
+            stext = fz_new_stext_page_from_page(ctx, page, &opts);
+        }
+        fz_always(ctx) {
+            fz_drop_page(ctx, page);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            stext = nullptr;
+        }
+        if (stext) {
+            walkBlocks(walkBlocks, stext->first_block, i + 1);
+            fz_drop_stext_page(ctx, stext);
+        }
+    }
+    if (AtomicIntGet(&e->headingTocCancel)) {
+        FreeTocItemRec(e->arena, first);
+        return nullptr;
+    }
+    logf("GenerateTocFromHeadings: %d pages, %d entries, %.1f ms\n", e->pageCount, nAdded, TimeSinceInMs(t0));
+    return first;
+}
+
+// Swap in a heading-generated tree (plus attachments). Returns the previous
+// tree so the caller can TocChanged() before deleting it.
+static TocTree* ReplaceTocWithHeadings(EngineMupdf* e, TocItem* headings, int idCounter) {
+    if (!e || !headings) {
+        return nullptr;
+    }
+    ScopedRecursiveMutex cs(&e->docLock);
+    TocTree* old = e->tocTree;
+    e->tocTree = nullptr;
+    TocItem* root = headings;
+    if (e->attachments) {
+        TocItem* att = e->BuildTocTree(nullptr, e->attachments, idCounter, true, 0);
+        if (root) {
+            root->AddSiblingAtEnd(att);
+        } else {
+            root = att;
+        }
+    }
+    if (!root) {
+        return old;
+    }
+    TocItem* realRoot = AllocTocItem(e->arena, {}, 0);
+    realRoot->child = root;
+    e->tocTree = AllocTocTree(e->arena, realRoot);
+    return old;
+}
+
+static void HeadingTocBuildFinished(EngineMupdf* e) {
+    TocItem* headings = e->pendingHeadingToc;
+    e->pendingHeadingToc = nullptr;
+    int idCounter = e->pendingHeadingTocIdCounter;
+    TocTree* old = nullptr;
+    if (!AtomicIntGet(&e->headingTocCancel) && headings) {
+        old = ReplaceTocWithHeadings(e, headings, idCounter);
+    } else {
+        FreeTocItemRec(e->arena, headings);
+    }
+    e->headingTocDone = true;
+    Func0 cb = e->headingTocDoneCb;
+    cb.Call();
+    DestroyTocTree(old);
+    AtomicIntDec(&gDangerousThreadCount);
+    e->Release();
+}
+
+static void HeadingTocBuildThread(EngineMupdf* e) {
+    int idCounter = 0;
+    TocItem* headings = GenerateTocFromHeadings(e, idCounter);
+    e->ReleaseTextExtractionThreadContext();
+    if (AtomicIntGet(&e->headingTocCancel)) {
+        FreeTocItemRec(e->arena, headings);
+        AtomicIntDec(&gDangerousThreadCount);
+        e->Release();
+        return;
+    }
+    e->pendingHeadingToc = headings;
+    e->pendingHeadingTocIdCounter = idCounter;
+    auto fn = MkFunc0(HeadingTocBuildFinished, e);
+    uitask::Post(fn, "HeadingTocBuildFinished");
+}
+
+bool EngineMupdf::HasToc() {
+    if (tocTree) {
+        return true;
+    }
+    return outline != nullptr || attachments != nullptr;
+}
+
+bool EngineMupdf::HeadingTocPending() const {
+    return headingTocStarted && !headingTocDone;
+}
+
+// Kick off heading extraction on a background thread. DisplayModel starts this
+// after load so HasToc()/GetToc() on the UI thread stay cheap (issue #5724
+// still fills the sidebar when the scan finishes). Skipped for a chaptered doc:
+// it walks every page with fz_load_page(), which would lay out every chapter.
+void EngineMupdf::StartHeadingTocIfNeeded() {
+    if (outline) {
+        return;
+    }
+    if (HasChapters()) {
+        headingTocDone = true;
+        return;
+    }
+    {
+        ScopedRecursiveMutex cs(&docLock);
+        if (headingTocStarted) {
+            return;
+        }
+        headingTocStarted = true;
+    }
+    AddRef();
+    AtomicIntInc(&gDangerousThreadCount);
+    auto fn = MkFunc0(HeadingTocBuildThread, this);
+    ThreadHandle th = StartThread(fn, StrL("HeadingToc"));
+    if (!th) {
+        AtomicIntDec(&gDangerousThreadCount);
+        Release();
+        headingTocDone = true;
+        return;
+    }
+    SafeCloseThreadHandle(&th);
+}
+
 TocTree* EngineMupdf::GetToc() {
     if (tocTree) {
         return tocTree;
     }
-    if (outline == nullptr && attachments == nullptr) {
-        return nullptr;
+    // No DisplayModel (tests, -dump): generate headings now. The UI path starts
+    // StartHeadingTocIfNeeded() instead so opening a long document does not
+    // freeze the message loop. Skipped for a chaptered doc (see StartHeadingTocIfNeeded).
+    if (!outline && !headingTocStarted && !HasChapters()) {
+        headingTocStarted = true;
+        int idCounter = 0;
+        TocItem* headings = GenerateTocFromHeadings(this, idCounter);
+        ReplaceTocWithHeadings(this, headings, idCounter);
+        headingTocDone = true;
     }
+    return BuildToc();
+}
 
+TocTree* EngineMupdf::BuildToc() {
     int idCounter = 0;
 
     ScopedRecursiveMutex cs(&docLock);
+    if (tocTree) {
+        return tocTree;
+    }
 
     TocItem* root = nullptr;
     TocItem* att = nullptr;
@@ -4193,25 +5757,24 @@ TocTree* EngineMupdf::GetToc() {
         root = BuildTocTree(nullptr, outline, idCounter, false, 0);
         ApplyOutlineStyles(Ctx(), _doc, root);
     }
-    if (!attachments) {
-        goto MakeTree;
+    if (attachments) {
+        att = BuildTocTree(nullptr, attachments, idCounter, true, 0);
+        if (root) {
+            root->AddSiblingAtEnd(att);
+        } else {
+            root = att;
+        }
     }
-    att = BuildTocTree(nullptr, attachments, idCounter, true, 0);
-    if (root) {
-        root->AddSiblingAtEnd(att);
-    } else {
-        root = att;
-    }
-MakeTree:
     if (!root) {
         return nullptr;
     }
-    TocItem* realRoot = AllocTocItem(nullptr, {}, 0);
+    TocItem* realRoot = AllocTocItem(arena, {}, 0);
     realRoot->child = root;
-    tocTree = new TocTree(realRoot);
+    tocTree = AllocTocTree(arena, realRoot);
     return tocTree;
 }
 
+// engine-owned; do not delete
 IPageDestination* EngineMupdf::GetNamedDest(Str name) {
     if (!pdfdoc) {
         return nullptr;
@@ -4229,7 +5792,7 @@ IPageDestination* EngineMupdf::GetNamedDest(Str name) {
 
     // kDestUseDefault dx/dy selects the /XYZ path in DisplayModel::ScrollTo
     // (IsEmpty would also work for 0,0 but would treat unspecified as bottom).
-    pageDest = NewSimpleDest(pageNo, r, zoom);
+    pageDest = NewSimpleDest(arena, pageNo, r, zoom);
     return pageDest;
 }
 
@@ -4361,8 +5924,8 @@ IPageDestination* EngineMupdf::GetNamedDest(Str name) {
 FzPageInfo* EngineMupdf::GetFzPageInfoFast(int pageNo) {
     ScopedRecursiveMutex scope(&pagesLock);
     ReportIf(pageNo < 1 || pageNo > pageCount);
-    FzPageInfo* pageInfo = pages[pageNo - 1];
-    if (!pageInfo->page || !pageInfo->fullyLoaded) {
+    FzPageInfo* pageInfo = PageInfoByPageNo(pageNo);
+    if (!pageInfo || !pageInfo->page || !pageInfo->fullyLoaded) {
         return nullptr;
     }
     return pageInfo;
@@ -4411,17 +5974,31 @@ static Str NormalizeCommentNewlinesTemp(Str s) {
     return res;
 }
 
-// Hover tip for an annotation: author and/or contents (issue #5329).
-// FreeText already draws its contents on the page, so the tip is just the author.
+// Acrobat hover tooltip for a form field is /TU. pdf_annot_field_label also
+// falls back to /T (the field name) and "Unnamed", which are not tooltips.
+// must be called inside fz_try
+static Str WidgetTooltipTemp(fz_context* ctx, pdf_annot* annot) {
+    pdf_obj* tu = pdf_dict_get_inheritable(ctx, pdf_annot_obj(ctx, annot), PDF_NAME(TU));
+    if (!tu) {
+        return {};
+    }
+    const char* s = pdf_to_text_string(ctx, tu);
+    if (!s || !s[0]) {
+        return {};
+    }
+    return Str(s);
+}
+
+// FreeText already draws its contents on the page, so its tip only has the
+// optional author.
 // must be called inside fz_try
 static IPageElement* MakePdfCommentFromPdfAnnot(fz_context* ctx, int pageNo, pdf_annot* annot) {
     fz_rect rect = pdf_bound_annot(ctx, annot);
     auto tp = pdf_annot_type(ctx, annot);
-    Str contents = NormalizeCommentNewlinesTemp(pdf_annot_contents(ctx, annot));
-    Str label = pdf_annot_field_label(ctx, annot);
+    Str contents = NormalizeCommentNewlinesTemp(Str(pdf_annot_contents(ctx, annot)));
     Str author;
-    if (pdf_annot_has_author(ctx, annot)) {
-        author = pdf_annot_author(ctx, annot);
+    if (gShowAnnotAuthorInTooltip && pdf_annot_has_author(ctx, annot)) {
+        author = Str(pdf_annot_author(ctx, annot));
         if (str::IsEmptyOrWhiteSpace(author)) {
             author = {};
         }
@@ -4430,19 +6007,17 @@ static IPageElement* MakePdfCommentFromPdfAnnot(fz_context* ctx, int pageNo, pdf
         contents = {};
     }
 
-    Str s;
-    if (tp == PDF_ANNOT_WIDGET) {
-        s = contents ? contents : label;
-    } else if (tp == PDF_ANNOT_FREE_TEXT) {
-        s = author ? author : StrL("Anonymous");
-    } else if (author && contents) {
-        s = str::JoinTemp(author, StrL("\n"), contents);
-    } else if (contents) {
-        s = contents;
-    } else if (author) {
-        s = author;
-    } else {
-        s = label;
+    if (tp == PDF_ANNOT_FREE_TEXT) {
+        contents = {};
+    }
+
+    Str s = contents;
+    if (len(author) > 0) {
+        TempStr authorLine = fmt("Author: %s", author);
+        s = contents ? str::JoinTemp(contents, StrL("\n"), authorLine) : authorLine;
+    }
+    if (len(s) == 0) {
+        return nullptr;
     }
     return NewFzComment(s, pageNo, ToRectF(rect));
 }
@@ -4451,30 +6026,20 @@ static IPageElement* MakePdfCommentFromPdfAnnot(fz_context* ctx, int pageNo, pdf
 static void RebuildCommentsFromAnnotationsInner(fz_context* ctx, pdf_annot* annot, int pageNo,
                                                 Vec<IPageElement*>& comments) {
     auto tp = pdf_annot_type(ctx, annot);
-    Str contents = pdf_annot_contents(ctx, annot); // don't free
-    if (contents.len > 128) {
-        contents = str::DupTemp(Str(contents.s, 128));
-    }
-    bool isContentsEmpty = !contents;
-    Str label = pdf_annot_field_label(ctx, annot); // don't free
-    bool isLabelEmpty = !label;
+    // only used to tell an empty annotation from one with something to show;
+    // MakePdfCommentFromPdfAnnot() below re-reads the contents in full
+    Str contents = Str(pdf_annot_contents(ctx, annot)); // don't free
+    bool isContentsEmpty = len(contents) == 0;
     Str author;
-    if (pdf_annot_has_author(ctx, annot)) {
-        author = pdf_annot_author(ctx, annot);
+    if (gShowAnnotAuthorInTooltip && pdf_annot_has_author(ctx, annot)) {
+        author = Str(pdf_annot_author(ctx, annot));
         if (str::IsEmptyOrWhiteSpace(author)) {
             author = {};
         }
     }
-    int flags = pdf_annot_field_flags(ctx, annot);
-    bool isEmpty = isContentsEmpty && isLabelEmpty && !author;
-
-    // const char* tpStr = pdf_string_from_annot_type(ctx, tp);
-    //  logf("MakePageElementCommentsFromAnnotations: annot %d '%s', contents: '%s', label: '%s'\n", tp, tpStr,
-    //  contents, abel);
+    bool isEmpty = isContentsEmpty && len(author) == 0;
 
     if (PDF_ANNOT_FILE_ATTACHMENT == tp) {
-        logf("found file attachment annotation\n");
-
         pdf_filespec_params fileParams = {};
         pdf_obj* fs = pdf_annot_filespec(ctx, annot);
         int num = pdf_to_num(ctx, pdf_annot_obj(ctx, annot));
@@ -4485,35 +6050,42 @@ static void RebuildCommentsFromAnnotationsInner(fz_context* ctx, pdf_annot* anno
             return;
         }
 
-        logf("attachment: %s, num: %d\n", Str(attname), num);
+        // logf("attachment: %s, num: %d\n", Str(attname), num);
 
         auto* dest = new PageDestination();
         dest->kind = kindDestinationLaunchEmbedded;
-        dest->value = str::Dup(attname);
+        dest->value = str::Dup(Str(attname));
         dest->embedObjNum = num;
 
         auto* el = new PageElementDestination(dest);
         el->pageNo = pageNo;
         el->rect = ToRectF(rect);
 
-        comments.Append(el);
-        // TODO: need to implement https://github.com/sumatrapdfreader/sumatrapdf/issues/1336
-        // for saving the attachment to a file
+        VecAppend(comments, el);
         // TODO: expose /Contents in addition to the file path
         return;
     }
 
-    if (tp == PDF_ANNOT_FREE_TEXT || (!isEmpty && tp != PDF_ANNOT_WIDGET)) {
-        auto* comment = MakePdfCommentFromPdfAnnot(ctx, pageNo, annot);
-        comments.Append(comment);
+    // Acrobat hover tooltip for a form field is /TU. Widgets live on
+    // page->widgets, not page->annots, and pdfcomment/hyperref buttons are
+    // usually read-only — skipping those left no tip at all (issue #2083).
+    if (tp == PDF_ANNOT_WIDGET) {
+        Str tu = WidgetTooltipTemp(ctx, annot);
+        if (len(tu) == 0) {
+            return;
+        }
+        fz_rect rect = pdf_bound_annot(ctx, annot);
+        if (fz_is_empty_rect(rect)) {
+            return;
+        }
+        VecAppend(comments, NewFzComment(tu, pageNo, ToRectF(rect)));
         return;
     }
 
-    if (PDF_ANNOT_WIDGET == tp && !isLabelEmpty) {
-        bool isReadOnly = flags & PDF_FIELD_IS_READ_ONLY;
-        if (!isReadOnly) {
-            auto* comment = MakePdfCommentFromPdfAnnot(ctx, pageNo, annot);
-            comments.Append(comment);
+    if (tp == PDF_ANNOT_FREE_TEXT || !isEmpty) {
+        auto* comment = MakePdfCommentFromPdfAnnot(ctx, pageNo, annot);
+        if (comment) {
+            VecAppend(comments, comment);
         }
     }
 }
@@ -4521,7 +6093,6 @@ static void RebuildCommentsFromAnnotationsInner(fz_context* ctx, pdf_annot* anno
 static void RebuildCommentsFromAnnotations(fz_context* ctx, FzPageInfo* pageInfo) {
     DeleteVecMembers(pageInfo->comments);
 
-    // TODO: can use pageInof->annotations
     Vec<IPageElement*>& comments = pageInfo->comments;
 
     auto* page = pageInfo->page;
@@ -4533,6 +6104,15 @@ static void RebuildCommentsFromAnnotations(fz_context* ctx, FzPageInfo* pageInfo
 
     pdf_annot* annot;
     for (annot = pdf_first_annot(ctx, pdfpage); annot; annot = pdf_next_annot(ctx, annot)) {
+        fz_try(ctx) {
+            RebuildCommentsFromAnnotationsInner(ctx, annot, pageNo, comments);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+        }
+    }
+    // form widgets are a separate list from markup annotations
+    for (annot = pdf_first_widget(ctx, pdfpage); annot; annot = pdf_next_widget(ctx, annot)) {
         fz_try(ctx) {
             RebuildCommentsFromAnnotationsInner(ctx, annot, pageNo, comments);
         }
@@ -4601,21 +6181,38 @@ static fz_stext_page* fz_new_stext_page_from_whole_page(fz_context* ctx, fz_page
 }
 
 // caller must hold pagesLock and renderLock
-static FzPageInfo* GetFzPageInfoLocked(EngineMupdf* e, int pageNo, bool loadQuick, fz_cookie* cookie) {
+static FzPageInfo* GetFzPageInfoLocked(EngineMupdf* e, Location loc, bool loadQuick, fz_cookie* cookie) {
     auto* ctx = e->Ctx();
-    ReportIf(pageNo < 1 || pageNo > e->pageCount);
-    if (pageNo < 1 || pageNo > e->pageCount) {
-        return nullptr;
-    }
-    int pageIdx = pageNo - 1;
-    FzPageInfo* pageInfo = e->pages[pageIdx];
-    if (!pageInfo) {
+    // docLock too: loading a page loads its annotations and has MuPDF generate
+    // their appearance streams, reading the same pdf objects the UI thread
+    // rewrites when an annotation is edited. Without this, editing one while
+    // the annotation-loading or heading-TOC thread walks the pages is a
+    // use-after-free (and trips mupdf's local_xref_nesting assert).
+    ScopedRecursiveMutex docScope(&e->docLock);
+
+    ReportIf(!loc.IsValid());
+    if (!loc.IsValid()) {
         return nullptr;
     }
 
+    // an unlaid chapter has only its placeholder page; lay it out now so
+    // loc.page beyond 1 becomes valid
+    if (!e->IsChapterLaidOut(loc.chapter)) {
+        e->LayOutChapter(loc.chapter);
+    }
+    loc = e->ClampLocation(loc);
+
+    FzPageInfo* pageInfo = e->PageInfoByLoc(loc);
+    ReportIf(!pageInfo);
+    if (!pageInfo) {
+        return nullptr;
+    }
+    int pageNo = e->PageNoFromLocation(loc);
+    pageInfo->pageNo = pageNo;
+
     if (!pageInfo->page) {
         fz_try(ctx) {
-            pageInfo->page = fz_load_page(ctx, e->_doc, pageIdx);
+            pageInfo->page = fz_load_chapter_page(ctx, e->_doc, loc.chapter - 1, loc.page - 1);
         }
         fz_catch(ctx) {
             fz_report_error(ctx);
@@ -4630,20 +6227,22 @@ static FzPageInfo* GetFzPageInfoLocked(EngineMupdf* e, int pageNo, bool loadQuic
     if (e->pdfdoc && !pageInfo->annotsLoaded) {
         pageInfo->annotsLoaded = true;
         fz_try(ctx) {
+            // null for a page that isn't a pdf_page; pdf_first_widget()
+            // dereferences it without checking (pdf_first_annot() doesn't)
             pdf_page* pdfpage = pdf_page_from_fz_page(ctx, pageInfo->page);
-            pdf_annot* annot = pdf_first_annot(ctx, pdfpage);
+            pdf_annot* annot = pdfpage ? pdf_first_annot(ctx, pdfpage) : nullptr;
             while (annot) {
                 Annotation* a = MakeAnnotationWrapper(e, annot, pageNo);
                 if (a) {
-                    pageInfo->annotations.Append(a);
+                    VecAppend(pageInfo->annotations, a);
                 }
                 annot = pdf_next_annot(ctx, annot);
             }
-            pdf_annot* widget = pdf_first_widget(ctx, pdfpage);
+            pdf_annot* widget = pdfpage ? pdf_first_widget(ctx, pdfpage) : nullptr;
             while (widget) {
                 Annotation* a = MakeAnnotationWrapper(e, widget, pageNo);
                 if (a) {
-                    pageInfo->widgets.Append(a);
+                    VecAppend(pageInfo->widgets, a);
                 }
                 widget = pdf_next_widget(ctx, widget);
             }
@@ -4657,8 +6256,6 @@ static FzPageInfo* GetFzPageInfoLocked(EngineMupdf* e, int pageNo, bool loadQuic
     if (loadQuick || pageInfo->fullyLoaded) {
         return pageInfo;
     }
-
-    ReportIf(pageInfo->pageNo != pageNo);
 
     pageInfo->fullyLoaded = true;
 
@@ -4704,17 +6301,27 @@ static FzPageInfo* GetFzPageInfoLocked(EngineMupdf* e, int pageNo, bool loadQuic
         }
     }
     while (link) {
-        auto* pel = NewLinkDestination(pageNo, ctx, e->_doc, link, nullptr);
+        auto* pel = NewLinkDestination(pageNo, e, link, nullptr);
         if (pel) {
+            pel->loc = pageInfo->loc;
             // a link that goes somewhere in this document has no URL to show,
             // so show the description the PDF gives it, like other viewers do
             auto* dest = (PageDestinationMupdf*)pel->AsLink();
-            if (dest && !PageDestGetValue(dest)) {
+            if (dest && len(PageDestGetValue(dest)) == 0) {
                 dest->value = PdfLinkContents(ctx, e->pdfdoc, pdfpage, pageNo, link->rect);
             }
-            pageInfo->links.Append(pel);
+            VecAppend(pageInfo->links, pel);
         }
         link = link->next;
+    }
+
+    if (e->pdfdoc && pdfpage) {
+        fz_try(ctx) {
+            AppendJsMenuLinks(ctx, e->pdfdoc, pdfpage, pageNo, pageInfo->links);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+        }
     }
 
     if (!stext) {
@@ -4724,7 +6331,7 @@ static FzPageInfo* GetFzPageInfoLocked(EngineMupdf* e, int pageNo, bool loadQuic
     if (!e->disableAutoLinks) {
         FzLinkifyPageText(pageInfo, stext);
     }
-    FzFindImagePositions(ctx, pageNo, pageInfo->images, stext);
+    FzFindImagePositions(ctx, pageNo, pageInfo->loc, pageInfo->images, stext);
     fz_drop_stext_page(ctx, stext);
     return pageInfo;
 }
@@ -4741,7 +6348,15 @@ FzPageInfo* EngineMupdf::GetFzPageInfoCanFail(int pageNo) {
         pagesLock.Unlock();
         return nullptr;
     }
-    FzPageInfo* res = GetFzPageInfoLocked(this, pageNo, true, nullptr);
+    // GetFzPageInfoLocked() needs docLock; take it here too so this stays the
+    // "give up rather than block the UI thread" path it exists to be
+    if (!docLock.TryLock()) {
+        renderLock.Unlock();
+        pagesLock.Unlock();
+        return nullptr;
+    }
+    FzPageInfo* res = GetFzPageInfoLocked(this, LocationFromPageNo(pageNo), true, nullptr);
+    docLock.Unlock();
     renderLock.Unlock();
     pagesLock.Unlock();
     return res;
@@ -4752,19 +6367,107 @@ FzPageInfo* EngineMupdf::GetFzPageInfoCanFail(int pageNo) {
 // Maybe: when loading fully, cache extracted text in FzPageInfo
 // so that we don't have to re-do fz_new_stext_page_from_page() when doing search
 FzPageInfo* EngineMupdf::GetFzPageInfo(int pageNo, bool loadQuick, fz_cookie* cookie) {
+    return GetFzPageInfo(LocationFromPageNo(pageNo), loadQuick, cookie);
+}
+
+FzPageInfo* EngineMupdf::GetFzPageInfo(Location loc, bool loadQuick, fz_cookie* cookie) {
     // TODO: minimize time spent under pagesLock when fully loading
     ScopedRecursiveMutex scope(&pagesLock);
     // page-running operations on this specific page run under per-page lock.
     // pagesLock (held above) serializes concurrent fz_load_page on _doc.
     ScopedMutex ctxScope(&renderLock);
-    return GetFzPageInfoLocked(this, pageNo, loadQuick, cookie);
+    return GetFzPageInfoLocked(this, loc, loadQuick, cookie);
 }
 
+// hot path (Transform/CvtToScreen/GetTileRes for every PDF page render), so
+// avoid pagesLock when the answer doesn't need it: a reflow doc shares one
+// mediabox across every page, and a single-chapter (non-reflow) doc's page
+// vector is fully built at load and never grows afterward.
 RectF EngineMupdf::PageMediabox(int pageNo) {
     ReportIf(pageNo < 1 || pageNo > pageCount);
-    if (pageNo < 1 || pageNo > pageCount) return {};
-    FzPageInfo* pi = pages[pageNo - 1];
-    return pi->mediabox;
+    if (pageNo < 1 || pageNo > pageCount) {
+        return {};
+    }
+    if (isReflowable) {
+        return reflowMediabox;
+    }
+    if (HasChapters()) {
+        // chaptered non-reflow docs don't exist today; stay safe if one ever does
+        FzPageInfo* pi = PageInfoByPageNo(pageNo);
+        return pi ? pi->mediabox : RectF{};
+    }
+    if (len(chapterPages) < 1 || !chapterPages[0]) {
+        return {};
+    }
+    Vec<FzPageInfo*>* v = chapterPages[0];
+    if (pageNo > len(*v)) {
+        return {};
+    }
+    return (*v)[pageNo - 1]->mediabox;
+}
+
+// Boxes the page (or an ancestor /Pages node) actually names. Crop/Bleed/Trim/Art
+// default to Crop/Media when absent; we skip those so the overlay only draws
+// what is in the file (issue #814). Rects are in the same space as PageMediabox.
+void EngineMupdf::GetPdfPageBoxes(int pageNo, Vec<PdfPageBox>& out) {
+    VecReset(out);
+    if (!pdfdoc || pageNo < 1 || pageNo > pageCount) {
+        return;
+    }
+    FzPageInfo* pi = GetFzPageInfo(pageNo, true);
+    if (!pi || !pi->page) {
+        return;
+    }
+    fz_context* ctx = Ctx();
+    ScopedRecursiveMutex scope(&docLock);
+    pdf_page* page = nullptr;
+    fz_try(ctx) {
+        page = pdf_page_from_fz_page(ctx, pi->page);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        return;
+    }
+    if (!page) {
+        return;
+    }
+
+    struct BoxSpec {
+        pdf_obj* name;
+        PdfPageBoxKind kind;
+        fz_box_type fzBox;
+    };
+    const BoxSpec specs[] = {
+        {PDF_NAME(MediaBox), PdfPageBoxKind::Media, FZ_MEDIA_BOX},
+        {PDF_NAME(CropBox), PdfPageBoxKind::Crop, FZ_CROP_BOX},
+        {PDF_NAME(BleedBox), PdfPageBoxKind::Bleed, FZ_BLEED_BOX},
+        {PDF_NAME(TrimBox), PdfPageBoxKind::Trim, FZ_TRIM_BOX},
+        {PDF_NAME(ArtBox), PdfPageBoxKind::Art, FZ_ART_BOX},
+    };
+    for (const BoxSpec& spec : specs) {
+        pdf_obj* obj = nullptr;
+        fz_rect r{};
+        fz_try(ctx) {
+            obj = pdf_dict_get_inheritable(ctx, page->obj, spec.name);
+            if (pdf_is_array(ctx, obj)) {
+                r = pdf_bound_page(ctx, page, spec.fzBox);
+            }
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            obj = nullptr;
+        }
+        if (!pdf_is_array(ctx, obj)) {
+            continue;
+        }
+        PdfPageBox box;
+        box.kind = spec.kind;
+        box.rect = ToRectF(r);
+        if (box.rect.IsEmpty()) {
+            continue;
+        }
+        VecAppend(out, box);
+    }
 }
 
 // returns a kept reference to the cached "View" display list for the page,
@@ -4804,14 +6507,14 @@ static fz_display_list* GetOrBuildPageDisplayList(FzPageInfo* pi, fz_context* ct
 //
 // Clip paths are still bounded as a whole: a clip is a region, not ink, and its
 // bbox is the conservative thing to intersect subsequent ops against.
-#define CONTENT_BBOX_STACK_SIZE 96
+constexpr int kContentBboxStackSize = 96;
 
 typedef struct {
     fz_device super;
     fz_rect* result;
     fz_rect pageRect;
     int top;
-    fz_rect stack[CONTENT_BBOX_STACK_SIZE];
+    fz_rect stack[kContentBboxStackSize];
     // mask content and tiles are ignored
     int ignore;
 } fz_content_bbox_device;
@@ -4819,16 +6522,16 @@ typedef struct {
 static void fz_content_bbox_add_rect(fz_device* dev, fz_rect rect, bool clip) {
     fz_content_bbox_device* d = (fz_content_bbox_device*)dev;
 
-    if (0 < d->top && d->top <= CONTENT_BBOX_STACK_SIZE) {
+    if (0 < d->top && d->top <= kContentBboxStackSize) {
         rect = fz_intersect_rect(rect, d->stack[d->top - 1]);
     }
-    if (!clip && d->top <= CONTENT_BBOX_STACK_SIZE && !d->ignore) {
+    if (!clip && d->top <= kContentBboxStackSize && !d->ignore) {
         // only the part that lands on the page is content. Disjoint rects
         // intersect to an invalid one, which fz_union_rect() ignores - so ink
         // fully outside the page contributes nothing
         *d->result = fz_union_rect(*d->result, fz_intersect_rect(rect, d->pageRect));
     }
-    if (clip && ++d->top <= CONTENT_BBOX_STACK_SIZE) {
+    if (clip && ++d->top <= kContentBboxStackSize) {
         d->stack[d->top - 1] = rect;
     }
 }
@@ -5163,8 +6866,8 @@ static void DarkLegacySkipKeepLargestArtwork(FzPageInfo* pageInfo) {
         }
     }
     Rect keep = skipRects[bestIdx];
-    skipRects.Clear();
-    skipRects.Append(keep);
+    VecClear(skipRects);
+    VecAppend(skipRects, keep);
     pageInfo->darkLegacyArtworkPageBottom = 0.f;
 }
 
@@ -5191,12 +6894,12 @@ static int DarkLegacyTileFindRoot(Vec<int>& parent, int i) {
 // that don't group land in a group of their own, so callers see no difference
 // from the ungrouped case.
 static void DarkLegacyGroupImageTiles(const Vec<RectF>& rects, float tol, Vec<int>& groupOf, Vec<RectF>& groupRect) {
-    groupOf.Clear();
-    groupRect.Clear();
+    VecClear(groupOf);
+    VecClear(groupRect);
     int n = len(rects);
     Vec<int> parent;
     for (int i = 0; i < n; i++) {
-        parent.Append(i);
+        VecAppend(parent, i);
     }
     for (int i = 0; i < n; i++) {
         if (rects[i].IsEmpty()) {
@@ -5220,9 +6923,9 @@ static void DarkLegacyGroupImageTiles(const Vec<RectF>& rects, float tol, Vec<in
     Vec<float> tileArea;
     Vec<int> nTiles;
     for (int i = 0; i < n; i++) {
-        bbox.Append(RectF());
-        tileArea.Append(0.f);
-        nTiles.Append(0);
+        VecAppend(bbox, RectF());
+        VecAppend(tileArea, 0.f);
+        VecAppend(nTiles, 0);
     }
     for (int i = 0; i < n; i++) {
         if (rects[i].IsEmpty()) {
@@ -5245,20 +6948,20 @@ static void DarkLegacyGroupImageTiles(const Vec<RectF>& rects, float tol, Vec<in
 
     Vec<int> rootToGroup;
     for (int i = 0; i < n; i++) {
-        rootToGroup.Append(-1);
+        VecAppend(rootToGroup, -1);
     }
     for (int i = 0; i < n; i++) {
         int r = DarkLegacyTileFindRoot(parent, i);
         if (rects[i].IsEmpty() || nTiles[r] < 2) {
-            groupOf.Append(len(groupRect));
-            groupRect.Append(rects[i]);
+            VecAppend(groupOf, len(groupRect));
+            VecAppend(groupRect, rects[i]);
             continue;
         }
         if (rootToGroup[r] < 0) {
             rootToGroup[r] = len(groupRect);
-            groupRect.Append(bbox[r]);
+            VecAppend(groupRect, bbox[r]);
         }
-        groupOf.Append(rootToGroup[r]);
+        VecAppend(groupOf, rootToGroup[r]);
     }
 }
 
@@ -5266,7 +6969,7 @@ static void DarkLegacyGroupImageTiles(const Vec<RectF>& rects, float tol, Vec<in
 // should preserve (photos, artwork) and cache their absolute device rects
 static void BuildPageDarkLegacySkipRects(EngineMupdf* engine, FzPageInfo* pageInfo, float zoom, int rotation,
                                          u32 hash) {
-    pageInfo->darkLegacySkipDevAbs.Clear();
+    VecClear(pageInfo->darkLegacySkipDevAbs);
     pageInfo->darkLegacyArtworkPageBottom = 0.f;
     pageInfo->darkLegacySkipHash = hash;
     pageInfo->darkLegacySkipZoom = zoom;
@@ -5304,8 +7007,8 @@ static void BuildPageDarkLegacySkipRects(EngineMupdf* engine, FzPageInfo* pageIn
         if (image) {
             fz_drop_image(ctx, image);
         }
-        imgPageRects.Append(imgPage);
-        imgOnPageRects.Append(imgPage.Intersect(pageBounds));
+        VecAppend(imgPageRects, imgPage);
+        VecAppend(imgOnPageRects, imgPage.Intersect(pageBounds));
     }
     // tiles of one sliced illustration are judged as the region they form
     float tileTol = std::max(1.0f, std::min(pageBounds.dx, pageBounds.dy) * 0.005f);
@@ -5314,7 +7017,7 @@ static void BuildPageDarkLegacySkipRects(EngineMupdf* engine, FzPageInfo* pageIn
     DarkLegacyGroupImageTiles(imgOnPageRects, tileTol, groupOf, groupRect);
     Vec<int> groupAppended;
     for (int i = 0; i < len(groupRect); i++) {
-        groupAppended.Append(0);
+        VecAppend(groupAppended, 0);
     }
 
     for (int imgIdx = 0; imgIdx < nImages; imgIdx++) {
@@ -5363,7 +7066,7 @@ static void BuildPageDarkLegacySkipRects(EngineMupdf* engine, FzPageInfo* pageIn
         // tiles of one sliced illustration share a region - append it once
         if (!r.IsEmpty() && !groupAppended[groupIdx]) {
             groupAppended[groupIdx] = 1;
-            pageInfo->darkLegacySkipDevAbs.Append(r);
+            VecAppend(pageInfo->darkLegacySkipDevAbs, r);
             float bottom = imgOnPage.y + imgOnPage.dy;
             pageInfo->darkLegacyArtworkPageBottom = std::max(bottom, pageInfo->darkLegacyArtworkPageBottom);
         }
@@ -5376,7 +7079,7 @@ static void BuildPageDarkLegacySkipRects(EngineMupdf* engine, FzPageInfo* pageIn
 
 void EngineMupdf::GetBitmapRecolorSkipRects(int pageNo, float zoom, int rotation, const RectF& renderPageRect,
                                             Size bmpSize, Vec<Rect>& skipRects) {
-    skipRects.Clear();
+    VecClear(skipRects);
     if (renderPageRect.IsEmpty() || bmpSize.dx <= 0 || bmpSize.dy <= 0) {
         return;
     }
@@ -5392,7 +7095,7 @@ void EngineMupdf::GetBitmapRecolorSkipRects(int pageNo, float zoom, int rotation
     // annotation edit on the UI thread frees
     ScopedRecursiveMutex docScope(&docLock);
 
-    FzPageInfo* pageInfo = GetFzPageInfoLocked(this, pageNo, false, nullptr);
+    FzPageInfo* pageInfo = GetFzPageInfoLocked(this, LocationFromPageNo(pageNo), false, nullptr);
     if (!pageInfo || !pageInfo->page) {
         return;
     }
@@ -5434,7 +7137,7 @@ void EngineMupdf::GetBitmapRecolorSkipRects(int pageNo, float zoom, int rotation
         local.Inflate(3, 3);
         local = local.Intersect(Rect(0, 0, bmpSize.dx, bmpSize.dy));
         if (!local.IsEmpty()) {
-            skipRects.Append(local);
+            VecAppend(skipRects, local);
         }
     }
 }
@@ -5462,11 +7165,11 @@ void EngineMupdf::RunCadDetection() {
     cadHairlineVector = res.hairlineVector;
     cadDetectDone = true;
     if (cadDetectEnable) {
-        logfa("CAD enhance detect: score=%d reason=%s raster=%d hairline=%d\n", cadDetectScore,
-              Str(CadEnhanceReasonName(res.reason)), (int)cadRasterDominant, (int)cadHairlineVector);
+        logf("CAD enhance detect: score=%d reason=%s raster=%d hairline=%d\n", cadDetectScore,
+             Str(CadEnhanceReasonName(res.reason)), (int)cadRasterDominant, (int)cadHairlineVector);
     } else if (cadDetectScore >= 30) {
-        logfa("CAD enhance not enabled: score=%d hairline=%d (auto threshold 60, or metadata+45)\n", cadDetectScore,
-              (int)cadHairlineVector);
+        logf("CAD enhance not enabled: score=%d hairline=%d (auto threshold 60, or metadata+45)\n", cadDetectScore,
+             (int)cadHairlineVector);
     }
 }
 
@@ -5482,9 +7185,38 @@ void EngineMupdf::ToggleCadEnhanceOverride() {
     }
 }
 
+// Transparent backdrop: leave unpainted samples at alpha 0 so the canvas
+// checkerboard (CmdToggleTransparencyGrid) shows through (issue #1809).
+static void ClearRenderedPagePixmap(fz_context* ctx, fz_pixmap* pix, const RenderPageArgs& args, bool objectLevelDark) {
+    if (args.transparentBackdrop) {
+        fz_clear_pixmap(ctx, pix);
+        return;
+    }
+    if (objectLevelDark && args.darkProfile) {
+        PdfDarkModeClearPixmapToThemeBackground(ctx, pix, args.darkProfile->palette);
+        return;
+    }
+    fz_clear_pixmap_with_value(ctx, pix, 0xff);
+}
+
+static void MarkTransparentBackdropPixmap(Pixmap* pixmap, bool transparentBackdrop) {
+    if (pixmap && transparentBackdrop) {
+        pixmap->hasAlpha = true;
+        pixmap->premultiplied = true;
+    }
+}
+
+// An aborted run stops between a clip push and its pop, so the draw device's
+// stack is unbalanced and fz_close_device throws. The pixmap is discarded
+// anyway; skip closing so nothing is reported.
+static bool RenderAborted(fz_cookie* cookie) {
+    return cookie && cookie->abort;
+}
+
 Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
     auto* ctx = Ctx();
     auto pageNo = args.pageNo;
+    Location loc = args.loc.IsValid() ? args.loc : LocationFromPageNo(pageNo);
 
     fz_cookie* fzcookie = nullptr;
     FitzAbortCookie* cookie = nullptr;
@@ -5494,11 +7226,16 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
         fzcookie = (fz_cookie*)cookie->GetData();
     }
 
-    FzPageInfo* pageInfo = GetFzPageInfo(pageNo, false, fzcookie);
-    if (!pageInfo || !pageInfo->page) {
+    FzPageInfo* pageInfo = GetFzPageInfo(loc, false, fzcookie);
+    if (!pageInfo) {
         return nullptr;
     }
+    // Do not keep pageInfo->page across the gap before renderLock: theme
+    // restyle (ApplyReflowThemeCss) drops fz_page under that lock.
     fz_page* page = pageInfo->page;
+    if (!page) {
+        return nullptr;
+    }
 
     // AA level is per-thread-context state since Ctx() clones; no lock needed.
     if (disableAntiAlias) {
@@ -5533,6 +7270,11 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
         ScopedMutex cs(&renderLock);
         ScopedRecursiveMutex docScope(&docLock);
 
+        page = pageInfo->page;
+        if (!page) {
+            return nullptr;
+        }
+
         if (pageRect) {
             pRect = ToFzRect(*pageRect);
         } else {
@@ -5565,12 +7307,11 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
         fz_try(ctx) {
             pix = fz_new_pixmap_with_bbox(ctx, csRgb, ibounds, nullptr, 1);
             bool objectLevelDark = args.darkProfile && DarkModeProfileUsesObjectLevel(args.darkProfile);
-            if (objectLevelDark) {
-                PdfDarkModeClearPixmapToThemeBackground(ctx, pix, args.darkProfile->palette);
-            } else {
-                fz_clear_pixmap_with_value(ctx, pix, 0xff);
-            }
+            ClearRenderedPagePixmap(ctx, pix, args, objectLevelDark);
             dev = fz_new_draw_device(ctx, ctm, pix);
+            if (disableAntiAlias) {
+                fz_enable_device_hints(ctx, dev, FZ_DONT_INTERPOLATE_IMAGES);
+            }
             DarkModeReplayState replayState{};
             if (objectLevelDark && pdfdoc) {
                 DarkModePageAnalysis* analysis =
@@ -5588,11 +7329,14 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
                 dev = PdfCadEnhanceWrapDevice(ctx, dev, opts);
             }
             fz_run_display_list(ctx, keptList, dev, fz_identity, pRect, fzcookie);
-            fz_close_device(ctx, dev);
-            if (CadEnhanceActive() && cadRasterDominant) {
-                PdfCadEnhancePixmap(ctx, pix, zoom, true);
+            if (!RenderAborted(fzcookie)) {
+                fz_close_device(ctx, dev);
+                if (CadEnhanceActive() && cadRasterDominant) {
+                    PdfCadEnhancePixmap(ctx, pix, zoom, true);
+                }
+                pixmap = NewPixmapFromFzPixmap(ctx, pix, args.transparentBackdrop);
+                MarkTransparentBackdropPixmap(pixmap, args.transparentBackdrop);
             }
-            pixmap = NewPixmapFromFzPixmap(ctx, pix);
         }
         fz_always(ctx) {
             if (dev) {
@@ -5616,6 +7360,11 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
     // failed. Run the page directly under per-page lock.
     ScopedMutex cs(&renderLock);
 
+    page = pageInfo->page;
+    if (!page) {
+        return nullptr;
+    }
+
     Str usage = (args.target == RenderTarget::Print) ? StrL("Print") : StrL("View");
     const char* usageZ = CStrTemp(usage);
 
@@ -5625,19 +7374,25 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
         fz_try(ctx) {
             pdfpage = pdf_page_from_fz_page(ctx, page);
             pix = fz_new_pixmap_with_bbox(ctx, csRgb, ibounds, nullptr, 1);
-            fz_clear_pixmap_with_value(ctx, pix, 0xff);
+            ClearRenderedPagePixmap(ctx, pix, args, false);
             dev = fz_new_draw_device(ctx, ctm, pix);
+            if (disableAntiAlias) {
+                fz_enable_device_hints(ctx, dev, FZ_DONT_INTERPOLATE_IMAGES);
+            }
             if (hideAnnotations) {
                 pdf_run_page_contents_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
                 pdf_run_page_widgets_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
             } else {
                 pdf_run_page_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
             }
-            fz_close_device(ctx, dev);
-            if (CadEnhanceActive() && cadRasterDominant) {
-                PdfCadEnhancePixmap(ctx, pix, zoom, true);
+            if (!RenderAborted(fzcookie)) {
+                fz_close_device(ctx, dev);
+                if (CadEnhanceActive() && cadRasterDominant) {
+                    PdfCadEnhancePixmap(ctx, pix, zoom, true);
+                }
+                pixmap = NewPixmapFromFzPixmap(ctx, pix, args.transparentBackdrop);
+                MarkTransparentBackdropPixmap(pixmap, args.transparentBackdrop);
             }
-            pixmap = NewPixmapFromFzPixmap(ctx, pix);
         }
         fz_always(ctx) {
             if (dev) {
@@ -5653,12 +7408,16 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
     } else {
         fz_try(ctx) {
             pix = fz_new_pixmap_with_bbox(ctx, csRgb, ibounds, nullptr, 1);
-            fz_clear_pixmap_with_value(ctx, pix, 0xff);
+            ClearRenderedPagePixmap(ctx, pix, args, false);
             dev = fz_new_draw_device(ctx, ctm, pix);
+            if (disableAntiAlias) {
+                fz_enable_device_hints(ctx, dev, FZ_DONT_INTERPOLATE_IMAGES);
+            }
             fz_run_page_contents(ctx, page, dev, fz_identity, nullptr);
             fz_close_device(ctx, dev);
             fz_drop_device(ctx, dev);
-            pixmap = NewPixmapFromFzPixmap(ctx, pix);
+            pixmap = NewPixmapFromFzPixmap(ctx, pix, args.transparentBackdrop);
+            MarkTransparentBackdropPixmap(pixmap, args.transparentBackdrop);
         }
         fz_always(ctx) {
             fz_drop_pixmap(ctx, pix);
@@ -5679,8 +7438,6 @@ IPageElement* EngineMupdf::GetElementAtPos(int pageNo, PointF pt) {
     return FzGetElementAtPos(pageInfo, pt);
 }
 
-// TOOD: optimize by returning reference or pointer so that
-// we don't have to re-create the Vec every time
 Vec<IPageElement*> EngineMupdf::GetElements(int pageNo) {
     auto* pageInfo = GetFzPageInfoFast(pageNo);
     if (!pageInfo) {
@@ -5702,7 +7459,7 @@ bool EngineMupdf::TryGetElements(int pageNo, Vec<IPageElement*>* out) {
     }
     ReportIf(pageNo < 1 || pageNo > pageCount);
     if (pageNo >= 1 && pageNo <= pageCount) {
-        FzPageInfo* pageInfo = pages[pageNo - 1];
+        FzPageInfo* pageInfo = PageInfoByPageNo(pageNo);
         if (pageInfo && pageInfo->page && pageInfo->fullyLoaded) {
             BuildElementsInfo(pageInfo);
             *out = pageInfo->allElements;
@@ -5710,6 +7467,61 @@ bool EngineMupdf::TryGetElements(int pageNo, Vec<IPageElement*>* out) {
     }
     pagesLock.Unlock();
     return true;
+}
+
+// resolves a PageDestinationMupdf lazily: for a chaptered doc, dest->loc is
+// only {chapter, 0} until now (see NewPageDestinationMupdf); finish the
+// resolve here, laying out the target chapter, and cache the result on dest
+Location EngineMupdf::ResolveDest(IPageDestination* dest) {
+    if (!dest) {
+        return kInvalidLocation;
+    }
+    if (dest->GetKind() != kindDestinationMupdf) {
+        return EngineBase::ResolveDest(dest);
+    }
+    auto* d = (PageDestinationMupdf*)dest;
+    if (d->loc.IsValid()) {
+        return d->loc;
+    }
+    Str uri = d->outline ? Str(d->outline->uri) : (d->link ? Str(d->link->uri) : Str{});
+    if (len(uri) == 0) {
+        return kInvalidLocation;
+    }
+    auto* ctx = Ctx();
+    fz_link_dest ldest{};
+    fz_var(ldest);
+    bool ok = false;
+    fz_var(ok);
+    {
+        ScopedRecursiveMutex scope(&docLock);
+        fz_try(ctx) {
+            ldest = fz_resolve_link_dest(ctx, _doc, CStrTemp(uri));
+            ok = true;
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            logf("EngineMupdf::ResolveDest: fz_resolve_link_dest() for '%s' failed\n", uri);
+        }
+    }
+    if (!ok || ldest.loc.chapter < 0) {
+        return kInvalidLocation;
+    }
+    Location loc{ldest.loc.chapter + 1, ldest.loc.page + 1};
+    LayOutChapter(loc.chapter);
+    loc = ClampLocation(loc);
+
+    RectF r;
+    float zoom = 0.f;
+    DestFromFzLinkDest(ldest, &r, &zoom);
+    d->destX = r.x;
+    d->destY = r.y;
+    d->destW = r.dx;
+    d->destH = r.dy;
+    d->destZoom = zoom;
+    d->hasResolvedCoords = true;
+    d->loc = loc;
+    d->pageNo = PageNoFromLocation(loc);
+    return loc;
 }
 
 static void HandleLinkMupdf(EngineMupdf* e, IPageDestination* dest, ILinkHandler* linkHandler) {
@@ -5720,7 +7532,7 @@ static void HandleLinkMupdf(EngineMupdf* e, IPageDestination* dest, ILinkHandler
         return;
     }
     Str uri = link->outline ? Str(link->outline->uri) : Str(link->link->uri);
-    if (!uri) {
+    if (len(uri) == 0) {
         return;
     }
     if (IsExternalLink(uri)) {
@@ -5728,25 +7540,8 @@ static void HandleLinkMupdf(EngineMupdf* e, IPageDestination* dest, ILinkHandler
         return;
     }
 
-    // those locks must be taken in this order
-    // we need to lock pagesLock because it might
-    // be taken below
-    ScopedRecursiveMutex csPages(&e->pagesLock);
-    ScopedRecursiveMutex cs(&e->docLock);
-
-    int pageNo = -1;
-    fz_link_dest ldest{};
-    auto* ctx = e->Ctx();
-    fz_var(pageNo);
-    fz_try(ctx) {
-        ldest = fz_resolve_link_dest(ctx, e->_doc, CStrTemp(uri));
-        pageNo = fz_page_number_from_location(ctx, e->_doc, ldest.loc);
-    }
-    fz_catch(ctx) {
-        fz_report_error(ctx);
-        logfa("HandleLinkMupdf: fz_resolve_link() for '%s' failed\n", uri);
-    }
-    if (pageNo < 0) {
+    Location loc = e->ResolveDest(dest);
+    if (!loc.IsValid()) {
         TempStr localPath;
         Str localFragment;
         if (IsMupdfLocalFileLink(uri, &localPath, &localFragment)) {
@@ -5757,10 +7552,9 @@ static void HandleLinkMupdf(EngineMupdf* e, IPageDestination* dest, ILinkHandler
     }
 
     // Adobe /Fit, /FitH, /FitV, /FitB*, /XYZ, /FitR → zoom modes + scroll (issue #5828)
-    RectF r;
-    float zoom = 0.f;
-    DestFromFzLinkDest(ldest, &r, &zoom);
-    linkHandler->ScrollTo(pageNo + 1, r, zoom);
+    int pageNo = e->PageNoFromLocation(loc);
+    RectF r{link->destX, link->destY, link->destW, link->destH};
+    linkHandler->ScrollTo(pageNo, r, link->destZoom);
 }
 
 bool EngineMupdf::HandleLink(IPageDestination* dest, ILinkHandler* linkHandler) {
@@ -5781,7 +7575,7 @@ RenderedBitmap* EngineMupdf::GetImageForPageElement(IPageElement* ipel) {
     ReportIf(kindPageElementImage != ipel->GetKind());
     auto* pel = (PageElementImage*)ipel;
     auto r = pel->rect;
-    int pageNo = pel->pageNo;
+    int pageNo = pel->loc.IsValid() ? PageNoFromLocation(pel->loc) : pel->pageNo;
     int imageID = pel->imageID;
     return GetPageImage(pageNo, r, imageID);
 #else
@@ -5790,14 +7584,61 @@ RenderedBitmap* EngineMupdf::GetImageForPageElement(IPageElement* ipel) {
 #endif
 }
 
+// PDF-embedded CMYK JPEG uses PDF polarity (0 = no ink). A standalone JPEG
+// uses the Adobe/Photoshop convention (0 = full ink). Dumping the DCT stream
+// as a .jpg therefore looks inverted. Re-encode from the decoded pixmap with
+// invert_cmyk so Save Image keeps CMYK and displays correctly.
+static Str StandaloneJpegFromPdfCmykImage(fz_context* ctx, fz_image* image) {
+    fz_pixmap* pix = nullptr;
+    fz_pixmap* deviceCmyk = nullptr;
+    fz_buffer* buf = nullptr;
+    Str result;
+    fz_var(pix);
+    fz_var(deviceCmyk);
+    fz_var(buf);
+
+    fz_try(ctx) {
+        pix = fz_get_pixmap_from_image(ctx, image, nullptr, nullptr, nullptr, nullptr);
+        if (pix && pix->colorspace && fz_colorspace_is_cmyk(ctx, pix->colorspace) && !pix->alpha && pix->s == 0) {
+            fz_pixmap* src = pix;
+            if (pix->colorspace != fz_device_cmyk(ctx)) {
+                deviceCmyk =
+                    fz_convert_pixmap(ctx, pix, fz_device_cmyk(ctx), nullptr, nullptr, fz_default_color_params, 1);
+                src = deviceCmyk;
+            }
+            if (src) {
+                buf = fz_new_buffer_from_pixmap_as_jpeg(ctx, src, fz_default_color_params, 95, 1);
+                unsigned char* data = nullptr;
+                size_t n = fz_buffer_storage(ctx, buf, &data);
+                if (data && n > 0 && n <= (size_t)INT_MAX) {
+                    result = str::Dup(Str((char*)data, (int)n));
+                }
+            }
+        }
+    }
+    fz_always(ctx) {
+        fz_drop_buffer(ctx, buf);
+        fz_drop_pixmap(ctx, deviceCmyk);
+        fz_drop_pixmap(ctx, pix);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        str::Free(result);
+        result = {};
+    }
+    return result;
+}
+
 // JPEG/PNG/GIF/BMP/TIFF streams that are already a complete file. Flate-raw
-// samples, JPEG2000, JBIG2, and images with a decode/mask are not.
+// samples, JPEG2000, JBIG2, and images with a decode/mask are not. CMYK JPEG
+// is re-encoded (see StandaloneJpegFromPdfCmykImage).
 Str EngineMupdf::GetImageDataForPageElement(IPageElement* ipel) {
     if (!ipel || ipel->GetKind() != kindPageElementImage) {
         return {};
     }
     auto* pel = (PageElementImage*)ipel;
-    FzPageInfo* pageInfo = GetFzPageInfo(pel->pageNo, false);
+    Location loc = pel->loc.IsValid() ? pel->loc : LocationFromPageNo(pel->pageNo);
+    FzPageInfo* pageInfo = GetFzPageInfo(loc, false);
     if (!pageInfo || !pageInfo->page) {
         return {};
     }
@@ -5812,11 +7653,17 @@ Str EngineMupdf::GetImageDataForPageElement(IPageElement* ipel) {
         return {};
     }
     int type = cbuf->params.type;
-    if (image->use_colorkey || image->use_decode || image->mask) {
+    if (image->use_colorkey || image->mask) {
+        return {};
+    }
+    if (type == FZ_IMAGE_JPEG && image->n == 4) {
+        return StandaloneJpegFromPdfCmykImage(ctx, image);
+    }
+    if (image->use_decode) {
         return {};
     }
     if (type != FZ_IMAGE_JPEG && type != FZ_IMAGE_PNG && type != FZ_IMAGE_GIF && type != FZ_IMAGE_BMP &&
-        type != FZ_IMAGE_TIFF) {
+        type != FZ_IMAGE_TIFF && type != FZ_IMAGE_WEBP) {
         return {};
     }
     unsigned char* data = nullptr;
@@ -5868,12 +7715,15 @@ RenderedBitmap* EngineMupdf::GetPageImage(int pageNo, RectF rect, int imageIdx) 
         return nullptr;
     }
     const auto& images = pageInfo->images;
-    bool outOfBounds = imageIdx >= len(images);
+    bool outOfBounds = imageIdx < 0 || imageIdx >= len(images);
+    ReportIf(outOfBounds);
+    if (outOfBounds) {
+        return nullptr;
+    }
     fz_rect imgRect = images[imageIdx]->rect;
     bool badRect = ToRectF(imgRect) != rect;
-    ReportIf(outOfBounds);
     ReportIf(badRect);
-    if (outOfBounds || badRect) {
+    if (badRect) {
         return nullptr;
     }
 
@@ -5964,7 +7814,7 @@ static PageText ExtractPageTextLocked(EngineMupdf* e, FzPageInfo* pageInfo) {
         return {};
     }
     PageText res;
-    res.text = FzTextPageToUtf8(stext, &res.coords);
+    res.text = FzTextPageToUtf8(stext, &res.coords, &res.quads);
     fz_drop_stext_page(ctx, stext);
     res.len = res.text.len;
     res.nCodepoints = Utf8CodepointCount(res.text);
@@ -5974,7 +7824,7 @@ static PageText ExtractPageTextLocked(EngineMupdf* e, FzPageInfo* pageInfo) {
 PageText EngineMupdf::ExtractPageText(int pageNo) {
     ScopedRecursiveMutex pagesScope(&pagesLock);
     ScopedMutex renderScope(&renderLock);
-    FzPageInfo* pageInfo = GetFzPageInfoLocked(this, pageNo, true, nullptr);
+    FzPageInfo* pageInfo = GetFzPageInfoLocked(this, LocationFromPageNo(pageNo), true, nullptr);
     if (!pageInfo) {
         return {};
     }
@@ -5989,7 +7839,7 @@ bool EngineMupdf::TryExtractPageText(int pageNo, PageText* out) {
         pagesLock.Unlock();
         return false;
     }
-    FzPageInfo* pageInfo = GetFzPageInfoLocked(this, pageNo, true, nullptr);
+    FzPageInfo* pageInfo = GetFzPageInfoLocked(this, LocationFromPageNo(pageNo), true, nullptr);
     if (!pageInfo) {
         renderLock.Unlock();
         pagesLock.Unlock();
@@ -6011,16 +7861,16 @@ static void pdf_extract_fonts(fz_context* ctx, pdf_obj* res, Vec<pdf_obj*>& font
     // dedupe/cycle-protect via resList, not pdf_mark_obj: marks mutate shared
     // pdf_obj flags, which races with other threads using marks (and would
     // leave objects marked while locks are dropped between pages)
-    if (!res || depth >= 64 || resList.Contains(res)) {
+    if (!res || depth >= 64 || VecContains(resList, res)) {
         return;
     }
-    resList.Append(res);
+    VecAppend(resList, res);
 
     pdf_obj* fonts = pdf_dict_gets(ctx, res, "Font");
     for (int k = 0; k < pdf_dict_len(ctx, fonts); k++) {
         pdf_obj* font = pdf_resolve_indirect(ctx, pdf_dict_get_val(ctx, fonts, k));
-        if (font && !fontList.Contains(font)) {
-            fontList.Append(font);
+        if (font && !VecContains(fontList, font)) {
+            VecAppend(fontList, font);
         }
     }
     // also extract fonts for all XObjects (recursively)
@@ -6104,10 +7954,10 @@ TempStr EngineMupdf::ExtractFontListTemp() {
             }
 
             name = Str(pdf_to_name(ctx, pdf_dict_getsa(ctx, font2, "BaseFont", "Name")));
-            bool needAnonName = !name;
+            bool needAnonName = len(name) == 0;
             if (needAnonName && font2 != font) {
                 name = Str(pdf_to_name(ctx, pdf_dict_getsa(ctx, font, "BaseFont", "Name")));
-                needAnonName = !name;
+                needAnonName = len(name) == 0;
             }
             if (needAnonName) {
                 name = fmt("<#%d>", pdf_obj_parent_num(ctx, font2));
@@ -6124,9 +7974,9 @@ TempStr EngineMupdf::ExtractFontListTemp() {
             if (font2 != font) {
                 Str type2 = Str(pdf_to_name(ctx, pdf_dict_gets(ctx, font2, "Subtype")));
                 if (str::Eq(type2, StrL("CIDFontType0"))) {
-                    type = "Type1 (CID)";
+                    type = StrL("Type1 (CID)");
                 } else if (str::Eq(type2, StrL("CIDFontType2"))) {
-                    type = "TrueType (CID)";
+                    type = StrL("TrueType (CID)");
                 }
             }
             if (str::Eq(type, StrL("Type3"))) {
@@ -6135,11 +7985,11 @@ TempStr EngineMupdf::ExtractFontListTemp() {
 
             encoding = Str(pdf_to_name(ctx, pdf_dict_gets(ctx, font, "Encoding")));
             if (str::Eq(encoding, StrL("WinAnsiEncoding"))) {
-                encoding = "Ansi";
+                encoding = StrL("Ansi");
             } else if (str::Eq(encoding, StrL("MacRomanEncoding"))) {
-                encoding = "Roman";
+                encoding = StrL("Roman");
             } else if (str::Eq(encoding, StrL("MacExpertEncoding"))) {
-                encoding = "Expert";
+                encoding = StrL("Expert");
             }
         }
         fz_catch(ctx) {
@@ -6165,7 +8015,7 @@ TempStr EngineMupdf::ExtractFontListTemp() {
         info.Append(name);
 #endif
         if (len(encoding) > 0 || len(type) > 0 || embedded) {
-            info.Append(" (");
+            info.Append(StrL(" ("));
             if (len(type) > 0) {
                 info.Append(fmt("%s; ", type));
             }
@@ -6173,13 +8023,13 @@ TempStr EngineMupdf::ExtractFontListTemp() {
                 info.Append(fmt("%s; ", encoding));
             }
             if (embedded) {
-                info.Append("embedded; ");
+                info.Append(StrL("embedded; "));
             }
             info.RemoveAt(len(info) - 2, 2);
-            info.Append(")");
+            info.Append(StrL(")"));
         }
 
-        if (info.IsEmpty()) {
+        if (len(info) == 0) {
             continue;
         }
         AppendIfNotExists(&fonts, ToStr(info));
@@ -6189,7 +8039,7 @@ TempStr EngineMupdf::ExtractFontListTemp() {
     }
 
     SortNatural(&fonts);
-    return JoinTemp(&fonts, "\n");
+    return JoinTemp(&fonts, StrL("\n"));
 }
 
 // @gen-start docprop-mupdf
@@ -6255,16 +8105,16 @@ TempStr EngineMupdf::GetPropertyTemp(DocProp prop) {
     if (prop == DocProp::PdfFileStructure) {
         StrVec fstruct;
         if (pdf_to_bool(ctx, pdf_dict_gets(ctx, pdfInfo, "Linearized"))) {
-            fstruct.Append("linearized");
+            fstruct.Append(StrL("linearized"));
         }
         if (pdf_to_bool(ctx, pdf_dict_gets(ctx, pdfInfo, "Marked"))) {
-            fstruct.Append("tagged");
+            fstruct.Append(StrL("tagged"));
         }
         if (pdf_dict_gets(ctx, pdfInfo, "OutputIntents")) {
             int n = pdf_array_len(ctx, pdf_dict_gets(ctx, pdfInfo, "OutputIntents"));
             for (int i = 0; i < n; i++) {
                 pdf_obj* intent = pdf_array_get(ctx, pdf_dict_gets(ctx, pdfInfo, "OutputIntents"), i);
-                ReportIf(!str::StartsWith(pdf_to_name(ctx, intent), StrL("GTS_")));
+                ReportIf(!str::StartsWith(Str(pdf_to_name(ctx, intent)), StrL("GTS_")));
                 const char* intentName = pdf_to_name(ctx, intent);
                 fstruct.Append(Str(intentName + 4));
             }
@@ -6272,12 +8122,12 @@ TempStr EngineMupdf::GetPropertyTemp(DocProp prop) {
         if (len(fstruct) == 0) {
             return {};
         }
-        return JoinTemp(&fstruct, ",");
+        return JoinTemp(&fstruct, StrL(","));
     }
 
     if (prop == DocProp::UnsupportedFeatures) {
         if (pdf_to_bool(ctx, pdf_dict_gets(ctx, pdfInfo, "Unsupported_XFA"))) {
-            return "XFA";
+            return StrL("XFA");
         }
         return {};
     }
@@ -6297,7 +8147,7 @@ static SeqStrNum pdfPropNames =
     // clang-format on
     // @gen-end docprop-pdf-info
     Str pdfPropName = SeqStrNumStrByNumber(pdfPropNames, (i64)prop);
-    if (!pdfPropName) {
+    if (len(pdfPropName) == 0) {
         return {};
     }
 
@@ -6327,6 +8177,66 @@ static TempStr LookupMetadataTemp(fz_context* ctx, fz_document* doc, Str key) {
 }
 
 #if OS_WIN
+static bool (*gEutlLookupFn)(const u8* der, int derLen) = nullptr;
+
+void SetEutlLookupFn(bool (*fn)(const u8* der, int derLen)) {
+    gEutlLookupFn = fn;
+}
+
+static bool CertIsEuTrusted(const u8* der, int derLen) {
+    if (!gEutlLookupFn || !der || derLen <= 0) {
+        return false;
+    }
+    return gEutlLookupFn(der, derLen);
+}
+
+static TempStr FormatUnixTimeTemp(int64_t unixSecs) {
+    if (unixSecs <= 0) {
+        return {};
+    }
+    time_t t = (time_t)unixSecs;
+    struct tm tm;
+    gmtime_s(&tm, &t);
+    char buf[64];
+    strftime(buf, sizeof buf, "%Y/%m/%d %H:%M:%S UTC", &tm);
+    return str::DupTemp(Str(buf));
+}
+
+static TempStr FormatPdfDateRawTemp(fz_context* ctx, pdf_obj* obj) {
+    if (!obj) {
+        return {};
+    }
+    const char* raw = nullptr;
+    fz_try(ctx) {
+        raw = pdf_to_str_buf(ctx, obj);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        raw = nullptr;
+    }
+    if (!raw || !raw[0]) {
+        return {};
+    }
+    Str s = Str(raw);
+    str::TrimPrefix(s, StrL("D:"));
+    if (s.len < 14) {
+        return {};
+    }
+    char buf[80];
+    int n =
+        snprintf(buf, sizeof(buf), "%.4s/%.2s/%.2s %.2s:%.2s:%.2s", s.s, s.s + 4, s.s + 6, s.s + 8, s.s + 10, s.s + 12);
+    if (n < 0) {
+        return {};
+    }
+    if (s.len > 14) {
+        Str tz = Str(s.s + 14, s.len - 14);
+        if (tz.len > 0 && (tz.s[0] == '+' || tz.s[0] == '-' || tz.s[0] == 'Z')) {
+            snprintf(buf + n, sizeof(buf) - (size_t)n, " %s", tz.s);
+        }
+    }
+    return str::DupTemp(Str(buf));
+}
+
 static void AppendSigDictText(fz_context* ctx, str::Builder& s, pdf_obj* sigDict, Str label, pdf_obj* key) {
     const char* val = nullptr;
     fz_try(ctx) {
@@ -6344,97 +8254,366 @@ static void AppendSigDictText(fz_context* ctx, str::Builder& s, pdf_obj* sigDict
     }
 }
 
-static void AppendSigDictDate(fz_context* ctx, str::Builder& s, pdf_obj* sigDict, Str label, pdf_obj* key) {
-    int64_t secs = 0;
-    fz_try(ctx) {
-        pdf_obj* obj = pdf_dict_get(ctx, sigDict, key);
-        if (obj) {
-            secs = pdf_to_date(ctx, obj);
-        }
+static bool PdfHasDssRevocation(fz_context* ctx, pdf_document* pdfdoc) {
+    pdf_obj* root = pdf_dict_get(ctx, pdf_trailer(ctx, pdfdoc), PDF_NAME(Root));
+    pdf_obj* dss = root ? pdf_dict_gets(ctx, root, "DSS") : nullptr;
+    if (!dss) {
+        return false;
     }
-    fz_catch(ctx) {
-        fz_report_error(ctx);
-        secs = 0;
-    }
-    if (secs <= 0) {
-        return;
-    }
-    time_t t = (time_t)secs;
-    struct tm tm;
-    gmtime_s(&tm, &t);
-    char buf[64];
-    strftime(buf, sizeof buf, "%Y-%m-%d %H:%M UTC", &tm);
-    s.Append(fmt("  %s: %s\n", label, Str(buf)));
+    pdf_obj* crls = pdf_dict_gets(ctx, dss, "CRLs");
+    pdf_obj* ocsps = pdf_dict_gets(ctx, dss, "OCSPs");
+    int nCrl = crls ? pdf_array_len(ctx, crls) : 0;
+    int nOcsp = ocsps ? pdf_array_len(ctx, ocsps) : 0;
+    return nCrl > 0 || nOcsp > 0;
 }
 
-static void AppendSignatureInfo(fz_context* ctx, str::Builder& s, pdf_pkcs7_verifier* verifier, pdf_document* pdfdoc,
-                                pdf_annot* widget, int sigNo, int pageNo) {
-    if (!s.IsEmpty()) {
-        s.AppendChar('\n');
+static const char* SigSubFilter(fz_context* ctx, pdf_obj* vDict) {
+    pdf_obj* sf = pdf_dict_get(ctx, vDict, PDF_NAME(SubFilter));
+    if (!sf) {
+        return nullptr;
     }
-    s.Append(fmt("Signature %d (page %d):\n", sigNo, pageNo));
-    pdf_obj* sigObj = pdf_annot_obj(ctx, widget);
-    if (!pdf_signature_is_signed(ctx, pdfdoc, sigObj)) {
-        s.Append("  not signed\n");
+    return pdf_to_name(ctx, sf);
+}
+
+static bool SubFilterIsDocTimeStamp(const char* sf) {
+    return sf && str::Eq(Str(sf), StrL("ETSI.RFC3161"));
+}
+
+static bool SubFilterIsCades(const char* sf) {
+    return sf && str::StartsWith(Str(sf), StrL("ETSI.CAdES"));
+}
+
+static void AppendTrustSource(str::Builder& s, const u8* der, int derLen) {
+    if (CertIsEuTrusted(der, derLen)) {
+        s.Append(StrL("  Source of trust: European Union Trusted List (EUTL)\n"));
+    } else {
+        s.Append(StrL("  Source of trust: Windows Certificate Store\n"));
+    }
+}
+
+static void AppendLtvLine(str::Builder& s, bool ltv, int64_t notAfterUnix) {
+    if (ltv) {
+        s.Append(StrL("  This signature is LTV enabled.\n"));
         return;
     }
-
-    pdf_pkcs7_distinguished_name* dn = nullptr;
-    char* name = nullptr;
-    fz_var(dn);
-    fz_var(name);
-    fz_try(ctx) {
-        dn = pdf_signature_get_widget_signatory(ctx, verifier, widget);
-        if (dn) {
-            name = pdf_signature_format_distinguished_name(ctx, dn);
-        }
+    TempStr exp = FormatUnixTimeTemp(notAfterUnix);
+    if (exp) {
+        s.Append(fmt("  This signature isn't LTV enabled and expires after: %s\n", exp));
+    } else {
+        s.Append(StrL("  This signature isn't LTV enabled.\n"));
     }
-    fz_catch(ctx) {
-        fz_report_error(ctx);
-    }
-    s.Append(fmt("  signer: %s\n", Str(name ? name : "(unknown)")));
-    fz_free(ctx, name);
-    pdf_signature_drop_distinguished_name(ctx, dn);
+}
 
-    // optional metadata the signer put in the /V dictionary (PDF 32000-1
-    // §12.8.1). These are plain PDF text strings, so pdf_to_text_string
-    // already hands us well-formed UTF-8 -- no mojibake risk.
+static void AppendPadesLevel(str::Builder& s, bool isCades, bool hasTs, bool ltv, bool hasDocTs, bool isDocTs,
+                             bool hasPolicy) {
+    if (isDocTs) {
+        return;
+    }
+    if (!isCades) {
+        return;
+    }
+    const char* level = "PAdES B-B";
+    if (hasDocTs && ltv && hasTs) {
+        level = "PAdES B-LTA";
+    } else if (ltv && hasTs) {
+        level = "PAdES B-LT";
+    } else if (hasTs) {
+        level = "PAdES B-T";
+    }
+    if (hasPolicy && str::Eq(Str(level), StrL("PAdES B-B"))) {
+        s.Append(StrL("  Signature level: PAdES-EPES\n"));
+        return;
+    }
+    s.Append(fmt("  Signature level: %s\n", Str(level)));
+}
+
+struct SigFieldWalk {
+    Vec<pdf_obj*> fields;
+};
+
+static void OnSigFieldArrive(fz_context* ctx, pdf_obj* node, void* arg, pdf_obj** values) {
+    pdf_obj* ft = values && values[0] ? values[0] : pdf_dict_get_inheritable(ctx, node, PDF_NAME(FT));
+    if (ft && pdf_name_eq(ctx, ft, PDF_NAME(Sig))) {
+        VecAppend(((SigFieldWalk*)arg)->fields, pdf_keep_obj(ctx, node));
+    }
+}
+
+static void CollectSignatureFields(fz_context* ctx, pdf_document* pdfdoc, Vec<pdf_obj*>& fields) {
+    SigFieldWalk walk;
+    pdf_obj* formFields = pdf_dict_getp(ctx, pdf_trailer(ctx, pdfdoc), "Root/AcroForm/Fields");
+    pdf_obj* ftName[2] = {PDF_NAME(FT), nullptr};
+    pdf_obj* ftVal = nullptr;
+    pdf_walk_tree(ctx, formFields, PDF_NAME(Kids), OnSigFieldArrive, nullptr, &walk, ftName, &ftVal);
+    fields = walk.fields;
+}
+
+static int PageNoForSigField(fz_context* ctx, pdf_document* pdfdoc, pdf_obj* field) {
+    pdf_obj* p = pdf_dict_get(ctx, field, PDF_NAME(P));
+    if (!p) {
+        return 0;
+    }
+    int n = pdf_lookup_page_number(ctx, pdfdoc, p);
+    return n >= 0 ? n + 1 : 0;
+}
+
+static void AppendSignatureFieldInfo(fz_context* ctx, str::Builder& s, pdf_pkcs7_verifier* verifier,
+                                     pdf_document* pdfdoc, pdf_obj* sigObj, int sigNo, int pageNo, bool docHasDss,
+                                     bool docHasDocTs) {
+    if (len(s) > 0) {
+        s.AppendChar('\n');
+    }
     pdf_obj* vDict = pdf_dict_get(ctx, sigObj, PDF_NAME(V));
     if (!vDict) {
         vDict = sigObj;
     }
-    AppendSigDictDate(ctx, s, vDict, "signing time", PDF_NAME(M));
-    AppendSigDictText(ctx, s, vDict, "reason", PDF_NAME(Reason));
-    AppendSigDictText(ctx, s, vDict, "location", PDF_NAME(Location));
-    AppendSigDictText(ctx, s, vDict, "contact", PDF_NAME(ContactInfo));
+    const char* subFilter = SigSubFilter(ctx, vDict);
+    bool isDocTs = SubFilterIsDocTimeStamp(subFilter);
+    bool isSigned = pdf_signature_is_signed(ctx, pdfdoc, sigObj);
+    if (!isSigned && isDocTs && pdf_dict_get(ctx, vDict, PDF_NAME(Contents))) {
+        isSigned = true;
+    }
+    if (isDocTs) {
+        s.Append(fmt("Signature %d (document timestamp):\n", sigNo));
+    } else if (pageNo > 0) {
+        s.Append(fmt("Signature %d (page %d):\n", sigNo, pageNo));
+    } else {
+        s.Append(fmt("Signature %d:\n", sigNo));
+    }
+    if (!isSigned) {
+        s.Append(StrL("  not signed\n"));
+        return;
+    }
 
-    pdf_signature_error certErr = PDF_SIGNATURE_ERROR_UNKNOWN;
+    char* contents = nullptr;
+    size_t contentsLen = 0;
+    pkcs7_windows_sig_info info{};
     fz_try(ctx) {
-        certErr = pdf_check_widget_certificate(ctx, verifier, widget);
+        contentsLen = pdf_signature_contents(ctx, pdfdoc, sigObj, &contents);
+        if (contentsLen > 0) {
+            pkcs7_windows_inspect(ctx, (unsigned char*)contents, contentsLen, &info);
+        }
+    }
+    fz_always(ctx) {
+        fz_free(ctx, contents);
+        contents = nullptr;
     }
     fz_catch(ctx) {
         fz_report_error(ctx);
     }
-    s.Append(fmt("  certificate: %s\n", Str(pdf_signature_error_description(certErr))));
 
+    s.Append(isDocTs ? StrL("  Timestamp certificate:\n") : StrL("  User certificate:\n"));
+    AppendTrustSource(s, info.cert_der, info.cert_der_len);
+    if (info.signer_cn && info.signer_cn[0]) {
+        s.Append(fmt("  Signed by: %s\n", Str(info.signer_cn)));
+    } else {
+        s.Append(StrL("  Signed by: (unknown)\n"));
+    }
+
+    pdf_obj* mObj = pdf_dict_get(ctx, vDict, PDF_NAME(M));
+    TempStr signedAt = FormatPdfDateRawTemp(ctx, mObj);
+    if (len(signedAt) == 0 && info.gen_time_unix > 0) {
+        signedAt = FormatUnixTimeTemp(info.gen_time_unix);
+    }
+    if (len(signedAt) == 0 && info.n_ts > 0) {
+        signedAt = FormatUnixTimeTemp(info.ts[0].gen_time_unix);
+    }
+    if (signedAt) {
+        s.Append(fmt("  Signature time: %s\n", signedAt));
+        if (isDocTs) {
+            s.Append(StrL("  The time and date displayed is from the secure time & date server.\n"));
+        } else {
+            s.Append(StrL("  The time and date displayed is from the user device.\n"));
+        }
+    }
+    if (info.issuer_cn && info.issuer_cn[0]) {
+        s.Append(fmt("  Certificate issued by: %s\n", Str(info.issuer_cn)));
+    }
+    if (info.has_qc_statement) {
+        s.Append(StrL("  Qualified certificate (eIDAS qcStatements).\n"));
+    }
+
+    pdf_signature_error certErr = PDF_SIGNATURE_ERROR_UNKNOWN;
     pdf_signature_error digErr = PDF_SIGNATURE_ERROR_UNKNOWN;
     int edits = 0;
     fz_try(ctx) {
-        digErr = pdf_check_widget_digest(ctx, verifier, widget);
+        certErr = pdf_check_certificate(ctx, verifier, pdfdoc, sigObj);
+        digErr = pdf_check_digest(ctx, verifier, pdfdoc, sigObj);
         edits = pdf_signature_incremental_change_since_signing(ctx, pdfdoc, sigObj);
     }
     fz_catch(ctx) {
         fz_report_error(ctx);
     }
-    if (digErr) {
-        s.Append(fmt("  digest: %s\n", Str(pdf_signature_error_description(digErr))));
-    } else if (edits) {
-        s.Append("  document edited after signing\n");
-    } else {
-        s.Append("  document unchanged since signing\n");
+    if (!isDocTs) {
+        if (certErr) {
+            s.Append(fmt("  Certificate: %s\n", Str(pdf_signature_error_description(certErr))));
+        }
+        if (digErr) {
+            s.Append(fmt("  Digest: %s\n", Str(pdf_signature_error_description(digErr))));
+        } else if (edits) {
+            s.Append(StrL("  The document was changed since the signature was applied.\n"));
+        } else {
+            s.Append(StrL("  The document wasn't changed since the signature was applied.\n"));
+        }
     }
+
+    bool ltv = docHasDss;
+    AppendLtvLine(s, ltv, info.not_after_unix);
+    if (info.hash_algo) {
+        s.Append(fmt("  Hash algorithm: %s\n", Str(info.hash_algo)));
+    }
+    if (info.sig_algo) {
+        s.Append(fmt("  Signature algorithm: %s\n", Str(info.sig_algo)));
+    }
+    if (info.digest_hex) {
+        s.Append(fmt("  Document hash: %s\n", Str(info.digest_hex)));
+    }
+    if (info.policy_oid) {
+        s.Append(fmt("  Policy ID: %s\n", Str(info.policy_oid)));
+    }
+    bool isCades = SubFilterIsCades(subFilter) || info.has_cades_attr;
+    AppendPadesLevel(s, isCades, info.has_timestamp, ltv, docHasDocTs, isDocTs, info.has_sig_policy_attr);
+
+    AppendSigDictText(ctx, s, vDict, StrL("reason"), PDF_NAME(Reason));
+    AppendSigDictText(ctx, s, vDict, StrL("location"), PDF_NAME(Location));
+    AppendSigDictText(ctx, s, vDict, StrL("contact"), PDF_NAME(ContactInfo));
+
+    for (int ti = 0; ti < info.n_ts; ti++) {
+        const pkcs7_windows_ts_info& ts = info.ts[ti];
+        s.Append(StrL("  -----\n"));
+        s.Append(StrL("  Included Time Stamp:\n"));
+        AppendTrustSource(s, ts.cert_der, ts.cert_der_len);
+        if (ts.signer_cn && ts.signer_cn[0]) {
+            s.Append(fmt("  Signed by: %s\n", Str(ts.signer_cn)));
+        }
+        TempStr tsTime = FormatUnixTimeTemp(ts.gen_time_unix);
+        if (tsTime) {
+            s.Append(fmt("  Signature time: %s\n", tsTime));
+            s.Append(StrL("  The time and date displayed is from the secure time & date server.\n"));
+        }
+        if (ts.issuer_cn && ts.issuer_cn[0]) {
+            s.Append(fmt("  Certificate issued by: %s\n", Str(ts.issuer_cn)));
+        }
+        AppendLtvLine(s, ltv, ts.not_after_unix);
+        if (ts.hash_algo) {
+            s.Append(fmt("  Hash algorithm: %s\n", Str(ts.hash_algo)));
+        }
+        if (ts.policy_oid) {
+            s.Append(fmt("  Policy ID: %s\n", Str(ts.policy_oid)));
+        }
+    }
+
+    pkcs7_windows_sig_info_free(ctx, &info);
+}
+
+PdfSigCert::~PdfSigCert() {
+    str::Free(label);
+    str::Free(der);
+}
+
+PdfSigCert* EngineMupdfGetSignatureCerts(EngineBase* engine) {
+    PdfSigCert* head = nullptr;
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        return nullptr;
+    }
+    fz_context* ctx = e->Ctx();
+    ScopedRecursiveMutex scope(&e->docLock);
+    Vec<pdf_obj*> fields;
+    fz_try(ctx) {
+        CollectSignatureFields(ctx, e->pdfdoc, fields);
+        int sigNo = 0;
+        for (pdf_obj* field : fields) {
+            ++sigNo;
+            char* contents = nullptr;
+            size_t contentsLen = pdf_signature_contents(ctx, e->pdfdoc, field, &contents);
+            if (contentsLen == 0) {
+                fz_free(ctx, contents);
+                continue;
+            }
+            pkcs7_windows_sig_info info{};
+            if (contentsLen > 0) {
+                pkcs7_windows_inspect(ctx, (unsigned char*)contents, contentsLen, &info);
+            }
+            fz_free(ctx, contents);
+            auto add = [&](const char* who, const u8* der, int derLen) {
+                if (!der || derLen <= 0) {
+                    return;
+                }
+                auto* c = new PdfSigCert;
+                c->label = str::Dup(fmt("Signature %d %s", sigNo, Str(who)));
+                c->der = str::Dup(Str((const char*)der, derLen));
+                ListInsertEnd(&head, c);
+            };
+            pdf_obj* v = pdf_dict_get(ctx, field, PDF_NAME(V));
+            bool docTs = SubFilterIsDocTimeStamp(SigSubFilter(ctx, v ? v : field));
+            add(docTs ? "timestamp" : "signer", info.cert_der, info.cert_der_len);
+            for (int ti = 0; ti < info.n_ts; ti++) {
+                add("timestamp", info.ts[ti].cert_der, info.ts[ti].cert_der_len);
+            }
+            pkcs7_windows_sig_info_free(ctx, &info);
+        }
+    }
+    fz_always(ctx) {
+        for (pdf_obj* field : fields) {
+            pdf_drop_obj(ctx, field);
+        }
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+    }
+    return head;
+}
+
+void FreePdfSigCerts(PdfSigCert* certs) {
+    ListDelete(certs);
 }
 #endif
+
+static TempStr GetSignatures(EngineMupdf* e) {
+    // pdf signatures (signed form widgets). Walks each page's widget set;
+    // for each signature widget, pulls signer DN + cert/digest verdict via
+    // the Windows CryptoAPI pdf_pkcs7_verifier.
+#if OS_WIN
+    auto pdfdoc = e->pdfdoc;
+    if (!pdfdoc) return {};
+    auto ctx = e->Ctx();
+    int nSigs = pdf_count_signatures(ctx, pdfdoc);
+    if (nSigs == 0) return {};
+    str::Builder sigs;
+    pdf_pkcs7_verifier* verifier = nullptr;
+    Vec<pdf_obj*> fields;
+    fz_var(verifier);
+    fz_try(ctx) {
+        verifier = pkcs7_windows_new_verifier(ctx);
+        CollectSignatureFields(ctx, pdfdoc, fields);
+        bool hasDss = PdfHasDssRevocation(ctx, pdfdoc);
+        bool hasDocTs = false;
+        for (pdf_obj* field : fields) {
+            pdf_obj* v = pdf_dict_get(ctx, field, PDF_NAME(V));
+            if (SubFilterIsDocTimeStamp(SigSubFilter(ctx, v ? v : field))) {
+                hasDocTs = true;
+                break;
+            }
+        }
+        int sigNo = 0;
+        for (pdf_obj* field : fields) {
+            ++sigNo;
+            int pageNo = PageNoForSigField(ctx, pdfdoc, field);
+            AppendSignatureFieldInfo(ctx, sigs, verifier, pdfdoc, field, sigNo, pageNo, hasDss, hasDocTs);
+        }
+    }
+    fz_always(ctx) {
+        for (pdf_obj* field : fields) {
+            pdf_drop_obj(ctx, field);
+        }
+        pdf_drop_verifier(ctx, verifier);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+    }
+    return len(sigs) > 0 ? str::DupTemp(ToStr(sigs)) : TempStr{};
+#endif
+}
 
 void EngineMupdf::GetProperties(Props& propsOut) {
     EngineBase::GetProperties(propsOut);
@@ -6442,55 +8621,28 @@ void EngineMupdf::GetProperties(Props& propsOut) {
     auto* ctx = Ctx();
     ScopedRecursiveMutex ctxScope(&docLock);
 
-    TempStr val = LookupMetadataTemp(ctx, _doc, "info:Keywords");
+    TempStr val = LookupMetadataTemp(ctx, _doc, StrL("info:Keywords"));
+    if (len(val) == 0 && pdfInfo) {
+        pdf_obj* obj = pdf_dict_gets(ctx, pdfInfo, "Keywords");
+        if (obj) {
+            TempWStr ws = PdfToWStrTemp(ctx, obj);
+            PdfCleanStringInPlace(ws);
+            val = ToUtf8Temp(ws);
+        }
+    }
     if (val) {
         AddProp(propsOut, DocProp::Keywords, val);
     }
 
-    val = LookupMetadataTemp(ctx, _doc, "encryption");
+    val = LookupMetadataTemp(ctx, _doc, StrL("encryption"));
     if (val) {
         AddProp(propsOut, DocProp::Encryption, val);
     }
 
-    // pdf signatures (signed form widgets). Walks each page's widget set;
-    // for each signature widget, pulls signer DN + cert/digest verdict via
-    // the Windows CryptoAPI pdf_pkcs7_verifier.
-#if OS_WIN
-    if (pdfdoc && pdf_count_signatures(ctx, pdfdoc) > 0) {
-        str::Builder sigs;
-        pdf_pkcs7_verifier* verifier = nullptr;
-        pdf_page* page = nullptr;
-        fz_var(verifier);
-        fz_var(page);
-        fz_try(ctx) {
-            verifier = pkcs7_windows_new_verifier(ctx);
-            int totalPages = pdf_count_pages(ctx, pdfdoc);
-            int sigNo = 0;
-            for (int pageNo = 0; pageNo < totalPages; pageNo++) {
-                page = pdf_load_page(ctx, pdfdoc, pageNo);
-                for (pdf_annot* w = pdf_first_widget(ctx, page); w; w = pdf_next_widget(ctx, w)) {
-                    if (pdf_widget_type(ctx, w) != PDF_WIDGET_TYPE_SIGNATURE) {
-                        continue;
-                    }
-                    ++sigNo;
-                    AppendSignatureInfo(ctx, sigs, verifier, pdfdoc, w, sigNo, pageNo + 1);
-                }
-                fz_drop_page(ctx, (fz_page*)page);
-                page = nullptr;
-            }
-        }
-        fz_always(ctx) {
-            fz_drop_page(ctx, (fz_page*)page);
-            pdf_drop_verifier(ctx, verifier);
-        }
-        fz_catch(ctx) {
-            fz_report_error(ctx);
-        }
-        if (!sigs.IsEmpty()) {
-            AddProp(propsOut, DocProp::Signatures, str::DupTemp(ToStr(sigs)));
-        }
+    TempStr sigs = GetSignatures(this);
+    if (len(sigs) > 0) {
+        AddProp(propsOut, DocProp::Signatures, sigs);
     }
-#endif
 
     // for epub files, list all files in the archive
     Str path = FilePath();
@@ -6539,7 +8691,7 @@ Str EngineMupdf::GetFileData() {
     }
 
     auto path = FilePath();
-    if (!path) {
+    if (len(path) == 0) {
         return {};
     }
     return file::ReadFile(path);
@@ -6553,7 +8705,7 @@ bool EngineMupdf::SaveFileAs(Str dstPath) {
         return ok;
     }
     auto srcPath = FilePath();
-    if (!srcPath) {
+    if (len(srcPath) == 0) {
         return false;
     }
     bool ok = file::Copy(dstPath, srcPath, false);
@@ -6591,7 +8743,7 @@ bool EngineMupdfIsEncrypted(EngineBase* engine) {
 Str EngineMupdfGetPassword(EngineBase* engine) {
     EngineMupdf* epdf = AsEngineMupdf(engine);
     if (!epdf) {
-        return nullptr;
+        return {};
     }
     return epdf->pdfPassword;
 }
@@ -6651,10 +8803,37 @@ bool EngineMupdfSaveUpdated(EngineBase* engine, Str path, const ShowErrorCb& sho
         }
     }
 
-    // TOOD: what if not ok?
     // note: this should be short-lived as we should re-load the file
     if (ok) {
         epdf->modifiedAnnotations = false;
+        // undoing back to here means the file on disk matches again
+        epdf->savedUndoPos = EngineMupdfUndoPos(epdf, nullptr);
+    }
+    return ok;
+}
+
+// Write a standalone (non-incremental) copy of the live PDF, including
+// unsaved annotations, without marking the document clean. Used so tools
+// that re-open the file from disk (bake) see the current session (issue #5977).
+bool EngineMupdfSaveCopy(EngineBase* engine, Str path) {
+    EngineMupdf* epdf = AsEngineMupdf(engine);
+    if (!epdf || !epdf->pdfdoc || len(path) == 0) {
+        return false;
+    }
+    auto* ctx = epdf->Ctx();
+    ScopedRecursiveMutex scope(&epdf->docLock);
+    pdf_write_options save_opts{};
+    save_opts = pdf_default_write_options2;
+    save_opts.do_incremental = 0;
+    save_opts.do_compress = 1;
+    bool ok = false;
+    fz_try(ctx) {
+        pdf_save_document(ctx, epdf->pdfdoc, CStrTemp(path), &save_opts);
+        ok = true;
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        logf("EngineMupdfSaveCopy: saving '%s' failed: '%s'\n", path, Str(fz_caught_message(ctx)));
     }
     return ok;
 }
@@ -6665,7 +8844,7 @@ static bool HasClipOptimizationsLocked(EngineMupdf* e, int pageNo) {
     if (pageNo < 1 || pageNo > e->pageCount) {
         return false;
     }
-    FzPageInfo* pageInfo = e->pages[pageNo - 1];
+    FzPageInfo* pageInfo = e->PageInfoByPageNo(pageNo);
     if (!pageInfo || !pageInfo->page || !pageInfo->fullyLoaded) {
         return false;
     }
@@ -6700,7 +8879,7 @@ bool EngineMupdf::HasClipOptimizations(int pageNo) {
 }
 
 TempStr EngineMupdf::GetPageLabeTemp(int pageNo) const {
-    if (!pageLabels || pageNo < 1 || PageCount() < pageNo) {
+    if (!pageLabels || pageNo < 1 || pageCount < pageNo) {
         return EngineBase::GetPageLabeTemp(pageNo);
     }
 
@@ -6786,7 +8965,7 @@ EngineBase* CreateEngineMupdfFromFile(Str path, FileType kind, int displayDPI, P
         }
         engine->displayDPI = displayDPI;
         fz_stream* stm = FzStreamFromData(engine->Ctx(), (u8*)d.s, d.len);
-        if (!engine->LoadFromStream(stm, "foo.fb2", pwdUI) || !engine->FinishLoading()) {
+        if (!engine->LoadFromStream(stm, StrL("foo.fb2"), pwdUI) || !engine->FinishLoading()) {
             SafeEngineRelease(&engine);
             return {};
         }
@@ -6819,22 +8998,228 @@ EngineBase* CreateEngineMupdfFromData(Str data, Str nameHint, PasswordUI* pwdUI)
     return engine;
 }
 
-// it's fast because we only collect pointers from FzPageInfo
-void EngineMupdfGetAnnotations(EngineBase* engine, Vec<Annotation*>& annotsOut) {
-    annotsOut.Clear();
+static void AppendLoadedAnnotations(EngineMupdf* e, Vec<Annotation*>& annotsOut) {
+    VecClear(annotsOut);
+    ForEachPageInfo(e, [&annotsOut](FzPageInfo* pi) {
+        if (pi && pi->annotsLoaded) {
+            VecAppendVec(annotsOut, pi->annotations);
+        }
+    });
+}
 
+// Collect Annotation* already sitting on FzPageInfo. Does not load pages.
+void EngineMupdfGetLoadedAnnotations(EngineBase* engine, Vec<Annotation*>& annotsOut) {
+    VecClear(annotsOut);
     EngineMupdf* e = AsEngineMupdf(engine);
-    if (!e->pdfdoc) {
+    if (!e || !e->pdfdoc) {
         return;
     }
     ScopedRecursiveMutex scope(&e->pagesLock);
+    AppendLoadedAnnotations(e, annotsOut);
+}
+
+bool EngineMupdfAnnotsLoadDone(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    return e && e->annotLoadDone;
+}
+
+// Like EngineMupdfGetLoadedAnnotations but does not wait for pagesLock.
+bool EngineMupdfTryGetLoadedAnnotations(EngineBase* engine, Vec<Annotation*>& annotsOut) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        VecClear(annotsOut);
+        return true;
+    }
+    if (!e->pagesLock.TryLock()) {
+        return false;
+    }
+    AppendLoadedAnnotations(e, annotsOut);
+    e->pagesLock.Unlock();
+    return true;
+}
+
+// Load each page just far enough to read its annots (not stext/links). Callers
+// that need the complete list now (tests, matching after reload) use this.
+void EngineMupdfGetAnnotations(EngineBase* engine, Vec<Annotation*>& annotsOut) {
+    VecClear(annotsOut);
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        return;
+    }
     for (int i = 1; i <= e->pageCount; i++) {
-        FzPageInfo* pi = e->GetFzPageInfo(i, false);
+        FzPageInfo* pi = e->GetFzPageInfo(i, true);
         if (!pi) {
             continue;
         }
-        annotsOut.Append(pi->annotations);
+        VecAppendVec(annotsOut, pi->annotations);
     }
+}
+
+static void AnnotLoadFinished(EngineMupdf* e) {
+    e->annotLoadDone = true;
+    Func0 cb = e->annotLoadDoneCb;
+    if (!AtomicIntGet(&e->annotLoadCancel)) {
+        cb.Call();
+    }
+    AtomicIntDec(&gDangerousThreadCount);
+    e->Release();
+}
+
+static void AnnotLoadProgressUi(EngineMupdf* e) {
+    Func0 cb = e->annotLoadDoneCb;
+    if (!AtomicIntGet(&e->annotLoadCancel) && cb.IsValid()) {
+        cb.Call();
+    }
+    e->Release();
+}
+
+static void PostAnnotLoadProgress(EngineMupdf* e) {
+    if (AtomicIntGet(&e->annotLoadCancel)) {
+        return;
+    }
+    if (!e->annotLoadDoneCb.IsValid()) {
+        return;
+    }
+    e->AddRef();
+    auto fn = MkFunc0(AnnotLoadProgressUi, e);
+    uitask::Post(fn, "AnnotLoadProgress");
+}
+
+static int CountLoadedAnnots(EngineMupdf* e) {
+    int n = 0;
+    ScopedRecursiveMutex scope(&e->pagesLock);
+    ForEachPageInfo(e, [&n](FzPageInfo* pi) {
+        if (pi && pi->annotsLoaded) {
+            n += len(pi->annotations);
+        }
+    });
+    return n;
+}
+
+static int LoadAnnotsForPageNo(EngineMupdf* e, int pageNo) {
+    if (pageNo < 1 || pageNo > e->pageCount) {
+        return 0;
+    }
+    int before = 0;
+    {
+        ScopedRecursiveMutex scope(&e->pagesLock);
+        FzPageInfo* pi = e->PageInfoByPageNo(pageNo);
+        if (pi && pi->annotsLoaded) {
+            return 0;
+        }
+        if (pi) {
+            before = len(pi->annotations);
+        }
+    }
+    FzPageInfo* pi = e->GetFzPageInfo(pageNo, true);
+    if (!pi) {
+        return 0;
+    }
+    int after = len(pi->annotations);
+    if (after < before) {
+        return 0;
+    }
+    return after - before;
+}
+
+static void AnnotLoadThread(EngineMupdf* e) {
+    Vec<int> first = e->annotLoadFirstPages;
+    int nPages = e->pageCount;
+    int nSincePost = 0;
+    bool postedAny = false;
+    TimeStamp lastPost = TimeGet();
+
+    auto maybePost = [&](bool force) {
+        if (AtomicIntGet(&e->annotLoadCancel)) {
+            return;
+        }
+        if (!force && nSincePost < 16) {
+            return;
+        }
+        if (!force && postedAny && TimeSinceInMs(lastPost) < 1000) {
+            return;
+        }
+        if (!force && nSincePost < 1) {
+            return;
+        }
+        if (force && CountLoadedAnnots(e) == 0 && nSincePost == 0) {
+            return;
+        }
+        logf("AnnotLoadProgress: force=%d nSincePost=%d loaded=%d\n", (int)force, nSincePost, CountLoadedAnnots(e));
+        PostAnnotLoadProgress(e);
+        nSincePost = 0;
+        lastPost = TimeGet();
+        postedAny = true;
+    };
+
+    for (int pageNo : first) {
+        if (AtomicIntGet(&e->annotLoadCancel)) {
+            break;
+        }
+        nSincePost += LoadAnnotsForPageNo(e, pageNo);
+    }
+    // Current / visible pages: show them immediately, even if fewer than 16.
+    maybePost(true);
+
+    for (int i = 1; i <= nPages; i++) {
+        if (AtomicIntGet(&e->annotLoadCancel)) {
+            break;
+        }
+        nSincePost += LoadAnnotsForPageNo(e, i);
+        maybePost(false);
+    }
+    e->ReleaseTextExtractionThreadContext();
+    if (AtomicIntGet(&e->annotLoadCancel)) {
+        AtomicIntDec(&gDangerousThreadCount);
+        e->Release();
+        return;
+    }
+    auto fn = MkFunc0(AnnotLoadFinished, e);
+    uitask::Post(fn, "AnnotLoadFinished");
+}
+
+void EngineMupdfStartLoadAllAnnotations(EngineBase* engine, const Vec<int>& firstPages, const Func0& onProgress) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        return;
+    }
+    e->annotLoadDoneCb = onProgress;
+    if (e->annotLoadDone) {
+        return;
+    }
+    if (e->annotLoadStarted) {
+        return;
+    }
+    bool allLoaded = true;
+    {
+        // PDF is always single-chapter (annotations are PDF-only)
+        ScopedRecursiveMutex scope(&e->pagesLock);
+        for (FzPageInfo* pi : *e->chapterPages[0]) {
+            if (!pi || !pi->annotsLoaded) {
+                allLoaded = false;
+                break;
+            }
+        }
+    }
+    if (allLoaded) {
+        e->annotLoadStarted = true;
+        e->annotLoadDone = true;
+        return;
+    }
+    e->annotLoadFirstPages = firstPages;
+    e->annotLoadStarted = true;
+    e->AddRef();
+    AtomicIntInc(&gDangerousThreadCount);
+    auto fn = MkFunc0(AnnotLoadThread, e);
+    ThreadHandle th = StartThread(fn, StrL("LoadAnnots"));
+    if (!th) {
+        AtomicIntDec(&gDangerousThreadCount);
+        e->Release();
+        e->annotLoadDone = true;
+        onProgress.Call();
+        return;
+    }
+    SafeCloseThreadHandle(&th);
 }
 
 bool EngineMupdfHasUnsavedAnnotations(EngineBase* engine) {
@@ -6843,6 +9228,405 @@ bool EngineMupdfHasUnsavedAnnotations(EngineBase* engine) {
         return false;
     }
     return epdf->modifiedAnnotations;
+}
+
+bool EngineMupdfHasRedactMarks(EngineBase* engine) {
+    Vec<Annotation*> annots;
+    EngineMupdfGetLoadedAnnotations(engine, annots);
+    for (Annotation* a : annots) {
+        if (a && a->type == AnnotationType::Redact) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void DropPageImages(fz_context* ctx, FzPageInfo* pi) {
+    for (FitzPageImageInfo* img : pi->images) {
+        if (img && img->image) {
+            fz_drop_image(ctx, img->image);
+            img->image = nullptr;
+        }
+    }
+    DeleteVecMembers(pi->images);
+}
+
+// Drop cached page bits that were built from the old content stream.
+// Caller holds pagesLock and renderLock. Leaves annotation wrappers in place.
+static void InvalidateFzPageAfterContentChange(EngineMupdf* e, FzPageInfo* pi) {
+    auto* ctx = e->Ctx();
+    if (pi->displayList) {
+        fz_drop_display_list(ctx, pi->displayList);
+        pi->displayList = nullptr;
+    }
+    PdfDarkModeInvalidatePage(ctx, pi);
+    pi->contentImagesCollected = false;
+    DropPageImages(ctx, pi);
+    DeleteVecMembers(pi->links);
+    DeleteVecMembers(pi->autoLinks);
+    if (pi->retainedLinks) {
+        fz_drop_link(ctx, pi->retainedLinks);
+        pi->retainedLinks = nullptr;
+    }
+    pi->elementsNeedRebuilding = true;
+    pi->fullyLoaded = false;
+}
+
+// Apply every /Redact annotation: rewrite the page content, drop the marks,
+// and return the Sumatra wrappers that MuPDF deleted (caller must Detach +
+// DeleteAnnotation). Incremental save is unsafe afterwards; pdfdoc->redacted
+// already forces a full rewrite in EngineMupdfSaveUpdated.
+bool EngineMupdfApplyRedactions(EngineBase* engine, Vec<Annotation*>& deletedOut) {
+    VecReset(deletedOut);
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        return false;
+    }
+
+    pdf_redact_options opts{};
+    opts.black_boxes = 1;
+    opts.image_method = PDF_REDACT_IMAGE_PIXELS;
+    opts.line_art = PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED;
+    opts.text = PDF_REDACT_TEXT_REMOVE;
+
+    auto* ctx = e->Ctx();
+    bool any = false;
+    ScopedRecursiveMutex pagesScope(&e->pagesLock);
+    ScopedMutex renderScope(&e->renderLock);
+
+    for (int pageNo = 1; pageNo <= e->pageCount; pageNo++) {
+        FzPageInfo* pi = GetFzPageInfoLocked(e, e->LocationFromPageNo(pageNo), true, nullptr);
+        if (!pi || !pi->page) {
+            continue;
+        }
+
+        bool hasRedact = false;
+        for (Annotation* a : pi->annotations) {
+            if (a && a->type == AnnotationType::Redact) {
+                hasRedact = true;
+                break;
+            }
+        }
+        if (!hasRedact) {
+            continue;
+        }
+
+        Vec<Annotation*> before = pi->annotations;
+        int did = 0;
+        bool failed = false;
+        {
+            ScopedRecursiveMutex docScope(&e->docLock);
+            fz_try(ctx) {
+                pdf_page* page = pdf_page_from_fz_page(ctx, pi->page);
+                if (page) {
+                    did = pdf_redact_page(ctx, e->pdfdoc, page, &opts);
+                }
+            }
+            fz_catch(ctx) {
+                fz_report_error(ctx);
+                failed = true;
+                logf("EngineMupdfApplyRedactions: pdf_redact_page failed on page %d\n", pageNo);
+            }
+        }
+        if (failed || !did) {
+            continue;
+        }
+
+        Vec<pdf_annot*> live;
+        bool listedLive = false;
+        {
+            ScopedRecursiveMutex docScope(&e->docLock);
+            fz_try(ctx) {
+                pdf_page* page = pdf_page_from_fz_page(ctx, pi->page);
+                for (pdf_annot* a = page ? pdf_first_annot(ctx, page) : nullptr; a; a = pdf_next_annot(ctx, a)) {
+                    VecAppend(live, a);
+                }
+                listedLive = true;
+            }
+            fz_catch(ctx) {
+                fz_report_error(ctx);
+            }
+        }
+
+        for (Annotation* w : before) {
+            if (!w) {
+                continue;
+            }
+            bool gone = listedLive ? VecFind(live, w->pdfannot) < 0 : w->type == AnnotationType::Redact;
+            if (!gone) {
+                continue;
+            }
+            w->pdfannot = nullptr;
+            VecRemove(pi->annotations, w);
+            VecAppend(deletedOut, w);
+        }
+
+        {
+            ScopedRecursiveMutex docScope(&e->docLock);
+            RebuildCommentsFromAnnotations(ctx, pi);
+        }
+        InvalidateFzPageAfterContentChange(e, pi);
+        e->InvalidateTextForPage(pageNo);
+        any = true;
+    }
+
+    if (any) {
+        e->modifiedAnnotations = true;
+    }
+    return any;
+}
+
+//--- Undo / redo, on top of MuPDF's journal (see pdf_enable_journal)
+
+// Where we are in the undo history: 0 is the document as it was loaded,
+// *stepsOut is the number of recorded steps. -1 if the document isn't
+// journalled or MuPDF refused to answer (it does while an operation is open).
+int EngineMupdfUndoPos(EngineMupdf* e, int* stepsOut) {
+    if (stepsOut) {
+        *stepsOut = 0;
+    }
+    if (!e || !e->pdfdoc || e->journalNesting > 0) {
+        return -1;
+    }
+    auto* ctx = e->Ctx();
+    ScopedRecursiveMutex docScope(&e->docLock);
+    int steps = 0;
+    int pos = -1;
+    fz_try(ctx) {
+        pos = pdf_undoredo_state(ctx, e->pdfdoc, &steps);
+    }
+    fz_catch(ctx) {
+        // MuPDF throws while an edit/appearance op is still open (e.g. selecting
+        // a file attachment rebuilds its property row, then the toolbar asks
+        // undo/redo). That is expected; do not log it as an error.
+        if (fz_caught(ctx) != FZ_ERROR_ARGUMENT) {
+            fz_report_error(ctx);
+        } else {
+            fz_ignore_error(ctx);
+        }
+        pos = -1;
+    }
+    if (stepsOut && pos >= 0) {
+        *stepsOut = steps;
+    }
+    return pos;
+}
+
+// One operation is one undo step. MuPDF's annotation setters open one
+// themselves, so this is for grouping a whole gesture (create, paste, a resize
+// drag that writes on every mouse move) into a single step. Nested operations
+// fold into the outermost one. Must be paired with EngineMupdfEndOperation().
+void EngineMupdfBeginOperation(EngineBase* engine, const char* name) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        return;
+    }
+    auto* ctx = e->Ctx();
+    ScopedRecursiveMutex docScope(&e->docLock);
+    fz_try(ctx) {
+        pdf_begin_operation(ctx, e->pdfdoc, name);
+        e->journalNesting++;
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+    }
+}
+
+void EngineMupdfEndOperation(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc || e->journalNesting <= 0) {
+        return;
+    }
+    auto* ctx = e->Ctx();
+    ScopedRecursiveMutex docScope(&e->docLock);
+    fz_try(ctx) {
+        pdf_end_operation(ctx, e->pdfdoc);
+        e->journalNesting--;
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        e->journalNesting--;
+    }
+}
+
+bool EngineMupdfCanUndo(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    int pos = EngineMupdfUndoPos(e, nullptr);
+    return pos > 0;
+}
+
+bool EngineMupdfCanRedo(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    int steps = 0;
+    int pos = EngineMupdfUndoPos(e, &steps);
+    return pos >= 0 && pos < steps;
+}
+
+static Annotation* FindWrapperForPdfAnnot(const Vec<Annotation*>& annots, pdf_annot* a) {
+    for (Annotation* w : annots) {
+        if (w && w->pdfannot == a) {
+            return w;
+        }
+    }
+    return nullptr;
+}
+
+// Rebuild `wrappers` so it matches `live`, in page order: keep the wrapper of
+// an annotation that is still there, make one for an annotation that (re)appeared
+// and hand back the ones whose pdf_annot MuPDF freed.
+// A wrapper we keep across an undo / redo caches the bounds the annotation had
+// before the step, and the step may well have been a resize or a move. Nothing
+// else the wrapper holds can change under it: an annotation that went away is
+// dropped, one that came back gets a fresh wrapper.
+static void RefreshWrapperBounds(EngineMupdf* e, Annotation* w) {
+    if (!w || !w->pdfannot) {
+        return;
+    }
+    fz_context* ctx = e->Ctx();
+    ScopedRecursiveMutex docScope(&e->docLock);
+    fz_rect bounds = {};
+    fz_try(ctx) {
+        bounds = pdf_bound_annot(ctx, w->pdfannot);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        return;
+    }
+    w->bounds = ToRectF(bounds);
+}
+
+static void ResyncWrapperList(EngineMupdf* e, int pageNo, Vec<Annotation*>& wrappers, const Vec<pdf_annot*>& live,
+                              Vec<Annotation*>& removedOut) {
+    Vec<Annotation*> res;
+    for (pdf_annot* a : live) {
+        Annotation* w = FindWrapperForPdfAnnot(wrappers, a);
+        if (!w) {
+            w = MakeAnnotationWrapper(e, a, pageNo);
+            if (!w) {
+                continue;
+            }
+        } else {
+            RefreshWrapperBounds(e, w);
+        }
+        VecAppend(res, w);
+    }
+    for (Annotation* w : wrappers) {
+        if (!w || VecContains(res, w)) {
+            continue;
+        }
+        // its pdf_annot is gone; the wrapper must not reach MuPDF again
+        w->pdfannot = nullptr;
+        VecAppend(removedOut, w);
+    }
+    wrappers = res;
+}
+
+// Undo / redo restores objects under our feet: MuPDF re-syncs each open page,
+// which frees the pdf_annot of an annotation that went away and makes a fresh
+// one for an annotation that came back. Bring our wrappers in line and drop
+// every cached rendering of the page.
+static void SyncPagesAfterUndoRedo(EngineMupdf* e, Vec<Annotation*>& removedOut) {
+    auto* ctx = e->Ctx();
+    ScopedRecursiveMutex pagesScope(&e->pagesLock);
+    ScopedMutex renderScope(&e->renderLock);
+    ForEachPageInfo(e, [&](FzPageInfo* pi) {
+        if (!pi || !pi->page) {
+            return;
+        }
+        if (pi->annotsLoaded) {
+            Vec<pdf_annot*> liveAnnots;
+            Vec<pdf_annot*> liveWidgets;
+            {
+                ScopedRecursiveMutex docScope(&e->docLock);
+                bool ok = false;
+                fz_var(ok);
+                fz_try(ctx) {
+                    pdf_page* page = pdf_page_from_fz_page(ctx, pi->page);
+                    for (pdf_annot* a = page ? pdf_first_annot(ctx, page) : nullptr; a; a = pdf_next_annot(ctx, a)) {
+                        VecAppend(liveAnnots, a);
+                    }
+                    for (pdf_annot* a = page ? pdf_first_widget(ctx, page) : nullptr; a; a = pdf_next_widget(ctx, a)) {
+                        VecAppend(liveWidgets, a);
+                    }
+                    ok = true;
+                }
+                fz_catch(ctx) {
+                    fz_report_error(ctx);
+                }
+                if (!ok) {
+                    return;
+                }
+            }
+            ResyncWrapperList(e, pi->pageNo, pi->annotations, liveAnnots, removedOut);
+            ResyncWrapperList(e, pi->pageNo, pi->widgets, liveWidgets, removedOut);
+            {
+                ScopedRecursiveMutex docScope(&e->docLock);
+                RebuildCommentsFromAnnotations(ctx, pi);
+            }
+        }
+        InvalidateFzPageAfterContentChange(e, pi);
+        e->InvalidateTextForPage(pi->pageNo);
+    });
+}
+
+// Step one operation back (or forward with redo). Returns false if there was
+// nothing to step to. The wrappers in removedOut are detached from the document
+// already; the caller must take them out of the UI and delete them.
+static bool EngineMupdfUndoRedo(EngineBase* engine, bool redo, Vec<Annotation*>& removedOut) {
+    VecReset(removedOut);
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        return false;
+    }
+    bool can = redo ? EngineMupdfCanRedo(engine) : EngineMupdfCanUndo(engine);
+    if (!can) {
+        return false;
+    }
+    auto* ctx = e->Ctx();
+    bool ok = false;
+    {
+        ScopedRecursiveMutex docScope(&e->docLock);
+        fz_try(ctx) {
+            if (redo) {
+                pdf_redo(ctx, e->pdfdoc);
+            } else {
+                pdf_undo(ctx, e->pdfdoc);
+            }
+            ok = true;
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            logf("EngineMupdfUndoRedo: pdf_%s() failed\n", redo ? StrL("redo") : StrL("undo"));
+        }
+    }
+    if (!ok) {
+        return false;
+    }
+    SyncPagesAfterUndoRedo(e, removedOut);
+    return true;
+}
+
+bool EngineMupdfUndo(EngineBase* engine, Vec<Annotation*>& removedOut) {
+    return EngineMupdfUndoRedo(engine, false, removedOut);
+}
+
+bool EngineMupdfRedo(EngineBase* engine, Vec<Annotation*>& removedOut) {
+    return EngineMupdfUndoRedo(engine, true, removedOut);
+}
+
+// The journal knows exactly whether the document differs from the file, which
+// the modifiedAnnotations flag can only approximate (it stays set after the
+// change that set it is undone). Call after undo / redo.
+void EngineMupdfRefreshModifiedState(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        return;
+    }
+    int pos = EngineMupdfUndoPos(e, nullptr);
+    if (pos < 0) {
+        return;
+    }
+    e->modifiedAnnotations = (pos != e->savedUndoPos);
 }
 
 // the mupdf engine also renders epub, mobi, fb2, xps, svg and more; only a real
@@ -6860,24 +9644,109 @@ bool EngineMupdfSupportsAnnotations(EngineBase* engine) {
     return (epdf->pdfdoc != nullptr);
 }
 
+// Restyle a reflowable document with the current theme page colors and drop
+// cached page display lists so the next render uses the new HTML. A chaptered
+// doc re-lays-out lazily (chapter 1 only, like at open); a single-chapter doc
+// resizes its page-info vector to match the new count.
+void EngineMupdf::ApplyReflowThemeCss() {
+    if (!isReflowable || !_doc || ebookLayoutW <= 0 || ebookLayoutH <= 0) {
+        return;
+    }
+    TempStr themeCss = ReflowDocumentThemeCssTemp();
+    TempStr fullCss = ebookUserCss;
+    if (themeCss) {
+        fullCss = fullCss ? str::JoinTemp(fullCss, themeCss) : themeCss;
+    }
+    const char* cssZ = fullCss ? CStrTemp(fullCss) : "";
+
+    ScopedRecursiveMutex pagesScope(&pagesLock);
+    ScopedMutex renderScope(&renderLock);
+    ScopedRecursiveMutex docScope(&docLock);
+
+    fz_context* ctx = Ctx();
+    if (!ctx) {
+        return;
+    }
+    ForEachPageInfo(this, [this, ctx](FzPageInfo* pi) {
+        InvalidateFzPageAfterContentChange(this, pi);
+        if (pi->page) {
+            fz_drop_page(ctx, pi->page);
+            pi->page = nullptr;
+        }
+    });
+
+    bool ok = false;
+    fz_var(ok);
+    fz_try(ctx) {
+        fz_style_document(ctx, _doc, ebookPublisherCss, cssZ);
+        fz_layout_document(ctx, _doc, ebookLayoutW, ebookLayoutH, ebookLayoutEm);
+        ok = true;
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+    }
+    if (!ok) {
+        return;
+    }
+
+    if (HasChapters()) {
+        chapters.Reset();
+        LayOutChapter(1);
+        SetPageCountFromChapters();
+        logf("ApplyReflowThemeCss: chapters reset, chapter 1 -> %d pages\n", chapters.PageCount(1));
+        return;
+    }
+
+    int n = pageCount;
+    fz_try(ctx) {
+        n = fz_count_pages(ctx, _doc);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+    }
+    if (n < 1) {
+        n = 1;
+    }
+    if (n == pageCount) {
+        return;
+    }
+    logf("ApplyReflowThemeCss: page count %d -> %d\n", pageCount, n);
+    Vec<FzPageInfo*>* v = chapterPages[0];
+    RectF mbox = len(*v) > 0 ? (*v)[len(*v) - 1]->mediabox : RectF{};
+    while (len(*v) < n) {
+        int p = len(*v) + 1;
+        auto* pi = New<FzPageInfo>(arena);
+        pi->loc = {1, p};
+        pi->pageNo = p;
+        pi->mediabox = mbox;
+        VecAppend(*v, pi);
+    }
+    while (len(*v) > n) {
+        FzPageInfo* pi = (*v)[len(*v) - 1];
+        pi->~FzPageInfo();
+        VecRemoveLast(*v);
+    }
+    // EnsureChapterTable() (run by the next chapter-API call, e.g.
+    // LayoutGeneration()) resyncs chapters[1] to pageCount and bumps the
+    // generation so DisplayModel resyncs
+    pageCount = n;
+}
+
 // Drop cached dark-mode analyses and processed images; call when dark-mode
-// options (theme, color mode, preserve toggle) change.
-// drop cached dark-mode analyses/images (call when dark-mode options change)
+// options (theme, color mode, preserve toggle) change. Reflowable docs also
+// restyle with the current theme CSS.
 void EngineMupdfInvalidateDarkMode(EngineBase* engine) {
     EngineMupdf* epdf = AsEngineMupdf(engine);
     if (!epdf) {
         return;
     }
+    epdf->ApplyReflowThemeCss();
     ScopedRecursiveMutex scope(&epdf->pagesLock);
     fz_context* ctx = epdf->Ctx();
     if (epdf->darkModeEngineCache) {
         PdfDarkModeEngineCacheClear(ctx, epdf->darkModeEngineCache);
     }
-    for (FzPageInfo* pi : epdf->pages) {
-        if (pi) {
-            PdfDarkModeInvalidatePage(ctx, pi);
-        }
-    }
+    ForEachPageInfo(epdf, [ctx](FzPageInfo* pi) { PdfDarkModeInvalidatePage(ctx, pi); });
 }
 
 // PDF documents support the object-level smart dark renderer
@@ -6961,7 +9830,7 @@ Annotation* EngineMupdfGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF
         if (!bounds.Contains(pos)) {
             continue;
         }
-        els.Append(annot);
+        VecAppend(els, annot);
     }
     if (len(els) == 0) {
         return nullptr;
@@ -7032,7 +9901,7 @@ Annotation* EngineMupdfGetAdjacentWidget(EngineBase* engine, Annotation* cur, bo
     }
     Vec<Annotation*>& ws = pi->widgets;
     int n = len(ws);
-    int idx = ws.Find(cur);
+    int idx = VecFind(ws, cur);
     if (n == 0 || idx < 0) {
         return nullptr;
     }
@@ -7064,8 +9933,63 @@ Annotation* EngineMupdfGetAdjacentWidget(EngineBase* engine, Annotation* cur, bo
     return nullptr;
 }
 
+static bool FormFieldValueIsEmpty(int wt, const char* val) {
+    if (!val || !val[0]) {
+        return true;
+    }
+    if (wt == PDF_WIDGET_TYPE_CHECKBOX || wt == PDF_WIDGET_TYPE_RADIOBUTTON) {
+        return str::Eq(Str(val), StrL("Off"));
+    }
+    return str::IsEmptyOrWhiteSpace(Str(val));
+}
+
+// Page-space rects of empty fillable fields on pageNo (issue #5966). skip is
+// the field currently being edited, if any, so its overlay isn't double-tinted.
+void EngineMupdfGetFormFieldHighlightRects(EngineBase* engine, int pageNo, Annotation* skip, Vec<RectF>& out) {
+    EngineMupdf* epdf = AsEngineMupdf(engine);
+    if (!epdf || !epdf->pdfdoc) {
+        return;
+    }
+    FzPageInfo* pi = epdf->GetFzPageInfoCanFail(pageNo);
+    if (!pi) {
+        return;
+    }
+    auto* ctx = epdf->Ctx();
+    ScopedRecursiveMutex cs(&epdf->docLock);
+    for (Annotation* w : pi->widgets) {
+        if (!w || w == skip || !w->pdfannot || w->bounds.IsEmpty()) {
+            continue;
+        }
+        bool highlight = false;
+        fz_try(ctx) {
+            int aflags = pdf_annot_flags(ctx, w->pdfannot);
+            int hidden = PDF_ANNOT_IS_HIDDEN | PDF_ANNOT_IS_NO_VIEW | PDF_ANNOT_IS_INVISIBLE;
+            if (!(aflags & hidden)) {
+                int flags = pdf_annot_field_flags(ctx, w->pdfannot);
+                if (!(flags & PDF_FIELD_IS_READ_ONLY)) {
+                    int wt = (int)pdf_widget_type(ctx, w->pdfannot);
+                    if (wt == PDF_WIDGET_TYPE_SIGNATURE) {
+                        highlight = !pdf_widget_is_signed(ctx, w->pdfannot);
+                    } else if (wt == PDF_WIDGET_TYPE_TEXT || wt == PDF_WIDGET_TYPE_COMBOBOX ||
+                               wt == PDF_WIDGET_TYPE_LISTBOX || wt == PDF_WIDGET_TYPE_CHECKBOX ||
+                               wt == PDF_WIDGET_TYPE_RADIOBUTTON) {
+                        highlight = FormFieldValueIsEmpty(wt, pdf_annot_field_value(ctx, w->pdfannot));
+                    }
+                }
+            }
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            highlight = false;
+        }
+        if (highlight) {
+            VecAppend(out, w->bounds);
+        }
+    }
+}
+
 // Note: this code is compiled in release mode even if debug build so
-// DEBUG is not defined so we can't do #if defined(DEBUG) here
+// DEBUG is not defined so we can't do #if IS_DEBUG here
 // so we use this runtime boolean instead
 static bool gSkipAnnotatoinValidation = true;
 
@@ -7079,6 +10003,10 @@ static NO_INLINE void ValidateAnnotationsInSync(EngineMupdf* /*e*/, FzPageInfo* 
 
 // in a function so that we can set a breakpoint or add logging
 // to easily trace all places that modify annotations
+void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot) {
+    MarkNotificationAsModified(e, annot, AnnotationChange::Modify);
+}
+
 NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, AnnotationChange change) {
     e->modifiedAnnotations = true;
     if (!e->pdfdoc) {
@@ -7086,7 +10014,6 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
     }
     int pageNo = annot->pageNo;
     ReportIf(pageNo < 1 || pageNo > e->pageCount);
-    int pageIdx = pageNo - 1;
 
     // EngineMupdf is the ultimate source of truth for Annotation* list
     // all other places only get references to Annotation* created
@@ -7096,21 +10023,21 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
     // so on add /remove we update the list manually
     // on change we assume Annotation* lives inside EngineMupdf
     ScopedRecursiveMutex scope(&e->pagesLock);
-    FzPageInfo* pageInfo = e->pages[pageIdx];
+    FzPageInfo* pageInfo = e->PageInfoByPageNo(pageNo);
 
     if (change == AnnotationChange::Remove) {
         // Markup and form widgets live in separate vectors.
-        int removedPos = pageInfo->annotations.Remove(annot);
+        int removedPos = VecRemove(pageInfo->annotations, annot);
         if (removedPos < 0) {
-            removedPos = pageInfo->widgets.Remove(annot);
+            removedPos = VecRemove(pageInfo->widgets, annot);
         }
         ReportIf(removedPos < 0); // must exist in one of the lists
         ValidateAnnotationsInSync(e, pageInfo);
     } else if (change == AnnotationChange::Add) {
         int sizeBefore = len(pageInfo->annotations);
-        int pos = pageInfo->annotations.Find(annot);
+        int pos = VecFind(pageInfo->annotations, annot);
         ReportIf(pos >= 0); // shouldn't exist
-        pageInfo->annotations.Append(annot);
+        VecAppend(pageInfo->annotations, annot);
         int sizeNow = len(pageInfo->annotations);
         ReportIf(sizeBefore != sizeNow - 1);
         ValidateAnnotationsInSync(e, pageInfo);
@@ -7191,7 +10118,7 @@ TempStr EngineMupdfGetPdfOutline(Str path) {
         return {};
     }
     fz_register_document_handlers(ctx);
-    TempStr res = nullptr;
+    TempStr res;
     fz_document* doc = nullptr;
     fz_outline* outline = nullptr;
     fz_buffer* buf = nullptr;
@@ -7200,7 +10127,7 @@ TempStr EngineMupdfGetPdfOutline(Str path) {
         doc = fz_open_document(ctx, CStrTemp(path));
         outline = fz_load_outline(ctx, doc);
         if (!outline) {
-            res = str::DupTemp("(no outline)");
+            res = str::DupTemp(StrL("(no outline)"));
         } else {
             buf = fz_new_buffer(ctx, 1024);
             out = fz_new_output_with_buffer(ctx, buf);
@@ -7208,7 +10135,7 @@ TempStr EngineMupdfGetPdfOutline(Str path) {
             fz_close_output(ctx, out);
             unsigned char* data;
             size_t n = fz_buffer_storage(ctx, buf, &data);
-            res = str::DupTemp(Str((char*)(data), (int)(n)));
+            res = str::DupTemp(Str((char*)data, (int)n));
         }
     }
     fz_catch(ctx) {
@@ -7228,13 +10155,13 @@ TempStr EngineMupdfGetPdfInfo(Str path) {
         return {};
     }
     fz_register_document_handlers(ctx);
-    TempStr res = nullptr;
+    TempStr res;
     fz_buffer* buf = nullptr;
     fz_try(ctx) {
         buf = pdfinfo_to_buffer(ctx, path.s);
         unsigned char* data;
         size_t n = fz_buffer_storage(ctx, buf, &data);
-        res = str::DupTemp(Str((char*)(data), (int)(n)));
+        res = str::DupTemp(Str((char*)data, (int)n));
     }
     fz_catch(ctx) {
         fz_report_error(ctx);

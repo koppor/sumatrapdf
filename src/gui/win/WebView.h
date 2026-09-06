@@ -3,6 +3,7 @@
 
 TempStr GetWebView2VersionTemp();
 bool HasWebView();
+void WebViewShutdown();
 
 // TODO: maybe hide those inside a private struct
 typedef interface ICoreWebView2 ICoreWebView2;
@@ -129,6 +130,7 @@ struct WebviewWnd : WindowBase {
     void QueuePendingOp(PendingWebViewOp::Kind kind, Str text, int token = 0);
     void FlushPendingOps();
     void SetControllerVisible(bool visible);
+    void RefreshControllerSurface();
 
     virtual void OnBrowserMessage(Str msg);
 
@@ -171,6 +173,7 @@ struct WebviewWnd : WindowBase {
     WebViewEvents events;
     bool forwardAppAccelerators = true;
     bool allowClipboardRead = false;
+    Color defaultBackgroundColor = kColorTransparent;
     // when false, WebView2 won't claim external (file) drops, so they fall
     // through to the host window's drop target (e.g. to open the file)
     bool allowExternalDrop = true;
