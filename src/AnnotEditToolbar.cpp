@@ -72,6 +72,9 @@ enum class AnnotEditKind {
     Opacity,
     Border,
     FontName,
+    Bold,
+    Italic,
+    Underline,
     TextColor,
     TextSize,
     Alignment,
@@ -123,6 +126,8 @@ struct AnnotEditToolbar {
     Rect lastPlaced;
     Rect lastAnnotBounds;
     Vec<AnnotEditKind> kinds;
+    // which color chip's drop-down is up, for its pick callback
+    AnnotEditKind colorPickKind = AnnotEditKind::Color;
     // non-owning, for tests; the layout tree owns them and is replaced on relayout
     Vec<AnnotEditChip*> chips;
     Func1List<MainWindow*> onWindowMoved;
@@ -202,13 +207,59 @@ static Color PdfToWinColor(PdfColor c) {
     return MkRgb(r, g, b);
 }
 
-static bool PdfColorIsTransparent(PdfColor c) {
+static u8 PdfColorAlpha(PdfColor c) {
     u8 r;
     u8 g;
     u8 b;
     u8 a;
     UnpackPdfColor(c, r, g, b, a);
-    return a == 0;
+    return a;
+}
+
+static Color PdfToWinColorWithAlpha(PdfColor c) {
+    u8 r;
+    u8 g;
+    u8 b;
+    u8 a;
+    UnpackPdfColor(c, r, g, b, a);
+    return MkRgba(r, g, b, a);
+}
+
+static PdfColor WinToPdfColor(Color c) {
+    u8 r;
+    u8 g;
+    u8 b;
+    u8 a;
+    UnpackColor(c, r, g, b, a);
+    // in a Color alpha 0 means opaque, in a PdfColor it means transparent
+    return MkPdfColor(r, g, b, a == 0 ? 0xff : a);
+}
+
+// the same color, made fully opaque
+static PdfColor OpaquePdfColor(PdfColor c) {
+    if (c == 0) {
+        return 0;
+    }
+    u8 r;
+    u8 g;
+    u8 b;
+    u8 a;
+    UnpackPdfColor(c, r, g, b, a);
+    return MkPdfColor(r, g, b, 0xff);
+}
+
+// a chip shows a color the way the page does: with the annotation's opacity
+static PdfColor ColorWithOpacity(PdfColor c, Annotation* annot, bool withOpacity) {
+    if (c == 0 || !withOpacity) {
+        // no color at all; there is no opacity to show
+        return c;
+    }
+    u8 r;
+    u8 g;
+    u8 b;
+    u8 a;
+    UnpackPdfColor(c, r, g, b, a);
+    return MkPdfColor(r, g, b, (u8)Opacity(annot));
 }
 
 static Str KindName(AnnotEditKind kind) {
@@ -223,6 +274,12 @@ static Str KindName(AnnotEditKind kind) {
             return StrL("border");
         case AnnotEditKind::FontName:
             return StrL("font");
+        case AnnotEditKind::Bold:
+            return StrL("bold");
+        case AnnotEditKind::Italic:
+            return StrL("italic");
+        case AnnotEditKind::Underline:
+            return StrL("underline");
         case AnnotEditKind::TextColor:
             return StrL("textColor");
         case AnnotEditKind::TextSize:
@@ -249,7 +306,13 @@ static Str KindName(AnnotEditKind kind) {
 
 // annotation types whose GetColor() is a background, not the ink color
 static bool AnnotationColorIsBackground(AnnotationType tp) {
-    return tp == AnnotationType::FreeText;
+    return tp == AnnotationType::FreeText || tp == AnnotationType::Text;
+}
+
+// shapes whose color is their border's: the color chip's drop-down also sets
+// the border's width, so they have no Border Width chip
+static bool AnnotationBorderInColorChip(AnnotationType tp) {
+    return tp == AnnotationType::Square || tp == AnnotationType::Circle || tp == AnnotationType::Polygon;
 }
 
 static Str DefaultAnnotIconName(AnnotationType type) {
@@ -281,6 +344,83 @@ static Str ResolvedAnnotIconName(Annotation* annot) {
         idx = 0;
     }
     return SeqStrByIndex(icons, idx);
+}
+
+// clang-format off
+// in gBase14FontFamilies order
+static SeqStrings gBase14ReadableNames = "Courier\0Helvetica\0TimesRoman\0";
+// clang-format on
+
+static int StyleBitForKind(AnnotEditKind kind) {
+    switch (kind) {
+        case AnnotEditKind::Bold:
+            return kFreeTextBold;
+        case AnnotEditKind::Italic:
+            return kFreeTextItalic;
+        case AnnotEditKind::Underline:
+            return kFreeTextUnderline;
+        default:
+            return 0;
+    }
+}
+
+// chips paint after the temp arena resets, so a family they show must outlive it
+static Str InternFontFamily(Str family) {
+    static Vec<Str> families;
+    for (Str f : families) {
+        if (str::Eq(f, family)) {
+            return f;
+        }
+    }
+    Str dup = str::Dup(family);
+    VecAppend(families, dup);
+    return dup;
+}
+
+static Str FontFamilyLabel(Str family) {
+    int idx = SeqStrIndexIS(gBase14FontFamilies, family);
+    if (idx >= 0) {
+        return SeqStrByIndex(gBase14ReadableNames, idx);
+    }
+    return InternFontFamily(family);
+}
+
+static TempStr FontDescriptionTemp(Str family, int style) {
+    str::Builder s;
+    s.Append(FontFamilyLabel(family));
+    if (style & kFreeTextBold) {
+        s.Append(fmt(" %s", Tr("Bold")));
+    }
+    if (style & kFreeTextItalic) {
+        s.Append(fmt(" %s", Tr("Italic")));
+    }
+    if (style & kFreeTextUnderline) {
+        s.Append(fmt(" %s", Tr("Underline")));
+    }
+    return ToStrTemp(s);
+}
+
+// Arial / Courier New / Times New Roman have the metrics of the base 14 fonts
+// MuPDF renders free text with
+static WStr WinFontFamilyTemp(Str family) {
+    if (str::EqI(family, StrL("Courier"))) {
+        return WStrL(L"Courier New");
+    }
+    if (str::EqI(family, StrL("Times"))) {
+        return WStrL(L"Times New Roman");
+    }
+    if (len(family) == 0 || str::EqI(family, StrL("Helvetica"))) {
+        return WStrL(L"Arial");
+    }
+    return ToWStrTemp(family);
+}
+
+static void AppendStyleToggle(Vec<AnnotEditItem>& out, AnnotEditKind kind, int style, Str tooltip) {
+    AnnotEditItem it;
+    it.kind = kind;
+    it.number = (style & StyleBitForKind(kind)) ? 1 : 0;
+    it.tooltip = tooltip;
+    VecAppend(out, it);
 }
 
 static void CollectItems(Annotation* annot, Vec<AnnotEditItem>& out) {
@@ -321,33 +461,41 @@ static void CollectItems(Annotation* annot, Vec<AnnotEditItem>& out) {
     if (isFreeText) {
         AnnotEditItem it;
         it.kind = AnnotEditKind::TextColor;
-        it.color = DefaultAppearanceTextColor(annot);
+        it.color = ColorWithOpacity(DefaultAppearanceTextColor(annot), annot, AnnotationSupportsOpacity(type));
         it.tooltip = Tr("Text Color");
         VecAppend(out, it);
     }
+    // a color chip is also the opacity chip: it shows the color as it looks on
+    // the page and picking one sets the annotation's opacity too, so there is
+    // no separate Opacity chip when there is a color to carry it
+    bool colorCarriesOpacity = AnnotationSupportsOpacity(type) && AnnotationSupportsColor(type);
     if (AnnotationSupportsColor(type)) {
         AnnotEditItem it;
         it.kind = AnnotEditKind::Color;
-        it.color = GetColor(annot);
+        it.color = ColorWithOpacity(GetColor(annot), annot, colorCarriesOpacity);
         it.tooltip = AnnotationColorIsBackground(type) ? Tr("Background Color") : Tr("Color");
+        if (AnnotationBorderInColorChip(type)) {
+            it.tooltip = Tr("Border Color and Width");
+        }
         VecAppend(out, it);
     }
     if (AnnotationSupportsInteriorColor(type)) {
         AnnotEditItem it;
         it.kind = AnnotEditKind::InteriorColor;
-        it.color = InteriorColor(annot);
+        it.color = ColorWithOpacity(InteriorColor(annot), annot, colorCarriesOpacity);
         it.tooltip = Tr("Interior Color");
         VecAppend(out, it);
     }
-    if (AnnotationSupportsOpacity(type)) {
+    if (AnnotationSupportsOpacity(type) && !colorCarriesOpacity) {
         AnnotEditItem it;
         it.kind = AnnotEditKind::Opacity;
         it.number = Opacity(annot);
-        // for free text the whole appearance is the text, background aside
-        it.tooltip = isFreeText ? Tr("Text Opacity") : Tr("Opacity");
+        it.tooltip = Tr("Opacity");
         VecAppend(out, it);
     }
-    if (AnnotationSupportsBorder(type)) {
+    // ink has no Border Width chip of its own: the stroke's width is the
+    // Thickness slider of its color chip's drop-down. Same for the shapes.
+    if (AnnotationSupportsBorder(type) && type != AnnotationType::Ink && !AnnotationBorderInColorChip(type)) {
         AnnotEditItem it;
         it.kind = AnnotEditKind::Border;
         it.number = BorderWidth(annot);
@@ -358,13 +506,14 @@ static void CollectItems(Annotation* annot, Vec<AnnotEditItem>& out) {
         {
             AnnotEditItem it;
             it.kind = AnnotEditKind::FontName;
-            Str pdfName = DefaultAppearanceTextFont(annot);
-            int idx = SeqStrIndex(AnnotEditorFontNames(), pdfName);
-            it.number = idx;
-            it.text = idx >= 0 ? SeqStrByIndex(AnnotEditorFontReadableNames(), idx) : pdfName;
+            it.text = FontFamilyLabel(FreeTextFontFamily(annot));
             it.tooltip = Tr("Font");
             VecAppend(out, it);
         }
+        int style = FreeTextFontStyle(annot);
+        AppendStyleToggle(out, AnnotEditKind::Bold, style, Tr("Bold"));
+        AppendStyleToggle(out, AnnotEditKind::Italic, style, Tr("Italic"));
+        AppendStyleToggle(out, AnnotEditKind::Underline, style, Tr("Underline"));
         {
             AnnotEditItem it;
             it.kind = AnnotEditKind::TextSize;
@@ -448,8 +597,13 @@ static void PaintSwatch(Gfx* gfx, Rect r, PdfColor col, Color border) {
         sw = r;
         sw.Inflate(-2, -2);
     }
-    if (PdfColorIsTransparent(col)) {
+    u8 alpha = PdfColorAlpha(col);
+    if (alpha == 0) {
         PaintChecker(gfx, sw);
+    } else if (alpha < 0xff) {
+        // a translucent color over the checker, so the opacity can be seen
+        PaintChecker(gfx, sw);
+        gfx->FillRects(&sw, 1, PdfToWinColor(col), alpha);
     } else {
         gfx->FillRoundedRect(sw, DpiScale(3), PdfToWinColor(col), border);
     }
@@ -465,16 +619,16 @@ static void PaintAlignment(Gfx* gfx, Rect r, int quadding, Color col) {
         inner.Inflate(-2, -2);
     }
     int lineH = std::max(DpiScale(2), 1);
-    int gap = std::max((inner.dy - 3 * lineH) / 2, 1);
-    int blockDy = 3 * lineH + 2 * gap;
-    int y = inner.y + (inner.dy - blockDy) / 2;
+    int gap = std::max((inner.dy - (3 * lineH)) / 2, 1);
+    int blockDy = (3 * lineH) + (2 * gap);
+    int y = inner.y + ((inner.dy - blockDy) / 2);
     int full = inner.dx;
     int shortDx = std::max((full * 2) / 3, 4);
     for (int i = 0; i < 3; i++) {
         int dx = (i == 1) ? shortDx : full;
         int x = inner.x;
         if (quadding == kQuaddingCenter) {
-            x = inner.x + (inner.dx - dx) / 2;
+            x = inner.x + ((inner.dx - dx) / 2);
         } else if (quadding == kQuaddingRight) {
             x = inner.x + inner.dx - dx;
         }
@@ -485,7 +639,7 @@ static void PaintAlignment(Gfx* gfx, Rect r, int quadding, Color col) {
 
 static void PaintSvgChip(Gfx* gfx, Rect r, const char* svg, Color fg, Color bg) {
     int pad = DpiScale(3);
-    int sz = std::min(r.dx, r.dy) - 2 * pad;
+    int sz = std::min(r.dx, r.dy) - (2 * pad);
     if (sz < 8) {
         sz = std::min(r.dx, r.dy);
     }
@@ -496,8 +650,8 @@ static void PaintSvgChip(Gfx* gfx, Rect r, const char* svg, Color fg, Color bg) 
     if (!px) {
         return;
     }
-    int x = r.x + (r.dx - px->width) / 2;
-    int y = r.y + (r.dy - px->height) / 2;
+    int x = r.x + ((r.dx - px->width) / 2);
+    int y = r.y + ((r.dy - px->height) / 2);
     gfx->DrawPixmap(px, {x, y, px->width, px->height});
 }
 
@@ -505,17 +659,17 @@ static void PaintLineEndingMark(Gfx* gfx, Point tip, Point along, Color col, int
     // along is a unit-ish direction from the shaft toward the tip
     int dx = along.x;
     int dy = along.y;
-    auto perp = [&](int s) -> Point { return {tip.x - dy * s / size, tip.y + dx * s / size}; };
-    auto back = [&](int s) -> Point { return {tip.x - dx * s / size, tip.y - dy * s / size}; };
+    auto perp = [&](int s) -> Point { return {tip.x - (dy * s / size), tip.y + (dx * s / size)}; };
+    auto back = [&](int s) -> Point { return {tip.x - (dx * s / size), tip.y - (dy * s / size)}; };
     switch (style) {
         case 1: { // Square
             Point p = back(size);
-            gfx->DrawRect({p.x - size / 2, p.y - size / 2, size, size}, col, 1);
+            gfx->DrawRect({p.x - (size / 2), p.y - (size / 2), size, size}, col, 1);
             break;
         }
         case 2: { // Circle
             Point p = back(size / 2);
-            gfx->FillEllipse({p.x - size / 2, p.y - size / 2, size, size}, col);
+            gfx->FillEllipse({p.x - (size / 2), p.y - (size / 2), size, size}, col);
             break;
         }
         case 3: { // Diamond
@@ -533,8 +687,8 @@ static void PaintLineEndingMark(Gfx* gfx, Point tip, Point along, Color col, int
             Point wing = (style == 7) ? Point{-dx, -dy} : along;
             Point t = (style == 7) ? back(size) : tip;
             Point base = (style == 7) ? tip : back(size);
-            Point l = {base.x - wing.y / 2, base.y + wing.x / 2};
-            Point r = {base.x + wing.y / 2, base.y - wing.x / 2};
+            Point l = {base.x - (wing.y / 2), base.y + (wing.x / 2)};
+            Point r = {base.x + (wing.y / 2), base.y - (wing.x / 2)};
             gfx->DrawLineAA(t, l, col, 1.5f);
             gfx->DrawLineAA(t, r, col, 1.5f);
             break;
@@ -543,8 +697,8 @@ static void PaintLineEndingMark(Gfx* gfx, Point tip, Point along, Color col, int
         case 8: { // RClosedArrow
             Point t = (style == 8) ? back(size) : tip;
             Point base = (style == 8) ? tip : back(size);
-            Point l = {base.x - dy / 2, base.y + dx / 2};
-            Point r = {base.x + dy / 2, base.y - dx / 2};
+            Point l = {base.x - (dy / 2), base.y + (dx / 2)};
+            Point r = {base.x + (dy / 2), base.y - (dx / 2)};
             gfx->DrawLineAA(t, l, col, 1.5f);
             gfx->DrawLineAA(t, r, col, 1.5f);
             gfx->DrawLineAA(l, r, col, 1.5f);
@@ -554,8 +708,8 @@ static void PaintLineEndingMark(Gfx* gfx, Point tip, Point along, Color col, int
             gfx->DrawLineAA(perp(size / 2), perp(-size / 2), col, 1.5f);
             break;
         case 9: { // Slash
-            Point a = {tip.x - size / 2, tip.y - size / 2};
-            Point b = {tip.x + size / 2, tip.y + size / 2};
+            Point a = {tip.x - (size / 2), tip.y - (size / 2)};
+            Point b = {tip.x + (size / 2), tip.y + (size / 2)};
             gfx->DrawLineAA(a, b, col, 1.5f);
             break;
         }
@@ -566,7 +720,7 @@ static void PaintLineEndingMark(Gfx* gfx, Point tip, Point along, Color col, int
 
 static void PaintLineEnding(Gfx* gfx, Rect r, int style, bool isStart, Color col) {
     int pad = DpiScale(5);
-    int y = r.y + r.dy / 2;
+    int y = r.y + (r.dy / 2);
     Point left{r.x + pad, y};
     Point right{r.x + r.dx - pad, y};
     gfx->DrawLineAA(left, right, col, 1.5f);
@@ -781,7 +935,7 @@ static Pixmap* RenderMupdfAnnotIcon(Str name, Color fg, int dx, int dy) {
     u8 g;
     u8 b;
     UnpackColor(fg, r, g, b);
-    float rgb[3] = {r / 255.f, g / 255.f, b / 255.f};
+    float rgb[3] = {(float)r / 255.f, (float)g / 255.f, (float)b / 255.f};
 
     fz_path* path = nullptr;
     fz_pixmap* fzpx = nullptr;
@@ -805,7 +959,7 @@ static Pixmap* RenderMupdfAnnotIcon(Str name, Color fg, int dx, int dy) {
             bh = 8;
         }
         float pad = 0.4f;
-        float scale = std::min((float)dx / (bw + 2 * pad), (float)dy / (bh + 2 * pad));
+        float scale = std::min((float)dx / (bw + (2 * pad)), (float)dy / (bh + (2 * pad)));
         // Open Iconic streams are y-down (MuPDF's appearance cm flips them for
         // PDF). Fit into the pixmap without a second flip (issue #6112).
         fz_matrix ctm = fz_make_matrix(scale, 0, 0, scale, -scale * (bound.x0 - pad), -scale * (bound.y0 - pad));
@@ -864,14 +1018,14 @@ static Pixmap* GetCachedMupdfAnnotIcon(Str name, Color fg, int dx, int dy) {
 
 static void PaintMupdfAnnotIcon(Gfx* gfx, Rect r, Str name, Color fg, PlatformFont* font) {
     int pad = DpiScale(3);
-    int sz = std::min(r.dx, r.dy) - 2 * pad;
+    int sz = std::min(r.dx, r.dy) - (2 * pad);
     if (sz < 8) {
         sz = std::min(r.dx, r.dy);
     }
     Pixmap* px = GetCachedMupdfAnnotIcon(name, fg, sz, sz);
     if (px) {
-        int x = r.x + (r.dx - px->width) / 2;
-        int y = r.y + (r.dy - px->height) / 2;
+        int x = r.x + ((r.dx - px->width) / 2);
+        int y = r.y + ((r.dy - px->height) / 2);
         gfx->DrawPixmap(px, {x, y, px->width, px->height});
         return;
     }
@@ -896,10 +1050,35 @@ static void PaintIconGlyph(Gfx* gfx, Rect r, Str name, Color col, PlatformFont* 
     gfx->DrawText(label, inner, gfxTextCenter | gfxTextVCenter | gfxTextEllipsis, font, col);
 }
 
+static Color BarActiveBg() {
+    if (BarIsDark()) {
+        return AccentColor(ThemeWindowControlBackgroundColor(), 35);
+    }
+    return AccentColor(BarBg(), 22);
+}
+
+// "B" in bold, "I" in italic, "U" underlined
+static void PaintStyleToggle(Gfx* gfx, Rect r, AnnotEditKind kind, Color col, PlatformFont* font) {
+    if (!font) {
+        return;
+    }
+    PlatformFontStyle style = PlatformFontStyle::Bold;
+    Str label = StrL("B");
+    if (kind == AnnotEditKind::Italic) {
+        style = PlatformFontStyle::Italic;
+        label = StrL("I");
+    } else if (kind == AnnotEditKind::Underline) {
+        style = PlatformFontStyle::Underline;
+        label = StrL("U");
+    }
+    PlatformFont* styled = GetPlatformFont(font->name, font->sizePt, style);
+    gfx->DrawText(label, r, gfxTextCenter | gfxTextVCenter, styled ? styled : font, col);
+}
+
 static TempStr ChipLabelTemp(const AnnotEditItem& item) {
     switch (item.kind) {
         case AnnotEditKind::Opacity:
-            return fmt("%d%%", (item.number * 100 + 127) / 255);
+            return fmt("%d%%", ((item.number * 100) + 127) / 255);
         case AnnotEditKind::Border:
         case AnnotEditKind::TextSize:
             return fmt("%d", item.number);
@@ -923,6 +1102,14 @@ void AnnotEditChip::Paint(VirtPaintCtx& ctx) {
             break;
         case AnnotEditKind::Alignment:
             PaintAlignment(ctx.gfx, r, item.number, textCol);
+            break;
+        case AnnotEditKind::Bold:
+        case AnnotEditKind::Italic:
+        case AnnotEditKind::Underline:
+            if (item.number != 0) {
+                ctx.gfx->FillRoundedRect(r, DpiScale(kButtonRadius), BarActiveBg());
+            }
+            PaintStyleToggle(ctx.gfx, r, item.kind, textCol, tb ? tb->font : nullptr);
             break;
         case AnnotEditKind::Icon:
             if (item.mupdfIcon) {
@@ -1024,93 +1211,6 @@ static int PopupPick(MainWindow* win, Point screen, const StrVec& names, int cur
     return cmd > 0 ? cmd - 1 : -1;
 }
 
-// 32bpp PARGB: themed menus ignore 24-bit DDBs and treat a 32-bit DIB with
-// alpha 0 as fully transparent, so GDI FillRect into a DIB is not enough.
-static HBITMAP CreateColorSwatchBitmap(PdfColor pdfCol, int dx, int dy) {
-    if (dx < 1 || dy < 1) {
-        return nullptr;
-    }
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = dx;
-    bmi.bmiHeader.biHeight = -dy;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    void* bits = nullptr;
-    HBITMAP bmp = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!bmp || !bits) {
-        DeleteObject(bmp);
-        return nullptr;
-    }
-    u8 r;
-    u8 g;
-    u8 b;
-    u8 a;
-    UnpackPdfColor(pdfCol, r, g, b, a);
-    auto* px = (u32*)bits;
-    int cell = std::max(dx / 4, 2);
-    for (int y = 0; y < dy; y++) {
-        for (int x = 0; x < dx; x++) {
-            u8 pr;
-            u8 pg;
-            u8 pb;
-            if (x == 0 || y == 0 || x == dx - 1 || y == dy - 1) {
-                pr = pg = pb = 80;
-            } else if (a == 0) {
-                bool dark = ((x / cell) + (y / cell)) & 1;
-                pr = pg = pb = dark ? 180 : 240;
-            } else {
-                pr = r;
-                pg = g;
-                pb = b;
-            }
-            px[y * dx + x] = 0xFF000000u | ((u32)pr << 16) | ((u32)pg << 8) | pb;
-        }
-    }
-    return bmp;
-}
-
-static int PopupPickColors(MainWindow* win, Point screen, int current, Rect chipScreen) {
-    HMENU menu = CreatePopupMenu();
-    if (!menu) {
-        return -1;
-    }
-    Vec<HBITMAP> bmps;
-    int n = AnnotEditorColorCount();
-    int sw = DpiScale(14);
-    for (int i = 0; i < n; i++) {
-        HBITMAP bmp = CreateColorSwatchBitmap(AnnotEditorColorAt(i), sw, sw);
-        if (bmp) {
-            VecAppend(bmps, bmp);
-        }
-        MENUITEMINFOW mii{};
-        mii.cbSize = sizeof(mii);
-        mii.fMask = MIIM_ID | MIIM_STRING | MIIM_STATE;
-        if (bmp) {
-            mii.fMask |= MIIM_BITMAP;
-            mii.hbmpItem = bmp;
-        }
-        mii.wID = (UINT)(i + 1);
-        Str name = AnnotEditorColorNameAt(i);
-        WCHAR* ws = ToWStrTemp(name).s;
-        mii.dwTypeData = ws;
-        mii.cch = (UINT)len(name);
-        if (i == current) {
-            mii.fState = MFS_CHECKED;
-        }
-        InsertMenuItemW(menu, (UINT)i, TRUE, &mii);
-    }
-    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN, screen.x, screen.y, 0, win->hwndFrame,
-                             nullptr);
-    DestroyMenu(menu);
-    for (HBITMAP bmp : bmps) {
-        DeleteObject(bmp);
-    }
-    EatDismissClickOverRect(chipScreen);
-    return cmd > 0 ? cmd - 1 : -1;
-}
-
 enum class PopupGlyphKind {
     None,
     Icon,
@@ -1119,7 +1219,7 @@ enum class PopupGlyphKind {
 };
 
 static HBITMAP CreateMenuGlyphBitmap(int dx, int dy, PopupGlyphKind glyph, Str iconName, int style, bool lineIsStart,
-                                     Color fg, Color bg, PlatformFont* font) {
+                                     Color fg, Color bg) {
     if (dx < 1 || dy < 1 || glyph == PopupGlyphKind::None) {
         return nullptr;
     }
@@ -1156,7 +1256,7 @@ static HBITMAP CreateMenuGlyphBitmap(int dx, int dy, PopupGlyphKind glyph, Str i
                 if (dyOut < 0 || dyOut >= dy) {
                     continue;
                 }
-                u8* s = src->data + y * src->stride;
+                u8* s = src->data + (y * src->stride);
                 for (int x = 0; x < src->width; x++) {
                     int dxOut = x + ox;
                     if (dxOut < 0 || dxOut >= dx) {
@@ -1167,14 +1267,14 @@ static HBITMAP CreateMenuGlyphBitmap(int dx, int dy, PopupGlyphKind glyph, Str i
                     u8 sg = s[1];
                     u8 sr = s[2];
                     u8 sa = s[3];
-                    u32* d = &px[dyOut * dx + dxOut];
+                    u32* d = &px[(dyOut * dx) + dxOut];
                     u8 db = (u8)(*d);
                     u8 dg = (u8)((*d >> 8) & 0xff);
                     u8 dr = (u8)((*d >> 16) & 0xff);
                     int inv = 255 - sa;
-                    u8 ob = (u8)(sb + (db * inv + 127) / 255);
-                    u8 og = (u8)(sg + (dg * inv + 127) / 255);
-                    u8 oor = (u8)(sr + (dr * inv + 127) / 255);
+                    u8 ob = (u8)(sb + (((db * inv) + 127) / 255));
+                    u8 og = (u8)(sg + (((dg * inv) + 127) / 255));
+                    u8 oor = (u8)(sr + (((dr * inv) + 127) / 255));
                     *d = 0xFF000000u | ((u32)oor << 16) | ((u32)og << 8) | ob;
                     s += 4;
                 }
@@ -1201,7 +1301,7 @@ static HBITMAP CreateMenuGlyphBitmap(int dx, int dy, PopupGlyphKind glyph, Str i
 }
 
 static int PopupPickGlyphs(MainWindow* win, Point screen, const StrVec& names, int current, Rect chipScreen,
-                           PopupGlyphKind glyph, bool lineIsStart, PlatformFont* font) {
+                           PopupGlyphKind glyph, bool lineIsStart) {
     HMENU menu = CreatePopupMenu();
     if (!menu) {
         return -1;
@@ -1211,7 +1311,7 @@ static int PopupPickGlyphs(MainWindow* win, Point screen, const StrVec& names, i
     Color fg = GetSysColor(COLOR_MENUTEXT);
     Color bg = GetSysColor(COLOR_MENU);
     for (int i = 0; i < len(names); i++) {
-        HBITMAP bmp = CreateMenuGlyphBitmap(sw, sw, glyph, names[i], i, lineIsStart, fg, bg, font);
+        HBITMAP bmp = CreateMenuGlyphBitmap(sw, sw, glyph, names[i], i, lineIsStart, fg, bg);
         if (bmp) {
             VecAppend(bmps, bmp);
         }
@@ -1242,8 +1342,7 @@ static int PopupPickGlyphs(MainWindow* win, Point screen, const StrVec& names, i
 }
 
 static int PopupPickSeq(MainWindow* win, Point screen, SeqStrings names, int current, Rect chipScreen,
-                        PopupGlyphKind glyph = PopupGlyphKind::None, bool lineIsStart = false,
-                        PlatformFont* font = nullptr) {
+                        PopupGlyphKind glyph = PopupGlyphKind::None, bool lineIsStart = false) {
     StrVec items;
     for (Str name = SeqStrFirst(names); len(name) > 0; name = SeqStrNext(name)) {
         items.Append(name);
@@ -1251,7 +1350,189 @@ static int PopupPickSeq(MainWindow* win, Point screen, SeqStrings names, int cur
     if (glyph == PopupGlyphKind::None) {
         return PopupPick(win, screen, items, current, chipScreen);
     }
-    return PopupPickGlyphs(win, screen, items, current, chipScreen, glyph, lineIsStart, font);
+    return PopupPickGlyphs(win, screen, items, current, chipScreen, glyph, lineIsStart);
+}
+
+constexpr UINT kFontMenuCurrent = 100;
+constexpr UINT kFontMenuOther = 101;
+
+// the Windows font dialog; false if canceled
+static bool ChooseSystemFont(HWND hwnd, Str& family, int& style) {
+    LOGFONTW lf{};
+    WStr face = WinFontFamilyTemp(family);
+    lstrcpynW(lf.lfFaceName, face.s, LF_FACESIZE);
+    lf.lfWeight = (style & kFreeTextBold) ? FW_BOLD : FW_NORMAL;
+    lf.lfItalic = (style & kFreeTextItalic) ? TRUE : FALSE;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    CHOOSEFONTW cf{};
+    cf.lStructSize = sizeof(cf);
+    cf.hwndOwner = hwnd;
+    cf.lpLogFont = &lf;
+    cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_NOVERTFONTS | CF_NOSCRIPTSEL | CF_NOSIZESEL;
+    if (!ChooseFontW(&cf)) {
+        return false;
+    }
+    family = ToUtf8Temp(WStr(lf.lfFaceName));
+    style &= kFreeTextUnderline;
+    if (lf.lfWeight >= FW_SEMIBOLD) {
+        style |= kFreeTextBold;
+    }
+    if (lf.lfItalic) {
+        style |= kFreeTextItalic;
+    }
+    return true;
+}
+
+// a font other than the base 14 is embedded in the PDF
+static bool ConfirmFontEmbedding(HWND hwnd) {
+    Str msg = Tr("This font will be embedded in the PDF, which can add hundreds of kilobytes or more to its size.");
+    int res = MessageBoxW(hwnd, ToWStrTemp(msg).s, ToWStrTemp(Tr("Embed Font")).s, MB_OKCANCEL | MB_ICONWARNING);
+    return res == IDOK;
+}
+
+// Font chip menu: the base 14 fonts and any other font from the Windows font dialog
+static void PickFreeTextFont(AnnotEditToolbar* tb, Annotation* annot, Point screen, Rect chipScreen) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) {
+        return;
+    }
+    Str family = FreeTextFontFamily(annot);
+    int style = FreeTextFontStyle(annot);
+    bool isBase14 = IsBase14FontFamily(family);
+
+    int idx = 0;
+    for (Str name = SeqStrFirst(gBase14ReadableNames); len(name) > 0; name = SeqStrNext(name)) {
+        bool checked = str::EqI(SeqStrByIndex(gBase14FontFamilies, idx), family);
+        AppendMenuW(menu, MF_STRING | (checked ? MF_CHECKED : 0), (UINT)(idx + 1), ToWStrTemp(name).s);
+        idx++;
+    }
+    if (!isBase14) {
+        AppendMenuW(menu, MF_STRING | MF_CHECKED, kFontMenuCurrent, ToWStrTemp(family).s);
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kFontMenuOther, ToWStrTemp(Tr("Other Font (Embedded)...")).s);
+
+    int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN, screen.x, screen.y, 0,
+                             tb->win->hwndFrame, nullptr);
+    DestroyMenu(menu);
+    EatDismissClickOverRect(chipScreen);
+    if (cmd <= 0) {
+        NotePopupDismissed(tb, AnnotEditKind::FontName);
+        return;
+    }
+
+    HWND hwnd = tb->win->hwndFrame;
+    WindowTab* tab = tb->tab;
+    switch (cmd) {
+        case kFontMenuCurrent:
+            return;
+        case kFontMenuOther: {
+            Str prevFamily = family;
+            if (!ChooseSystemFont(hwnd, family, style)) {
+                return;
+            }
+            // warn only when a font starts being embedded
+            bool newlyEmbedded = !IsBase14FontFamily(family) && !str::EqI(family, prevFamily);
+            if (newlyEmbedded && !ConfirmFontEmbedding(hwnd)) {
+                return;
+            }
+            break;
+        }
+        default:
+            family = SeqStrByIndex(gBase14FontFamilies, cmd - 1);
+            break;
+    }
+    // the dialogs ran a message loop, in which the annotation could have gone
+    if (!AnnotationIsLive(annot) || tab->selectedAnnotation != annot) {
+        return;
+    }
+    SetFreeTextFont(annot, family, style);
+    AnnotChanged(tab);
+}
+
+// a color from the drop-down of the chip that was clicked last; its alpha is
+// the annotation's opacity, kColorUnset means no color at all
+static void ChipColorPicked(AnnotEditToolbar* tb, Color col) {
+    WindowTab* tab = tb->tab;
+    Annotation* annot = tab ? tab->selectedAnnotation : nullptr;
+    if (!AnnotationIsLive(annot) || annot != tb->annot) {
+        return;
+    }
+    AnnotationType type = Type(annot);
+    bool isNone = (col == kColorUnset);
+    PdfColor pdfCol = isNone ? 0 : WinToPdfColor(col);
+    u8 opacity = isNone ? 0 : PdfColorAlpha(pdfCol);
+    bool setsOpacity = !isNone && AnnotationSupportsOpacity(type);
+    switch (tb->colorPickKind) {
+        case AnnotEditKind::Color:
+            // SetColor() takes the opacity from the color's alpha
+            SetColor(annot, setsOpacity ? pdfCol : OpaquePdfColor(pdfCol));
+            break;
+        case AnnotEditKind::InteriorColor:
+            // /IC has no alpha of its own, the annotation's opacity covers it
+            SetInteriorColor(annot, OpaquePdfColor(pdfCol));
+            if (setsOpacity) {
+                SetOpacity(annot, opacity);
+            }
+            break;
+        case AnnotEditKind::TextColor:
+            SetDefaultAppearanceTextColor(annot, OpaquePdfColor(pdfCol));
+            if (setsOpacity) {
+                SetOpacity(annot, opacity);
+            }
+            break;
+        default:
+            return;
+    }
+    AnnotChanged(tab);
+}
+
+// how wide the stroke of an ink annotation is, from the Thickness slider of
+// its color drop-down
+static void ChipThicknessPicked(AnnotEditToolbar* tb, int width) {
+    WindowTab* tab = tb->tab;
+    Annotation* annot = tab ? tab->selectedAnnotation : nullptr;
+    if (!AnnotationIsLive(annot) || annot != tb->annot) {
+        return;
+    }
+    if (BorderWidth(annot) == width) {
+        return;
+    }
+    SetBorderWidth(annot, width);
+    AnnotChanged(tab);
+}
+
+// ranges of the number sliders; widths and sizes are in PDF points
+constexpr int kBorderWidthMax = 12;
+constexpr int kFreeTextSizeMin = 6;
+constexpr int kFreeTextSizeMax = 72;
+constexpr int kOpacityPercentMin = 10;
+
+static void ChipOpacityPicked(AnnotEditToolbar* tb, int percent) {
+    WindowTab* tab = tb->tab;
+    Annotation* annot = tab ? tab->selectedAnnotation : nullptr;
+    if (!AnnotationIsLive(annot) || annot != tb->annot) {
+        return;
+    }
+    int opacity = ((percent * 255) + 50) / 100;
+    if (Opacity(annot) == opacity) {
+        return;
+    }
+    SetOpacity(annot, opacity);
+    AnnotChanged(tab);
+}
+
+static void ChipTextSizePicked(AnnotEditToolbar* tb, int size) {
+    WindowTab* tab = tb->tab;
+    Annotation* annot = tab ? tab->selectedAnnotation : nullptr;
+    if (!AnnotationIsLive(annot) || annot != tb->annot) {
+        return;
+    }
+    if (DefaultAppearanceTextSize(annot) == size) {
+        return;
+    }
+    SetDefaultAppearanceTextSize(annot, size);
+    AnnotChanged(tab);
 }
 
 static void OnChipClick(AnnotEditChip* chip, VirtMouseEvent*) {
@@ -1281,112 +1562,62 @@ static void OnChipClick(AnnotEditChip* chip, VirtMouseEvent*) {
         case AnnotEditKind::Color:
         case AnnotEditKind::InteriorColor:
         case AnnotEditKind::TextColor: {
-            int n = AnnotEditorColorCount();
-            int current = -1;
-            for (int i = 0; i < n; i++) {
-                if (AnnotEditorColorAt(i) == chip->item.color) {
-                    current = i;
-                    break;
-                }
+            PdfColor col = chip->item.color;
+            Color current = (col == 0) ? kColorUnset : PdfToWinColorWithAlpha(col);
+            // a text markup annotation without a color isn't invisible, mupdf
+            // draws it in a default one, so offering "none" there is a trap
+            bool withNone = !AnnotationIsTextMarkup(Type(annot));
+            tb->colorPickKind = kind;
+            // an ink annotation's drop-down sets how thick its stroke is too, a
+            // shape's how wide its border is
+            bool isColor = kind == AnnotEditKind::Color;
+            bool isInk = (Type(annot) == AnnotationType::Ink) && isColor;
+            bool isBorder = AnnotationBorderInColorChip(Type(annot)) && isColor;
+            int thickness = (isInk || isBorder) ? std::max(BorderWidth(annot), 0) : -1;
+            // a note's color fills its icon, behind the note
+            bool isNoteColor = (Type(annot) == AnnotationType::Text) && isColor;
+            Str label = isNoteColor ? Tr("Background Color") : Tr("Color");
+            Str thicknessLabel;
+            int minThickness = 1;
+            if (isBorder) {
+                label = Tr("Border Color");
+                thicknessLabel = Tr("Border Width");
+                // a shape can do without a border
+                minThickness = 0;
             }
-            int idx = PopupPickColors(tb->win, screen, current, chipScreen);
-            if (dismissed(idx)) {
-                return;
-            }
-            PdfColor col = AnnotEditorColorAt(idx);
-            if (kind == AnnotEditKind::Color) {
-                // SetColor() takes the annotation's opacity from the color's
-                // alpha and the palette is all-opaque, so picking a color would
-                // throw away what the Opacity chip set
-                if (col != 0) {
-                    u8 r;
-                    u8 g;
-                    u8 b;
-                    u8 a;
-                    UnpackPdfColor(col, r, g, b, a);
-                    u8 opacity = (u8)Opacity(annot);
-                    if (opacity == 0) {
-                        // coming back from Transparent, which set opacity to 0;
-                        // keeping it would make the color picked here invisible
-                        opacity = 255;
-                    }
-                    col = MkPdfColor(r, g, b, opacity);
-                }
-                SetColor(annot, col);
-            } else if (kind == AnnotEditKind::InteriorColor) {
-                SetInteriorColor(annot, col);
-            } else {
-                SetDefaultAppearanceTextColor(annot, col);
-            }
-            AnnotChanged(tab);
+            ShowAnnotColorPopup(tb->win, chipScreen, current, withNone, label, MkFunc1(ChipColorPicked, tb), thickness,
+                                MkFunc1(ChipThicknessPicked, tb), thicknessLabel, minThickness);
             break;
         }
         case AnnotEditKind::Opacity: {
-            const int vals[] = {64, 128, 191, 255};
-            StrVec names;
-            int current = -1;
-            for (int i = 0; i < dimofi(vals); i++) {
-                names.Append(fmt("%d%%", (vals[i] * 100 + 127) / 255));
-                if (abs(vals[i] - chip->item.number) < 20) {
-                    current = i;
-                }
-            }
-            int idx = PopupPick(tb->win, screen, names, current, chipScreen);
-            if (dismissed(idx)) {
-                return;
-            }
-            SetOpacity(annot, vals[idx]);
-            AnnotChanged(tab);
+            // in percent, as the chip shows it; fully transparent would lose the annotation
+            int percent = ((chip->item.number * 100) + 127) / 255;
+            ShowAnnotSliderPopup(tb->win, chipScreen, Tr("Opacity"), percent, kOpacityPercentMin, 100,
+                                 MkFunc1(ChipOpacityPicked, tb));
             break;
         }
         case AnnotEditKind::Border: {
-            const int vals[] = {0, 1, 2, 3, 4, 6, 8, 12};
-            StrVec names;
-            int current = -1;
-            for (int i = 0; i < dimofi(vals); i++) {
-                names.Append(fmt("%d", vals[i]));
-                if (vals[i] == chip->item.number) {
-                    current = i;
-                }
-            }
-            int idx = PopupPick(tb->win, screen, names, current, chipScreen);
-            if (dismissed(idx)) {
-                return;
-            }
-            SetBorderWidth(annot, vals[idx]);
-            AnnotChanged(tab);
+            ShowAnnotSliderPopup(tb->win, chipScreen, Tr("Border Width"), std::max(BorderWidth(annot), 0), 0,
+                                 kBorderWidthMax, MkFunc1(ChipThicknessPicked, tb));
             break;
         }
         case AnnotEditKind::TextSize: {
-            const int vals[] = {8, 10, 12, 14, 16, 18, 24, 36};
-            StrVec names;
-            int current = -1;
-            for (int i = 0; i < dimofi(vals); i++) {
-                names.Append(fmt("%d", vals[i]));
-                if (vals[i] == chip->item.number) {
-                    current = i;
-                }
-            }
-            int idx = PopupPick(tb->win, screen, names, current, chipScreen);
-            if (dismissed(idx)) {
-                return;
-            }
-            SetDefaultAppearanceTextSize(annot, vals[idx]);
-            AnnotChanged(tab);
+            ShowAnnotSliderPopup(tb->win, chipScreen, Tr("Text Size"), chip->item.number, kFreeTextSizeMin,
+                                 kFreeTextSizeMax, MkFunc1(ChipTextSizePicked, tb));
             break;
         }
-        case AnnotEditKind::FontName: {
-            int idx = PopupPickSeq(tb->win, screen, AnnotEditorFontReadableNames(), chip->item.number, chipScreen);
-            if (dismissed(idx)) {
-                return;
-            }
-            SetDefaultAppearanceTextFont(annot, SeqStrByIndex(AnnotEditorFontNames(), idx));
+        case AnnotEditKind::FontName:
+            PickFreeTextFont(tb, annot, screen, chipScreen);
+            break;
+        case AnnotEditKind::Bold:
+        case AnnotEditKind::Italic:
+        case AnnotEditKind::Underline:
+            SetFreeTextFont(annot, FreeTextFontFamily(annot), FreeTextFontStyle(annot) ^ StyleBitForKind(kind));
             AnnotChanged(tab);
             break;
-        }
         case AnnotEditKind::Alignment: {
             int idx = PopupPickSeq(tb->win, screen, gQuaddingNames, chip->item.number, chipScreen,
-                                   PopupGlyphKind::Alignment, false, tb->font);
+                                   PopupGlyphKind::Alignment, false);
             if (dismissed(idx)) {
                 return;
             }
@@ -1398,7 +1629,7 @@ static void OnChipClick(AnnotEditChip* chip, VirtMouseEvent*) {
             SeqStrings icons = AnnotationIconNames(annot);
             int current = SeqStrIndex(icons, chip->item.iconName);
             PopupGlyphKind glyph = Type(annot) == AnnotationType::Stamp ? PopupGlyphKind::None : PopupGlyphKind::Icon;
-            int idx = PopupPickSeq(tb->win, screen, icons, current, chipScreen, glyph, false, tb->font);
+            int idx = PopupPickSeq(tb->win, screen, icons, current, chipScreen, glyph, false);
             if (dismissed(idx)) {
                 return;
             }
@@ -1409,7 +1640,7 @@ static void OnChipClick(AnnotEditChip* chip, VirtMouseEvent*) {
         case AnnotEditKind::LineStart:
         case AnnotEditKind::LineEnd: {
             int idx = PopupPickSeq(tb->win, screen, AnnotEditorLineEndingStyles(), chip->item.lineEnding, chipScreen,
-                                   PopupGlyphKind::LineEnding, kind == AnnotEditKind::LineStart, tb->font);
+                                   PopupGlyphKind::LineEnding, kind == AnnotEditKind::LineStart);
             if (dismissed(idx)) {
                 return;
             }
@@ -1484,6 +1715,9 @@ static Size ChipSizeFor(const AnnotEditItem& item, PlatformFont* font, int rowDy
         case AnnotEditKind::TextColor:
         case AnnotEditKind::Alignment:
         case AnnotEditKind::Icon:
+        case AnnotEditKind::Bold:
+        case AnnotEditKind::Italic:
+        case AnnotEditKind::Underline:
         case AnnotEditKind::Contents:
         case AnnotEditKind::AttachFile:
         case AnnotEditKind::SaveAttachment:
@@ -1589,6 +1823,20 @@ static void RaiseToolbarHost(AnnotEditToolbar* tb) {
     SetWindowPos(tb->host->native, ToolbarZ(tb), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
+// where a text markup annotation was clicked to select it, in page
+// coordinates so it follows scrolling and zoom. A highlight can span many
+// lines, so the toolbar starts at the click, not at the bounds' left edge.
+struct AnnotEditClickAnchor {
+    Annotation* annot = nullptr;
+    PointF pt;
+};
+static AnnotEditClickAnchor gClickAnchor;
+
+void SetAnnotEditToolbarClickPos(Annotation* annot, PointF pagePt) {
+    gClickAnchor.annot = annot;
+    gClickAnchor.pt = pagePt;
+}
+
 static bool PositionToolbar(AnnotEditToolbar* tb, const Rect& annot) {
     MainWindow* win = tb->win;
     Rect canvas = HwndClientRect(win->hwndCanvas);
@@ -1597,6 +1845,10 @@ static bool PositionToolbar(AnnotEditToolbar* tb, const Rect& annot) {
     int h = tb->size.dy;
 
     int x = annot.x;
+    DisplayModel* dm = win->AsFixed();
+    if (dm && tb->annot && gClickAnchor.annot == tb->annot) {
+        x = dm->CvtToScreen(PageNo(tb->annot), gClickAnchor.pt).x;
+    }
     int y = annot.y + annot.dy + gap;
     if (y + h > canvas.y + canvas.dy) {
         y = annot.y - gap - h;
@@ -1676,7 +1928,7 @@ static void EndContentsEdit(AnnotEditToolbar* tb, bool accept) {
     TempStr newText{};
     if (accept && tb->contentsEdit && annot) {
         newText = tb->contentsEdit->GetTextTemp();
-        newText = str::ReplaceTemp(newText, StrL("\r\n"), StrL("\n"));
+        str::NormalizeNewlinesToLFInPlace(newText);
     }
     RestoreCanvasFocus(tb);
     DestroyContentsEditor(tb);
@@ -1974,9 +2226,9 @@ static void StartContentsEdit(AnnotEditToolbar* tb) {
         delete edit;
         return;
     }
-    Str s = Contents(annot);
-    s = str::ReplaceTemp(s, StrL("\r\n"), StrL("\n"));
-    s = str::ReplaceTemp(s, StrL("\n"), StrL("\r\n"));
+    TempStr s = str::DupTemp(Contents(annot));
+    str::NormalizeNewlinesToLFInPlace(s);
+    s = str::LFToCRLFTemp(s);
     edit->SetText(s);
     edit->onWndProc = MkFunc1(OnContentsEditWndProc, tb);
 
@@ -2045,6 +2297,8 @@ struct FreeTextInPlaceEdit {
     int borderWidth = 0;
     int fontPx = 0;
     float scale = 1.f;
+    // the annotation's text color, for the typed text and the box's border
+    Color textCol = kColBlack;
 };
 
 // MuPDF stacks free text lines 1.2 * the font size apart and wraps at the
@@ -2076,18 +2330,6 @@ bool IsEditingFreeTextInPlace(MainWindow* win) {
         return false;
     }
     return !win || gInPlace.win == win;
-}
-
-// Arial / Courier New / Times New Roman have the metrics of the base 14 fonts
-// MuPDF renders free text with.
-static const WCHAR* WinFontForPdfFontName(Str pdfName) {
-    if (str::EqI(pdfName, StrL("Cour"))) {
-        return L"Courier New";
-    }
-    if (str::EqI(pdfName, StrL("TiRo"))) {
-        return L"Times New Roman";
-    }
-    return L"Arial";
 }
 
 static Size MeasureInPlaceText(Str text) {
@@ -2175,7 +2417,7 @@ void EndFreeTextInPlaceEdit(bool accept) {
     TempStr text{};
     if (accept) {
         text = str::DupTemp(HwndGetTextTemp(hwnd));
-        text = str::ReplaceTemp(text, StrL("\r\n"), StrL("\n"));
+        str::NormalizeNewlinesToLFInPlace(text);
     }
     // clear the state and unsubclass before destroying, so the destroy-time
     // WM_KILLFOCUS doesn't come back through the commit path
@@ -2240,6 +2482,30 @@ static LRESULT CALLBACK WndProcFreeTextInPlaceEdit(HWND hwnd, UINT msg, WPARAM w
                 return 0;
             }
             break;
+        case WM_NCCALCSIZE: {
+            // reserve a 1px frame, drawn in WM_NCPAINT
+            LRESULT res = CallWindowProcW(gInPlaceDefProc, hwnd, msg, wp, lp);
+            RECT* rc = wp ? &((NCCALCSIZE_PARAMS*)lp)->rgrc[0] : (RECT*)lp;
+            if (rc->right - rc->left > 2 && rc->bottom - rc->top > 2) {
+                InflateRect(rc, -1, -1);
+            }
+            return res;
+        }
+        case WM_NCPAINT: {
+            // a frame in the annotation's text color
+            CallWindowProcW(gInPlaceDefProc, hwnd, msg, wp, lp);
+            HDC hdc = GetWindowDC(hwnd);
+            if (hdc) {
+                RECT wr;
+                GetWindowRect(hwnd, &wr);
+                RECT r = {0, 0, wr.right - wr.left, wr.bottom - wr.top};
+                HBRUSH br = CreateSolidBrush(gInPlace.textCol);
+                FrameRect(hdc, &r, br);
+                DeleteObject(br);
+                ReleaseDC(hwnd, hdc);
+            }
+            return 0;
+        }
         case WM_KILLFOCUS: {
             HWND next = (HWND)wp;
             if (!next || HwndIsOnScreenKeyboard(next)) {
@@ -2301,15 +2567,21 @@ bool StartFreeTextInPlaceEdit(MainWindow* win, Annotation* annot) {
     }
     int borderWidth = std::max(BorderWidth(annot), 0);
     int fontPx = std::max(6, (int)(((float)textSize * scale) + 0.5f));
-    HFONT font = CreateFontW(-fontPx, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+    int fontStyle = FreeTextFontStyle(annot);
+    int weight = (fontStyle & kFreeTextBold) ? FW_BOLD : FW_NORMAL;
+    BOOL italic = (fontStyle & kFreeTextItalic) ? TRUE : FALSE;
+    BOOL underline = (fontStyle & kFreeTextUnderline) ? TRUE : FALSE;
+    HFONT font = CreateFontW(-fontPx, 0, 0, 0, weight, italic, underline, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                              CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH,
-                             WinFontForPdfFontName(DefaultAppearanceTextFont(annot)));
+                             WinFontFamilyTemp(FreeTextFontFamily(annot)).s);
     if (!font) {
         return false;
     }
 
     // lines don't wrap: the box grows to fit them instead
-    DWORD style = WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_WANTRETURN | ES_AUTOHSCROLL | ES_AUTOVSCROLL;
+    // no WS_BORDER: the 1px frame comes from WM_NCCALCSIZE / WM_NCPAINT so it
+    // can be drawn in the text color
+    DWORD style = WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_WANTRETURN | ES_AUTOHSCROLL | ES_AUTOVSCROLL;
     HMODULE hmod = GetModuleHandleW(nullptr);
     HWND hwnd =
         CreateWindowExW(0, WC_EDITW, L"", style, rc.x, rc.y, rc.dx, rc.dy, win->hwndCanvas, nullptr, hmod, nullptr);
@@ -2317,11 +2589,14 @@ bool StartFreeTextInPlaceEdit(MainWindow* win, Annotation* annot) {
         DeleteObject(font);
         return false;
     }
+    // a themed edit paints its own border over the one we draw in WM_NCPAINT
+    SetWindowTheme(hwnd, L"", L"");
     SetWindowFont(hwnd, font, TRUE);
     int pad = std::max(DpiScale(2), 1);
     SendMessageW(hwnd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(pad, pad));
-    TempStr text = str::ReplaceTemp(Contents(annot), StrL("\r\n"), StrL("\n"));
-    text = str::ReplaceTemp(text, StrL("\n"), StrL("\r\n"));
+    TempStr text = str::DupTemp(Contents(annot));
+    str::NormalizeNewlinesToLFInPlace(text);
+    text = str::LFToCRLFTemp(text);
     HwndSetText(hwnd, text);
 
     gInPlaceDefProc = (WNDPROC)GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
@@ -2339,6 +2614,14 @@ bool StartFreeTextInPlaceEdit(MainWindow* win, Annotation* annot) {
     gInPlace.borderWidth = borderWidth;
     gInPlace.fontPx = fontPx;
     gInPlace.scale = scale;
+    PdfColor pdfTextCol = DefaultAppearanceTextColor(annot);
+    if (pdfTextCol != kColorUnset) {
+        u8 r, g, b, a;
+        UnpackPdfColor(pdfTextCol, r, g, b, a);
+        gInPlace.textCol = MkRgb(r, g, b);
+    }
+    // the border was painted before we knew the color
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 
     HwndSetFocus(hwnd);
     // caret at the end, nothing selected: this is editing what is there, not
@@ -2366,6 +2649,17 @@ bool StartFreeTextInPlaceEditAt(MainWindow* win, Point pt) {
     }
     SetSelectedAnnotation(tab, annot);
     return StartFreeTextInPlaceEdit(win, annot);
+}
+
+// WM_CTLCOLOREDIT the canvas gets for the in-place box: the annotation's text
+// color on white. nullptr if `edit` isn't the box.
+HBRUSH FreeTextInPlaceEditCtlColor(HWND edit, HDC hdc) {
+    if (!gInPlace.hwnd || edit != gInPlace.hwnd) {
+        return nullptr;
+    }
+    SetTextColor(hdc, gInPlace.textCol);
+    SetBkColor(hdc, kColWhite);
+    return (HBRUSH)GetStockObject(WHITE_BRUSH);
 }
 
 TempStr FreeTextInPlaceEditStateTemp(MainWindow* win) {
@@ -2399,6 +2693,7 @@ void HideAnnotEditToolbar(MainWindow* win) {
     }
     tb->tab = nullptr;
     tb->annot = nullptr;
+    gClickAnchor = {};
     tb->lastPlaced = {};
     tb->lastAnnotBounds = {};
     VecReset(tb->kinds);
@@ -2526,9 +2821,12 @@ TempStr AnnotEditToolbarStateTemp(MainWindow* win) {
             iconName = tb->chips[i]->item.iconName;
         }
     }
-    return fmt("annotEditToolbar visible=1 n=%d items=%s placed=%d,%d,%d,%d editing=%d iconName=%s chips=%s\n",
-               len(tb->kinds), ToStrTemp(items), r.x, r.y, r.dx, r.dy, tb->editingContents ? 1 : 0, iconName,
-               ToStrTemp(chips));
+    Annotation* annot = LiveToolbarAnnot(tb);
+    return fmt(
+        "annotEditToolbar visible=1 n=%d items=%s placed=%d,%d,%d,%d editing=%d iconName=%s fontStyle=%d "
+        "font=%s chips=%s\n",
+        len(tb->kinds), ToStrTemp(items), r.x, r.y, r.dx, r.dy, tb->editingContents ? 1 : 0, iconName,
+        FreeTextFontStyle(annot), FreeTextFontFamily(annot), ToStrTemp(chips));
 }
 
 // clang-format off
@@ -2541,8 +2839,6 @@ static SeqStrings gLineEndingStyles =
     "None\0Square\0Circle\0Diamond\0OpenArrow\0ClosedArrow\0Butt\0ROpenArrow\0RClosedArrow\0Slash\0";
 static SeqStrings gColors =
     "Transparent\0Aqua\0Black\0Blue\0Fuchsia\0Gray\0Green\0Lime\0Maroon\0Navy\0Olive\0Orange\0Purple\0Red\0Silver\0Teal\0White\0Yellow\0";
-static SeqStrings gFontNames = "Cour\0Helv\0TiRo\0";
-static SeqStrings gFontReadableNames = "Courier\0Helvetica\0TimesRoman\0";
 
 static PdfColor gColorsValues[] = {
 	0x00000000, /* transparent */
@@ -2724,35 +3020,8 @@ void DrawAnnotationListRow(Gfx* gfx, PlatformFont* font, Rect rc, Annotation* an
     gfx->DrawText(pageStr, rcPage, gfxTextEllipsis | gfxTextVCenter | gfxTextRight, font, colText);
 }
 
-SeqStrings AnnotEditorColorNames() {
-    return gColors;
-}
-
-int AnnotEditorColorCount() {
-    return dimofi(gColorsValues);
-}
-
-PdfColor AnnotEditorColorAt(int i) {
-    if (i < 0 || i >= dimofi(gColorsValues)) {
-        return 0;
-    }
-    return gColorsValues[i];
-}
-
-Str AnnotEditorColorNameAt(int i) {
-    return SeqStrByIndex(gColors, i);
-}
-
 SeqStrings AnnotEditorLineEndingStyles() {
     return gLineEndingStyles;
-}
-
-SeqStrings AnnotEditorFontNames() {
-    return gFontNames;
-}
-
-SeqStrings AnnotEditorFontReadableNames() {
-    return gFontReadableNames;
 }
 
 SeqStrings AnnotationIconNames(Annotation* annot) {
@@ -2805,6 +3074,10 @@ struct AnnotationHoverOverlay {
     Str rowsDump;
     int rowCount = 0;
     bool isAbove = false;
+    // text markup: the mouse position (page coordinates) when the card
+    // appeared; the card is centered on it until it hides
+    bool hasMouseAnchor = false;
+    PointF mouseAnchor;
 };
 
 static TempStr AnnotationColorNameTemp(PdfColor color) {
@@ -2864,10 +3137,8 @@ static void CollectAnnotationHoverRows(Annotation* annot, AnnotationHoverRows& r
         int quadding = Quadding(annot);
         rows.Add(StrL("textAlignment"), Tr("Text Alignment:"), SeqStrByIndex(gQuaddingNames, quadding));
 
-        int fontIdx = SeqStrIndex(gFontNames, DefaultAppearanceTextFont(annot));
-        if (fontIdx >= 0) {
-            rows.Add(StrL("textFont"), Tr("Text Font:"), SeqStrByIndex(gFontReadableNames, fontIdx));
-        }
+        rows.Add(StrL("textFont"), Tr("Text Font:"),
+                 FontDescriptionTemp(FreeTextFontFamily(annot), FreeTextFontStyle(annot)));
         rows.Add(StrL("textSize"), Tr("Text Size:"), fmt("%d", DefaultAppearanceTextSize(annot)));
         rows.Add(StrL("textColor"), Tr("Text Color:"), AnnotationColorNameTemp(DefaultAppearanceTextColor(annot)));
     }
@@ -3047,6 +3318,10 @@ static bool PositionAnnotationHoverOverlay(AnnotationHoverOverlay* overlay) {
     int width = overlay->size.dx;
     int height = std::min(overlay->size.dy, canvas.dy);
     int x = annotRect.x;
+    if (overlay->hasMouseAnchor) {
+        // a highlight can span many lines: center the card where the mouse entered it
+        x = dm->CvtToScreen(PageNo(annot), overlay->mouseAnchor).x - (width / 2);
+    }
     int y = annotRect.y + annotRect.dy + gap;
     overlay->isAbove = y + height > canvas.y + canvas.dy;
     if (overlay->isAbove) {
@@ -3077,6 +3352,7 @@ void HideAnnotationHoverOverlay(MainWindow* win) {
     overlay->tab = nullptr;
     overlay->lastPlaced = {};
     overlay->anchorRect = {};
+    overlay->hasMouseAnchor = false;
     overlay->annotBounds = {};
     overlay->rowCount = 0;
     str::Free(overlay->rowsDump);
@@ -3096,8 +3372,18 @@ void UpdateAnnotationHoverOverlay(MainWindow* win) {
         return;
     }
     RectF bounds = GetRect(annot);
-    bool rebuild = overlay->annot != annot || overlay->tab != win->CurrentTab() ||
-                   !SameRectF(bounds, overlay->annotBounds) || !overlay->host->IsVisible();
+    bool appearing = overlay->annot != annot || overlay->tab != win->CurrentTab() || !overlay->host->IsVisible();
+    if (appearing) {
+        overlay->hasMouseAnchor = false;
+        POINT cursor;
+        DisplayModel* dm = win->AsFixed();
+        if (dm && AnnotationIsTextMarkup(annot->type) && GetCursorPos(&cursor) &&
+            ScreenToClient(win->hwndCanvas, &cursor)) {
+            overlay->mouseAnchor = dm->CvtFromScreen(Point(cursor.x, cursor.y), PageNo(annot));
+            overlay->hasMouseAnchor = true;
+        }
+    }
+    bool rebuild = appearing || !SameRectF(bounds, overlay->annotBounds);
     if (rebuild) {
         BuildAnnotationHoverOverlay(overlay, annot);
     }
@@ -3235,7 +3521,6 @@ static void LoadAnnotsForPage(EngineMupdf* e, int pageNo) {
         logf("LoadAnnotsForPage: page %d GetFzPageInfo failed\n", pageNo);
         return;
     }
-    logf("LoadAnnotsForPage: page %d n=%d loaded=%d\n", pageNo, len(pi->annotations), (int)pi->annotsLoaded);
 }
 
 // Pages the background loader should finish first: current page (toolbar page
@@ -3317,6 +3602,16 @@ void RefreshEditAnnotationsAfterEngineChange(WindowTab* tab) {
 }
 
 // Dump selected-annotation and loaded-annot count for tests (issue-5933, issue-6023).
+// no color at all would serialize like black
+static TempStr ColorDumpTemp(PdfColor c) {
+    if (c == 0) {
+        return fmt("none");
+    }
+    str::Builder out;
+    SerializePdfColor(c, out);
+    return ToStrTemp(out);
+}
+
 TempStr AnnotEditorLayoutResultTemp(int, int, int* exitCodeOut, int) {
     str::Builder out;
     auto finish = [&](Str msg, int code) -> TempStr {
@@ -3360,6 +3655,8 @@ TempStr AnnotEditorLayoutResultTemp(int, int, int* exitCodeOut, int) {
             outline = dm->CvtToScreen(annot->pageNo, win->annotationResizePreviewRect);
         }
         out.Append(fmt(" resizeOutline=%d,%d,%d,%d", outline.x, outline.y, outline.dx, outline.dy));
+        out.Append(fmt(" color=%s interiorColor=%s opacity=%d", ColorDumpTemp(GetColor(annot)),
+                       ColorDumpTemp(InteriorColor(annot)), Opacity(annot)));
         // last on the line: the contents can hold anything, including spaces
         out.Append(fmt(" contents=%s", Contents(annot)));
     }

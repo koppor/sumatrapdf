@@ -25,7 +25,7 @@
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
 #include "Translations.h"
-#include "DarkMode_win.h"
+#include "DarkMode.h"
 #include "SumatraDialogs.h"
 
 // Font, size and line spacing for reflowable documents (EPUB, MOBI, FB2, ...),
@@ -108,7 +108,7 @@ static void ClearEbookSettingsWnd() {
 // a multi-line edit shows only CRLF as a line break, while our CSS (and what
 // we store in the settings) uses LF
 static TempStr ToEditTextTemp(Str s) {
-    return str::ReplaceTemp(s, StrL("\n"), StrL("\r\n"));
+    return str::LFToCRLFTemp(s);
 }
 
 static TempStr FromEditTextTemp(Str s) {
@@ -379,7 +379,7 @@ void EbookSettingsWnd::Apply() {
             DeleteFileEBookUI(fs->eBookUI);
             fs->eBookUI = nullptr;
         }
-        SaveSettings();
+        ScheduleSaveSettings();
         return;
     }
 
@@ -396,7 +396,7 @@ void EbookSettingsWnd::Apply() {
         // so it stops being written out
         DeleteFileEBookUI(fs->eBookUI);
         fs->eBookUI = nullptr;
-        SaveSettings();
+        ScheduleSaveSettings();
         return;
     }
     if (!fs->eBookUI) {
@@ -417,7 +417,7 @@ void EbookSettingsWnd::Apply() {
     }
     str::ReplaceWithCopy(&f->ignoreDocumentCSS, ignore);
     str::ReplaceWithCopy(&f->customCSS, str::Eq(v.customCSS, g->customCSS) ? Str{} : v.customCSS);
-    SaveSettings();
+    ScheduleSaveSettings();
 }
 
 void EbookSettingsWnd::OnCancel(VirtMouseEvent*) {

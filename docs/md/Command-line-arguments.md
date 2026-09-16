@@ -19,7 +19,9 @@ Anything that is not recognized as a known option is interpreted as a file path,
 - `-for-testing` : for ad-hoc testing by humans or agents. Always starts a new instance, doesn't restore a session (only loads files given on the command line) and doesn't save settings (**ver 3.7+**)
 - `-quicklook` : open the file in a chrome-less always-on-top preview window (Explorer Space preview). Esc or Space closes it (**ver 3.7+**, fixes #2568)
 - `-quicklook-agent` : run the hidden File Explorer Space-bar helper with no UI. Started automatically when `ExplorerQuickLook` is true (**ver 3.7+**)
-- `-dbg-control <named-pipe>` : starts a test control server on a named pipe. Used by automated tests through `tests/control.ts`; combine with `-for-testing`. (**ver 3.7+**)
+- `-dbg-control <named-pipe>` : starts a test control server on a named pipe. Used by automated tests through `tests/control.ts`; combine with `-for-testing`. (**ver 3.7+**). In a profile build, the control commands `StartPerfLog` / `StopPerfLog` enable function-timing logs around a region of code
+- `-start-perf-log` : in a profile build (`bun cmd/build.ts -profile`), start writing function enter/exit timings immediately. Off by default. The log is saved to `sumperf.txt` next to the exe on exit, or to `-log-perf-file <path>`
+- `-log-perf-file <path>` : write the profile function-timing log to this path instead of `sumperf.txt` (**ver 3.7+**)
 - `-dump-chm <file>` : headlessly opens a CHM file, lists contained files with sizes, unpacks each file to memory to validate retrieval, and prints TOC/index metadata to stdout. Exits with a non-zero code if the CHM can't be opened, enumerated, or unpacked.
 - `-pwd <password>` : use the given password to open password-protected documents. If the password is wrong, SumatraPDF falls back to default passwords and then asks interactively.
 
@@ -121,6 +123,8 @@ With multiple files, the exit code is `0` only if all printed; otherwise it's th
   ```
 
   renders file1.pdf 25 times, renders pages 1 to 3 of file2.pdf and renders all but the first 14 PDF and XPS files from dir 3 times.
+
+- `-html-backend <ie|webview2>` : forces the embedded browser that shows CHM and markdown documents. By default WebView2 is used when it's installed and the IE control otherwise; this makes a test cover both. (**ver 3.7+**)
 
 - `-bench <filepath> [page-range]` : Renders all pages (or just the indicated ones) for the given file and then outputs the required rendering times for performance testing and comparisons. Often used together with `-console`.
 

@@ -19,7 +19,6 @@ TempStr GetSettingsPathTemp();
 TempStr GetSettingsFileNameTemp();
 
 bool LoadSettings();
-bool SaveSettings();
 void ScheduleSaveSettings();
 void FlushScheduledSaveSettings();
 void ForceReloadSettings();
@@ -46,6 +45,9 @@ PlatformFont* GetAppSidebarLabelFont();
 PlatformFont* GetAppSidebarLabelFontForDpi(int dpi);
 bool IsMenuFontSizeDefault();
 
+void ParseColorList(Str, Vec<Color>& out, int maxColors);
+TempStr SerializeColorList(const Vec<Color>&);
+
 TempStr ZoomLevelStr(float zoom);
 TempStr ZoomLevelStrExact(float zoom);
 // the command for each level the zoom buttons step through, in that order
@@ -56,6 +58,8 @@ extern Settings* gSettings;
 
 bool* FindSettingsBoolSetting(Str name);
 void ToggleSettingsBool(bool*);
+const char** GetSettingsEnumValues(Str path);
+bool SetSettingsValueFromStr(Str path, Str value);
 
 FileState* NewFileState(Str);
 void DeleteFileState(FileState*);

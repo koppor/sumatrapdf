@@ -22,6 +22,7 @@ Here are some things you can customize:
 - window background color with `FixedPageUI.BackgroundColor`
 - color used to highlight text with `FixedPageUI.SelectionColor`
 - control scrollbar mode with `FixedPageUI.Scrollbars` (values: `windows`, `smart`, `overlay`, `hidden`)
+- CAD / engineering-drawing line rendering with `EngineeringDrawingEnhance` — [CAD / Engineering Drawings](CAD-Engineering-Drawings.md)
 
 Advanced settings file also stores the history and state of opened files so that we can e.g. re-open on the page
 
@@ -90,6 +91,9 @@ HomePageViewMode = thumbnails
 ; valid values: (empty), os, sumatrapdf (introduced in version 3.7)
 FilePicker = 
 
+; valid values: (empty), auto, modern, classic (introduced in version 3.7)
+PrinterUI = 
+
 ; if true, a document will be reloaded automatically whenever it's changed
 ; (currently doesn't work for documents shown in the ebook UI) (introduced in
 ; version 2.5)
@@ -120,6 +124,10 @@ ShowMenubarWithTabs = false
 ; if true, show the current page as n/N after the file name on tabs (introduced
 ; in version 3.7)
 ShowPageNumberInTabs = false
+
+; if true, show reading progress (n/N, or chapter:page for ebooks) on home page
+; thumbnails and list rows (introduced in version 3.7)
+ShowHomePageReadingProgress = true
 
 ; if true, show tips on the home page (introduced in version 3.7)
 ShowTips = true
@@ -162,6 +170,9 @@ ShowToc = true
 ; (introduced in version 3.7)
 SidebarOnRight = false
 
+; valid values: (empty), keep, grow (introduced in version 3.7)
+SidebarWindowSize = 
+
 ; if true, draw a blue border around links in the document (introduced in
 ; version 3.6)
 ShowLinks = false
@@ -199,6 +210,13 @@ RememberViewOffsetOnPageTurn = false
 ; scrolls horizontally and Ctrl + wheel zooms (introduced in version 3.7)
 MouseWheelTurnsPage = false
 
+; if true, in single page / facing / book view, scrolling past the top or bottom
+; of a zoomed-in page goes to the previous / next page; if false, scrolling
+; stops at the edge and the page is changed only by the keyboard, toolbar or
+; scrollbar. A page that fits the window has nothing to scroll, so a wheel notch
+; turns it either way (introduced in version 3.7)
+ScrollEdgeTurnsPage = true
+
 ; if true, draw a focus ring around the document when it has keyboard focus (Tab
 ; to the page area) (introduced in version 3.7)
 ShowDocumentFocusIndicator = false
@@ -206,6 +224,10 @@ ShowDocumentFocusIndicator = false
 ; if true, show a tip when hovering an annotation (e.g. "Highlight annotation.
 ; Ctrl+click to edit.") (introduced in version 3.7)
 ShowAnnotationNotification = true
+
+; if true, at the end of a document show a hint to open the next file in the
+; folder. Closing the hint sets it to false (introduced in version 3.7)
+ShowFileNavigateHint = true
 
 ; if true, show the author at the bottom of an annotation tooltip as "Author:
 ; <author>" (introduced in version 3.7)
@@ -238,6 +260,11 @@ SmoothScroll = true
 ; distance, in screen pixels at 96 DPI, scrolled by an arrow-key press or one
 ; mouse-wheel line; values below 1 use 16 (introduced in version 3.7)
 ScrollLineAmount = 16
+
+; how hard to free unused page and image caches to save RAM (0 to 100). 0 keeps
+; them until an allocation fails; 100 drops them as soon as a page is off-screen
+; (introduced in version 3.7)
+SaveMemory = 50
 
 ; if true, continuous view has extra scroll room after the last page so you can
 ; scroll the end of the document to the top of the window (introduced in version
@@ -272,6 +299,30 @@ ReadAloudVoiceId =
 ; normal speed; can also be changed from the Read Aloud playback bar (introduced
 ; in version 3.7)
 ReadAloudSpeed = 1
+
+; pixels per second for Automatically Scroll (View menu / Ctrl+Shift+H). 8 to
+; 320; also changed from the auto-scroll bar and the arrow keys while scrolling
+; (introduced in version 3.7)
+ReadingAutoScrollSpeed = 40
+
+; reading bar (View menu): a horizontal band on the page to keep your place.
+; Highlight fills the band; Invert dims everything else (introduced in version
+; 3.7)
+ReadingBar [
+    ; fill of the reading bar in highlight mode. #aarrggbb sets opacity (00 =
+    ; transparent, FF = opaque); #rrggbb is fully opaque (introduced in version
+    ; 3.7)
+    Background = #66ffe082
+
+    ; if true, dim the page except the reading bar (screen mask); if false, draw
+    ; a colored highlight band (introduced in version 3.7)
+    Invert = false
+
+    ; height of the reading bar in pixels at 96 DPI; 0 uses a default of about
+    ; three lines. dragging the top or bottom edge of the bar also changes this
+    ; (introduced in version 3.7)
+    Height = 0
+]
 
 ; if true, mouse wheel scrolling is faster when mouse is over a scrollbar
 ; (introduced in version 3.6)
@@ -347,7 +398,7 @@ DisableAntiAlias = false
 
 ; CAD/engineering PDF line rendering: off, auto (enhance if a CAD drawing is
 ; detected) or on (introduced in version 3.7)
-EngineeringDrawingEnhance = auto
+EngineeringDrawingEnhance = off
 
 ; if true, disables auto-linking of URLs and email addresses found in PDF text
 ; (introduced in version 3.7)
@@ -721,15 +772,15 @@ Annotations [
 
     ; color of newly created underline annotations. #aarrggbb sets default
     ; opacity the same way as HighlightColor
-    UnderlineColor = #00ff00
+    UnderlineColor = #8bf05d
 
     ; color of newly created squiggly underline annotations. #aarrggbb sets
     ; default opacity the same way as HighlightColor (introduced in version 3.5)
-    SquigglyColor = #ff00ff
+    SquigglyColor = #f199d2
 
     ; color of newly created strike out annotations. #aarrggbb sets default
     ; opacity the same way as HighlightColor (introduced in version 3.5)
-    StrikeOutColor = #ff0000
+    StrikeOutColor = #e24745
 
     ; text color of newly created free text annotations (introduced in version
     ; 3.5)
@@ -756,8 +807,60 @@ Annotations [
     ; (Arabic, Hebrew, Persian) want right (introduced in version 3.7)
     FreeTextAlignment = left
 
+    ; colors offered by the drop-down on the annotation toolbar's buttons,
+    ; separated by space. Picking one sets the color of new annotations of that
+    ; type. The color a button currently makes annotations in is added when it
+    ; is missing (introduced in version 3.7)
+    PresetColors = #ffff00 #8bf05d #99defa #f199d2 #e24745 #ff0000 #0000ff #000000
+
     ; color of newly created text (sticky note) annotations
     TextIconColor = 
+
+    ; color of newly created line annotations. If not set, the PDF engine's
+    ; default (red) is used (introduced in version 3.7)
+    LineColor = 
+
+    ; color of newly created polyline annotations. If not set, the PDF engine's
+    ; default (red) is used (introduced in version 3.7)
+    PolyLineColor = 
+
+    ; color of newly created square annotations. If not set, the PDF engine's
+    ; default (red) is used (introduced in version 3.7)
+    SquareColor = 
+
+    ; color of newly created circle annotations. If not set, the PDF engine's
+    ; default (red) is used (introduced in version 3.7)
+    CircleColor = 
+
+    ; color of newly created polygon annotations. If not set, the PDF engine's
+    ; default (red) is used (introduced in version 3.7)
+    PolygonColor = 
+
+    ; color of newly created ink annotations, as #aarrggbb: the alpha is how
+    ; translucent the stroke is (00 = transparent, FF = opaque), so the color is
+    ; exactly what ends up on the page (introduced in version 3.7)
+    InkColor = #66ffff00
+
+    ; colors offered by the ink button's drop-down, separated by space. Use
+    ; #aarrggbb values: the alpha is the stroke's opacity. The color ink
+    ; currently draws in is added when it is missing (introduced in version 3.7)
+    InkColors = #66ffff00 #668bf05d #6699defa #66f199d2 #66e24745
+
+    ; width of the stroke of new ink annotations, in points (introduced in
+    ; version 3.7)
+    InkBorderWidth = 16
+
+    ; color of newly created stamp annotations. If not set, the PDF engine's
+    ; default (red) is used (introduced in version 3.7)
+    StampColor = 
+
+    ; color of newly created caret annotations. If not set, the PDF engine's
+    ; default (red) is used (introduced in version 3.7)
+    CaretColor = 
+
+    ; color of newly created file attachment annotations. If not set, the PDF
+    ; engine's default (red) is used (introduced in version 3.7)
+    FileAttachmentColor = 
 
     ; icon shown for text (sticky note) annotations: comment, help, insert, key,
     ; new paragraph, note or paragraph. If not set, note is used
@@ -1150,6 +1253,10 @@ FileStates [
     ; chapters (folds in ReparseIdx; see PagePosition.cpp)
     PageNo = 1
 
+    ; number of pages in the document when it was last open; 0 if unknown. Used
+    ; to show reading progress on the home page (introduced in version 3.7)
+    PageCount = 0
+
     ; how far pages have been rotated as a multiple of 90 degrees
     Rotation = 0
 
@@ -1189,6 +1296,10 @@ FileStates [
     ; if true, percentage zoom scales every page to the width page 1 has at that
     ; zoom level (introduced in version 3.7)
     UniformPageWidth = false
+
+    ; if true, empty margins around page content are trimmed from display
+    ; (introduced in version 3.7)
+    TrimEmptyMargins = false
   ]
 ]
 

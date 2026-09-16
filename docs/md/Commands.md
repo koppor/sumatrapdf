@@ -29,6 +29,8 @@ CmdOpenFileWithOSFilePicker,,Open File With Windows File Picker...,"always the s
 CmdToggleFilePicker,,SumatraPDF File Picker,"checkbox under File and Settings; toggles `FilePicker` empty/os ↔ sumatrapdf, ver 3.7+"
 CmdToggleBoolSetting,,Toggle Boolean Setting,"in the Command Palette, lists boolean advanced settings; Enter or a click toggles one and closes. Custom shortcuts: `CmdToggleBoolSetting <SettingName>` (case-insensitive leaf or dotted path), e.g. `Fullscreen.ShowMenubar` (fixes #5912), ver 3.7+"
 CmdFixDefaultApp,,Fix Default App For Extension,"`CmdFixDefaultApp .pdf` opens the OS dialog to set the default app for that extension; used by the home-page bottom bar when Sumatra is no longer the default, ver 3.7+"
+CmdFileHistory,,Open Recent File,"`CmdFileHistory <path>` opens that file; used for the recent files listed in the File menu, each of which carries its own path, ver 3.7+"
+CmdFavorite,,Go to Favorite,"`CmdFavorite <path> page=<page>` goes to that favorite; used for the favorites listed in the Favorites menu, each of which carries its own file path and page, ver 3.7+"
 CmdOpenNextFileInFolder,Shift + Ctrl + Right,Open Next File In Folder,
 CmdNavigateFilesInFolder,Shift + Ctrl + Up,Navigate Files in Folder,"directory browser for openable files in the current file's folder (stays open; Enter/double-click replaces the current tab, Ctrl+Enter/Ctrl+double-click switches to the tab already showing the file or opens a new tab, Alt+Up goes to the parent directory, Del moves the selected file to the recycle bin, F5 re-reads the directory); also used when `FilePicker = sumatrapdf`, ver 3.7+"
 CmdOpenPrevFileInFolder,Shift + Ctrl + Left,Open Previous File In Folder,
@@ -65,10 +67,12 @@ CmdCopyImage,,Copy Image,
 CmdCopyLinkTarget,,Copy Link Target,
 CmdCopySelection,"Ctrl + C, Ctrl + Insert",Copy Selection,"in Edit PDF mode with an annotation selected, copies that annotation instead of text"
 CmdCopySelectionAsImage,,Copy Selection As Image,"copy a rectangular selection as an image, ver 3.7+"
+CmdSaveSelectionAsImage,,Save As Image...,"save a rectangular (Ctrl+drag) selection as PNG, JPEG or BMP at a chosen DPI, independent of the current zoom, ver 3.7+ (fixes #6127)"
 CmdSearchGoogleLens,,Search with Google Lens,"opens the selection, image under the cursor, or current page in Google Lens, ver 3.7+"
 CmdSearchGoogleLensPage,,Search Page with Google Lens,"current page (or the page under the cursor from the context menu), ver 3.7+"
 CmdSearchGoogleLensImage,,Search Image with Google Lens,"image under the cursor, ver 3.7+"
 CmdCopyFilePath,,Copy File Path,ver 3.5+
+CmdCopyLocationToClipboard,,Copy Location To Clipboard,"copies the current view (page, zoom, scroll position and file path) to the clipboard as command-line arguments, ver 3.7+"
 CmdDeleteFile,,Delete Currently Opened File, ver 3.6+
 CmdDeleteFileAndOpenNext,,Delete File And Open Next,"moves the current file to the Recycle Bin after the next file opens successfully, ver 3.7+"
 CmdShowGeneratedHTML,,Show Generated HTML,"available for Markdown files; saves the generated HTML to a temporary .html file and opens it in Notepad, ver 3.7+"
@@ -103,6 +107,7 @@ CmdToggleKeyboardLinkFollowing,Shift + F,Follow Link With Keyboard,"ver 3.7+, la
 CmdToggleFullscreen,"f, Shift + Ctrl + L, F11",Toggle Fullscreen,
 CmdToggleMangaMode,,Toggle Manga Mode,"Right-to-left facing/book layout for fixed-page documents; before 3.7 this was limited to comic books"
 CmdToggleUniformPageWidth,,Toggle Uniform Page Width,"At percentage zoom levels, scales every page to the width page 1 has at that zoom; remembered per document (fixes #5512)"
+CmdToggleTrimEmptyMargins,,Toggle Trim Empty Margins,"Trims empty margins around page content from display on demand, ver 3.7+"
 CmdToggleMenuBar,F9,Toggle Menu Bar,
 CmdTogglePageInfo,i,Show / Hide Current Page Number,was Shift + i before 3.6
 CmdTogglePageBoxes,,Toggle Page Boxes,"ver 3.7+, outlines the PDF MediaBox, CropBox, BleedBox, TrimBox and ArtBox on each page (only boxes that page actually has) and labels them. Palette and Debug menu. No default shortcut (fixes #814)"
@@ -118,7 +123,7 @@ CmdTranslateSelectionWithAntiGravity,,Translate Selection with Antigravity,"Tran
 CmdChangeTheme,,Change Theme...,"ver 3.7+, opens a dialog to pick a UI theme (including **Follow Windows**, which automatically tracks Windows light/dark app mode) and optionally how document colors follow the theme (`DocumentColorsFollowTheme`)"
 CmdNavigateThumbnail,,Navigate Thumbnails,"opens a thumbnail grid for the current document; arrow keys and the mouse select a page, Enter or double-click opens it, and Esc closes the grid"
 CmdToggleLightDarkTheme,,Toggle Light/Dark Theme,"ver 3.7+, switches between the last used light and dark themes (see `LastLightTheme` / `LastDarkTheme` advanced settings)"
-CmdToggleEngineeringDrawingEnhance,,Toggle Engineering Drawing Enhancement,"ver 3.7+, toggles CAD/engineering-drawing line enhancement for the current PDF (see the `EngineeringDrawingEnhance` advanced setting)"
+CmdToggleEngineeringDrawingEnhance,,Toggle Engineering Drawing Enhancement,"ver 3.7+, toggles CAD/engineering-drawing line enhancement for the current PDF (see [CAD / Engineering Drawings](CAD-Engineering-Drawings.md))"
 CmdSetDocumentColorsFollowTheme,,Set Document Colors Follow Theme,"ver 3.7+, opens a dialog to pick how MuPDF-rendered documents follow the UI theme (`DocumentColorsFollowTheme`: off, smart, legacy)"
 CmdTogglePreservePdfImages,,Toggle Preserve PDF Image Colors in Dark Mode,"ver 3.7+, session-only toggle of image preservation on inverted pages"
 CmdToggleLinks,,Toggle Show Links,"Toggle drawing blue rectangle around links, ver 3.6+"
@@ -159,6 +164,11 @@ CmdScrollRight,"l, Right",Scroll Right,
 CmdScrollUpHalfPage,Shift + Up,Scroll Up By Half Page,
 CmdScrollDownHalfPage,Shift + Down,Scroll Down By Half Page,
 CmdStartAutoScroll,,Start Auto-Scroll,"Start (or stop) middle-click-style auto-scroll anchored at the cursor, without needing a middle mouse button; move the cursor away from the anchor to scroll. Invoke again (or middle-click) to stop, ver 3.7+"
+CmdToggleAutomaticallyScroll,Ctrl + Shift + H,Automatically Scroll,"Hands-free continuous pan (Acrobat-style). A bar at the bottom shows speed and Pause / Stop / Reverse. While it is on: Up/Down change speed, 0-9 set it, minus reverses, Left/Right turn the page, Space pauses, Esc stops. Distinct from CmdStartAutoScroll, ver 3.7+"
+CmdAutomaticallyScrollFaster,,Automatically Scroll Faster,"Increase Automatically Scroll speed (no default shortcut; Up/Down while scrolling also change speed), ver 3.7+"
+CmdAutomaticallyScrollSlower,,Automatically Scroll Slower,"Decrease Automatically Scroll speed, ver 3.7+"
+CmdToggleReadingBar,,Reading Bar,"Toggle a horizontal reading bar on the page (highlight band, or invert to dim the rest). Drag to move, drag the top/bottom edge to resize, hover for a close button. Ctrl+Up/Down move it, Ctrl+Shift+Up/Down change height, Esc hides it. Settings in ReadingBar. Also Focus on the Automatically Scroll bar. ver 3.7+"
+CmdToggleReadingBarInvert,,Reading Bar Invert,"Toggle invert (screen mask) for the reading bar; remembered in ReadingBar.Invert. ver 3.7+"
 CmdScrollUpPage,"Ctrl + Up, PageUp, Shift + Return, Shift + Space",Scroll Up By Page,
 CmdScrollDownPage,"Ctrl + Down, PageDown, Return, Space",Scroll Down By Page,
 CmdScrollLeftPage,Shift + Left,Scroll Left By Page,
@@ -205,8 +215,8 @@ CmdCreateAnnotCircle,,Create Circle Annotation,
 CmdFindAnnotation,,Find Annotation,"opens the floating annotation list, where you can filter the document's annotations and jump to one, ver 3.7+"
 CmdCreateAnnotFileAttachment,,Create File Attachment Annotation,"click to place, like Stamp/Caret; Esc cancels, ver 3.7+"
 CmdCreateAnnotFreeText,,Create Free Text Annotation,
-CmdCreateAnnotHighlight,"a, A",Create Highlight Annotation,
-CmdAnnotationHighlightBrush,,Highlight with Brush,"a freehand highlighter: drag to paint a marker stroke anywhere on the page, no text selection needed. Release finishes, Esc cancels. Saved as an ink annotation in HighlightColor, ver 3.7+"
+CmdCreateAnnotHighlight,"a, A",Create Highlight Annotation,"`A` (`Shift + A`) is `CmdCreateAnnotHighlight openedit`: also turns on Edit PDF mode"
+CmdAnnotationHighlightBrush,,Highlighter,"a mode: every text selection is highlighted, until Esc or Enter. Text already selected is highlighted right away, ver 3.7+"
 CmdCreateAnnotInk,,Create Ink Annotation,"drag to paint; release commits the stroke and leaves the tool on. Esc or closing the hint leaves the tool, ver 3.7+"
 CmdCreateAnnotLine,,Create Line Annotation,
 CmdCreateAnnotLink,,Create Link Annotation,
@@ -221,7 +231,7 @@ CmdCreateAnnotStamp,,Create Stamp Annotation,
 CmdCreateAnnotImageFromClipboard,,Create Image Annotation From Clipboard,
 CmdCreateAnnotStrikeOut,,Create Strike Out Annotation,
 CmdCreateAnnotText,,Create Text Annotation,
-CmdCreateAnnotUnderline,"u, U",Create Underline Annotation,
+CmdCreateAnnotUnderline,"u, U",Create Underline Annotation,"`U` (`Shift + U`) is `CmdCreateAnnotUnderline openedit`: also turns on Edit PDF mode"
 CmdUndo,Ctrl + Z,Undo,"ver 3.7+, takes back the last change to the PDF (annotations, form fields, applied redactions). One gesture is one step: creating, pasting or resizing an annotation comes back in a single Undo. Disabled when there is nothing to undo; in a text box Ctrl + Z is the text box's undo"
 CmdRedo,Shift + Ctrl + Z,Redo,"ver 3.7+, re-applies the change Undo took back. Disabled when there is nothing to redo"
 CmdCutAnnotation,Ctrl + X,Cut Annotation,"ver 3.7+, copies the annotation under the cursor (or the selected one) and deletes it when the copy is pasted; in a text box Ctrl + X is the text box's cut"
@@ -382,10 +392,8 @@ CmdToggleToolbarShowReadAloud,,Read Aloud: Show In Toolbar,"Show or hide the Rea
 ```commands
 Command IDs,Keyboard shortcuts,Command Palette,Notes
 CmdDebugCrashMe,,Debug: Crash Me,
-CmdDebugDownloadSymbols,,Debug: Download Symbols,
 CmdDebugShowNotif,,Debug: Show Notification,
 CmdDebugStartStressTest,,Debug: Start Stress Test,
-CmdDebugTestApp,,Debug: Test App,
 CmdDebugTogglePredictiveRender,,Debug: Toggle Predictive Rendering,
 CmdDebugToggleRenderInfo,,Debug: Toggle Render Queue Info,
 CmdDebugToggleCacheInfo,,Debug: Toggle Cache Info,
@@ -402,8 +410,6 @@ Command IDs,Keyboard shortcuts,Command Palette,Notes
 CmdInstallPrereleaseUpdate,,internal,"used by the pre-release update notification link (Update); not for user shortcuts or DDE"
 CmdTogglePdfPreviewLogging,,internal,"toggles PDF shell-preview logging for debugging the Windows preview handler; not for normal use"
 CmdDebugCorruptMemory,,don't use,
-CmdOpenWithKnownExternalViewerFirst,,don't use,
-CmdOpenWithKnownExternalViewerLast,,don't use,
 CmdSelectionHandler,,use SelectionHandlers advanced setting instead,
 CmdSetTheme,,don't use,
 CmdViewWithExternalViewer,,don't use,
@@ -511,7 +517,7 @@ Use case: if you want to go forward or back by more than one page.
 Arguments:
 
 - `color` : default, color
-- `openedit` : Boolean, `false` if not given. Opens the Contents editor on the property row after creating the annotation (the old annotations window is gone). Creating an annotation always turns on Edit PDF mode.
+- `openedit` : Boolean, `false` if not given. Turns on Edit PDF mode and opens the Contents editor on the property row after creating the annotation. Built-in `Shift + A` / `Shift + U` use this.
 - `copytoclipboard` : Boolean, `false` if not given. For highlight/underline/squiggly/strikeout annotations, copies the selection (the annotation's text) to the clipboard. This used to be the default behavior for built-in keyboard shortcuts such as `a`, but now it has to be chosen explicitly.
 - `setcontent` : Boolean, `false` if not given. For highlight/underline/squiggly/strikeout annotations, sets the annotation's content to the selection (the annotation's text)
 

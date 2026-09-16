@@ -79,15 +79,19 @@ async function main() {
     "src/base/*.h",
     "src/base/tests/*.cpp",
     "src/base/tests/*.h",
+    "src/tests/*.cpp",
+    "src/tests/*.h",
     "src/gui/*",
     "src/gui/win/*",
+    "src/gui/tests/*",
     "src/uia/*",
     "src/tools/**/*.{cpp,c,h,hpp}",
     "src/ifilter/*.cpp",
     "src/ifilter/*.h",
     "src/previewer/*.cpp",
     "src/previewer/*.h",
-    "ext/mupdf_load_system_font.c",
+    "src/mupdf/*.c",
+    "src/mupdf/*.h",
   ];
 
   const files = await globFiles(patterns);

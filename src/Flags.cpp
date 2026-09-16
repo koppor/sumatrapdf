@@ -12,7 +12,7 @@
 #if OS_WIN
 #include "Print.h"
 #endif
-#if OS_WIN && !defined(SUMATRA_TEST_UTIL)
+#if OS_WIN
 #include "Translations.h"
 #endif
 #include "Flags.h"
@@ -44,7 +44,8 @@ enum class Arg {
     DDE = 76, Pwd = 77, EngineDump = 78, SetColorRange = 79,
     UpgradeFrom = 80, ForTesting = 81, QuickLook = 82, QuickLookAgent = 83,
     WindowPos = 84, DumpExif = 85, DumpChm = 86, Control = 87,
-    UnitTests = 88, NewWindowTabs = 89,
+    UnitTests = 88, ForAi = 89, NewWindowTabs = 90, HtmlBackend = 91,
+    StartPerfLog = 92, LogPerfFile = 93,
 };
 
 static SeqStrings gArgNames =
@@ -70,7 +71,8 @@ static SeqStrings gArgNames =
     "dde\0" "pwd\0" "engine-dump\0" "set-color-range\0"
     "upgrade-from\0" "for-testing\0" "quicklook\0" "quicklook-agent\0"
     "window-pos\0" "dump-exif\0" "dump-chm\0" "dbg-control\0"
-    "unit-tests\0" "new-window-tabs\0";
+    "unit-tests\0" "for-ai\0" "new-window-tabs\0" "html-backend\0"
+    "start-perf-log\0" "log-perf-file\0";
 // clang-format on
 // @gen-end flags
 
@@ -86,7 +88,6 @@ void ShowPrintersDialog(bool consoleOnly) {
     log(ToStr(out));
 
     gLogToConsole = false;
-#ifndef SUMATRA_TEST_UTIL
     // CLI (-list-printers with -console/-silent, or stdout already a console):
     // print only. Otherwise show the text dialog (e.g. CmdListPrinters).
     if (!consoleOnly) {
@@ -99,9 +100,6 @@ void ShowPrintersDialog(bool consoleOnly) {
     if (!consoleOnly) {
         ShowTextInWindowDialog(Tr("SumatraPDF - Show Printers"), ToStr(out));
     }
-#else
-    (void)consoleOnly;
-#endif
 }
 #else
 static TempStr GetDefaultPrinterNameTemp() {
@@ -569,8 +567,16 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
             i.exitImmediately = true;
             continue;
         }
+        if (arg == Arg::ForAi) {
+            i.forAi = true;
+            continue;
+        }
         if (arg == Arg::Log) {
             i.log = true;
+            continue;
+        }
+        if (arg == Arg::StartPerfLog) {
+            i.startPerfLog = true;
             continue;
         }
         if (arg == Arg::RunInstallNow) {
@@ -617,6 +623,10 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
         if (arg == Arg::LogToFile) {
             i.logFile = str::Dup(a, param);
             i.log = true;
+            continue;
+        }
+        if (arg == Arg::LogPerfFile) {
+            i.perfLogFile = str::Dup(a, param);
             continue;
         }
 
@@ -679,6 +689,10 @@ void ParseFlags(Arena* a, WStr cmdLine, Flags& i, Str toolNames) {
         }
         if (arg == Arg::WindowPos) {
             ParseWindowPos(&i.windowPos, param);
+            continue;
+        }
+        if (arg == Arg::HtmlBackend) {
+            i.htmlBackend = str::Dup(a, param);
             continue;
         }
         if (arg == Arg::AppData) {

@@ -4,7 +4,7 @@
 #include "base/Base.h"
 
 // must be last due to assert() over-write
-#include "base/UtAssert.h"
+#include "base/tests/UtAssert.h"
 
 static_assert(len(Str{}) == 0);
 static_assert(StrL("ab").len == 2);
@@ -243,7 +243,21 @@ static void StrUrlExtractTest() {
     utassert(str::Eq(url::EncodePathTemp(StrL("Test Test.html")), StrL("Test%20Test.html")));
     utassert(str::Eq(url::EncodePathTemp(StrL("dir/Test Test.html")), StrL("dir/Test%20Test.html")));
     utassert(str::Eq(url::EncodePathTemp(StrL("a/b c/d")), StrL("a/b%20c/d")));
+    utassert(str::Eq(url::EncodePathTemp(StrL("C#1.md")), StrL("C%231.md")));
     utassert(str::Eq(url::DecodeTemp(url::EncodePathTemp(StrL("dir/Test Test.html"))), StrL("dir/Test Test.html")));
+    utassert(str::Eq(url::DecodeTemp(url::EncodePathTemp(StrL("a/C#1 & 100%.md"))), StrL("a/C#1 & 100%.md")));
+    // every url-special character legal in a Windows file name round-trips and
+    // none is left literal: '/' is the only byte the path encoder passes through
+    Str specials = StrL("dir/ !#$%&'()+,;=@[]^`{}~ caf\xC3\xA9.md");
+    TempStr encSpecials = url::EncodePathTemp(specials);
+    utassert(str::Eq(url::DecodeTemp(encSpecials), specials));
+    Str mustEncode = StrL(" !#$&'()+,;=@[]^`{}");
+    for (int i = 0; i < len(mustEncode); i++) {
+        utassert(str::IndexOfChar(encSpecials, mustEncode.s[i]) < 0);
+    }
+    // the separator after "dir" is the only '/' left
+    utassert(str::IndexOfChar(encSpecials, '/') == 3);
+    utassert(str::IndexOfChar(Str(encSpecials.s + 4, encSpecials.len - 4), '/') < 0);
 
     bool truncated = true;
     TempStr fit = url::EncodeMayTruncateTemp(StrL("abc"), 100, &truncated);
@@ -504,6 +518,40 @@ static void StrCutTest() {
     // multi-char separator, only first occurrence splits
     utassert(str::Cut(StrL("a::b::c"), StrL("::"), &before, &after));
     utassert(str::Eq(before, StrL("a")) && str::Eq(after, StrL("b::c")));
+}
+
+static void StrNormalizeNewlinesToLFInPlaceTest() {
+    // CRLF and lone CR become LF, empty lines survive
+    char buf[64];
+    auto norm = [&buf](const char* in) -> Str {
+        Str s = Str(buf, str::BufSet(Str(buf, sizeofi(buf)), Str(in)));
+        str::NormalizeNewlinesToLFInPlace(s);
+        return s;
+    };
+    utassert(str::Eq(norm("a\r\nb"), StrL("a\nb")));
+    utassert(str::Eq(norm("a\rb"), StrL("a\nb")));
+    utassert(str::Eq(norm("a\nb"), StrL("a\nb")));
+    utassert(str::Eq(norm("a\r\n\r\nb"), StrL("a\n\nb")));
+    utassert(str::Eq(norm("a\r\n"), StrL("a\n")));
+    utassert(len(norm("")) == 0);
+
+    // len is updated and the result stays nul-terminated
+    Str s = Str(buf, str::BufSet(Str(buf, sizeofi(buf)), StrL("x\r\ny\r\n")));
+    utassert(str::NormalizeNewlinesToLFInPlace(s) == 4 && s.len == 4 && s.s[4] == 0);
+}
+
+static void StrLFToCRLFTempTest() {
+    // bare LF becomes CRLF, an existing CRLF is left alone
+    utassert(str::Eq(str::LFToCRLFTemp(StrL("a\nb")), StrL("a\r\nb")));
+    utassert(str::Eq(str::LFToCRLFTemp(StrL("a\r\nb")), StrL("a\r\nb")));
+    utassert(str::Eq(str::LFToCRLFTemp(StrL("\na\n")), StrL("\r\na\r\n")));
+    utassert(str::Eq(str::LFToCRLFTemp(StrL("a\n\nb")), StrL("a\r\n\r\nb")));
+
+    // nothing to do: returns s as-is, no allocation
+    Str s = StrL("abc");
+    TempStr res = str::LFToCRLFTemp(s);
+    utassert(res.s == s.s && res.len == s.len);
+    utassert(len(str::LFToCRLFTemp(Str{})) == 0);
 }
 
 static void StrTrimWsTest() {
@@ -791,7 +839,7 @@ void StrTest() {
     utassert(str::Eq(Str(buf), StrL("AbC\1Efg\1")));
     str::TransCharsInPlace(bufStr, StrL("\1"), StrL("\0"));
     utassert(str::Eq(Str(buf), StrL("AbC")) && str::Eq(Str(buf + 4), StrL("Efg")));
-    str::TransCharsInPlace(bufStr, StrL(""), StrL("X"));
+    str::TransCharsInPlace(bufStr, StrL(""), StrL(""));
     utassert(str::Eq(Str(buf), StrL("AbC")));
 
     str::BufSet(Str(buf, dimof(buf)), StrL("blogarapato"));
@@ -1176,6 +1224,8 @@ void StrTest() {
     StrCutTest();
     StrNextLineTest();
     StrTrimWsTest();
+    StrNormalizeNewlinesToLFInPlaceTest();
+    StrLFToCRLFTempTest();
     StrStartsWithTest();
     // ParseUntilTest();
 }

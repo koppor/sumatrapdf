@@ -66,6 +66,7 @@ bool HwndIsMouseOverRect(HWND hwnd, const Rect& r);
 
 HWND HwndSetFocus(HWND hwnd);
 HWND HwndThreadFocus();
+bool IsThreadInMenuMode();
 bool HwndSetFocusForce(HWND hwnd);
 bool HwndIsFocused(HWND);
 bool HwndIsOnScreenKeyboard(HWND);
@@ -343,6 +344,7 @@ bool IsShiftPressed();
 bool IsAltPressed();
 bool IsCtrlPressed();
 bool IsRightButtonPressed();
+int ReleaseThreadKeyState();
 
 //--- cursors / mouse tracking
 
@@ -405,6 +407,8 @@ void DbgOutLastError(DWORD err = 0);
 Str GetLastErrorAsStr(Arena* arena);
 TempStr GetSpecialFolderTemp(int csidl, bool createIfMissing = false);
 TempStr GetTempDirTemp();
+// initialCch is only a starting guess; tests pass a tiny value to force the retry
+TempStr GetTempDirTemp(int initialCch);
 Str GetAppLocalDataDirTemp();
 void ChangeCurrDirToDocuments();
 TempStr ResolveLnkTemp(Str path);
@@ -482,7 +486,7 @@ struct LoadedDataResource {
     const u8* data = nullptr;
     int dataSize = 0;
 };
-bool LockDataResource(int resId, LoadedDataResource*);
+bool LockDataResource(int resId, LoadedDataResource*, HMODULE mod = nullptr);
 
 //--- HGLOBAL / atoms
 

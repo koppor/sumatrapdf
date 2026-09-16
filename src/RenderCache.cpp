@@ -18,7 +18,7 @@
 #include "Settings.h"
 #include "AppSettings.h"
 #include "Theme.h"
-#include "DarkMode_win.h"
+#include "DarkMode.h"
 #include "SumatraConfig.h"
 #include "DocController.h"
 #include "EngineBase.h"
@@ -26,17 +26,7 @@
 #include "DisplayModel.h"
 #include "Canvas.h"
 #include "RenderCache.h"
-
-// CONSERVE_MEMORY sets the compile-time default for gConserveMemory. When defined,
-// cached page bitmaps for non-visible pages are freed aggressively. Undefining it
-// keeps more pages resident (higher GDI memory use, fewer re-renders).
-#define CONSERVE_MEMORY
-
-#ifdef CONSERVE_MEMORY
-static bool gConserveMemory = true;
-#else
-bool gConserveMemory = false;
-#endif
+#include "CachedObjects.h"
 
 static DWORD WINAPI RenderCacheThread(LPVOID data);
 
@@ -209,8 +199,7 @@ bool RenderCache::DropCacheEntry(BitmapCacheEntry* entry) {
     rcLogf("RenderCache::DropCacheEntry: dm: 0x%p, pageNo: %d, rotation: %d, zoom: %.2f\n", entry->dm, entry->pageNo,
            entry->rotation, entry->zoom);
 
-    RecordCacheChange(false, entry);
-
+    UnregisterCachedObject((uintptr_t)entry);
     delete entry;
 
     // fast removal by replacing freed item with the item at the end
@@ -276,6 +265,29 @@ static bool FreeIfFull(RenderCache* rc, const PageRenderRequest& req) {
     return false;
 }
 
+extern RenderCache* gRenderCache;
+
+static bool RenderCacheCanFree(WindowTab* currTab, CachedObject* o) {
+    (void)currTab;
+    auto* entry = (BitmapCacheEntry*)o->id;
+    if (!entry || entry->refs > 1) {
+        return false;
+    }
+    if (entry->dm && entry->dm->PageVisibleNearby(entry->pageNo)) {
+        return false;
+    }
+    return true;
+}
+
+static bool RenderCacheFree(WindowTab* currTab, CachedObject* o) {
+    (void)currTab;
+    if (!gRenderCache || !o) {
+        return false;
+    }
+    auto* entry = (BitmapCacheEntry*)o->id;
+    return gRenderCache->DropCacheEntryIfNotUsed(entry);
+}
+
 void RenderCache::Add(PageRenderRequest& req, Pixmap* bmp) {
     ScopedRecursiveMutex scope(&cacheAccess);
     ReportIf(!req.dm);
@@ -303,7 +315,16 @@ void RenderCache::Add(PageRenderRequest& req, Pixmap* bmp) {
     cache[cacheCount] = entry;
     cacheCount++;
 
-    RecordCacheChange(true, entry);
+    CachedObject o{};
+    o.id = (uintptr_t)entry;
+    o.size = (u64)PixmapByteSize(bmp);
+    o.kind = kindCachedRender;
+    o.pageNo = req.pageNo;
+    o.zoom = req.zoom;
+    o.engine = req.dm->GetEngine();
+    o.canFree = RenderCacheCanFree;
+    o.free = RenderCacheFree;
+    DidAllocateCachedObject(&o);
 }
 
 static RectF GetTileRect(RectF pagerect, TilePosition tile) {
@@ -317,24 +338,27 @@ static RectF GetTileRect(RectF pagerect, TilePosition tile) {
 }
 
 // get the coordinates of a specific tile
-static Rect GetTileRectDevice(EngineBase* engine, int pageNo, int rotation, float zoom, TilePosition tile) {
-    RectF mediabox = engine->PageMediabox(pageNo);
+static Rect GetTileRectDevice(DisplayModel* dm, int pageNo, int rotation, float zoom, TilePosition tile) {
+    EngineBase* engine = dm->GetEngine();
+    RectF pageBox = dm->PageMediaBoxForLayout(pageNo);
     if (tile.res > 0 && tile.res != kInvalidTileRes) {
-        mediabox = GetTileRect(mediabox, tile);
+        pageBox = GetTileRect(pageBox, tile);
     }
-    RectF pixelbox = engine->Transform(mediabox, pageNo, zoom, rotation);
-    return pixelbox.Round();
+    return engine->Transform(pageBox, pageNo, zoom, rotation).Round();
 }
 
-static RectF GetTileRectUser(EngineBase* engine, int pageNo, int rotation, float zoom, TilePosition tile) {
-    Rect pixelbox = GetTileRectDevice(engine, pageNo, rotation, zoom, tile);
-    return engine->Transform(ToRectF(pixelbox), pageNo, zoom, rotation, true);
+static RectF GetTileRectUser(DisplayModel* dm, int pageNo, int rotation, float zoom, TilePosition tile) {
+    // Render the exact screen pixel bounds so painting doesn't rescale finished tiles.
+    Rect pixelBox = GetTileRectDevice(dm, pageNo, rotation, zoom, tile);
+    return dm->GetEngine()->Transform(ToRectF(pixelBox), pageNo, zoom, rotation, true);
 }
 
-static Rect GetTileOnScreen(EngineBase* engine, int pageNo, int rotation, float zoom, TilePosition tile,
+static Rect GetTileOnScreen(DisplayModel* dm, int pageNo, int rotation, float zoom, TilePosition tile,
                             Rect pageOnScreen) {
-    Rect bbox = GetTileRectDevice(engine, pageNo, rotation, zoom, tile);
-    bbox.Offset(pageOnScreen.x, pageOnScreen.y);
+    Rect bbox = GetTileRectDevice(dm, pageNo, rotation, zoom, tile);
+    RectF pageBox = dm->PageMediaBoxForLayout(pageNo);
+    Rect pagePixels = dm->GetEngine()->Transform(pageBox, pageNo, zoom, rotation).Round();
+    bbox.Offset(pageOnScreen.x - pagePixels.x, pageOnScreen.y - pagePixels.y);
     return bbox;
 }
 
@@ -350,7 +374,7 @@ static bool IsTileVisible(DisplayModel* dm, int pageNo, TilePosition tile, float
     int rotation = dm->GetRotation();
     float zoom = dm->GetZoomReal(pageNo);
     Rect r = pageInfo->pageOnScreen;
-    Rect tileOnScreen = GetTileOnScreen(engine, pageNo, rotation, zoom, tile, r);
+    Rect tileOnScreen = GetTileOnScreen(dm, pageNo, rotation, zoom, tile, r);
     // consider nearby tiles visible depending on the fuzz factor
     tileOnScreen.x -= (int)((float)tileOnScreen.dx * fuzz * 0.5);
     tileOnScreen.dx = (int)((float)tileOnScreen.dx * (fuzz + 1));
@@ -526,7 +550,7 @@ void RenderCache::Invalidate(DisplayModel* dm, int pageNo, RectF rect) {
 // determine the count of tiles required for a page at a given zoom level
 USHORT RenderCache::GetTileRes(DisplayModel* dm, int pageNo) const {
     auto* engine = dm->GetEngine();
-    RectF mediabox = engine->PageMediabox(pageNo);
+    RectF mediabox = dm->PageMediaBoxForLayout(pageNo);
     float zoom = dm->GetZoomReal(pageNo);
     float zoomVirt = dm->GetZoomVirtual();
     Rect viewPort = dm->GetViewPort();
@@ -804,7 +828,7 @@ bool RenderCache::Render(DisplayModel* dm, int pageNo, int rotation, float zoom,
     PageInfo* pi = dm->GetPageInfo(pageNo);
     newRequest->loc = pi ? pi->loc : kInvalidLocation;
     if (tile) {
-        newRequest->pageRect = GetTileRectUser(dm->GetEngine(), pageNo, rotation, zoom, *tile);
+        newRequest->pageRect = GetTileRectUser(dm, pageNo, rotation, zoom, *tile);
         newRequest->tile = *tile;
     } else if (pageRect) {
         newRequest->pageRect = *pageRect;
@@ -1038,7 +1062,7 @@ bool RenderCache::VisibleTargetTilesReady(DisplayModel* dm, Str* whyNot) {
         bool sawTarget = false;
         while (len(queue) > 0) {
             TilePosition tile = VecPopAt(queue, 0);
-            Rect tileOnScreen = GetTileOnScreen(dm->GetEngine(), pageNo, rotation, zoom, tile, pi->pageOnScreen);
+            Rect tileOnScreen = GetTileOnScreen(dm, pageNo, rotation, zoom, tile, pi->pageOnScreen);
             if (tileOnScreen.IsEmpty()) {
                 continue;
             }
@@ -1265,7 +1289,13 @@ int RenderCache::PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, T
     int renderDelay = 0;
 
     if (!entry) {
-        if (!isRemoteSession) {
+        // comics in fit-page: a leftover bitmap at the previous zoom is the
+        // wrong size; blitting it stretched then replacing it is a visible jump
+        bool allowOtherZoom = !isRemoteSession;
+        if (allowOtherZoom && dm->GetEngine() && dm->GetEngine()->IsImageCollection()) {
+            allowOtherZoom = false;
+        }
+        if (allowOtherZoom) {
             if (renderedReplacement) {
                 *renderedReplacement = true;
             }
@@ -1360,6 +1390,9 @@ int RenderCache::Paint(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, PageI
 
         RectF area = ToRectF(bounds);
         area.Offset((float)-pi->pageOnScreen.x, (float)-pi->pageOnScreen.y);
+        RectF pageBox = dm->PageMediaBoxForLayout(pageNo);
+        PointF origin = dm->GetEngine()->Transform(pageBox, pageNo, zoom, rotation).TL();
+        area.Offset(origin.x, origin.y);
         area = dm->GetEngine()->Transform(area, pageNo, zoom, rotation, true);
 
         RenderPageArgs args(pageNo, zoom, rotation, &area);
@@ -1388,7 +1421,7 @@ int RenderCache::Paint(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, PageI
 
     while (len(queue) > 0) {
         TilePosition tile = VecPopAt(queue, 0);
-        Rect tileOnScreen = GetTileOnScreen(dm->GetEngine(), pageNo, rotation, zoom, tile, pi->pageOnScreen);
+        Rect tileOnScreen = GetTileOnScreen(dm, pageNo, rotation, zoom, tile, pi->pageOnScreen);
         if (tileOnScreen.IsEmpty()) {
             // display an error message when only empty tiles should be drawn (i.e. on page loading errors)
             renderDelayMin = std::min(kRenderDelayFailed, renderDelayMin);
@@ -1423,17 +1456,13 @@ int RenderCache::Paint(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, PageI
         }
     }
 
-    if (gConserveMemory) {
-        if (!neededScaling) {
-            if (renderOutOfDateCue) {
-                *renderOutOfDateCue = false;
-            }
-            // free tiles with different resolution
-            TilePosition tile(targetRes, (USHORT)-1, 0);
-            rcLogf("RenderCache::Paint: calling FreePage() pageNo: %d\n", pageNo);
-            FreePage(dm, pageNo, &tile);
+    if (gSaveMemory > 0 && !neededScaling) {
+        if (renderOutOfDateCue) {
+            *renderOutOfDateCue = false;
         }
-        FreeNotVisible();
+        TilePosition tile(targetRes, (USHORT)-1, 0);
+        rcLogf("RenderCache::Paint: calling FreePage() pageNo: %d\n", pageNo);
+        FreePage(dm, pageNo, &tile);
     }
 
     return renderDelayMin;
@@ -1479,7 +1508,7 @@ void DebugTextWnd::UpdateTheme() {
 
 void DebugTextWnd::SetTextContent(Str text) {
     if (edit) {
-        edit->SetText(text);
+        edit->SetText(str::LFToCRLFTemp(text));
     }
 }
 
@@ -1499,6 +1528,7 @@ bool DebugTextWnd::Create(Str title, int fontSize) {
     Edit::CreateArgs args;
     args.parent = hwnd;
     args.isMultiLine = true;
+    args.noWrap = true;
     args.withBorder = true;
     edit = new Edit();
     edit->Create(args);
@@ -1513,7 +1543,7 @@ bool DebugTextWnd::Create(Str title, int fontSize) {
     }
     layout = edit;
 
-    int winW = DpiScale(700);
+    int winW = DpiScale(800);
     int winH = DpiScale(500);
     SetWindowPos(hwnd, nullptr, 0, 0, winW, winH, SWP_NOMOVE | SWP_NOZORDER);
     DoLayout();
@@ -1553,12 +1583,17 @@ static void OnRenderInfoDestroy(WindowBase::DestroyEvent* ev) {
     TeardownDebugTextWnd(&gRenderInfoWnd, (DebugTextWnd*)ev->e->self);
 }
 
+static void TeardownCacheInfoWnd(DebugTextWnd* w) {
+    gOnCachedObjectsChanged = nullptr;
+    TeardownDebugTextWnd(&gCacheInfoWnd, w);
+}
+
 static void OnCacheInfoClose(WindowBase::CloseEvent* ev) {
-    TeardownDebugTextWnd(&gCacheInfoWnd, (DebugTextWnd*)ev->e->self);
+    TeardownCacheInfoWnd((DebugTextWnd*)ev->e->self);
 }
 
 static void OnCacheInfoDestroy(WindowBase::DestroyEvent* ev) {
-    TeardownDebugTextWnd(&gCacheInfoWnd, (DebugTextWnd*)ev->e->self);
+    TeardownCacheInfoWnd((DebugTextWnd*)ev->e->self);
 }
 
 bool IsRenderInfoWindowVisible() {
@@ -1715,89 +1750,10 @@ void ToggleRenderInfoWindow() {
     }
 }
 
-// --------- bitmap cache debug window (CmdDebugToggleCacheInfo) ---------
+// --------- cached-objects debug window (CmdDebugToggleCacheInfo) ---------
 
 bool IsCacheInfoWindowVisible() {
     return gCacheInfoWnd && gCacheInfoWnd->hwnd && IsWindow(gCacheInfoWnd->hwnd);
-}
-
-static TempStr FormatCacheBytesTemp(i64 bytes) {
-    if (bytes < 1024) {
-        return fmt("%d B", (int)bytes);
-    }
-    if (bytes < 1024LL * 1024) {
-        return fmt("%.1f KB", bytes / 1024.0);
-    }
-    return fmt("%.2f MB", bytes / (1024.0 * 1024.0));
-}
-
-static void SetDmFileName(DisplayModel* dm, char* buf, int bufLen) {
-    buf[0] = 0;
-    if (dm && dm->GetEngine()) {
-        TempStr name = path::GetBaseNameTemp(dm->GetEngine()->FilePath());
-        str::BufSet(Str(buf, bufLen), name);
-    }
-}
-
-// record a cache add/remove in cacheHistory (call holding cacheAccess)
-void RenderCache::RecordCacheChange(bool isAdd, BitmapCacheEntry* entry) {
-    ReportIf(!entry);
-    if (!entry) {
-        return;
-    }
-    CacheChangeInfo& ci = cacheHistory[cacheHistoryNext];
-    ci.isAdd = isAdd;
-    ci.pageNo = entry->pageNo;
-    ci.zoom = entry->zoom;
-    ci.rotation = entry->rotation;
-    ci.tile = entry->tile;
-    ci.bytes = entry->bitmap ? PixmapByteSize(entry->bitmap) : 0;
-    ci.timestamp = GetTickCount64();
-    SetDmFileName(entry->dm, ci.fileName, dimof(ci.fileName));
-    cacheHistoryNext = (cacheHistoryNext + 1) % kCacheHistorySize;
-    if (cacheHistoryCount < kCacheHistorySize) {
-        cacheHistoryCount++;
-    }
-    UpdateCacheInfo();
-}
-
-static void SerializeCacheChange(str::Builder& s, CacheChangeInfo* c, u64 now) {
-    Str label = c->isAdd ? StrL("ADD") : StrL("REMOVE");
-    int agoMs = (int)(now - c->timestamp);
-    s.Append(fmt("%-7s page %3d  zoom %6.2f  rot %3d  tile[res=%d row=%d col=%d]  %8s  %6dms ago", label, c->pageNo,
-                 c->zoom, c->rotation, c->tile.res, c->tile.row, c->tile.col, FormatCacheBytesTemp(c->bytes), agoMs));
-    if (c->fileName[0]) {
-        s.Append(fmt("  %s", Str(c->fileName)));
-    }
-    s.Append(StrL("\n"));
-}
-
-// serialize cache stats and recent changes as plain text for the cache-info
-// debug window
-void RenderCache::SerializeCacheState(str::Builder& s) {
-    ScopedRecursiveMutex scope(&cacheAccess);
-    u64 now = GetTickCount64();
-    i64 totalBytes = 0;
-    for (int i = 0; i < cacheCount; i++) {
-        BitmapCacheEntry* e = cache[i];
-        if (e->bitmap) {
-            totalBytes += PixmapByteSize(e->bitmap);
-        }
-    }
-    s.Append(
-        fmt("Cache: %d / %d entries, %s total\n\n", cacheCount, kMaxBitmapsCached, FormatCacheBytesTemp(totalBytes)));
-
-    if (cacheHistoryCount > 0) {
-        s.Append(fmt("Recent %d changes:\n", cacheHistoryCount));
-        int idx = cacheHistoryNext - 1;
-        for (int n = 0; n < cacheHistoryCount; n++) {
-            if (idx < 0) {
-                idx += kCacheHistorySize;
-            }
-            SerializeCacheChange(s, &cacheHistory[idx], now);
-            idx--;
-        }
-    }
 }
 
 static void SetCacheInfoTextOnUI(Str* s) {
@@ -1808,14 +1764,12 @@ static void SetCacheInfoTextOnUI(Str* s) {
     delete s;
 }
 
-// if the cache-info debug window is shown, refresh it. Cheap no-op when
-// hidden. Safe to call from any thread (and while holding cacheAccess).
-void RenderCache::UpdateCacheInfo() {
+void UpdateCacheInfo() {
     if (!IsCacheInfoWindowVisible()) {
         return;
     }
     str::Builder s;
-    SerializeCacheState(s);
+    SerializeCachedObjects(s);
     auto* dup = new Str(str::Dup(ToStr(s)));
     auto fn = MkFunc0<Str>(SetCacheInfoTextOnUI, dup);
     uitask::Post(fn, "CacheInfo");
@@ -1831,16 +1785,14 @@ static void CreateCacheInfoWindow() {
         return;
     }
     gCacheInfoWnd = wnd;
+    gOnCachedObjectsChanged = UpdateCacheInfo;
 }
 
-// bitmap cache debug window (CmdDebugToggleCacheInfo)
 void ToggleCacheInfoWindow() {
     if (gCacheInfoWnd) {
         CloseDebugTextWnd(&gCacheInfoWnd);
         return;
     }
     CreateCacheInfoWindow();
-    if (gRenderCache) {
-        gRenderCache->UpdateCacheInfo();
-    }
+    UpdateCacheInfo();
 }

@@ -23,7 +23,7 @@
 #include "Translations.h"
 #include "SumatraConfig.h"
 #include "Theme.h"
-#include "DarkMode_win.h"
+#include "DarkMode.h"
 #include "TabGroupsManage.h"
 
 constexpr int kPadding = 8;
@@ -117,7 +117,7 @@ void TabGroupsWnd::SaveTabGroup() {
         gSettings->tabGroups = new Vec<TabGroup*>();
     }
     VecAppend(*gSettings->tabGroups, group);
-    SaveSettings();
+    ScheduleSaveSettings();
     Close();
 }
 
@@ -200,7 +200,7 @@ void TabGroupsWnd::DeleteTabGroup(VirtMouseEvent*) {
     TabGroup* group = (*groups)[sel];
     VecRemove(*groups, group);
     FreeTabGroup(group);
-    SaveSettings();
+    ScheduleSaveSettings();
     PopulateListBox(this);
     UpdateDeleteButton();
 }

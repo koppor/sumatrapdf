@@ -11,6 +11,20 @@ struct Builder;
 }
 struct ReadAloudHighlightMap;
 
+struct AutoScroll {
+    bool on = false;
+    bool paused = false;
+    bool atEnd = false;
+    int dir = 1;
+    float accum = 0;
+    i64 lastQpc = 0;
+};
+
+struct ReadingBarTab {
+    bool on = false;
+    float yFrac = 0.40f;
+};
+
 // per-tab state of one AI chat provider (see AIChatPanel.cpp)
 struct AIChatTabState {
     Str sessionId;
@@ -138,6 +152,8 @@ struct WindowTab {
     Vec<PushedCitation>* pushedCitations = nullptr;
     // follow the spoken word while reading; disabled when the user scrolls away
     bool readAloudAutoScroll = false;
+    AutoScroll autoScroll;
+    ReadingBarTab readingBar;
 
     WindowTab(MainWindow* win);
     ~WindowTab();

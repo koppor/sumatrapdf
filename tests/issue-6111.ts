@@ -1,6 +1,7 @@
-// #6111: creating a highlight in fullscreen must still show the property row
+// #6111: Shift+A (openedit) in fullscreen must still show the property row
 // so Contents can be edited. The row is a WS_POPUP; in fullscreen it must be
 // HWND_TOPMOST or it sits behind the caption-less frame.
+// #6196: plain `a` in fullscreen must not turn on Edit PDF, same as windowed.
 //
 // Run: bun tests/issue-6111.ts [--no-build]
 
@@ -8,7 +9,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ControlClient, ControlCommand } from "./control.ts";
 import { cmdId, ROOT, runStandalone, SLOW_BUILD_FACTOR, tmpPath } from "./util.ts";
-import { findTopWindow, postMessage, sleep, VK_END, WM_CHAR, WM_KEYDOWN, WM_KEYUP } from "./winapi.ts";
+import { findTopWindow, postMessage, sleep, VK_END, WM_KEYDOWN, WM_KEYUP, postChar } from "./winapi.ts";
 import { findChildByClass, killAndWait, launchControlled, sendCommandSync, typeIntoInput } from "./win-automation.ts";
 
 const TOOLBAR_CLASS = "SumatraAnnotEditToolbar";
@@ -53,7 +54,7 @@ async function selectLineWithKeyboard(client: ControlClient, frame: number): Pro
   if (!/active=1/.test(dump)) {
     throw new Error(`issue-6111: keyboard selection did not start\n${dump}`);
   }
-  postMessage(frame, WM_CHAR, "v".charCodeAt(0), 0);
+  await postChar(frame, "v");
   while (Date.now() < deadline) {
     dump = String((await client.request(ControlCommand.TestSelectTextKeyboard, []))[1] ?? "");
     if (/visual=1/.test(dump)) {
@@ -98,13 +99,27 @@ export async function testit(): Promise<void> {
     await client.waitForRenderIdle();
     await sleep(200);
 
+    // plain `a` behaves as in a window: no Edit PDF mode (issue #6196)
     await selectLineWithKeyboard(client, frame);
     sendCommandSync(frame, cmdId("CmdCreateAnnotHighlight"));
+    await client.waitForRenderIdle();
+    await sleep(300);
+    const plain = await markupDump(client);
+    if (!/annotations=1\b/.test(plain) || !/ editToolbar=0/.test(plain)) {
+      throw new Error(`issue-6111: plain highlight in fullscreen turned on Edit PDF\n${plain}`);
+    }
+
+    // Shift+A (openedit) shows the property row and its Contents editor
+    await selectLineWithKeyboard(client, frame);
+    const res = await client.request(ControlCommand.TestInvokeCommand, ["CmdCreateAnnotHighlight openedit"]);
+    if (res[0] !== 0) {
+      throw new Error(`issue-6111: CmdCreateAnnotHighlight openedit: ${String(res[1] ?? "")}`);
+    }
     await client.waitForRenderIdle();
 
     let dump = await waitForToolbar(client, "property row not shown after highlight in fullscreen");
     const created = /annotations=(\d+)/.exec(await markupDump(client));
-    if (!created || +created[1]! < 1) {
+    if (!created || +created[1]! < 2) {
       throw new Error(`issue-6111: highlight was not created in fullscreen\n${await markupDump(client)}`);
     }
 

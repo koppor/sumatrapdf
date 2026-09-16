@@ -18,16 +18,16 @@
 extern "C" {
 #include <mupdf/pdf.h>
 #if OS_WIN
-#include <mupdf/helpers/pkcs7-windows.h>
+#include "mupdf/pkcs7-windows.h"
 #endif
 #include "../ext/mupdf/source/fitz/color-imp.h"
 }
 
 #include "Annotation.h"
 #include "DocProperties.h"
+#include "EmbeddedResources.h"
 #include "gui/UIModels.h"
 #include "EngineBase.h"
-#include "PdfCadEnhanceDevice.h"
 #include "PdfDarkMode.h"
 #include "PdfDarkModeInternal.h"
 #include "EngineAll.h"
@@ -1389,7 +1389,7 @@ static bool LinkifyCheckMultiline(Utf8PageText pageText, int startOff, int posOf
     if (next.BR().y <= last.y) {
         return false;
     }
-    if (next.y > last.BR().y + last.dy * 1.5f) {
+    if ((float)next.y > (float)last.BR().y + ((float)last.dy * 1.5f)) {
         return false;
     }
     if (next.x >= last.BR().x) {
@@ -1397,14 +1397,14 @@ static bool LinkifyCheckMultiline(Utf8PageText pageText, int startOff, int posOf
     }
     // Continuation stays near the URL's left edge. The next row of a
     // left-hand column starts much further left than that.
-    float slack = last.dy * 1.5f;
+    float slack = (float)last.dy * 1.5f;
     if (first.dx > 0) {
         slack = std::max(slack, (float)first.dx * 3);
     }
-    if (next.x < first.x - slack) {
+    if ((float)next.x < (float)first.x - slack) {
         return false;
     }
-    if (next.dy < last.dy * 0.85f || next.dy > last.dy * 1.2f) {
+    if ((float)next.dy < (float)last.dy * 0.85f || (float)next.dy > (float)last.dy * 1.2f) {
         return false;
     }
     return true;
@@ -2026,7 +2026,7 @@ static void BuildElementsInfo(FzPageInfo* pageInfo) {
 
     int total = len(pageInfo->images) + len(pageInfo->links) + len(pageInfo->autoLinks) + len(pageInfo->comments);
     VecClear(els);
-    VecReserve(els, total);
+    VecGrow(els, total);
 
     // since all elements lists are in last-to-first order, append
     // item types in inverse order and reverse the whole list at the end
@@ -3685,6 +3685,7 @@ EngineMupdf::EngineMupdf() {
 #if OS_WIN
     install_load_windows_font_funcs(_ctx);
 #endif
+    InstallEmbeddedFontLoader();
     fz_register_document_handlers(_ctx);
 }
 
@@ -4372,7 +4373,7 @@ static TempStr AssemblePdfTemp(const char* const* objs, int nObjs) {
     str::Builder b;
     b.Append(StrL("%PDF-1.4\n"));
     Vec<int> offs;
-    VecReserve(offs, nObjs);
+    VecGrow(offs, nObjs);
     for (int i = 0; i < nObjs; i++) {
         VecAppend(offs, len(b));
         b.Append(fmt("%d 0 obj\n%s\nendobj\n", i + 1, Str(objs[i])));
@@ -4445,8 +4446,6 @@ static bool EbookFontIsAvailable(fz_context* ctx, Str fontName) {
 }
 
 // stm is either freed or retained via _doc
-// TODO(port): fz_stream can no-longer be re-opened (fz_clone_stream)
-// bool Load(fz_stream* stm, PasswordUI* pwdUI = nullptr);
 bool EngineMupdf::LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI) {
     if (!stm) {
         return false;
@@ -6384,12 +6383,15 @@ FzPageInfo* EngineMupdf::GetFzPageInfo(Location loc, bool loadQuick, fz_cookie* 
 // mediabox across every page, and a single-chapter (non-reflow) doc's page
 // vector is fully built at load and never grows afterward.
 RectF EngineMupdf::PageMediabox(int pageNo) {
+    // a reflow doc has one mediabox for every page, so answer even for a page
+    // number a caller hasn't resynced yet: a restyle (ApplyReflowThemeCss)
+    // resets the chapter table, shrinking pageCount under DisplayModel
+    if (isReflowable) {
+        return reflowMediabox;
+    }
     ReportIf(pageNo < 1 || pageNo > pageCount);
     if (pageNo < 1 || pageNo > pageCount) {
         return {};
-    }
-    if (isReflowable) {
-        return reflowMediabox;
     }
     if (HasChapters()) {
         // chaptered non-reflow docs don't exist today; stay safe if one ever does
@@ -7275,12 +7277,7 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
             return nullptr;
         }
 
-        if (pageRect) {
-            pRect = ToFzRect(*pageRect);
-        } else {
-            // TODO(port): use pageInfo->mediabox?
-            pRect = fz_bound_page(ctx, page);
-        }
+        pRect = ToFzRect(pageRect ? *pageRect : pageInfo->mediabox);
         ctm = viewctm(page, zoom, rotation);
         ibounds = fz_round_rect(fz_transform_rect(pRect, ctm));
 
@@ -7323,10 +7320,7 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
                 }
             }
             if (CadEnhanceActive()) {
-                CadEnhanceRenderOpts opts;
-                opts.zoom = zoom;
-                opts.hairlineVector = cadHairlineVector;
-                dev = PdfCadEnhanceWrapDevice(ctx, dev, opts);
+                dev = PdfCadEnhanceWrapDevice(ctx, dev);
             }
             fz_run_display_list(ctx, keptList, dev, fz_identity, pRect, fzcookie);
             if (!RenderAborted(fzcookie)) {
@@ -7743,7 +7737,6 @@ RenderedBitmap* EngineMupdf::GetPageImage(int pageNo, RectF rect, int imageIdx) 
     fz_var(bmp);
 
     fz_try(ctx) {
-        // TODO(port): not sure if should provide subarea, w and h
         pixmap = fz_get_pixmap_from_image(ctx, image, nullptr, nullptr, nullptr, nullptr);
         // Match `extract -r`: normalize embedded images to RGB before creating
         // a Windows bitmap for copy/save operations.
@@ -8839,14 +8832,15 @@ bool EngineMupdfSaveCopy(EngineBase* engine, Str path) {
 }
 
 // caller must hold pagesLock (protects pages[] and pageInfo->images)
-static bool HasClipOptimizationsLocked(EngineMupdf* e, int pageNo) {
+// returns 1 or 0, or -1 while the page isn't fully loaded
+static int HasClipOptimizationsLocked(EngineMupdf* e, int pageNo) {
     ReportIf(pageNo < 1 || pageNo > e->pageCount);
     if (pageNo < 1 || pageNo > e->pageCount) {
-        return false;
+        return 0;
     }
     FzPageInfo* pageInfo = e->PageInfoByPageNo(pageNo);
     if (!pageInfo || !pageInfo->page || !pageInfo->fullyLoaded) {
-        return false;
+        return -1;
     }
 
     fz_rect mbox = ToFzRect(e->PageMediabox(pageNo));
@@ -8854,28 +8848,44 @@ static bool HasClipOptimizationsLocked(EngineMupdf* e, int pageNo) {
     for (auto& img : pageInfo->images) {
         fz_rect ir = img->rect;
         if (FzRectOverlap(mbox, ir) >= 0.9f) {
-            return false;
+            return 0;
         }
     }
-    return true;
+    return 1;
 }
 
 bool EngineMupdf::HasClipOptimizations(int pageNo) {
-    if (!pdfdoc) {
+    if (!pdfdoc || pageNo < 1) {
         return false;
     }
-    // This only tunes tile size (RenderCache::GetTileRes) and the UI thread asks
-    // on every zoom/scroll, so never wait for the answer: pagesLock can be held
-    // for the length of an image decode by a render thread that is itself queued
-    // on renderLock, which stalls the UI mid-mouse-wheel. "false" is what we
-    // already return for a page that isn't loaded yet, i.e. "can't tell, use the
-    // smaller tiles".
-    if (!pagesLock.TryLock()) {
-        return false;
+    // The UI thread asks on every zoom/scroll (RenderCache::GetTileRes), so never
+    // wait for the answer: pagesLock can be held for the length of an image
+    // decode by a render thread that is itself queued on renderLock, which
+    // stalls the UI mid-mouse-wheel.
+    // The answer must not flip-flop, though: it picks the tile resolution, and
+    // RenderCache::Paint frees every tile of a page that isn't at the current
+    // resolution. Answering "no" only while pagesLock happens to be busy made
+    // the visible tiles re-render in a loop at higher zoom (#6154), so fall
+    // back to the last answer we got for the page.
+    if (pagesLock.TryLock()) {
+        int res = HasClipOptimizationsLocked(this, pageNo);
+        pagesLock.Unlock();
+        if (res >= 0) {
+            ScopedMutex scope(&clipOptLock);
+            if (len(clipOptKnown) < pageNo) {
+                int prevLen = len(clipOptKnown);
+                VecResize(clipOptKnown, pageNo);
+                for (int i = prevLen; i < pageNo; i++) {
+                    clipOptKnown[i] = 0;
+                }
+            }
+            clipOptKnown[pageNo - 1] = res ? 2 : 1;
+            return res != 0;
+        }
     }
-    bool res = HasClipOptimizationsLocked(this, pageNo);
-    pagesLock.Unlock();
-    return res;
+    // a page never seen loaded answers "no", same as before it's loaded
+    ScopedMutex scope(&clipOptLock);
+    return pageNo <= len(clipOptKnown) && clipOptKnown[pageNo - 1] == 2;
 }
 
 TempStr EngineMupdf::GetPageLabeTemp(int pageNo) const {
@@ -9230,6 +9240,17 @@ bool EngineMupdfHasUnsavedAnnotations(EngineBase* engine) {
     return epdf->modifiedAnnotations;
 }
 
+// redaction marks the user made in this session. Marks that came with the
+// file don't count: they surface only as their page gets loaded, so the button
+// would appear out of nowhere when an annotation is selected
+bool EngineMupdfHasUserRedactMarks(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->createdRedactMark) {
+        return false;
+    }
+    return EngineMupdfHasRedactMarks(engine);
+}
+
 bool EngineMupdfHasRedactMarks(EngineBase* engine) {
     Vec<Annotation*> annots;
     EngineMupdfGetLoadedAnnotations(engine, annots);
@@ -9372,6 +9393,8 @@ bool EngineMupdfApplyRedactions(EngineBase* engine, Vec<Annotation*>& deletedOut
 
     if (any) {
         e->modifiedAnnotations = true;
+        // the marks are burned in and gone; nothing left to apply
+        e->createdRedactMark = false;
     }
     return any;
 }
@@ -9812,7 +9835,9 @@ Str EngineMupdfLoadAnnotAttachment(EngineBase* engine, int objNum) {
 }
 
 // if an elements fully obscures another, remove it from the list
-Annotation* EngineMupdfGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF pos, Annotation* preferredAnnot) {
+// padding (in page units) grows each annotation's bounds
+Annotation* EngineMupdfGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF pos, float padding,
+                                          Annotation* preferredAnnot) {
     EngineMupdf* epdf = AsEngineMupdf(engine);
     if (!epdf->pdfdoc) {
         return nullptr;
@@ -9827,6 +9852,7 @@ Annotation* EngineMupdfGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF
     for (auto& annot : pi->annotations) {
         auto& atp = annot->type;
         RectF bounds = annot->bounds;
+        bounds.Inflate(padding, padding);
         if (!bounds.Contains(pos)) {
             continue;
         }
@@ -10034,6 +10060,9 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
         ReportIf(removedPos < 0); // must exist in one of the lists
         ValidateAnnotationsInSync(e, pageInfo);
     } else if (change == AnnotationChange::Add) {
+        if (annot->type == AnnotationType::Redact) {
+            e->createdRedactMark = true;
+        }
         int sizeBefore = len(pageInfo->annotations);
         int pos = VecFind(pageInfo->annotations, annot);
         ReportIf(pos >= 0); // shouldn't exist
@@ -10063,6 +10092,36 @@ NO_INLINE void MarkNotificationAsModified(EngineMupdf* e, Annotation* annot, Ann
     }
 }
 
+// pdf_bound_annot(), except ink: mupdf pads its /Rect by line width + 6pt, so
+// bound the stroke itself. Must be called inside fz_try.
+RectF PdfAnnotBounds(fz_context* ctx, pdf_annot* a) {
+    fz_rect fallback = pdf_bound_annot(ctx, a);
+    if (pdf_annot_type(ctx, a) != PDF_ANNOT_INK) {
+        return ToRectF(fallback);
+    }
+    fz_rect r = fallback;
+    bool first = true;
+    int nStrokes = pdf_annot_ink_list_count(ctx, a);
+    for (int i = 0; i < nStrokes; i++) {
+        int nv = pdf_annot_ink_list_stroke_count(ctx, a, i);
+        for (int k = 0; k < nv; k++) {
+            fz_point p = pdf_annot_ink_list_stroke_vertex(ctx, a, i, k);
+            if (first) {
+                r = fz_make_rect(p.x, p.y, p.x, p.y);
+                first = false;
+                continue;
+            }
+            r = fz_include_point_in_rect(r, p);
+        }
+    }
+    if (first) {
+        return ToRectF(fallback);
+    }
+
+    // the ink list vertices are already in page space
+    return ToRectF(fz_expand_rect(r, pdf_annot_border(ctx, a) / 2));
+}
+
 // creates Annotation wrapper around pdf_annot
 Annotation* MakeAnnotationWrapper(EngineMupdf* engine, pdf_annot* annot, int pageNo) {
     ReportIf(pageNo < 1);
@@ -10070,12 +10129,12 @@ Annotation* MakeAnnotationWrapper(EngineMupdf* engine, pdf_annot* annot, int pag
     ScopedRecursiveMutex cs(&engine->docLock);
 
     AnnotationType typ = AnnotationType::Unknown;
-    fz_rect bounds;
+    RectF bounds;
 
     fz_context* ctx = engine->Ctx();
     fz_try(ctx) {
         auto tp = pdf_annot_type(ctx, annot);
-        bounds = pdf_bound_annot(ctx, annot);
+        bounds = PdfAnnotBounds(ctx, annot);
         typ = AnnotationTypeFromPdfAnnot(tp);
     }
     fz_catch(ctx) {
@@ -10092,7 +10151,7 @@ Annotation* MakeAnnotationWrapper(EngineMupdf* engine, pdf_annot* annot, int pag
     res->engine = engine;
     res->pageNo = pageNo;
     res->pdfannot = annot;
-    res->bounds = ToRectF(bounds);
+    res->bounds = bounds;
     res->type = typ;
     return res;
 }

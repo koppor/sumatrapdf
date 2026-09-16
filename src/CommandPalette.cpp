@@ -3,99 +3,6 @@
 
 #include "base/Base.h"
 
-#ifdef SUMATRA_TEST_UTIL
-
-#if IS_DEBUG
-#include "base/UtAssert.h"
-#endif
-#include "Commands.h"
-#include "FilterUtil.h"
-#include "CommandPalette.h"
-
-/* CommandPaletteModel code:
-   Copyright 2026 the SumatraPDF project authors (see AUTHORS file).
-   License: GPLv3 */
-struct CommandPaletteEntry {
-    int commandId = 0;
-};
-
-struct CommandPaletteModel {
-    StrVecWithData<CommandPaletteEntry> commands;
-    StrVecWithData<CommandPaletteEntry> filtered;
-    StrVec filterWords;
-
-    void SetCommands(const int* commandIds, int count);
-    void Filter(Str query);
-    int Count() const;
-    Str ItemText(int index) const;
-    int ItemCommandId(int index) const;
-};
-
-void CommandPaletteModel::SetCommands(const int* commandIds, int count) {
-    commands.Reset();
-    filtered.Reset();
-    filterWords.Reset();
-    for (int i = 0; i < count; i++) {
-        int commandId = commandIds[i];
-        Str description = GetCommandDescription(commandId);
-        if (len(description) == 0) {
-            continue;
-        }
-        commands.Append(description, {commandId});
-    }
-    SortNoCase(&commands);
-    Filter({});
-}
-
-void CommandPaletteModel::Filter(Str query) {
-    filtered.Reset();
-    filterWords.Reset();
-    SplitFilterToWords(query, filterWords);
-    for (int i = 0; i < len(commands); i++) {
-        if (FilterMatches(commands[i], filterWords)) {
-            filtered.AppendFrom(&commands, i);
-        }
-    }
-}
-
-int CommandPaletteModel::Count() const {
-    return len(filtered);
-}
-
-Str CommandPaletteModel::ItemText(int index) const {
-    return index >= 0 && index < len(filtered) ? filtered[index] : Str{};
-}
-
-int CommandPaletteModel::ItemCommandId(int index) const {
-    CommandPaletteEntry* entry = index >= 0 && index < len(filtered) ? filtered.AtData(index) : nullptr;
-    return entry ? entry->commandId : 0;
-}
-
-#if IS_DEBUG
-
-void CommandPaletteModel_UnitTests() {
-    const int commands[] = {CmdOpenFile, CmdRotateLeft, CmdRotateRight, CmdZoomFitWidth};
-    CommandPaletteModel model;
-    model.SetCommands(commands, dimofi(commands));
-    utassert(model.Count() == dimofi(commands));
-    utassert(model.ItemCommandId(0) == CmdOpenFile);
-
-    model.Filter(StrL("rotate right"));
-    utassert(model.Count() == 1);
-    utassert(model.ItemCommandId(0) == CmdRotateRight);
-
-    model.Filter(StrL("FIT width"));
-    utassert(model.Count() == 1);
-    utassert(model.ItemCommandId(0) == CmdZoomFitWidth);
-
-    model.Filter(StrL("missing"));
-    utassert(model.Count() == 0);
-}
-
-#endif
-
-#else
-
 #include "base/Pixmap.h"
 #include "base/Win.h"
 #include "base/File.h"
@@ -158,6 +65,10 @@ enum class ThumbnailMode {
     Enabled,
 };
 
+// separates a setting from the value being typed for it in the "= settings"
+// query, e.g. "=ZoomIncrement = 25". A setting name never contains one
+constexpr const char* kPaletteSettingValueSep = "=";
+
 struct ItemDataCP {
     i32 cmdId = 0;
     // a "Debug: ..." command; those are listed after all the others
@@ -170,8 +81,13 @@ struct ItemDataCP {
     FileState* favFs = nullptr;
     Favorite* fav = nullptr;
     Annotation* annot = nullptr;
-    bool* boolSetting = nullptr;
-    bool boolSettingDefault = false;
+    // a "= settings" row. In the setting-picking stage the row text is the
+    // setting's dotted path; in the value-picking stage it is a candidate value
+    // and settingPath names the setting it belongs to.
+    SettingType settingType = SettingType::Comment; // Comment: not a setting row
+    u8* settingPtr = nullptr;
+    intptr_t settingDefault = 0; // FieldInfo::value, decoded per type
+    Str settingPath;
 };
 
 using StrVecCP = StrVecWithData<ItemDataCP>;
@@ -197,7 +113,7 @@ struct CommandPaletteWnd : WindowBase {
     StrVecCP toc;
     StrVecCP favorites;
     StrVecCP annotations;
-    StrVecCP boolSettings;
+    StrVecCP settings;
     VirtListBox* listBox = nullptr;
     ThumbnailPaletteCtrl* thumbnailCtrl = nullptr;
     HBox* switchRow = nullptr;
@@ -225,7 +141,7 @@ struct CommandPaletteWnd : WindowBase {
     void CollectToc(MainWindow*);
     void CollectFavorites(MainWindow*);
     void CollectAnnotations(MainWindow*);
-    void CollectBoolSettings();
+    void CollectSettings();
     void FillSwitchRow();
     void FilterStringsForQuery(Str, StrVecCP&);
 
@@ -244,7 +160,9 @@ struct CommandPaletteWnd : WindowBase {
     void SwitchToFileHistory();
     void SwitchToTOC();
     void SwitchToFavorites();
-    void SwitchToBoolSettings();
+    void SwitchToSettings();
+    void BeginEditSettingValue(Str path);
+    void FillSettingValueRows(Str path, Str value, StrVecCP& out);
     void SetThumbnailMode(ThumbnailMode mode);
     void OnSelectionChange();
     void OnListDoubleClick();
@@ -260,6 +178,7 @@ void CommandPaletteSetCurrentSelection(CommandPaletteWnd* wnd, int idx);
 void ScheduleDeleteAndExecCommand(i32 cmdId = 0);
 void SafeDeleteCommandPaletteWnd();
 void PositionCommandPalette(HWND hwnd, HWND hwndRelative);
+static TempStr FormatSettingValueTemp(SettingType type, const u8* p);
 
 // clang-format off
 static i32 gCommandsNoActivate[] = {
@@ -313,6 +232,7 @@ Str CommandPaletteSkipWS(Str s) {
 }
 
 CommandPaletteWnd* gCommandPaletteWnd = nullptr;
+static int gPaletteOpDepth = 0;
 static HWND gHwndToActivateOnClose = nullptr;
 static WindowTab* gTabToSelectOnClose = nullptr;
 static i32 gCmdIdToExecOnClose = 0;
@@ -585,7 +505,7 @@ void ThumbnailPaletteCtrl::SetBounds(Rect r) {
     int visibleRows = std::max(1, (r.dy - gap) / (thumbDy + gap));
     visibleRows = std::min(visibleRows, rowsModel->rows);
     if (visibleRows > 0) {
-        int freeDy = r.dy - visibleRows * thumbDy;
+        int freeDy = r.dy - (visibleRows * thumbDy);
         rowGap = std::max(gap, freeDy / (visibleRows + 1));
     }
     itemDy = thumbDy + rowGap;
@@ -600,16 +520,16 @@ void ThumbnailPaletteCtrl::SetBounds(Rect r) {
 }
 
 void ThumbnailPaletteCtrl::DrawRow(DrawItemEvent* ev) {
-    int gridDx = cols * thumbDx + (cols - 1) * gap;
+    int gridDx = (cols * thumbDx) + ((cols - 1) * gap);
     int left = ev->itemRect.x + std::max(0, (ev->itemRect.dx - gridDx) / 2);
-    int firstPage = ev->itemIndex * cols + 1;
+    int firstPage = (ev->itemIndex * cols) + 1;
     int lastPage = std::min(pageCount, firstPage + cols - 1);
     DisplayModel* dm = tab ? tab->AsFixed() : nullptr;
     EngineBase* engine = dm ? dm->GetEngine() : nullptr;
     bool chapters = engine && engine->HasChapters();
     for (int pageNo = firstPage; pageNo <= lastPage; pageNo++) {
         int col = pageNo - firstPage;
-        int x = left + col * (thumbDx + gap);
+        int x = left + (col * (thumbDx + gap));
         Rect pageRect{x, ev->itemRect.y, thumbDx, thumbDy};
         ev->gfx->FillRect(pageRect, kColWhite);
 
@@ -617,7 +537,7 @@ void ThumbnailPaletteCtrl::DrawRow(DrawItemEvent* ev) {
         if (thumbnail) {
             int drawDx = std::min(thumbnail->width, thumbDx);
             int drawDy = std::min(thumbnail->height, thumbDy);
-            Rect target{x + (thumbDx - drawDx) / 2, pageRect.y + (thumbDy - drawDy) / 2, drawDx, drawDy};
+            Rect target{x + ((thumbDx - drawDx) / 2), pageRect.y + ((thumbDy - drawDy) / 2), drawDx, drawDy};
             ev->gfx->DrawPixmap(thumbnail, target);
         }
 
@@ -635,18 +555,18 @@ void ThumbnailPaletteCtrl::DrawRow(DrawItemEvent* ev) {
         Size ts = ev->gfx->MeasureText(label, font);
         int padX = DpiScaleByDpi(dpi, 6);
         int padY = DpiScaleByDpi(dpi, 2);
-        int rad = DpiScaleByDpi(dpi, 4);
         int inset = DpiScaleByDpi(dpi, 4);
-        int boxDx = std::min(ts.dx + padX * 2, pageRect.dx - inset * 2);
-        int boxDy = ts.dy + padY * 2;
-        int boxX = pageRect.x + (pageRect.dx - boxDx) / 2;
+        int boxDx = std::min(ts.dx + (padX * 2), pageRect.dx - (inset * 2));
+        int boxDy = ts.dy + (padY * 2);
+        int boxX = pageRect.x + ((pageRect.dx - boxDx) / 2);
         int boxY = pageRect.y + pageRect.dy - boxDy - inset;
         if (boxY < pageRect.y + inset) {
             boxY = pageRect.y + inset;
         }
         Rect box{boxX, boxY, boxDx, boxDy};
-        ev->gfx->FillRoundedRect(box, rad, MkRgb(0x22, 0x22, 0x22));
-        ev->gfx->DrawText(label, box, gfxTextCenter | gfxTextVCenter, font, kColWhite);
+        // a pill: half the height rounds the short sides into semicircles
+        ev->gfx->FillRoundedRect(box, boxDy / 2, ThemeWindowBackgroundColor());
+        ev->gfx->DrawText(label, box, gfxTextCenter | gfxTextVCenter, font, ThemeWindowTextColor());
     }
 }
 
@@ -661,7 +581,7 @@ int ThumbnailPaletteCtrl::PageAtPoint(Point pt) {
     }
     Point origin = OriginInWindow();
     rowRect.Offset(-origin.x, -origin.y);
-    int gridDx = cols * thumbDx + (cols - 1) * gap;
+    int gridDx = (cols * thumbDx) + ((cols - 1) * gap);
     int left = rowRect.x + std::max(0, (rowRect.dx - gridDx) / 2);
     if (pt.x < left || pt.y < rowRect.y || pt.y >= rowRect.y + thumbDy) {
         return -1;
@@ -670,11 +590,11 @@ int ThumbnailPaletteCtrl::PageAtPoint(Point pt) {
     if (col < 0 || col >= cols) {
         return -1;
     }
-    int cellX = left + col * (thumbDx + gap);
+    int cellX = left + (col * (thumbDx + gap));
     if (pt.x >= cellX + thumbDx) {
         return -1;
     }
-    int pageNo = row * cols + col + 1;
+    int pageNo = (row * cols) + col + 1;
     return pageNo <= pageCount ? pageNo : -1;
 }
 
@@ -842,14 +762,14 @@ void ThumbnailPaletteCtrl::StartRendering() {
     }
 
     int visibleRows = std::max(1, UsableDy() / itemDy);
-    int firstVisible = (scrollY / itemDy) * cols + 1;
+    int firstVisible = ((scrollY / itemDy) * cols) + 1;
     int perScreen = std::max(1, visibleRows * cols);
     int lastVisible = std::min(pageCount, firstVisible + perScreen - 1);
-    int firstPage = std::max(1, firstVisible - kPaletteThumbnailRenderScreens * perScreen);
-    int lastPage = std::min(pageCount, lastVisible + kPaletteThumbnailRenderScreens * perScreen);
+    int firstPage = std::max(1, firstVisible - (kPaletteThumbnailRenderScreens * perScreen));
+    int lastPage = std::min(pageCount, lastVisible + (kPaletteThumbnailRenderScreens * perScreen));
 
-    int keepFirst = std::max(1, firstPage - kPaletteThumbnailKeepScreens * perScreen);
-    int keepLast = std::min(pageCount, lastPage + kPaletteThumbnailKeepScreens * perScreen);
+    int keepFirst = std::max(1, firstPage - (kPaletteThumbnailKeepScreens * perScreen));
+    int keepLast = std::min(pageCount, lastPage + (kPaletteThumbnailKeepScreens * perScreen));
     for (int idx = 0; idx < len(cache->thumbnails); idx++) {
         int pageNo = idx + 1;
         if (cache->thumbnails[idx] && (pageNo < keepFirst || pageNo > keepLast)) {
@@ -973,6 +893,75 @@ void CommandPaletteSetCurrentSelection(CommandPaletteWnd* wnd, int idx) {
     wnd->OnSelectionChange();
 }
 
+struct RemoveItemOp {
+    CommandPaletteWnd* wnd = nullptr;
+    WindowTab* tab = nullptr;
+    Favorite* fav = nullptr;
+    FileState* favFs = nullptr;
+    Str filePath;
+    int currSel = 0;
+};
+
+// CloseTab / DelFavorite can pump; this runs after the key handler returns.
+static void ApplyRemoveItem(RemoveItemOp* op) {
+    CommandPaletteWnd* wnd = op->wnd;
+    WindowTab* tab = op->tab;
+    Favorite* fav = op->fav;
+    FileState* favFs = op->favFs;
+    Str filePath = op->filePath;
+    int currSel = op->currSel;
+    defer {
+        str::Free(filePath);
+        delete op;
+    };
+
+    if (gCommandPaletteWnd != wnd) {
+        return;
+    }
+
+    gPaletteOpDepth++;
+    defer {
+        gPaletteOpDepth--;
+    };
+
+    MainWindow* host = wnd->win;
+    if (tab) {
+        CloseTab(tab, false);
+    } else if (fav && favFs) {
+        DelFavorite(favFs, fav);
+    } else if (len(filePath) > 0 && host) {
+        ForgetFileFromFrequentlyRead(host, filePath);
+    }
+
+    if (gCommandPaletteWnd != wnd) {
+        return;
+    }
+    if (!IsMainWindowValid(host)) {
+        ScheduleDeleteAndExecCommand();
+        return;
+    }
+
+    wnd->CollectStrings(host);
+    if (gCommandPaletteWnd != wnd || !wnd->listBox || !wnd->listBox->model) {
+        return;
+    }
+    auto* m = (ListBoxModelCP*)wnd->listBox->model;
+    Str filter = CommandPaletteSkipWS(Str(wnd->editQuery->GetTextTemp()));
+    wnd->FilterStringsForQuery(filter, m->strings);
+    wnd->listBox->SetModel(m);
+
+    int n = m->ItemsCount();
+    if (n == 0) {
+        wnd->listBox->SetCurrentSelection(-1);
+        return;
+    }
+    int sel = currSel;
+    if (sel >= n) {
+        sel = n - 1;
+    }
+    CommandPaletteSetCurrentSelection(wnd, sel);
+}
+
 static void EditSetTextAndFocus(Edit* e, Str s) {
     e->SetText(s);
     EditSetCursorPosAtEnd(e);
@@ -1007,8 +996,25 @@ void CommandPaletteWnd::SwitchToFavorites() {
     SwitchToPrefix(Str(kPalettePrefixFavorites));
 }
 
-void CommandPaletteWnd::SwitchToBoolSettings() {
+void CommandPaletteWnd::SwitchToSettings() {
     SwitchToPrefix(Str(kPalettePrefixBoolSettings));
+}
+
+// Second stage of "= settings": the query becomes "=<path> = <value>" and the
+// list offers values instead of settings. An enum's current value is left out
+// so every choice shows; a free-form value is pre-filled so it can be edited.
+void CommandPaletteWnd::BeginEditSettingValue(Str path) {
+    TempStr value = {};
+    if (!GetSettingsEnumValues(path)) {
+        for (int i = 0; i < len(settings); i++) {
+            if (str::Eq(settings[i], path)) {
+                value = FormatSettingValueTemp(settings.AtData(i)->settingType, settings.AtData(i)->settingPtr);
+                break;
+            }
+        }
+    }
+    EditSetTextAndFocus(editQuery,
+                        fmt("%s%s %s %s", Str(kPalettePrefixBoolSettings), path, Str(kPaletteSettingValueSep), value));
 }
 
 void CommandPaletteWnd::OnActivate(WindowBase::ActivateEvent* ev) {
@@ -1016,7 +1022,7 @@ void CommandPaletteWnd::OnActivate(WindowBase::ActivateEvent* ev) {
         // -for-testing runs in the background, so this popup never stays
         // foreground. Closing on WA_INACTIVE would destroy it between
         // sequential WM_SETTEXT queries (image-only-palette-items).
-        if (!gForTesting) {
+        if (!gForTesting && gPaletteOpDepth == 0) {
             ScheduleDeleteAndExecCommand();
         }
         ev->didHandle = true;
@@ -1112,37 +1118,22 @@ bool CommandPaletteWnd::RemoveSelectedItem() {
         return false;
     }
 
-    if (d->tab) {
-        WindowTab* tab = d->tab;
-        CloseTab(tab, false);
-        if (!IsMainWindowValid(win)) {
-            // closing the last tab closed the host window
-            ScheduleDeleteAndExecCommand();
-            return true;
-        }
-    } else if (d->fav && d->favFs) {
-        DelFavorite(d->favFs, d->fav);
-    } else if (d->filePath) {
-        ForgetFileFromFrequentlyRead(win, d->filePath);
-    } else {
+    WindowTab* tab = d->tab;
+    Favorite* fav = d->fav;
+    FileState* favFs = d->favFs;
+    Str filePath = d->filePath;
+    if (!tab && !(fav && favFs) && len(filePath) == 0) {
         return false;
     }
 
-    CollectStrings(win);
-    Str filter = CommandPaletteSkipWS(Str(editQuery->GetTextTemp()));
-    FilterStringsForQuery(filter, m->strings);
-    listBox->SetModel(m);
-
-    n = m->ItemsCount();
-    if (n == 0) {
-        listBox->SetCurrentSelection(-1);
-        return true;
-    }
-    int sel = currSel;
-    if (sel >= n) {
-        sel = n - 1;
-    }
-    CommandPaletteSetCurrentSelection(this, sel);
+    auto* op = new RemoveItemOp;
+    op->wnd = this;
+    op->tab = tab;
+    op->fav = fav;
+    op->favFs = favFs;
+    op->filePath = str::Dup(filePath);
+    op->currSel = currSel;
+    uitask::Post(MkFunc0<RemoveItemOp>(ApplyRemoveItem, op), "PaletteRemoveItem");
     return true;
 }
 
@@ -1289,7 +1280,7 @@ void CommandPaletteWnd::ExecuteCurrentSelection() {
     ItemDataCP* data = m->strings.AtData(idx);
     i32 cmdId = data->cmdId;
     if (cmdId == CmdToggleBoolSetting) {
-        SwitchToBoolSettings();
+        SwitchToSettings();
         return;
     }
     if (cmdId != 0) {
@@ -1301,9 +1292,21 @@ void CommandPaletteWnd::ExecuteCurrentSelection() {
         return;
     }
 
-    if (data->boolSetting) {
-        ToggleSettingsBool(data->boolSetting);
-        ScheduleDeleteAndExecCommand();
+    if (data->settingPtr) {
+        Str itemText = m->strings[idx];
+        if (len(data->settingPath) > 0) {
+            // a value picked for a setting: the row text is the value
+            SetSettingsValueFromStr(data->settingPath, itemText);
+            ScheduleDeleteAndExecCommand();
+            return;
+        }
+        if (data->settingType == SettingType::Bool) {
+            ToggleSettingsBool((bool*)data->settingPtr);
+            ScheduleDeleteAndExecCommand();
+            return;
+        }
+        // anything else needs a value: stay open and ask for one
+        BeginEditSettingValue(itemText);
         return;
     }
 
@@ -2009,6 +2012,13 @@ static TempStr UpdateCommandNameTemp(MainWindow* win, int cmdId, Str s) {
                 newIsOn = !dm->GetUniformPageWidth();
             }
         } break;
+        case CmdToggleTrimEmptyMargins: {
+            DisplayModel* dm = win->AsFixed();
+            if (dm) {
+                isToggle = true;
+                newIsOn = !dm->GetTrimEmptyMargins();
+            }
+        } break;
         case CmdFindToggleMatchCase: {
             isToggle = true;
             newIsOn = !win->findMatchCase;
@@ -2277,7 +2287,60 @@ void CommandPaletteWnd::CollectFavorites(MainWindow* mainWin) {
     }
 }
 
-static void CollectBoolSettingsInStruct(StrVecCP& out, const StructInfo* info, u8* base, Str prefix) {
+// the scalar settings the palette can edit; arrays and compact structs need the
+// advanced settings dialog or the settings file
+static bool IsPaletteSettingType(SettingType t) {
+    switch (t) {
+        case SettingType::Bool:
+        case SettingType::Int:
+        case SettingType::Float:
+        case SettingType::String:
+        case SettingType::Color:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// field.value holds the default: the value itself for Bool/Int, a string
+// pointer for Float/String/Color. It is NOT a pointer for Bool/Int, so only
+// deref it for the string-backed types.
+static TempStr FormatSettingDefaultTemp(SettingType type, intptr_t def) {
+    switch (type) {
+        case SettingType::Bool:
+            return str::DupTemp(def != 0 ? StrL("true") : StrL("false"));
+        case SettingType::Int:
+            return fmt("%d", (int)def);
+        default:
+            return str::DupTemp(Str((const char*)def));
+    }
+}
+
+static TempStr FormatSettingValueTemp(SettingType type, const u8* p) {
+    switch (type) {
+        case SettingType::Bool:
+            return str::DupTemp(*(const bool*)p ? StrL("true") : StrL("false"));
+        case SettingType::Int:
+            return fmt("%d", *(const int*)p);
+        case SettingType::Float:
+            return fmt("%g", *(const float*)p);
+        default:
+            // Color is a ParsedColor whose first member is the text
+            return str::DupTemp(*(const Str*)p);
+    }
+}
+
+static bool SettingDiffersFromDefault(const ItemDataCP* d) {
+    if (d->settingType == SettingType::Float) {
+        float def = 0;
+        str::Parse(Str((const char*)d->settingDefault), "%f", &def);
+        return *(const float*)d->settingPtr != def;
+    }
+    TempStr val = FormatSettingValueTemp(d->settingType, d->settingPtr);
+    return !str::Eq(val, FormatSettingDefaultTemp(d->settingType, d->settingDefault));
+}
+
+static void CollectSettingsInStruct(StrVecCP& out, const StructInfo* info, u8* base, Str prefix) {
     if (!info || !base) {
         return;
     }
@@ -2292,39 +2355,39 @@ static void CollectBoolSettingsInStruct(StrVecCP& out, const StructInfo* info, u
         u8* fieldPtr = base + field.offset;
         TempStr path = len(prefix) > 0 ? fmt("%s.%s", prefix, fname) : str::DupTemp(fname);
         if (field.type == SettingType::Struct) {
-            CollectBoolSettingsInStruct(out, (const StructInfo*)field.value, fieldPtr, path);
+            CollectSettingsInStruct(out, (const StructInfo*)field.value, fieldPtr, path);
             continue;
         }
-        if (field.type != SettingType::Bool || len(path) == 0) {
+        if (!IsPaletteSettingType(field.type) || len(path) == 0) {
             continue;
         }
         ItemDataCP data;
-        data.boolSetting = (bool*)fieldPtr;
-        data.boolSettingDefault = field.value != 0;
+        data.settingType = field.type;
+        data.settingPtr = fieldPtr;
+        data.settingDefault = field.value;
         out.Append(path, data);
     }
 }
 
-void CommandPaletteWnd::CollectBoolSettings() {
-    boolSettings.Reset();
+void CommandPaletteWnd::CollectSettings() {
+    settings.Reset();
     if (!gSettings) {
         return;
     }
-    CollectBoolSettingsInStruct(boolSettings, &gSettingsInfo, (u8*)gSettings, {});
-    SortNoCase(&boolSettings);
+    CollectSettingsInStruct(settings, &gSettingsInfo, (u8*)gSettings, {});
+    SortNoCase(&settings);
 
     // changed values first, then the rest; both groups stay alphabetical
     StrVecCP ordered;
     for (int pass = 0; pass < 2; pass++) {
-        for (int i = 0; i < len(boolSettings); i++) {
-            ItemDataCP* d = boolSettings.AtData(i);
-            bool changed = *d->boolSetting != d->boolSettingDefault;
+        for (int i = 0; i < len(settings); i++) {
+            bool changed = SettingDiffersFromDefault(settings.AtData(i));
             if (changed == (pass == 0)) {
-                ordered.AppendFrom(&boolSettings, i);
+                ordered.AppendFrom(&settings, i);
             }
         }
     }
-    boolSettings = ordered;
+    settings = ordered;
 }
 
 void CommandPaletteWnd::CollectStrings(MainWindow* mainWin) {
@@ -2344,7 +2407,7 @@ void CommandPaletteWnd::CollectStrings(MainWindow* mainWin) {
         StartLoadingAnnotationsForUi(tab);
     }
     CollectAnnotations(mainWin);
-    CollectBoolSettings();
+    CollectSettings();
 
     fileHistory.Reset();
     for (FileState* fs : *gSettings->fileStates) {
@@ -2358,8 +2421,10 @@ void CommandPaletteWnd::CollectStrings(MainWindow* mainWin) {
     }
 
     StrVecCP tempCommands;
-    int cmdId = (int)CmdFirst + 1;
-    for (Str name = SeqStrFirst(gCommandDescriptions); len(name) > 0; name = SeqStrNext(name), cmdId++) {
+    int cmdIdx = 0;
+    int cmdId = 0;
+    for (Str name = SeqStrFirst(gCommandDescriptions); len(name) > 0; name = SeqStrNext(name), cmdIdx++) {
+        cmdId = GetCommandIdByIdx(cmdIdx);
         if (!AllowCommand(ctx, (i32)cmdId)) {
             continue;
         }
@@ -2464,11 +2529,10 @@ void CommandPaletteWnd::DrawListBoxItem(VirtListBox::DrawItemEvent* ev) {
     Color rightCol = AccentColor(colText, 80);
     if (data->cmdId != 0) {
         rightStr = CommandPaletteShortcutTemp(data->cmdId);
-    } else if (data->boolSetting) {
-        bool on = *data->boolSetting;
-        rightStr = on ? StrL("true") : StrL("false");
+    } else if (data->settingPtr && len(data->settingPath) == 0) {
+        rightStr = FormatSettingValueTemp(data->settingType, data->settingPtr);
         rightCol = colText;
-        if (on != data->boolSettingDefault) {
+        if (SettingDiffersFromDefault(data)) {
             PlatformFont* bold = GetBoldPlatformFont(lb->font);
             if (bold) {
                 rightFont = bold;
@@ -2589,14 +2653,80 @@ static void FilterStrings(StrVecCP& strs, const StrVec& words, StrVecCP& matched
             TempStr shortcut = CommandPaletteShortcutTemp(data->cmdId);
             matches = FilterMatches(shortcut, words);
         }
-        if (!matches && data && data->boolSetting) {
-            Str val = *data->boolSetting ? StrL("true") : StrL("false");
+        if (!matches && data && data->settingPtr) {
+            TempStr val = FormatSettingValueTemp(data->settingType, data->settingPtr);
             matches = FilterMatches(val, words);
         }
         if (!matches) {
             continue;
         }
         matchedOut.AppendFrom(&strs, i);
+    }
+}
+
+// "ZoomIncrement = 25" -> path "ZoomIncrement", value "25". False when the
+// query is still naming a setting, so the list keeps filtering settings.
+static bool SplitSettingValueQuery(Str query, Str& path, Str& value) {
+    int at = str::IndexOfChar(query, kPaletteSettingValueSep[0]);
+    if (at < 0) {
+        return false;
+    }
+    path = Str(query.s, at);
+    value = Str(query.s + at + 1, query.len - at - 1);
+    str::TrimWsBoth(path);
+    str::TrimWsBoth(value);
+    return len(path) > 0;
+}
+
+// Rows for the value stage: an enum offers its allowed values, anything else
+// offers the one value being typed. Enter on a row applies it (see
+// ExecuteCurrentSelection).
+void CommandPaletteWnd::FillSettingValueRows(Str path, Str value, StrVecCP& out) {
+    // the full dotted path, or an unambiguous leaf ("Units" for
+    // "FixedPageUI.PageGrid.Units") so the name can be typed by hand
+    ItemDataCP* found = nullptr;
+    Str foundPath;
+    int nLeaf = 0;
+    for (int i = 0; i < len(settings); i++) {
+        Str s = settings[i];
+        if (str::EqI(s, path)) {
+            found = settings.AtData(i);
+            foundPath = s;
+            nLeaf = 1;
+            break;
+        }
+        Str leaf = str::SliceFromCharLast(s, '.');
+        if (len(leaf) > 1 && str::EqI(Str(leaf.s + 1, leaf.len - 1), path)) {
+            nLeaf++;
+            found = settings.AtData(i);
+            foundPath = s;
+        }
+    }
+    if (nLeaf != 1) {
+        found = nullptr;
+    }
+    if (!found || found->settingType == SettingType::Bool) {
+        return;
+    }
+    ItemDataCP data = *found;
+    data.settingPath = foundPath;
+    const char** enumValues = GetSettingsEnumValues(foundPath);
+    if (!enumValues) {
+        // clearing a string is meaningful, an empty number is not
+        bool isStr = found->settingType != SettingType::Int && found->settingType != SettingType::Float;
+        if (len(value) > 0 || isStr) {
+            out.Append(value, data);
+        }
+        return;
+    }
+    for (const char** v = enumValues; *v; v++) {
+        Str s(*v);
+        // the empty choice means "unset"; it can't be a row you pick, so leave
+        // it to the advanced settings dialog
+        if (len(s) == 0 || (len(value) > 0 && !FilterMatches(s, filterWords))) {
+            continue;
+        }
+        out.Append(s, data);
     }
 }
 
@@ -2607,7 +2737,7 @@ void CommandPaletteWnd::FilterStringsForQuery(Str filter, StrVecCP& strings) {
     }
 
     bool searchTabs = false, searchHistory = false, searchCommands = false, searchToc = false, searchFavorites = false,
-         searchBoolSettings = false, searchAnnotations = false;
+         searchSettings = false, searchAnnotations = false;
     if (str::TrimPrefix(filter, Str(kPalettePrefixEverything))) {
         searchTabs = searchHistory = searchCommands = true;
     } else if (str::TrimPrefix(filter, Str(kPalettePrefixTabs))) {
@@ -2621,7 +2751,7 @@ void CommandPaletteWnd::FilterStringsForQuery(Str filter, StrVecCP& strings) {
     } else if (str::TrimPrefix(filter, Str(kPalettePrefixAnnotations))) {
         searchAnnotations = true;
     } else if (str::TrimPrefix(filter, Str(kPalettePrefixBoolSettings))) {
-        searchBoolSettings = true;
+        searchSettings = true;
     } else if (str::TrimPrefix(filter, Str(kPalettePrefixThumbnails))) {
         return;
     } else {
@@ -2630,6 +2760,14 @@ void CommandPaletteWnd::FilterStringsForQuery(Str filter, StrVecCP& strings) {
     }
 
     filterWords.Reset();
+    if (searchSettings) {
+        Str path, value;
+        if (SplitSettingValueQuery(filter, path, value)) {
+            SplitFilterToWords(value, filterWords);
+            FillSettingValueRows(path, value, strings);
+            return;
+        }
+    }
     if (searchAnnotations) {
         AnnotMatchOpts opts;
         if (!ParseAnnotSearch(filter, opts)) {
@@ -2668,8 +2806,8 @@ void CommandPaletteWnd::FilterStringsForQuery(Str filter, StrVecCP& strings) {
     if (searchFavorites) {
         FilterStrings(favorites, filterWords, strings);
     }
-    if (searchBoolSettings) {
-        FilterStrings(boolSettings, filterWords, strings);
+    if (searchSettings) {
+        FilterStrings(settings, filterWords, strings);
     }
 }
 
@@ -2710,4 +2848,3 @@ void CommandPaletteWnd::QueryChanged() {
     }
     CommandPaletteSetCurrentSelection(this, 0);
 }
-#endif

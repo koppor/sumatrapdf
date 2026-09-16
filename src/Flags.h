@@ -50,6 +50,7 @@ struct Flags {
     Str lang;
     Str installDir;
     Str logFile;
+    Str perfLogFile; // -log-perf-file <path>
     Str updateSelfTo;
     Str deleteFile;
     StrVec fileNames;
@@ -112,6 +113,7 @@ struct Flags {
     bool dumpExif = false;   // -dump-exif
     bool dumpChm = false;    // -dump-chm
     bool unitTests = false;  // -unit-tests (debug builds only)
+    bool forAi = false;      // -for-ai (AI-friendly unit test output)
     bool showPrintersDialog = false;
     bool crashOnOpen = false;
     // related to installer
@@ -122,9 +124,13 @@ struct Flags {
     bool withPreview = false;
     bool justExtractFiles = false;
     bool log = false;
+    bool startPerfLog = false; // -start-perf-log (profile builds)
     bool allUsers = false;
     bool runInstallNow = false;
     bool storeInstaller = false;
+    // -html-backend ie|webview2: force the embedded browser hosting CHM /
+    // markdown. Empty (the default) picks WebView2 when it's installed.
+    Str htmlBackend;
 
     Flags() = default;
     ~Flags() = default;

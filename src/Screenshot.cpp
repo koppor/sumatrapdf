@@ -24,7 +24,7 @@
 #include "ShortcutParse.h"
 #include "Theme.h"
 #include "SumatraConfig.h"
-#include "DarkMode_win.h"
+#include "DarkMode.h"
 #include "Commands.h"
 #include "Accelerators.h"
 #include "Settings.h"
@@ -278,7 +278,7 @@ void SetHotkeyWnd::DoSet(VirtMouseEvent*) {
         sc->cmdId = 0;
         VecAppend(*gSettings->shortcuts, sc);
     }
-    SaveSettings();
+    ScheduleSaveSettings();
 
     ReRegisterGlobalHotkeys();
     committed = true;
@@ -299,7 +299,7 @@ void SetHotkeyWnd::DoRemove(VirtMouseEvent*) {
         }
         curr = curr->next;
     }
-    SaveSettings();
+    ScheduleSaveSettings();
     ReRegisterGlobalHotkeys();
     committed = true;
     Close();

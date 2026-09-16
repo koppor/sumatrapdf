@@ -1016,24 +1016,36 @@ TempStr GetSpecialFolderTemp(int csidl, bool createIfMissing) {
 
 // temp directory
 TempStr GetTempDirTemp() {
-    WCHAR dir[MAX_PATH] = {};
-#if 0 // TODO: only available in 20348, not yet present in SDK
-    DWORD cch = 0;
-    if (DynGetTempPath2W) {
-        cch = DynGetTempPath2W(dimof(dir), dir);
+    // not GetTempPath2W(): it only differs for processes running as SYSTEM,
+    // which we never are
+    return GetTempDirTemp(MAX_PATH);
+}
+
+// GetTempPathW() returns the size the path needs, including the terminator,
+// when the buffer is too small, and writes nothing. Retry with that size.
+// initialCch is a parameter so tests can force the retry.
+TempStr GetTempDirTemp(int initialCch) {
+    int cchBuf = initialCch < 1 ? 1 : initialCch;
+    WCHAR* dir = AllocArrayTemp<WCHAR>(cchBuf + 1);
+    if (!dir) {
+        return {};
     }
-    if (cch == 0) {
-        cch = GetTempPathW(dimof(dir), dir);
-    }
-#else
-    DWORD cch = GetTempPathW(dimof(dir), dir);
-#endif
+    DWORD cch = GetTempPathW((DWORD)cchBuf, dir);
     if (cch == 0) {
         return {};
     }
-    // TODO: should handle this
-    ReportIf(cch >= dimof(dir));
-    return ToUtf8Temp(WStr(dir, (int)cch));
+    if ((int)cch < cchBuf) {
+        return ToUtf8Temp(WStr(dir, (int)cch));
+    }
+    WCHAR* buf = AllocArrayTemp<WCHAR>((int)cch + 1);
+    if (!buf) {
+        return {};
+    }
+    DWORD cch2 = GetTempPathW(cch, buf);
+    if (cch2 == 0 || cch2 >= cch) {
+        return {};
+    }
+    return ToUtf8Temp(WStr(buf, (int)cch2));
 }
 
 //--- OS / process (misc)
@@ -1417,6 +1429,27 @@ bool IsCtrlPressed() {
 // zooms.
 bool IsRightButtonPressed() {
     return IsKeyPressed(VK_RBUTTON);
+}
+
+// Mark every key and mouse button up in this thread's key state (what
+// GetKeyState() and TranslateAccelerator() read), keeping the Caps Lock /
+// Num Lock toggles. Returns how many were down.
+int ReleaseThreadKeyState() {
+    BYTE keys[256];
+    if (!GetKeyboardState(keys)) {
+        return 0;
+    }
+    int nDown = 0;
+    for (BYTE& k : keys) {
+        if (k & 0x80) {
+            k &= ~0x80;
+            nDown++;
+        }
+    }
+    if (nDown > 0) {
+        SetKeyboardState(keys);
+    }
+    return nDown;
 }
 
 #if 0
@@ -1892,6 +1925,18 @@ HWND HwndThreadFocus() {
         return gti.hwndFocus;
     }
     return nullptr;
+}
+
+// True while a menu (popup, menu bar or system menu) runs its nested message
+// loop on this thread. Work dispatched from that loop runs underneath whatever
+// the menu's caller has on its stack, so anything that frees state must wait.
+bool IsThreadInMenuMode() {
+    GUITHREADINFO gti{};
+    gti.cbSize = sizeof(gti);
+    if (!GetGUIThreadInfo(GetCurrentThreadId(), &gti)) {
+        return false;
+    }
+    return (gti.flags & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE)) != 0;
 }
 
 // SetFocus() does not move this thread's focused window when the thread is not
@@ -3210,25 +3255,26 @@ Size ButtonGetIdealSize(HWND hwnd) {
 
 constexpr int kResourceNotFound = -1;
 
-bool LockDataResource(int resId, LoadedDataResource* res) {
+// mod: the module holding the resource, the process exe when null
+bool LockDataResource(int resId, LoadedDataResource* res, HMODULE mod) {
     if (res->dataSize != 0) {
         return res->dataSize != kResourceNotFound;
     }
 
-    auto* h = GetModuleHandleW(nullptr);
+    HMODULE h = mod ? mod : GetModuleHandleW(nullptr);
     WCHAR* name = MAKEINTRESOURCEW(resId);
     HRSRC resSrc = FindResourceW(h, name, RT_RCDATA);
     if (!resSrc) {
         res->dataSize = kResourceNotFound;
         return false;
     }
-    HGLOBAL hres = LoadResource(nullptr, resSrc);
+    HGLOBAL hres = LoadResource(h, resSrc);
     if (!hres) {
         res->dataSize = kResourceNotFound;
         return false;
     }
     res->data = (const u8*)LockResource(hres);
-    res->dataSize = (int)SizeofResource(nullptr, resSrc);
+    res->dataSize = (int)SizeofResource(h, resSrc);
     return true;
 }
 

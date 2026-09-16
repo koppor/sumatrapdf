@@ -44,6 +44,7 @@ static Kind kNotifLineAnnotationPlacement = "notifLineAnnotationPlacement";
 static Kind kNotifPolyLineAnnotationPlacement = "notifPolyLineAnnotationPlacement";
 static Kind kNotifShapeAnnotationPlacement = "notifShapeAnnotationPlacement";
 static Kind kNotifInkAnnotationPlacement = "notifInkAnnotationPlacement";
+static Kind kNotifHighlighterPlacement = "notifHighlighterPlacement";
 
 // MuPDF's default stamp is {12,12,12+190,12+50}; caret is {12,12,12+18,12+15}
 // with the caret mark at the middle of the left edge; file attachment is
@@ -55,16 +56,11 @@ constexpr float kCaretAnnotDefaultDy = 15.f;
 constexpr float kFileAttachmentAnnotDefaultDx = 16.f;
 constexpr float kFileAttachmentAnnotDefaultDy = 16.f;
 
-// The highlighter brush keeps a roughly constant on-screen width whatever the
-// zoom, the way a real marker does, and saves as a translucent stroke.
-constexpr int kHighlightBrushScreenWidthPx = 22;
-constexpr int kHighlightBrushOpacity = 40;
 constexpr int kInkEraserRadiusPx = 10;
 
-// the marker paints in the same color the selection highlight uses
-static Color HighlightBrushColor() {
-    return GetParsedColor(gSettings->annotations.highlightColor, kColYellow);
-}
+// 40% yellow, when Annotations.InkColor is not a color. How translucent a
+// stroke is comes from its color's alpha.
+constexpr Color kInkDefaultColor = 0x6600ffff;
 
 // Free text is placed like a stamp: a preview box the size of the annotation
 // follows the cursor and a click creates it there. MuPDF lays free text out
@@ -143,8 +139,6 @@ void AnnotPlacement::Reset() {
     VecClear(points);
     VecClear(strokeCounts);
     circle = false;
-    highlightBrush = false;
-    brushWidthPt = 0.f;
     mouseDown = false;
     didDrag = false;
     constrain = false;
@@ -170,6 +164,8 @@ static Kind NotifGroupForKind(AnnotPlacementKind kind) {
             return kNotifShapeAnnotationPlacement;
         case AnnotPlacementKind::Ink:
             return kNotifInkAnnotationPlacement;
+        case AnnotPlacementKind::Highlighter:
+            return kNotifHighlighterPlacement;
         default:
             return nullptr;
     }
@@ -201,8 +197,9 @@ AnnotPlacementKind PlacementKindFromCommand(int cmdId) {
         case CmdCreateAnnotRedact:
             return AnnotPlacementKind::Shape;
         case CmdCreateAnnotInk:
-        case CmdAnnotationHighlightBrush:
             return AnnotPlacementKind::Ink;
+        case CmdAnnotationHighlightBrush:
+            return AnnotPlacementKind::Highlighter;
         default:
             return AnnotPlacementKind::None;
     }
@@ -240,6 +237,10 @@ bool IsPlacingShapeAnnotation(MainWindow* win) {
 
 bool IsPlacingInkAnnotation(MainWindow* win) {
     return KindOf(win) == AnnotPlacementKind::Ink;
+}
+
+bool IsPlacingHighlighterAnnotation(MainWindow* win) {
+    return KindOf(win) == AnnotPlacementKind::Highlighter;
 }
 
 static HCURSOR CreateSvgPlacementCursor(const char* icon, int dx, int dy, Color color, DWORD hotspotX, DWORD hotspotY) {
@@ -398,17 +399,16 @@ static Str PlacementNotification(AnnotPlacementKind kind, bool circle, int cmdId
         case AnnotPlacementKind::PolyLine:
             return Tr(
                 "Place polyline annotation. **Double-click**, **right-click**, **Space**, or **Enter** to finish, "
-                "**Ctrl+click** to close it. **Esc** to cancel.");
+                "**Ctrl+click** to close it. **Shift** to snap to multiples of 45 degrees. **Esc** to cancel.");
         case AnnotPlacementKind::Shape:
             return circle
                        ? Tr("Place circle annotation. Drag or click twice. **Shift** for a circle. **Esc** to cancel.")
                        : Tr("Place rectangle annotation. Drag or click twice. **Shift** for a square. **Esc** to "
                             "cancel.");
         case AnnotPlacementKind::Ink:
-            if (OrigCommandId(cmdId) == CmdAnnotationHighlightBrush) {
-                return Tr("Paint with the highlighter. Release to finish. **Esc** to cancel.");
-            }
             return Tr("Draw ink annotation. Release to finish. **Esc** to cancel.");
+        case AnnotPlacementKind::Highlighter:
+            return Tr("Select text to highlight it. **Esc** or **Enter** to finish.");
         default:
             return {};
     }
@@ -443,6 +443,7 @@ bool CancelAnnotationPlacement(MainWindow* win) {
     HideAnnotationHoverOverlay(win);
     ScheduleRepaint(win, 0);
     RestoreCanvasCursor(win);
+    ToolbarUpdateStateForWindow(win, false);
     return true;
 }
 
@@ -505,8 +506,8 @@ bool FinishInkAnnotationPlacement(MainWindow* win) {
     return FinishAnnotationPlacement(win);
 }
 
-static void OnPlacementNotifClosed(MainWindow* win, NotificationWnd* wnd) {
-    RemoveNotification(wnd);
+static void OnPlacementNotifClosed(MainWindow* win, NotificationClosedEvent* ev) {
+    RemoveNotification(ev->wnd);
     if (!win || !IsPlacingAnnotation(win)) {
         return;
     }
@@ -557,7 +558,6 @@ void StartAnnotationPlacement(MainWindow* win, int cmdId) {
     p.kind = kind;
     p.cmdId = cmdId;
     p.circle = OrigCommandId(cmdId) == CmdCreateAnnotCircle;
-    p.highlightBrush = OrigCommandId(cmdId) == CmdAnnotationHighlightBrush;
     if (IsPointPlacementKind(kind)) {
         p.pos = HwndGetCursorPos(win->hwndCanvas);
     }
@@ -579,6 +579,10 @@ void StartAnnotationPlacement(MainWindow* win, int cmdId) {
     HideAnnotationHoverOverlay(win);
     ScheduleRepaint(win, 0);
 
+    // edit PDF toolbar buttons are disabled for the duration of the mode
+    HideToolbarHoverDropdown(win);
+    ToolbarUpdateStateForWindow(win, false);
+
     NotificationCreateArgs args;
     args.hwndParent = win->hwndCanvas;
     args.msg = PlacementNotification(kind, p.circle, cmdId);
@@ -587,7 +591,7 @@ void StartAnnotationPlacement(MainWindow* win, int cmdId) {
     args.corner = NotifCorner::BottomBar;
     args.warning = true;
     args.tab = tab;
-    args.onRemoved = MkFunc1(OnPlacementNotifClosed, win);
+    args.onClosed = MkFunc1(OnPlacementNotifClosed, win);
     ShowNotification(args);
 
     HwndSetFocus(win->hwndFrame);
@@ -716,6 +720,9 @@ static bool HandlePolyLineClick(MainWindow* win, Point pt, WPARAM key) {
     }
     if (!started) {
         p.pageNo = pageNo;
+    }
+    if (started && bit::IsMaskSet(key, (WPARAM)MK_SHIFT)) {
+        pt = SnapLineEndpoint(dm->CvtToScreen(pageNo, p.points[len(p.points) - 1]), pt);
     }
     VecAppend(p.points, dm->CvtFromScreen(pt, pageNo));
     p.end = pt;
@@ -885,11 +892,6 @@ static bool HandleInkDown(MainWindow* win, Point pt) {
     if (!started) {
         p.pageNo = pageNo;
     }
-    if (p.highlightBrush) {
-        // the marker is a fixed number of screen pixels wide, so its width in
-        // page units depends on the zoom the stroke was drawn at
-        p.brushWidthPt = (float)kHighlightBrushScreenWidthPx / PxPerPagePt(dm, pageNo);
-    }
     VecAppend(p.strokeCounts, 0);
     p.mouseDown = true;
     AppendInkPoint(win, dm, pt);
@@ -906,12 +908,9 @@ static bool HandleInkUp(MainWindow* win, Point pt) {
         ReleaseCapture();
     }
     win->annotPlacement.mouseDown = false;
-    bool rearm = !win->annotPlacement.highlightBrush;
     int cmdId = win->annotPlacement.cmdId;
     FinishInkAnnotationPlacement(win);
-    if (rearm) {
-        StartAnnotationPlacement(win, cmdId);
-    }
+    StartAnnotationPlacement(win, cmdId);
     return true;
 }
 
@@ -973,8 +972,22 @@ bool AnnotationPlacementOnRightDown(MainWindow* win) {
     return true;
 }
 
+// The highlighter leaves the mouse to text selection, which it acts on when
+// a selection is finished.
+void AnnotationPlacementOnSelectionStop(MainWindow* win) {
+    if (KindOf(win) != AnnotPlacementKind::Highlighter) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    if (!tab || !tab->selectionOnPage || !win->showSelection) {
+        return;
+    }
+    WPARAM wp = MAKEWPARAM(win->annotPlacement.cmdId, kAnnotationPlacementCommandCode);
+    SendMessageW(win->hwndFrame, WM_COMMAND, wp, 0);
+}
+
 bool AnnotationPlacementOnMouseMove(MainWindow* win, Point pt, WPARAM key) {
-    if (!IsPlacingAnnotation(win)) {
+    if (!IsPlacingAnnotation(win) || KindOf(win) == AnnotPlacementKind::Highlighter) {
         return false;
     }
     DisplayModel* dm = win->AsFixed();
@@ -1021,9 +1034,13 @@ bool AnnotationPlacementOnMouseMove(MainWindow* win, Point pt, WPARAM key) {
             }
             break;
         case AnnotPlacementKind::PolyLine:
-            if (len(p.points) > 0 && pt != p.end) {
-                p.end = pt;
-                ScheduleRepaint(win, 0);
+            if (len(p.points) > 0) {
+                Point last = dm->CvtToScreen(p.pageNo, p.points[len(p.points) - 1]);
+                Point end = bit::IsMaskSet(key, (WPARAM)MK_SHIFT) ? SnapLineEndpoint(last, pt) : pt;
+                if (end != p.end) {
+                    p.end = end;
+                    ScheduleRepaint(win, 0);
+                }
             }
             break;
         case AnnotPlacementKind::Text:
@@ -1045,7 +1062,7 @@ bool AnnotationPlacementOnMouseMove(MainWindow* win, Point pt, WPARAM key) {
 }
 
 bool AnnotationPlacementOnSetCursor(MainWindow* win) {
-    if (!IsPlacingAnnotation(win)) {
+    if (!IsPlacingAnnotation(win) || KindOf(win) == AnnotPlacementKind::Highlighter) {
         return false;
     }
     SetPlacementCursor(win);
@@ -1061,6 +1078,9 @@ bool AnnotationPlacementOnKeyDown(MainWindow* win, WPARAM key) {
     }
     if ((key == VK_SPACE || key == VK_RETURN) && IsPlacingPolyLineAnnotation(win)) {
         return FinishPolyLineAnnotationPlacement(win);
+    }
+    if (key == VK_RETURN && KindOf(win) == AnnotPlacementKind::Highlighter) {
+        return CancelAnnotationPlacement(win);
     }
     return false;
 }
@@ -1114,7 +1134,7 @@ static void PaintPointPlacement(MainWindow* win, HDC hdc, DisplayModel* dm) {
         Gdiplus::SolidBrush fill(Gdiplus::Color(40, 200, 40, 40));
         gs.FillRectangle(&fill, r.x, r.y, r.dx, r.dy);
         gs.DrawRectangle(&pen, r.x, r.y, r.dx, r.dy);
-        Gdiplus::REAL fontDy = (Gdiplus::REAL)std::max(r.dy * 0.45f, 8.f);
+        Gdiplus::REAL fontDy = (Gdiplus::REAL)std::max((float)r.dy * 0.45f, 8.f);
         Gdiplus::Font font(L"Arial", fontDy, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
         Gdiplus::SolidBrush text(red);
         Gdiplus::StringFormat fmt;
@@ -1140,10 +1160,10 @@ static void PaintPointPlacement(MainWindow* win, HDC hdc, DisplayModel* dm) {
         gs.FillRectangle(&fill, r.x, r.y, r.dx, r.dy);
         gs.DrawRectangle(&border, r.x, r.y, r.dx, r.dy);
         Gdiplus::Pen pin(Gdiplus::Color(220, 40, 40, 40), (Gdiplus::REAL)std::max(DpiScale(1), 1));
-        int cx = r.x + r.dx / 2;
+        int cx = r.x + (r.dx / 2);
         int head = std::max(r.dx / 5, 2);
         gs.DrawEllipse(&pin, cx - head, r.y + head, head * 2, head * 2);
-        gs.DrawLine(&pin, cx, r.y + head * 3, cx, r.y + r.dy - head);
+        gs.DrawLine(&pin, cx, r.y + (head * 3), cx, r.y + r.dy - head);
     }
 }
 
@@ -1190,7 +1210,7 @@ static void PaintFreeTextPlacement(MainWindow* win, HDC hdc, DisplayModel* dm) {
     if (args.borderWidth > 0) {
         float bw = std::max((float)args.borderWidth * scale, 1.f);
         Gdiplus::Pen pen(textCol, bw);
-        gs.DrawRectangle(&pen, (Gdiplus::REAL)r.x + bw / 2, (Gdiplus::REAL)r.y + bw / 2, (Gdiplus::REAL)r.dx - bw,
+        gs.DrawRectangle(&pen, (Gdiplus::REAL)r.x + (bw / 2), (Gdiplus::REAL)r.y + (bw / 2), (Gdiplus::REAL)r.dx - bw,
                          (Gdiplus::REAL)r.dy - bw);
     } else {
         // no border on the annotation itself, so mark the extent faintly
@@ -1306,15 +1326,18 @@ static void PaintInkPlacement(MainWindow* win, HDC hdc, DisplayModel* dm) {
 
     Gdiplus::Graphics gs(hdc);
     gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    Gdiplus::Color strokeCol(255, 0, 80, 200);
+    // the stroke the ink button's drop-down is set to make: its color at its
+    // opacity, as wide as the saved stroke will be at this zoom
+    Color col = GetParsedColor(gSettings->annotations.inkColor, kInkDefaultColor);
+    u8 r, g, b;
+    UnpackColor(col, r, g, b);
+    u8 a = GetAlpha(col);
+    // no alpha written out is opaque
+    Gdiplus::Color strokeCol(a == 0 ? 255 : a, r, g, b);
     Gdiplus::REAL width = (Gdiplus::REAL)std::max(DpiScale(2), 1);
-    if (p.highlightBrush) {
-        // preview what the marker will lay down: its color at its opacity,
-        // as wide on screen as the saved stroke will be
-        u8 r, g, b;
-        UnpackColor(HighlightBrushColor(), r, g, b);
-        strokeCol = Gdiplus::Color((u8)((kHighlightBrushOpacity * 255) / 100), r, g, b);
-        width = (Gdiplus::REAL)std::max(1.f, p.brushWidthPt * PxPerPagePt(dm, pageNo));
+    int bw = gSettings->annotations.inkBorderWidth;
+    if (bw > 0) {
+        width = (Gdiplus::REAL)std::max(1.f, (float)bw * PxPerPagePt(dm, pageNo));
     }
     Gdiplus::Pen pen(strokeCol, width);
     pen.SetStartCap(Gdiplus::LineCapRound);
@@ -1324,7 +1347,7 @@ static void PaintInkPlacement(MainWindow* win, HDC hdc, DisplayModel* dm) {
     pen.SetLineJoin(Gdiplus::LineJoinRound);
 
     Vec<Gdiplus::Point> pts;
-    VecReserve(pts, len(p.points));
+    VecGrow(pts, len(p.points));
     int pointIdx = 0;
     for (int count : p.strokeCounts) {
         if (count <= 0 || pointIdx >= len(p.points)) {
@@ -1384,11 +1407,6 @@ bool AnnotationPlacementFillCreate(MainWindow* win, AnnotationType type, Point& 
             pt = dm->CvtToScreen(pageNo, VecLast(p.points));
             args.inkStrokeCounts = &p.strokeCounts;
             args.inkPoints = &p.points;
-            if (p.highlightBrush) {
-                args.borderWidth = (int)(p.brushWidthPt + 0.5f);
-                args.opacity = kHighlightBrushOpacity;
-                args.col = *GetParsedColor(gSettings->annotations.highlightColor);
-            }
             return true;
         case AnnotPlacementKind::Shape: {
             bool validType =
@@ -1475,7 +1493,7 @@ bool AnnotationPlacementFillCreate(MainWindow* win, AnnotationType type, Point& 
     return dm->ValidPageNo(pageNo);
 }
 
-static bool PointDumpCursor(MainWindow* win, AnnotPlacementKind kind, bool active) {
+static bool PointDumpCursor(AnnotPlacementKind kind, bool active) {
     if (!active) {
         return false;
     }
@@ -1496,7 +1514,7 @@ static TempStr PointPlacementDumpLineTemp(MainWindow* win, AnnotPlacementKind ki
     NotificationWnd* notif =
         active ? GetNotificationForGroup(win->hwndCanvas, kNotifPointAnnotationPlacement) : nullptr;
     Str message = NotificationGetMessageTemp(notif);
-    bool cursor = PointDumpCursor(win, kind, active);
+    bool cursor = PointDumpCursor(kind, active);
     int cmdOut = active ? win->annotPlacement.cmdId : 0;
     if (svgCursor) {
         return fmt("%s active=%d notification=%d cursor=%d cmd=%d message=%s\n", key, active ? 1 : 0, notif ? 1 : 0,
@@ -1533,6 +1551,7 @@ TempStr AnnotationPlacementStateTemp(MainWindow* win) {
         out.Append(
             StrL("inkPlacement active=0 notification=0 cursor=0 mouseDown=0 strokes=0 points=0 cmd=0 page=-1 "
                  "message=\n"));
+        out.Append(StrL("highlighterPlacement active=0 notification=0 cmd=0 message=\n"));
         return ToStrTemp(out);
     }
 
@@ -1597,6 +1616,13 @@ TempStr AnnotationPlacementStateTemp(MainWindow* win) {
             "message=%s\n",
             ink ? 1 : 0, notif ? 1 : 0, penCursor ? 1 : 0, ink && p.mouseDown ? 1 : 0, ink ? len(p.strokeCounts) : 0,
             ink ? len(p.points) : 0, ink ? p.cmdId : 0, ink ? p.pageNo : -1, message));
+    }
+    {
+        bool on = KindOf(win) == AnnotPlacementKind::Highlighter;
+        NotificationWnd* notif = GetNotificationForGroup(win->hwndCanvas, kNotifHighlighterPlacement);
+        Str message = NotificationGetMessageTemp(notif);
+        out.Append(fmt("highlighterPlacement active=%d notification=%d cmd=%d message=%s\n", on ? 1 : 0, notif ? 1 : 0,
+                       on ? p.cmdId : 0, message));
     }
     return ToStrTemp(out);
 }

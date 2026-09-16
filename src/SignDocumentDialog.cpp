@@ -29,7 +29,7 @@
 #include "SumatraPDF.h"
 #include "Translations.h"
 #include "Notifications.h"
-#include "DarkMode_win.h"
+#include "DarkMode.h"
 #include "SumatraDialogs.h"
 
 extern bool SaveAnnotationsToMaybeNewPdfFile(WindowTab*);
@@ -252,7 +252,8 @@ static RectF ClampRectToPage(RectF r, RectF page) {
 
 // A default-size box centered on the click, kept on the page.
 static RectF DefaultSignatureRectAt(DisplayModel* dm, int pageNo, PointF pt) {
-    RectF r(pt.x - kDefaultSignatureDx / 2, pt.y - kDefaultSignatureDy / 2, kDefaultSignatureDx, kDefaultSignatureDy);
+    RectF r(pt.x - (kDefaultSignatureDx / 2), pt.y - (kDefaultSignatureDy / 2), kDefaultSignatureDx,
+            kDefaultSignatureDy);
     PageInfo* pi = dm ? dm->GetPageInfo(pageNo) : nullptr;
     if (!pi || !IsMediaBoxKnown(pi->mediaBox)) {
         return r;

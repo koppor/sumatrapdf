@@ -8,7 +8,8 @@
 
 #include "gui/UIModels.h"
 
-#include "GumboHelpers.h"
+#include "base/HtmlTags.h"
+#include "GumboHtmlParser.h"
 
 #include "DocProperties.h"
 #include "DocController.h"
@@ -181,7 +182,7 @@ constexpr int kBaseTableItemCount = 64;
 constexpr int kBaseTableDataLen = kBaseTableItemCount * (int)sizeof(u32);
 
 constexpr int kHuffRecordMinLen = kHuffHeaderLen + kCacheDataLen + kBaseTableDataLen;
-constexpr int kHuffRecordLen = kHuffHeaderLen + 2 * kCacheDataLen + 2 * kBaseTableDataLen;
+constexpr int kHuffRecordLen = kHuffHeaderLen + (2 * kCacheDataLen) + (2 * kBaseTableDataLen);
 
 constexpr int kCdicsMax = 32;
 
@@ -547,7 +548,9 @@ bool MobiDoc::ParseHeader() {
     }
     textEncoding = (int)mobiHdr.textEncoding;
 
-    if (pdbReader->GetRecordCount() > (int)mobiHdr.imageFirstRec) {
+    // compare unsigned: a bogus imageFirstRec of e.g. 0xfffffff0 would pass as
+    // a negative int and index records before the first one
+    if (mobiHdr.imageFirstRec < (u32)pdbReader->GetRecordCount()) {
         imageFirstRec = (int)mobiHdr.imageFirstRec;
         if (0 == imageFirstRec) {
             // I don't think this should ever happen but I've seen it
@@ -556,7 +559,9 @@ bool MobiDoc::ParseHeader() {
             imagesCount = pdbReader->GetRecordCount() - imageFirstRec;
         }
     }
-    if (kPalmDocHeaderLen + (int)mobiHdr.hdrLen > recSize) {
+    // compare unsigned: a hdrLen >= 0x80000000 would pass as a negative int
+    // and the EXTH header would be read far past the end of the record
+    if (mobiHdr.hdrLen > (u32)(recSize - kPalmDocHeaderLen)) {
         logf("MobiHeader too big\n");
         return false;
     }
@@ -575,6 +580,9 @@ bool MobiDoc::ParseHeader() {
 
     if (kCompressionHuff == compressionType) {
         ReportIf(PdbDocType::Mobipocket != docType);
+        if (mobiHdr.huffmanFirstRec > (u32)INT_MAX - (u32)kCdicsMax) {
+            return false;
+        }
         rec = pdbReader->GetRecord((int)mobiHdr.huffmanFirstRec);
         int huffRecSize = rec.len;
         u8* recData = (u8*)rec.s;
@@ -586,12 +594,11 @@ bool MobiDoc::ParseHeader() {
         if (!huffDic->SetHuffData(recData, huffRecSize)) {
             return false;
         }
-        int cdicsCount = (int)mobiHdr.huffmanRecCount - 1;
-        if (cdicsCount > kCdicsMax) {
-            logf("MobiDoc::ParseHeader: cdicsCount: %d, kCdicsMax: %d\n", cdicsCount, kCdicsMax);
-            ReportDebugIf(true);
+        if (mobiHdr.huffmanRecCount < 1 || mobiHdr.huffmanRecCount > (u32)kCdicsMax + 1) {
+            logf("MobiDoc::ParseHeader: huffmanRecCount: %u\n", mobiHdr.huffmanRecCount);
             return false;
         }
+        int cdicsCount = (int)mobiHdr.huffmanRecCount - 1;
         for (int i = 0; i < cdicsCount; i++) {
             rec = pdbReader->GetRecord((int)mobiHdr.huffmanFirstRec + 1 + i);
             recData = (u8*)rec.s;
@@ -680,7 +687,7 @@ bool MobiDoc::DecodeExthHeader(const u8* data, int dataLen) {
     return true;
 }
 
-constexpr int kEofRec = 0xe98e0d0a;
+constexpr u32 kEofRec = 0xe98e0d0a;
 constexpr int kFlisRec = 0x464c4953; // 'FLIS'
 constexpr int kFcisRec = 0x46434953; // 'FCIS
 constexpr int kFdstRec = 0x46445354; // 'FDST'
@@ -949,7 +956,7 @@ int KindleEmbedToRecIndex(Str src) {
         } else {
             break;
         }
-        n = n * 32 + digit;
+        n = (n * 32) + digit;
         any = true;
         p++;
     }
@@ -1481,13 +1488,13 @@ static bool FileMightBePrintReplica(Str path) {
     u32 off1 = r.UInt32BE(86);
     bool isType8 = false;
     bool sawType = false;
-    if (off0 + 28 <= (u32)n && MemEq(buf + off0 + 16, "MOBI", 4)) {
+    if (n >= 28 && off0 <= (u32)(n - 28) && MemEq(buf + off0 + 16, "MOBI", 4)) {
         sawType = true;
         isType8 = r.UInt32BE((int)off0 + 24) == 8;
     }
     bool sawRec1 = false;
     bool rec1Mop = false;
-    if (off1 + 4 <= (u32)n) {
+    if (n >= 4 && off1 <= (u32)(n - 4)) {
         sawRec1 = true;
         rec1Mop = MemEq(buf + off1, "%MOP", 4);
     }

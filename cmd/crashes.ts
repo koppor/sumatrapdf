@@ -2,10 +2,10 @@
 //
 //   bun cmd/crashes.ts              list (oldest first); analyze missing
 //   bun cmd/crashes.ts --local      same, against http://127.0.0.1:9321
-//   bun cmd/crashes.ts <id>         download dump + pdb, run !analyze
-import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync, unlinkSync } from "node:fs";
+//   bun cmd/crashes.ts <id>         download dump + pdb + exe, run !analyze
+import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync, unlinkSync, copyFileSync } from "node:fs";
 import { join, resolve, relative } from "node:path";
-import { homedir } from "node:os";
+import { homedir, cpus } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
 
 const ROOT = resolve(join(import.meta.dir, ".."));
@@ -14,6 +14,8 @@ const WIN_SYM_CACHE = join(homedir(), ".symbols");
 const MS_SYMBOL_SERVER = "https://msdl.microsoft.com/download/symbols";
 const PROD_SERVER = "https://www.sumatrapdfreader.org";
 const LOCAL_SERVER = "http://127.0.0.1:9321";
+// the crash server hosts minidumps per app under /app/<app>/
+const APP = "sumatrapdf";
 const SECRETS_GO = String.raw`D:\src\hack\webapps\sumatra-website\server\secrets.go`;
 
 type DumpRow = {
@@ -27,16 +29,22 @@ type DumpRow = {
 function usage(): void {
   console.log(`Usage:
   bun cmd/crashes.ts [--local]                 list; download+analyze dumps we don't have yet
-  bun cmd/crashes.ts [--local] <id>            download dump, pdb, run cdb (!analyze -v; ~*kb)
-  bun cmd/crashes.ts -reanalyze [--local] [id] force cdb again (dump/pdb stay cached)
+  bun cmd/crashes.ts [--local] <id>            download dump, pdb, exe, run cdb (!analyze -v; ~*kb)
+  bun cmd/crashes.ts -reanalyze [--local] [id] force cdb again (dump/pdb/exe stay cached)
+  bun cmd/crashes.ts --list [--today]          print the list as CSV and exit (no download, no server)
   bun cmd/crashes.ts --server <url> ...        override server base URL
+  --today                                      only crashes from today
 After listing, serves a local page (like sumatrapdfreader.org/crashes/) and opens the browser.`);
 }
 
-function parseArgs(argv: string[]): { server: string; id: string; reanalyze: boolean } {
+type Args = { server: string; id: string; reanalyze: boolean; list: boolean; today: boolean };
+
+function parseArgs(argv: string[]): Args {
   let server = PROD_SERVER;
   let id = "";
   let reanalyze = false;
+  let list = false;
+  let today = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") {
@@ -45,6 +53,14 @@ function parseArgs(argv: string[]): { server: string; id: string; reanalyze: boo
     }
     if (a === "--local") {
       server = LOCAL_SERVER;
+      continue;
+    }
+    if (a === "--list" || a === "-list") {
+      list = true;
+      continue;
+    }
+    if (a === "--today" || a === "-today") {
+      today = true;
       continue;
     }
     if (a === "-reanalyze" || a === "-re-analyze" || a === "--reanalyze" || a === "--re-analyze") {
@@ -67,7 +83,19 @@ function parseArgs(argv: string[]): { server: string; id: string; reanalyze: boo
     }
     id = a;
   }
-  return { server, id, reanalyze };
+  return { server, id, reanalyze, list, today };
+}
+
+// yyyy-mm-dd in local time
+function todayStr(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// crash ids and the date column both start with yyyy-mm-dd
+function isFromDay(row: DumpRow, day: string): boolean {
+  return row.id.startsWith(day) || row.date.startsWith(day);
 }
 
 function parseList(text: string): DumpRow[] {
@@ -135,6 +163,10 @@ function relSettings(id: string): string {
   return relative(ROOT, settingsPath(id)).replaceAll("\\", "/");
 }
 
+function toLF(s: string): string {
+  return s.replace(/\r\n/g, "\n");
+}
+
 const kSettingsMark = "--- settings ---";
 const kSettingsMarkOld = "----- Settings file ----------";
 
@@ -153,8 +185,7 @@ function splitMinidumpComment(text: string): { log: string; settings: string } {
   }
   return {
     log: text.slice(0, idx).replace(/\s+$/, ""),
-    settings: text
-      .slice(idx + markLen)
+    settings: toLF(text.slice(idx + markLen))
       .replace(/^\s+/, "")
       .replace(/\s+$/, ""),
   };
@@ -422,11 +453,13 @@ function symbolCacheKey(version: string): string {
   return version.trim().replace(/[^\w.-]+/g, "_") || "unknown";
 }
 
-function pdbUrlForVersion(version: string): string {
+// ext is ".pdb.lzsa" or ".exe"; the arch part of the name is the same for both
+function dlUrlForVersion(version: string, ext: string): string {
   const v = version.trim();
   const arch = archSuffix(v);
-  const suff = arch === "64" ? "-64.pdb.lzsa" : arch === "arm64" ? "-arm64.pdb.lzsa" : "-32.pdb.lzsa";
-  const relSuff = arch === "32" ? ".pdb.lzsa" : suff;
+  const suff = arch === "64" ? `-64${ext}` : arch === "arm64" ? `-arm64${ext}` : `-32${ext}`;
+  // 32-bit releases have no arch suffix
+  const relSuff = arch === "32" ? ext : suff;
   const prerel = prerelVer(v);
   if (prerel) {
     return `${PROD_SERVER}/dl/prerel/${prerel}/SumatraPDF-prerel${suff}`;
@@ -614,30 +647,143 @@ function localDbgSymDir(version: string): string {
   return "";
 }
 
+const inFlightSymbols = new Map<string, Promise<string>>();
+
 async function ensureSymbols(row: DumpRow): Promise<string> {
   const local = localDbgSymDir(row.version);
   if (local) {
     return local;
   }
-  const dir = join(CACHE_DIR, "symbols", symbolCacheKey(row.version));
+  const key = symbolCacheKey(row.version);
+  const dir = join(CACHE_DIR, "symbols", key);
   if (hasSumatraPdbs(dir)) {
     return dir;
   }
-  const url = pdbUrlForVersion(row.version);
-  if (!url) {
-    throw new Error(`no pdb source for version '${row.version}'`);
+  let p = inFlightSymbols.get(key);
+  if (p) {
+    return await p;
   }
-  mkdirSync(dir, { recursive: true });
-  const lzsaPath = join(dir, "pdb.lzsa");
-  if (!existsSync(lzsaPath) || statSync(lzsaPath).size === 0) {
-    console.log(`pdb: downloading ${url}`);
-    writeFileSync(lzsaPath, await fetchBytes(url));
+  p = (async () => {
+    const url = dlUrlForVersion(row.version, ".pdb.lzsa");
+    if (!url) {
+      throw new Error(`no pdb source for version '${row.version}'`);
+    }
+    mkdirSync(dir, { recursive: true });
+    const lzsaPath = join(dir, "pdb.lzsa");
+    if (!existsSync(lzsaPath) || statSync(lzsaPath).size === 0) {
+      console.log(`pdb: downloading ${url}`);
+      writeFileSync(lzsaPath, await fetchBytes(url));
+    }
+    extractLzsaPdb(readFileSync(lzsaPath), dir);
+    if (!hasSumatraPdbs(dir)) {
+      throw new Error(`pdb lzsa missing SumatraPDF.pdb or libsumatrapdf.pdb (${url})`);
+    }
+    return dir;
+  })();
+  inFlightSymbols.set(key, p);
+  try {
+    return await p;
+  } finally {
+    inFlightSymbols.delete(key);
   }
-  extractLzsaPdb(readFileSync(lzsaPath), dir);
-  if (!hasSumatraPdbs(dir)) {
-    throw new Error(`pdb lzsa missing SumatraPDF.pdb or libsumatrapdf.pdb (${url})`);
+}
+
+const inFlightExe = new Map<string, Promise<string>>();
+
+// cdb needs SumatraPDF.exe to map the image (the dump has no code pages), otherwise
+// it prints "Unable to load image ... Win32 error 0n2" and can't disassemble
+async function ensureExe(row: DumpRow): Promise<string> {
+  const local = localDbgSymDir(row.version);
+  if (local && existsSync(join(local, "SumatraPDF.exe"))) {
+    return local;
+  }
+  const key = symbolCacheKey(row.version);
+  const dir = join(CACHE_DIR, "symbols", key);
+  const exePath = join(dir, "SumatraPDF.exe");
+  if (existsSync(exePath) && statSync(exePath).size > 0) {
+    return dir;
+  }
+  let p = inFlightExe.get(key);
+  if (p) {
+    return await p;
+  }
+  p = (async () => {
+    const url = dlUrlForVersion(row.version, ".exe");
+    if (!url) {
+      throw new Error(`no exe source for version '${row.version}'`);
+    }
+    mkdirSync(dir, { recursive: true });
+    console.log(`exe: downloading ${url}`);
+    writeFileSync(exePath, await fetchBytes(url));
+    return dir;
+  })();
+  inFlightExe.set(key, p);
+  try {
+    return await p;
+  } finally {
+    inFlightExe.delete(key);
+  }
+}
+
+// missing exe only degrades the analysis, so never fail on it
+async function ensureExeQuiet(row: DumpRow): Promise<string> {
+  try {
+    return await ensureExe(row);
+  } catch (e) {
+    console.log(`exe: ${e instanceof Error ? e.message : e}`);
+    return "";
+  }
+}
+
+// the dump identifies the image by the path it ran from, so a renamed exe
+// ("SumatraPDF-prerel-64 (3).exe") doesn't match our cached SumatraPDF.exe and
+// cdb can't unwind past inlined frames. Give it a dir with a copy under that name.
+function crashedExeName(id: string): string {
+  if (!isLogExtracted(id)) {
+    return "";
+  }
+  const m = /^Exe:[ \t]*(.*\.exe)[ \t]/im.exec(readFileSync(logPath(id), "utf8"));
+  if (!m) {
+    return "";
+  }
+  const name = m[1].split(/[\\/]/).pop() ?? "";
+  return name === "SumatraPDF.exe" ? "" : name;
+}
+
+function renamedExeDir(id: string, exeDir: string): string {
+  const name = exeDir ? crashedExeName(id) : "";
+  if (!name) {
+    return "";
+  }
+  const src = join(exeDir, "SumatraPDF.exe");
+  if (!existsSync(src)) {
+    return "";
+  }
+  const dir = join(dumpDir(id), "img");
+  const dst = join(dir, name);
+  if (!existsSync(dst) || statSync(dst).size !== statSync(src).size) {
+    mkdirSync(dir, { recursive: true });
+    copyFileSync(src, dst);
   }
   return dir;
+}
+
+async function downloadDumpIfMissing(server: string, id: string): Promise<void> {
+  mkdirSync(dumpDir(id), { recursive: true });
+  const dmpPath = dumpPath(id);
+  if (existsSync(dmpPath)) {
+    return;
+  }
+  const url = `${server}/app/${APP}/minidump/${id}`;
+  console.log(`dump: downloading ${url}`);
+  writeFileSync(dmpPath, await fetchBytes(url, dumpAuth(loadMinidumpPassword())));
+}
+
+async function ensureDownloaded(server: string, row: DumpRow, reanalyze: boolean): Promise<void> {
+  await downloadDumpIfMissing(server, row.id);
+  extractDumpLog(row.id, reanalyze);
+  await ensureSymbols(row);
+  await ensureExeQuiet(row);
 }
 
 const MARK_CRASHED = "---CRASHED-STACK---";
@@ -700,24 +846,43 @@ function rewriteAnalyzeLog(raw: string): string {
 
 const CDB_CMD = `.echo ${MARK_CRASHED}; .ecxr; kb; .echo ${MARK_ANALYZE}; !analyze -v; .echo ${MARK_THREADS}; ~*kb; qq`;
 
-async function analyze(server: string, row: DumpRow, reanalyze: boolean): Promise<void> {
+function runCdbAsync(cdb: string, args: string[], outPath: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    const proc = spawn(cdb, args, { stdio: ["ignore", "pipe", "pipe"] });
+    proc.stdout.on("data", (d) => {
+      stdout += d;
+    });
+    proc.stderr.on("data", (d) => {
+      stderr += d;
+    });
+    proc.on("error", (err) => {
+      reject(err);
+    });
+    proc.on("close", () => {
+      if (!existsSync(outPath) || statSync(outPath).size === 0) {
+        writeFileSync(outPath, `${stdout}\n${stderr}`);
+      }
+      if (existsSync(outPath)) {
+        writeFileSync(outPath, rewriteAnalyzeLog(readFileSync(outPath, "utf8")));
+      }
+      resolve();
+    });
+  });
+}
+
+async function runAnalysis(row: DumpRow, reanalyze: boolean): Promise<void> {
   if (!reanalyze && isAnalyzed(row.id)) {
     return;
   }
-  const dir = dumpDir(row.id);
-  mkdirSync(dir, { recursive: true });
   const dmpPath = dumpPath(row.id);
-  if (!existsSync(dmpPath)) {
-    const url = `${server}/minidump/${row.id}`;
-    console.log(`dump: downloading ${url}`);
-    writeFileSync(dmpPath, await fetchBytes(url, dumpAuth(loadMinidumpPassword())));
-  }
-  extractDumpLog(row.id, reanalyze);
   const outPath = analyzePath(row.id);
   if (reanalyze && existsSync(outPath)) {
     unlinkSync(outPath);
   }
   const symDir = await ensureSymbols(row);
+  const exeDir = await ensureExeQuiet(row);
   const cdb = findCdb();
   if (!cdb) {
     console.log(`dump: ${dmpPath}`);
@@ -732,18 +897,23 @@ async function analyze(server: string, row: DumpRow, reanalyze: boolean): Promis
     symParts.push(nt);
   }
   const symPath = symParts.join(";");
-  console.log(`cdb: ${cdb}`);
+  console.log(`cdb: ${cdb} (${row.id})`);
   console.log(`pdb: ${relative(ROOT, symDir).replaceAll("\\", "/")}`);
-  const r = spawnSync(cdb, ["-z", dmpPath, "-y", symPath, "-lines", "-logo", outPath, "-c", CDB_CMD], {
-    encoding: "utf8",
-    timeout: 300_000,
-  });
-  if (!existsSync(outPath) || statSync(outPath).size === 0) {
-    writeFileSync(outPath, `${r.stdout || ""}\n${r.stderr || ""}`);
+  const args = ["-z", dmpPath, "-y", symPath, "-lines"];
+  const imgDirs = [exeDir, renamedExeDir(row.id, exeDir)].filter((d) => d !== "");
+  if (imgDirs.length > 0) {
+    args.push("-i", imgDirs.join(";"));
   }
-  if (existsSync(outPath)) {
-    writeFileSync(outPath, rewriteAnalyzeLog(readFileSync(outPath, "utf8")));
+  args.push("-logo", outPath, "-c", CDB_CMD);
+  await runCdbAsync(cdb, args, outPath);
+}
+
+async function analyze(server: string, row: DumpRow, reanalyze: boolean): Promise<void> {
+  if (!reanalyze && isAnalyzed(row.id)) {
+    return;
   }
+  await ensureDownloaded(server, row, reanalyze);
+  await runAnalysis(row, reanalyze);
 }
 
 async function ensureAnalyzed(server: string, row: DumpRow, reanalyze: boolean): Promise<void> {
@@ -754,20 +924,29 @@ async function ensureAnalyzed(server: string, row: DumpRow, reanalyze: boolean):
   await analyze(server, row, reanalyze);
 }
 
+async function mapConcurrent<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let idx = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (idx < items.length) {
+      const cur = items[idx++];
+      await fn(cur);
+    }
+  });
+  await Promise.all(workers);
+}
+
 type ApiCrash = {
   Day: string;
   FileNameTxt: string;
   IP: string;
   Ver: string;
-  Cond: string;
   CrashLine: string;
+  SrcLoc: string;
   GitSha1: string;
   IsCrash: boolean;
-  HasLog: boolean;
-  HasSettings: boolean;
 };
 
-function parseAnalyzeSummary(txt: string): { crashLine: string; cond: string; isCrash: boolean } {
+function parseAnalyzeSummary(txt: string): { crashLine: string; srcLoc: string; isCrash: boolean } {
   const isCrash = !/Type:\s*hang/i.test(txt);
   let body = txt;
   const crashed = txt.indexOf("=== crashed thread ===");
@@ -779,7 +958,7 @@ function parseAnalyzeSummary(txt: string): { crashLine: string; cond: string; is
   const siteRe = / : ([A-Za-z0-9_.]+![^\s\[]+)/;
   const srcRe = /\[([^\]]+?) @ (\d+)\]/;
   let crashLine = "";
-  let cond = "";
+  let srcLoc = "";
   for (const line of body.split(/\r?\n/)) {
     const sm = siteRe.exec(line);
     if (!sm) {
@@ -788,28 +967,48 @@ function parseAnalyzeSummary(txt: string): { crashLine: string; cond: string; is
     crashLine = sm[1];
     const src = srcRe.exec(line);
     if (src) {
-      cond = `${crashLine} @ ${src[1]}:${src[2]}`;
+      srcLoc = `${src[1]}:${src[2]}`;
     }
     break;
   }
-  return { crashLine, cond, isCrash };
+  return { crashLine, srcLoc, isCrash };
 }
 
 function crashApiRow(row: DumpRow): ApiCrash {
   const txt = isAnalyzed(row.id) ? readFileSync(analyzePath(row.id), "utf8") : "";
-  const { crashLine, cond, isCrash } = parseAnalyzeSummary(txt);
+  const { crashLine, srcLoc, isCrash } = parseAnalyzeSummary(txt);
   return {
     Day: row.date.slice(0, 10),
     FileNameTxt: row.id,
     IP: row.ip,
     Ver: row.version,
-    Cond: cond,
     CrashLine: crashLine,
+    SrcLoc: srcLoc,
     GitSha1: "",
     IsCrash: isCrash,
-    HasLog: isLogExtracted(row.id),
-    HasSettings: isSettingsExtracted(row.id),
   };
+}
+
+function readLog(id: string): string {
+  return isLogExtracted(id) ? readFileSync(logPath(id), "utf8") : "";
+}
+
+function readSettings(id: string): string {
+  return isSettingsExtracted(id) ? toLF(readFileSync(settingsPath(id), "utf8")) : "";
+}
+
+// analyze.txt with the minidump log and settings appended
+function crashText(id: string, analyzeTxt: string): string {
+  const parts = [analyzeTxt.replace(/\s+$/, "")];
+  const log = readLog(id);
+  if (log) {
+    parts.push("=== minidump log ===", log.replace(/\s+$/, ""));
+  }
+  const settings = readSettings(id);
+  if (settings) {
+    parts.push("=== settings ===", settings.replace(/\s+$/, ""));
+  }
+  return `${parts.join("\n\n")}\n`;
 }
 
 function escapeHtml(s: string): string {
@@ -818,8 +1017,8 @@ function escapeHtml(s: string): string {
 
 function crashHtml(id: string, analyzeTxt: string): string {
   const enc = encodeURIComponent(id);
-  const logTxt = isLogExtracted(id) ? readFileSync(logPath(id), "utf8") : "";
-  const settingsTxt = isSettingsExtracted(id) ? readFileSync(settingsPath(id), "utf8") : "";
+  const logTxt = readLog(id);
+  const settingsTxt = readSettings(id);
   const logBlock = logTxt ? `<h2>minidump log</h2>\n<pre>${escapeHtml(logTxt)}</pre>` : "";
   const settingsBlock = settingsTxt ? `<h2>settings</h2>\n<pre>${escapeHtml(settingsTxt)}</pre>` : "";
   return `<!doctype html>
@@ -897,17 +1096,7 @@ function crashesIndexHtml(): string {
       let n = crashesPerDay[day] ? crashesPerDay[day].length : 0;
       return "[" + n + "]";
     }
-    function parseCond(crash) {
-      let cond = crash.Cond;
-      if (!cond) return null;
-      let atIdx = cond.lastIndexOf(" @ ");
-      if (atIdx < 0) return null;
-      return { prefix: cond.substring(0, atIdx + 3), shortPath: cond.substring(atIdx + 3), url: "" };
-    }
     function textURL(crash) { return "/crash/" + crash.FileNameTxt; }
-    function htmlURL(crash) { return "/crash/" + crash.FileNameTxt + ".html"; }
-    function logURL(crash) { return "/crash/" + crash.FileNameTxt + ".log"; }
-    function settingsURL(crash) { return "/crash/" + crash.FileNameTxt + ".settings"; }
   </script>
   <script src="https://unpkg.com/alpinejs" defer></script>
   <style>
@@ -943,17 +1132,6 @@ function crashesIndexHtml(): string {
         <template x-for="crash in $store.crashes.currDayCrashes">
           <tr>
             <td><a :href="textURL(crash)" target="_blank">text</a></td>
-            <td><a :href="htmlURL(crash)" target="_blank">html</a></td>
-            <td>
-              <template x-if="crash.HasLog">
-                <a :href="logURL(crash)" target="_blank">log</a>
-              </template>
-            </td>
-            <td>
-              <template x-if="crash.HasSettings">
-                <a :href="settingsURL(crash)" target="_blank">settings</a>
-              </template>
-            </td>
             <td>
               <template x-if="crash.IsCrash">
                 <div style="color: red; font-weight: bold;" x-text="shortVer(crash.ShortVer)"></div>
@@ -962,16 +1140,9 @@ function crashesIndexHtml(): string {
                 <div x-text="shortVer(crash.ShortVer)"></div>
               </template>
             </td>
-            <td>
-              <template x-if="parseCond(crash)">
-                <div><span x-text="parseCond(crash).prefix"></span><span x-text="parseCond(crash).shortPath"></span></div>
-              </template>
-              <template x-if="!parseCond(crash)">
-                <div x-text="crash.Cond"></div>
-              </template>
-            </td>
-            <td><div x-text="crash.CrashLine"></div></td>
             <td><div x-text="crash.IP"></div></td>
+            <td><div x-text="crash.CrashLine"></div></td>
+            <td><div x-text="crash.SrcLoc"></div></td>
           </tr>
         </template>
       </tbody>
@@ -1014,7 +1185,7 @@ function handleCrashHttp(req: Request, rows: DumpRow[]): Response {
       if (!isSettingsExtracted(id)) {
         return new Response("not found", { status: 404 });
       }
-      return new Response(readFileSync(settingsPath(id), "utf8"), {
+      return new Response(readSettings(id), {
         headers: { "content-type": "text/plain; charset=utf-8" },
       });
     }
@@ -1025,7 +1196,7 @@ function handleCrashHttp(req: Request, rows: DumpRow[]): Response {
     if (ext === ".html") {
       return new Response(crashHtml(id, body), { headers: { "content-type": "text/html; charset=utf-8" } });
     }
-    return new Response(body, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    return new Response(crashText(id, body), { headers: { "content-type": "text/plain; charset=utf-8" } });
   }
   return new Response("not found", { status: 404 });
 }
@@ -1062,13 +1233,23 @@ async function serveCrashes(rows: DumpRow[]): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const { server, id, reanalyze } = parseArgs(process.argv.slice(2));
+  const { server, id, reanalyze, list: listOnly, today } = parseArgs(process.argv.slice(2));
   const password = loadMinidumpPassword();
-  const list = parseList(await fetchText(`${server}/minidumps.txt`, dumpAuth(password)));
+  let list = parseList(await fetchText(`${server}/app/${APP}/minidumps.txt`, dumpAuth(password)));
+  if (today) {
+    list = list.filter((r) => isFromDay(r, todayStr()));
+  }
+  if (listOnly) {
+    console.log("id,version,date,size,ip");
+    for (const r of list) {
+      console.log(`${r.id},${r.version},${r.date},${r.size},${r.ip}`);
+    }
+    return;
+  }
   if (id) {
     const row = list.find((r) => r.id === id);
     if (!row) {
-      throw new Error(`minidump '${id}' not in ${server}/minidumps.txt`);
+      throw new Error(`minidump '${id}' not in ${server}/app/${APP}/minidumps.txt`);
     }
     await ensureAnalyzed(server, row, reanalyze);
     console.log(relAnalyze(row.id));
@@ -1079,17 +1260,48 @@ async function main(): Promise<void> {
       console.log(relSettings(row.id));
     }
   } else {
-    for (const row of list) {
+    await mapConcurrent(list, 4, async (row) => {
       try {
-        await ensureAnalyzed(server, row, reanalyze);
+        await ensureDownloaded(server, row, reanalyze);
       } catch (e) {
-        console.error(`${row.id}: ${e instanceof Error ? e.message : e}`);
+        console.error(`${row.id}: download: ${e instanceof Error ? e.message : e}`);
       }
-    }
+    });
+    const cdbWorkers = Math.max(1, cpus().length - 1);
+    await mapConcurrent(list, cdbWorkers, async (row) => {
+      try {
+        await runAnalysis(row, reanalyze);
+      } catch (e) {
+        console.error(`${row.id}: analyze: ${e instanceof Error ? e.message : e}`);
+      }
+    });
     printRows(list);
   }
   await serveCrashes(list);
 }
+
+export type { DumpRow };
+export {
+  CACHE_DIR,
+  PROD_SERVER,
+  LOCAL_SERVER,
+  dumpDir,
+  dumpPath,
+  analyzePath,
+  logPath,
+  settingsPath,
+  relAnalyze,
+  relLog,
+  relSettings,
+  extractDumpLog,
+  isAnalyzed,
+  isLogExtracted,
+  isSettingsExtracted,
+  downloadDumpIfMissing,
+  ensureSymbols,
+  runAnalysis,
+  parseAnalyzeSummary,
+};
 
 if (import.meta.main) {
   try {

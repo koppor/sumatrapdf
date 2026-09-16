@@ -27,7 +27,7 @@
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
 #include "Translations.h"
-#include "DarkMode_win.h"
+#include "DarkMode.h"
 #include "SumatraDialogs.h"
 
 static const int kMaxCustomColors = 13;
@@ -38,27 +38,44 @@ static const Color kBgPresetColors[] = {
     kColWhite,
 };
 
+// custom swatches are laid out in 2 rows
+static const int kCustomInRow1 = 5;
+
+static const Color kColCheckerDark = MkRgb(204, 204, 204);
+
 static const int kIdPreview = 1;
 static const int kIdPreset0 = 10;
 static const int kIdCustom0 = 20;
 
-// HSV picker, hex edit, swatches and OK/Cancel. Same WindowBase layout as
-// Settings. Used for both Change Background Color and Change Tab Color.
+enum class CloseAction {
+    Cancel,
+    Select
+};
+
+// HSV picker, hex edit, swatches and Cancel/OK. Same WindowBase layout as
+// Settings. Used for Change Background Color and, when colorsArgs is set, as
+// the generic color picker (ShowChangeColorsDialog).
 struct ChangeColorWnd : WindowBase {
     ~ChangeColorWnd() override;
 
     MainWindow* win = nullptr;
     WindowTab* tab = nullptr;
     Str filePath;
-    bool forTabColor = false;
+    // non-null: generic color picker mode, owned
+    ChangeColorsArgs* colorsArgs = nullptr;
+    // the picked color carries an opacity byte the user can change
+    bool withOpacity = false;
     bool isCbx = false;
     bool isImage = false;
     bool isEbook = false;
 
     Color currentColor = 0;
     bool isCheckered = false;
+    u8 opacity = 0xff;
     Color customColors[kMaxCustomColors]{};
-    bool customColorSet[kMaxCustomColors]{};
+    // how many of customColors are defined; the swatch at this index is the
+    // single empty slot for defining the next color
+    int nCustom = 0;
     bool customColorsChanged = false;
     int selectedCustomIdx = -1;
     bool previewSelected = true;
@@ -71,40 +88,59 @@ struct ChangeColorWnd : WindowBase {
     VirtCustom* swatchPreview = nullptr;
     VirtCustom* swatchPreset[kNumPresets]{};
     VirtCustom* swatchCustom[kMaxCustomColors]{};
+    ILayout* swatchRow2 = nullptr;
+    ILayout* opacityRow = nullptr;
+    VirtText* opacityLabel = nullptr;
+    VirtSlider* opacitySlider = nullptr;
+    VirtText* opacityValue = nullptr;
     Checkbox* radioThisFile = nullptr;
     Checkbox* radioAllFiles = nullptr;
+    VirtButton* btnRemove = nullptr;
     VirtButton* btnCancel = nullptr;
     VirtButton* btnOk = nullptr;
 
     bool Create(MainWindow* win);
     void SetTargetBackground(MainWindow* win);
-    void SetTargetTab(MainWindow* win, WindowTab* tab);
+    void SetTargetColors(ChangeColorsArgs* args);
     void ClassifyTab(WindowTab* tab);
     void LoadCurrentColor();
-    void ParseCustomColors();
+    void LoadColors();
     void SaveCustomColorsIfChanged();
     void UpdateEditFromColor();
     bool TryParseEdit();
     void SelectPreview();
     void SelectCustom(int idx);
     void InvalidateSwatches();
+    void UpdateSwatchVis();
+    void UpdateRemoveBtn();
+    void UpdateOpacityVis();
+    void UpdateOpacityValue();
+    void SyncOpacityFromColor();
+    void OnOpacityChanged();
+    void SetCustomColor(int idx, Color);
+    void RemoveCustom(int idx);
     void PickFromArea(Point ptLocal);
     void OnAreaMouse(VirtMouseEvent* ev);
     void OnSwatchClick(VirtMouseEvent* ev);
     void OnSwatchContext(VirtMouseEvent* ev);
     void OnEditChanged();
+    void Relayout();
     void RelayoutRadios();
 
+    void OnRemove(VirtMouseEvent* ev = nullptr);
     void OnCancel(VirtMouseEvent* ev = nullptr);
     void OnOk(VirtMouseEvent* ev = nullptr);
+    void Finish(CloseAction);
+    void NotifyColorsArgs(CloseAction);
     void ApplyBackground();
-    void ApplyTabColor();
     WindowTab* TargetTab();
 };
 
 static ChangeColorWnd* gChangeColorWnd = nullptr;
 
 ChangeColorWnd::~ChangeColorWnd() {
+    // a window destroyed without going through Finish() still owes the caller a reply
+    NotifyColorsArgs(CloseAction::Cancel);
     str::Free(filePath);
     FreePixmap(hsvPx);
 }
@@ -169,10 +205,29 @@ static Pixmap* MakeHsvPixmap(int w, int h) {
     return px;
 }
 
-static void PaintCheckerboard(Gfx* gfx, Rect rc) {
+static Color WithAlpha(Color c, u8 a) {
+    return (c & 0xffffff) | ((Color)a << 24);
+}
+
+// an alpha of 0 means "no alpha given" everywhere else, so it reads as opaque
+static u8 OpacityOf(Color c) {
+    u8 a = GetAlpha(c);
+    return a == 0 ? 0xff : a;
+}
+
+static u8 BlendChannel(u8 fg, u8 bg, u8 a) {
+    return (u8)(((int)fg * (int)a + (int)bg * (255 - (int)a)) / 255);
+}
+
+static Color BlendOver(Color col, Color bg, u8 a) {
+    u8 r, g, b, br, bg2, bb;
+    UnpackColor(col, r, g, b);
+    UnpackColor(bg, br, bg2, bb);
+    return MkRgb(BlendChannel(r, br, a), BlendChannel(g, bg2, a), BlendChannel(b, bb, a));
+}
+
+static void PaintCheckerboard(Gfx* gfx, Rect rc, Color light, Color dark) {
     constexpr int kCheckerSize = 8;
-    Color light = kColWhite;
-    Color dark = MkRgb(204, 204, 204);
     for (int cy = 0; cy < rc.dy; cy += kCheckerSize) {
         for (int cx = 0; cx < rc.dx; cx += kCheckerSize) {
             int cellW = kCheckerSize;
@@ -189,55 +244,40 @@ static void PaintCheckerboard(Gfx* gfx, Rect rc) {
     }
 }
 
-void ChangeColorWnd::ParseCustomColors() {
-    for (int i = 0; i < kMaxCustomColors; i++) {
-        customColorSet[i] = false;
-        customColors[i] = 0;
-    }
-    customColorsChanged = false;
-    Str s = gSettings ? gSettings->customColors : Str{};
-    if (len(s) == 0) {
+static void SaveCustomColors(const Vec<Color>& colors) {
+    if (!gSettings) {
         return;
     }
-    int idx = 0;
-    int i = 0;
-    while (i < s.len && idx < kMaxCustomColors) {
-        while (i < s.len && s.s[i] == ' ') {
-            i++;
-        }
-        if (i >= s.len) {
+    str::ReplaceWithCopy(&gSettings->customColors, SerializeColorList(colors));
+    ScheduleSaveSettings();
+}
+
+void ChangeColorWnd::LoadColors() {
+    Vec<Color> colors;
+    if (colorsArgs) {
+        colors = colorsArgs->colors;
+    } else if (gSettings) {
+        ParseColorList(gSettings->customColors, colors, kMaxCustomColors);
+    }
+    nCustom = 0;
+    customColorsChanged = false;
+    for (Color col : colors) {
+        if (nCustom >= kMaxCustomColors) {
             break;
         }
-        int start = i;
-        while (i < s.len && s.s[i] != ' ') {
-            i++;
-        }
-        ParsedColor parsed;
-        ParseColor(parsed, Str(s.s + start, i - start));
-        if (parsed.parsedOk) {
-            customColors[idx] = parsed.col;
-            customColorSet[idx] = true;
-            idx++;
-        }
+        customColors[nCustom++] = col;
     }
 }
 
 void ChangeColorWnd::SaveCustomColorsIfChanged() {
-    if (!customColorsChanged || !gSettings) {
+    if (!customColorsChanged) {
         return;
     }
-    str::Builder buf;
-    for (int i = 0; i < kMaxCustomColors; i++) {
-        if (!customColorSet[i]) {
-            continue;
-        }
-        if (len(buf) > 0) {
-            buf.AppendChar(' ');
-        }
-        buf.Append(SerializeColorTemp(customColors[i]));
+    Vec<Color> colors;
+    for (int i = 0; i < nCustom; i++) {
+        VecAppend(colors, customColors[i]);
     }
-    str::ReplaceWithCopy(&gSettings->customColors, ToStr(buf));
-    SaveSettings();
+    SaveCustomColors(colors);
 }
 
 void ChangeColorWnd::InvalidateSwatches() {
@@ -251,15 +291,114 @@ void ChangeColorWnd::InvalidateSwatches() {
     }
 }
 
+// only the defined colors plus a single empty slot are shown
+void ChangeColorWnd::UpdateSwatchVis() {
+    int nVisible = nCustom < kMaxCustomColors ? nCustom + 1 : kMaxCustomColors;
+    for (int i = 0; i < kMaxCustomColors; i++) {
+        if (swatchCustom[i]) {
+            swatchCustom[i]->SetIsVisible(i < nVisible);
+        }
+    }
+    if (swatchRow2) {
+        bool show = nVisible > kCustomInRow1;
+        swatchRow2->SetVisibility(show ? Visibility::Visible : Visibility::Collapse);
+    }
+    UpdateRemoveBtn();
+    Relayout();
+}
+
+void ChangeColorWnd::UpdateRemoveBtn() {
+    if (!btnRemove) {
+        return;
+    }
+    btnRemove->SetIsEnabled(selectedCustomIdx >= 0 && selectedCustomIdx < nCustom);
+}
+
+// Visibility on the row only takes it out of the layout, so the controls in it
+// are hidden as well
+void ChangeColorWnd::UpdateOpacityVis() {
+    if (!opacityRow) {
+        return;
+    }
+    Visibility vis = withOpacity ? Visibility::Visible : Visibility::Collapse;
+    opacityRow->SetVisibility(vis);
+    opacityLabel->SetVisibility(vis);
+    opacitySlider->SetVisibility(vis);
+    opacityValue->SetVisibility(vis);
+}
+
+void ChangeColorWnd::UpdateOpacityValue() {
+    if (!opacityValue) {
+        return;
+    }
+    opacityValue->SetText(fmt("%d", (int)opacity));
+    if (hwnd && layout) {
+        DoLayout(HwndClientRect(hwnd).Size());
+        HwndInvalidate(hwnd);
+    }
+}
+
+void ChangeColorWnd::SyncOpacityFromColor() {
+    if (!withOpacity) {
+        return;
+    }
+    opacity = isCheckered ? 0xff : OpacityOf(currentColor);
+    if (opacitySlider) {
+        opacitySlider->SetValue(opacity, false);
+    }
+    UpdateOpacityValue();
+}
+
+void ChangeColorWnd::OnOpacityChanged() {
+    if (!opacitySlider) {
+        return;
+    }
+    opacity = (u8)limitValue(opacitySlider->value, 0, 255);
+    if (!isCheckered) {
+        currentColor = WithAlpha(currentColor, opacity);
+        UpdateEditFromColor();
+    }
+    UpdateOpacityValue();
+}
+
+// setting a color on the empty slot defines it, which opens a new empty slot
+void ChangeColorWnd::SetCustomColor(int idx, Color col) {
+    if (idx < 0 || idx >= kMaxCustomColors) {
+        return;
+    }
+    customColors[idx] = col;
+    customColorsChanged = true;
+    if (idx < nCustom) {
+        return;
+    }
+    nCustom = idx + 1;
+    UpdateSwatchVis();
+}
+
+void ChangeColorWnd::RemoveCustom(int idx) {
+    if (idx < 0 || idx >= nCustom) {
+        return;
+    }
+    for (int i = idx; i < nCustom - 1; i++) {
+        customColors[i] = customColors[i + 1];
+    }
+    nCustom--;
+    customColorsChanged = true;
+    SelectPreview();
+    UpdateSwatchVis();
+}
+
 void ChangeColorWnd::SelectPreview() {
     selectedCustomIdx = -1;
     previewSelected = true;
+    UpdateRemoveBtn();
     InvalidateSwatches();
 }
 
 void ChangeColorWnd::SelectCustom(int idx) {
     selectedCustomIdx = idx;
     previewSelected = false;
+    UpdateRemoveBtn();
     InvalidateSwatches();
 }
 
@@ -267,16 +406,14 @@ void ChangeColorWnd::UpdateEditFromColor() {
     updatingEdit = true;
     if (editRgb) {
         if (isCheckered) {
-            editRgb->SetText(forTabColor ? StrL("unset") : StrL("checkered"));
+            editRgb->SetText(colorsArgs ? StrL("unset") : StrL("checkered"));
         } else {
             editRgb->SetText(SerializeColorTemp(currentColor));
         }
     }
     updatingEdit = false;
     if (selectedCustomIdx >= 0 && !isCheckered) {
-        customColors[selectedCustomIdx] = currentColor;
-        customColorSet[selectedCustomIdx] = true;
-        customColorsChanged = true;
+        SetCustomColor(selectedCustomIdx, currentColor);
     }
     InvalidateSwatches();
 }
@@ -310,10 +447,9 @@ void ChangeColorWnd::OnEditChanged() {
     if (!TryParseEdit()) {
         return;
     }
+    SyncOpacityFromColor();
     if (selectedCustomIdx >= 0 && !isCheckered) {
-        customColors[selectedCustomIdx] = currentColor;
-        customColorSet[selectedCustomIdx] = true;
-        customColorsChanged = true;
+        SetCustomColor(selectedCustomIdx, currentColor);
     }
     InvalidateSwatches();
 }
@@ -347,7 +483,7 @@ void ChangeColorWnd::PickFromArea(Point ptLocal) {
     u8 cr, cg, cb;
     HsvToRgb(hue, 1.0f, val, cr, cg, cb);
     isCheckered = false;
-    currentColor = MkRgb(cr, cg, cb);
+    currentColor = withOpacity ? MkRgba(cr, cg, cb, opacity) : MkRgb(cr, cg, cb);
     UpdateEditFromColor();
 }
 
@@ -387,19 +523,24 @@ void ChangeColorWnd::OnSwatchClick(VirtMouseEvent* ev) {
             currentColor = col;
         }
         SelectPreview();
+        SyncOpacityFromColor();
         UpdateEditFromColor();
         ev->didHandle = true;
         return;
     }
     if (id >= kIdCustom0 && id < kIdCustom0 + kMaxCustomColors) {
         int idx = id - kIdCustom0;
+        if (idx > nCustom) {
+            return;
+        }
         if (selectedCustomIdx == idx) {
             SelectPreview();
         } else {
             SelectCustom(idx);
-            if (customColorSet[idx]) {
+            if (idx < nCustom) {
                 isCheckered = false;
                 currentColor = customColors[idx];
+                SyncOpacityFromColor();
                 UpdateEditFromColor();
             }
         }
@@ -417,17 +558,10 @@ void ChangeColorWnd::OnSwatchContext(VirtMouseEvent* ev) {
         return;
     }
     int idx = id - kIdCustom0;
-    if (!customColorSet[idx]) {
+    if (idx >= nCustom) {
         return;
     }
-    customColorSet[idx] = false;
-    customColorsChanged = true;
-    if (selectedCustomIdx == idx) {
-        SelectPreview();
-    }
-    if (swatchCustom[idx]) {
-        swatchCustom[idx]->Invalidate();
-    }
+    RemoveCustom(idx);
     ev->didHandle = true;
 }
 
@@ -469,7 +603,7 @@ static void PaintSwatch(VirtCustom* sw, VirtPaintCtx* ctx) {
     } else if (id >= kIdCustom0 && id < kIdCustom0 + kMaxCustomColors) {
         int idx = id - kIdCustom0;
         selected = (idx == wnd->selectedCustomIdx);
-        if (wnd->customColorSet[idx]) {
+        if (idx < wnd->nCustom) {
             col = wnd->customColors[idx];
         } else {
             empty = true;
@@ -489,18 +623,58 @@ static void PaintSwatch(VirtCustom* sw, VirtPaintCtx* ctx) {
         return;
     }
     if (checkered) {
-        PaintCheckerboard(ctx->gfx, rc);
+        PaintCheckerboard(ctx->gfx, rc, kColWhite, kColCheckerDark);
     } else {
-        ctx->gfx->FillRect(rc, col);
+        u8 a = GetAlpha(col);
+        bool blend = wnd->withOpacity && a != 0 && a != 0xff;
+        if (blend) {
+            // show the color over a checkerboard, so opacity is visible
+            PaintCheckerboard(ctx->gfx, rc, BlendOver(col, kColWhite, a), BlendOver(col, kColCheckerDark, a));
+        } else {
+            ctx->gfx->FillRect(rc, col & 0xffffff);
+        }
     }
     if (sw->HasFlag(vwfFocused) && id >= kIdPreset0 && id < kIdPreset0 + kNumPresets) {
         ctx->gfx->DrawFocusRect(ctx->content);
     }
 }
 
-void ChangeColorWnd::OnCancel(VirtMouseEvent*) {
-    SaveCustomColorsIfChanged();
+// hands the picked color and the edited set of colors back to the caller
+void ChangeColorWnd::NotifyColorsArgs(CloseAction action) {
+    if (!colorsArgs) {
+        return;
+    }
+    ChangeColorsArgs* args = colorsArgs;
+    colorsArgs = nullptr;
+    VecClear(args->colors);
+    for (int i = 0; i < nCustom; i++) {
+        VecAppend(args->colors, customColors[i]);
+    }
+    args->color = isCheckered ? kColorUnset : currentColor;
+    args->didSelect = (action == CloseAction::Select);
+    args->colorsChanged = customColorsChanged;
+    args->onClose.Call(args);
+    delete args;
+}
+
+void ChangeColorWnd::Finish(CloseAction action) {
+    if (colorsArgs) {
+        NotifyColorsArgs(action);
+    } else {
+        SaveCustomColorsIfChanged();
+        if (action == CloseAction::Select) {
+            ApplyBackground();
+        }
+    }
     ScheduleDelete();
+}
+
+void ChangeColorWnd::OnRemove(VirtMouseEvent*) {
+    RemoveCustom(selectedCustomIdx);
+}
+
+void ChangeColorWnd::OnCancel(VirtMouseEvent*) {
+    Finish(CloseAction::Cancel);
 }
 
 WindowTab* ChangeColorWnd::TargetTab() {
@@ -552,40 +726,13 @@ void ChangeColorWnd::ApplyBackground() {
         t->bgColor = newColor;
         t->bgColorCheckered = isCheckered;
     }
-    SaveSettings();
+    ScheduleSaveSettings();
     HwndInvalidate(win->hwndCanvas, true);
-}
-
-void ChangeColorWnd::ApplyTabColor() {
-    WindowTab* t = TargetTab();
-    if (!t || !t->ctrl) {
-        return;
-    }
-    t->tabColor = isCheckered ? kColorUnset : currentColor;
-    SetTabInfoColor(t);
-    FileState* fs = FileHistoryFindByPath(t->filePath);
-    if (fs) {
-        if (isCheckered) {
-            SetColorText(fs->tabCol, StrL(""));
-        } else {
-            SetColorText(fs->tabCol, SerializeColorTemp(currentColor));
-        }
-    }
-    SaveSettings();
-    if (win->tabsCtrl) {
-        win->tabsCtrl->ScheduleRepaint();
-    }
 }
 
 void ChangeColorWnd::OnOk(VirtMouseEvent*) {
     TryParseEdit();
-    SaveCustomColorsIfChanged();
-    if (forTabColor) {
-        ApplyTabColor();
-    } else {
-        ApplyBackground();
-    }
-    ScheduleDelete();
+    Finish(CloseAction::Select);
 }
 
 static void OnClose(WindowBase::CloseEvent* /*ev*/) {
@@ -625,18 +772,18 @@ void ChangeColorWnd::ClassifyTab(WindowTab* t) {
 }
 
 void ChangeColorWnd::LoadCurrentColor() {
-    WindowTab* t = tab;
-    if (!t) {
-        currentColor = kColWhite;
-        isCheckered = false;
-        return;
-    }
-    if (forTabColor) {
-        currentColor = t->tabColor;
+    if (colorsArgs) {
+        currentColor = colorsArgs->color;
         isCheckered = (currentColor == kColorUnset);
         if (isCheckered) {
             currentColor = ThemeControlBackgroundColor();
         }
+        return;
+    }
+    WindowTab* t = tab;
+    if (!t) {
+        currentColor = kColWhite;
+        isCheckered = false;
         return;
     }
     if (t->bgColorCheckered) {
@@ -670,8 +817,17 @@ void ChangeColorWnd::LoadCurrentColor() {
     isCheckered = false;
 }
 
+void ChangeColorWnd::Relayout() {
+    if (!hwnd || !layout) {
+        return;
+    }
+    int dx = DpiScale(400);
+    LayoutAndSizeToContent(layout, dx, 0, hwnd);
+    DoLayout(HwndClientRect(hwnd).Size());
+}
+
 void ChangeColorWnd::RelayoutRadios() {
-    bool show = !forTabColor;
+    bool show = !colorsArgs;
     Visibility vis = show ? Visibility::Visible : Visibility::Collapse;
     if (radioThisFile) {
         radioThisFile->SetVisibility(vis);
@@ -695,8 +851,9 @@ void ChangeColorWnd::RelayoutRadios() {
 }
 
 void ChangeColorWnd::SetTargetBackground(MainWindow* mainWin) {
+    NotifyColorsArgs(CloseAction::Cancel);
+    withOpacity = false;
     win = mainWin;
-    forTabColor = false;
     tab = (IsMainWindowValidAndNotClosing(win) && win->CurrentTab() && win->CurrentTab()->ctrl) ? win->CurrentTab()
                                                                                                 : nullptr;
     str::ReplaceWithCopy(&filePath, tab ? tab->filePath : Str{});
@@ -706,31 +863,39 @@ void ChangeColorWnd::SetTargetBackground(MainWindow* mainWin) {
     previewSelected = true;
     if (hwnd) {
         HwndSetText(hwnd, Tr("Change Background Color"));
+        btnOk->SetText(Tr("OK"));
         RelayoutRadios();
+        LoadColors();
+        UpdateSwatchVis();
+        UpdateOpacityVis();
+        SyncOpacityFromColor();
         UpdateEditFromColor();
-        int dx = DpiScale(400);
-        LayoutAndSizeToContent(layout, dx, 0, hwnd);
-        DoLayout(HwndClientRect(hwnd).Size());
+        Relayout();
         UpdateTheme();
     }
 }
 
-void ChangeColorWnd::SetTargetTab(MainWindow* mainWin, WindowTab* colorTab) {
-    win = mainWin;
-    forTabColor = true;
-    tab = colorTab;
-    str::ReplaceWithCopy(&filePath, tab ? tab->filePath : Str{});
-    ClassifyTab(tab);
+void ChangeColorWnd::SetTargetColors(ChangeColorsArgs* args) {
+    NotifyColorsArgs(CloseAction::Cancel);
+    colorsArgs = args;
+    withOpacity = args->withOpacity;
+    win = args->win;
+    tab = nullptr;
+    str::ReplaceWithCopy(&filePath, Str{});
+    ClassifyTab(nullptr);
     LoadCurrentColor();
     selectedCustomIdx = -1;
     previewSelected = true;
     if (hwnd) {
-        HwndSetText(hwnd, Tr("Change Tab Color"));
+        HwndSetText(hwnd, args->title);
+        btnOk->SetText(Tr("Select"));
         RelayoutRadios();
+        LoadColors();
+        UpdateSwatchVis();
+        UpdateOpacityVis();
+        SyncOpacityFromColor();
         UpdateEditFromColor();
-        int dx = DpiScale(400);
-        LayoutAndSizeToContent(layout, dx, 0, hwnd);
-        DoLayout(HwndClientRect(hwnd).Size());
+        Relayout();
         UpdateTheme();
     }
 }
@@ -750,14 +915,13 @@ static VirtCustom* MakeSwatch(ChangeColorWnd* wnd, int id, Size sz, bool context
     return c;
 }
 
+// HBox::gap, not spacers, so that hiding a swatch doesn't leave a hole
 static HBox* SwatchRow(VirtCustom** items, int n, int gap) {
     auto* row = new HBox();
     row->alignMain = MainAxisAlign::MainStart;
     row->alignCross = CrossAxisAlign::CrossCenter;
+    row->gap = gap;
     for (int i = 0; i < n; i++) {
-        if (i > 0) {
-            row->AddChild(new Spacer(gap, 0));
-        }
         row->AddChild(items[i]);
     }
     return row;
@@ -768,7 +932,9 @@ bool ChangeColorWnd::Create(MainWindow* mainWin) {
 
     {
         CreateCustomArgs args;
-        args.title = forTabColor ? Tr("Change Tab Color") : Tr("Change Background Color");
+        // owned by the main window, so it can't end up behind it
+        args.owner = mainWin ? mainWin->hwndFrame : nullptr;
+        args.title = colorsArgs ? colorsArgs->title : Tr("Change Background Color");
         args.visible = false;
         args.style = WS_POPUPWINDOW | WS_CAPTION;
         args.font = GetFont();
@@ -779,7 +945,7 @@ bool ChangeColorWnd::Create(MainWindow* mainWin) {
         return false;
     }
     bool isRtl = IsUIRtl();
-    ParseCustomColors();
+    LoadColors();
 
     auto* vbox = new VBox();
     vbox->alignMain = MainAxisAlign::MainStart;
@@ -795,6 +961,38 @@ bool ChangeColorWnd::Create(MainWindow* mainWin) {
         c->onMouseMove = MkFunc1(OnAreaMouseMove, this);
         colorArea = c;
         vbox->AddChild(c);
+    }
+
+    {
+        auto* row = new HBox();
+        row->alignMain = MainAxisAlign::MainStart;
+        row->alignCross = CrossAxisAlign::CrossCenter;
+        row->gap = DpiScale(4);
+
+        opacityLabel = NewVirtText({
+            .s = Tr("Opacity:"),
+            .font = font,
+            .isRtl = isRtl,
+        });
+        row->AddChild(opacityLabel);
+
+        auto* sl = new VirtSlider();
+        sl->minVal = 0;
+        sl->maxVal = 255;
+        sl->value = opacity;
+        sl->idealDx = DpiScale(200);
+        sl->onValueChanged = MkMethod0<ChangeColorWnd, &ChangeColorWnd::OnOpacityChanged>(this);
+        opacitySlider = sl;
+        row->AddChild(sl);
+
+        opacityValue = NewVirtText({
+            .s = StrL("255"),
+            .font = font,
+            .isRtl = isRtl,
+        });
+        row->AddChild(opacityValue);
+        opacityRow = new Padding(row, DpiScaledInsets(4, 0, 0, 0));
+        vbox->AddChild(opacityRow);
     }
 
     {
@@ -831,25 +1029,28 @@ bool ChangeColorWnd::Create(MainWindow* mainWin) {
 
     Size swSz{DpiScale(36), DpiScale(22)};
     int gap = DpiScale(4);
-    VirtCustom* row1[8]{};
+    const int kInRow1 = kNumPresets + kCustomInRow1;
+    VirtCustom* row1[kInRow1]{};
     for (int i = 0; i < kNumPresets; i++) {
         swatchPreset[i] = MakeSwatch(this, kIdPreset0 + i, swSz, false);
         row1[i] = swatchPreset[i];
     }
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < kCustomInRow1; i++) {
         swatchCustom[i] = MakeSwatch(this, kIdCustom0 + i, swSz, true);
         row1[kNumPresets + i] = swatchCustom[i];
     }
-    auto* swatches1 = SwatchRow(row1, 8, gap);
+    auto* swatches1 = SwatchRow(row1, kInRow1, gap);
     vbox->AddChild(new Padding(swatches1, DpiScaledInsets(8, 0, 0, 0)));
 
-    VirtCustom* row2[8]{};
-    for (int i = 0; i < 8; i++) {
-        swatchCustom[5 + i] = MakeSwatch(this, kIdCustom0 + 5 + i, swSz, true);
-        row2[i] = swatchCustom[5 + i];
+    const int kInRow2 = kMaxCustomColors - kCustomInRow1;
+    VirtCustom* row2[kInRow2]{};
+    for (int i = 0; i < kInRow2; i++) {
+        swatchCustom[kCustomInRow1 + i] = MakeSwatch(this, kIdCustom0 + kCustomInRow1 + i, swSz, true);
+        row2[i] = swatchCustom[kCustomInRow1 + i];
     }
-    auto* swatches2 = SwatchRow(row2, 8, gap);
-    vbox->AddChild(new Padding(swatches2, DpiScaledInsets(4, 0, 0, 0)));
+    auto* swatches2 = SwatchRow(row2, kInRow2, gap);
+    swatchRow2 = new Padding(swatches2, DpiScaledInsets(4, 0, 0, 0));
+    vbox->AddChild(swatchRow2);
 
     {
         auto* row = new HBox();
@@ -887,19 +1088,26 @@ bool ChangeColorWnd::Create(MainWindow* mainWin) {
         hbox->gap = font->averageCharWidth;
         auto pad = Insets{4, 0, 4, 0};
 
+        btnRemove = NewThemedButton(hwnd, Tr("Remove"), font, false);
+        btnRemove->onClick = MkMethod1<ChangeColorWnd, VirtMouseEvent*, &ChangeColorWnd::OnRemove>(this);
+        hbox->AddChild(new Padding(btnRemove, pad));
         btnCancel = NewThemedButton(hwnd, Tr("Cancel"), font, false);
         btnCancel->onClick = MkMethod1<ChangeColorWnd, VirtMouseEvent*, &ChangeColorWnd::OnCancel>(this);
         hbox->AddChild(new Padding(btnCancel, pad));
-        btnOk = NewThemedButton(hwnd, Tr("OK"), font, true);
+        btnOk = NewThemedButton(hwnd, colorsArgs ? Tr("Select") : Tr("OK"), font, true);
         btnOk->onClick = MkMethod1<ChangeColorWnd, VirtMouseEvent*, &ChangeColorWnd::OnOk>(this);
         hbox->AddChild(new Padding(btnOk, pad));
-        vbox->AddChild(hbox);
+        // same space above the buttons as below them
+        vbox->AddChild(new Padding(hbox, DpiScaledInsets(4, 0, 0, 0)));
     }
 
     auto* padding = new Padding(vbox, DpiScaledInsets(4, 8));
     layout = padding;
 
     RelayoutRadios();
+    UpdateSwatchVis();
+    UpdateOpacityVis();
+    SyncOpacityFromColor();
     UpdateEditFromColor();
 
     int dx = DpiScale(400);
@@ -940,28 +1148,77 @@ void ShowChangeBackgroundColorDialog(MainWindow* win) {
     gChangeColorWnd = wnd;
 }
 
-void ShowSetTabColorDialog(MainWindow* win, WindowTab* tab) {
-    if (!IsMainWindowValidAndNotClosing(win) || !tab || !tab->ctrl) {
+void ShowChangeColorsDialog(ChangeColorsArgs* args) {
+    if (!IsMainWindowValidAndNotClosing(args->win)) {
+        delete args;
         return;
     }
     if (gChangeColorWnd) {
-        gChangeColorWnd->SetTargetTab(win, tab);
+        gChangeColorWnd->SetTargetColors(args);
         HwndSetFocus(gChangeColorWnd->hwnd);
         EditSetFocus(gChangeColorWnd->editRgb);
         EditSelectAll(gChangeColorWnd->editRgb);
         return;
     }
     auto* wnd = new ChangeColorWnd();
-    wnd->SetTargetTab(win, tab);
+    wnd->SetTargetColors(args);
     wnd->closeOnEsc = true;
     wnd->onBeforeDelete = MkFunc0Void(ClearChangeColorWnd);
     wnd->onClose = MkFunc1Void<WindowBase::CloseEvent*>(OnClose);
     wnd->onDestroy = MkFunc1Void<WindowBase::DestroyEvent*>(OnDestroy);
     wnd->SetFont(GetAppFont());
-    bool ok = wnd->Create(win);
+    bool ok = wnd->Create(args->win);
     if (!ok) {
         delete wnd;
         return;
     }
     gChangeColorWnd = wnd;
+}
+
+// which tab the color picked in the generic dialog applies to
+struct TabColorTarget {
+    MainWindow* win = nullptr;
+    Str filePath;
+};
+
+static void TabColorPicked(TabColorTarget* target, ChangeColorsArgs* args) {
+    if (args->colorsChanged) {
+        SaveCustomColors(args->colors);
+    }
+    WindowTab* tab = FindTabByFilePath(target->filePath);
+    bool tabValid = IsMainWindowValidAndNotClosing(target->win) && tab && tab->win == target->win && tab->ctrl;
+    if (args->didSelect && tabValid) {
+        tab->tabColor = args->color;
+        SetTabInfoColor(tab);
+        FileState* fs = FileHistoryFindByPath(tab->filePath);
+        if (fs) {
+            bool isUnset = (args->color == kColorUnset);
+            SetColorText(fs->tabCol, isUnset ? StrL("") : SerializeColorTemp(args->color));
+        }
+        ScheduleSaveSettings();
+        if (target->win->tabsCtrl) {
+            target->win->tabsCtrl->ScheduleRepaint();
+        }
+    }
+    str::Free(target->filePath);
+    delete target;
+}
+
+void ShowSetTabColorDialog(MainWindow* win, WindowTab* tab) {
+    if (!IsMainWindowValidAndNotClosing(win) || !tab || !tab->ctrl) {
+        return;
+    }
+    auto* target = new TabColorTarget();
+    target->win = win;
+    str::ReplaceWithCopy(&target->filePath, tab->filePath);
+
+    auto* args = new ChangeColorsArgs();
+    args->win = win;
+    args->title = Tr("Change Tab Color");
+    args->color = tab->tabColor;
+    if (gSettings) {
+        ParseColorList(gSettings->customColors, args->colors, kMaxCustomColors);
+    }
+    args->onClose = MkFunc1(TabColorPicked, target);
+    ShowChangeColorsDialog(args);
 }

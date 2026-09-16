@@ -18,7 +18,6 @@
 #include "base/Win.h"
 
 #include "SumatraConfig.h"
-#include "CrashHandler.h"
 #include "HangDetector.h"
 
 // how long the UI thread can ignore our ping before we call it blocked
@@ -50,17 +49,9 @@ bool IsUiHangDetectorRunning() {
     return gWatchdogThread != nullptr;
 }
 
-// Symbols: prefer a .pdb next to the .exe (what a local build has), then
-// whatever the crash handler downloaded into gSymbolsDir.
+// Symbols: the .pdb next to the .exe, which only a local build has.
 static bool EnsureSymbols() {
-    str::Builder symPath(GetTempArena());
-    symPath.Reserve(1024);
-    symPath.Append(GetSelfExeDirTemp());
-    if (len(gSymbolsDir) > 0) {
-        symPath.Append(StrL(";"));
-        symPath.Append(gSymbolsDir);
-    }
-    TempWStr ws = ToWStrTemp(ToStrTemp(symPath));
+    TempWStr ws = ToWStrTemp(GetSelfExeDirTemp());
     if (!dbghelp::Initialize(ws, false)) {
         return false;
     }

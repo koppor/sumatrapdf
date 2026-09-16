@@ -103,6 +103,10 @@ struct UpdateInfo {
 // "Download and update" link downloads & installs it (owned here until then)
 static UpdateInfo* gPendingUpdate = nullptr;
 
+bool HasPendingPreReleaseUpdate() {
+    return gPendingUpdate != nullptr;
+}
+
 /*
 The format of update information downloaded from the server:
 
@@ -296,7 +300,9 @@ static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
     // one-click update)
     if (gUpdateAutoInstall) {
         gUpdateAutoInstall = false;
-        SaveSettings(); // persist timeOfLastUpdateCheck
+        // persist timeOfLastUpdateCheck before a possible ExitProcess
+        ScheduleSaveSettings();
+        FlushScheduledSaveSettings();
         if (installerPathAuto && file::Exists(installerPathAuto)) {
             StartInstallerAutoUpgrade(installerPathAuto);
             ExitAfterStartingUpdater();
@@ -356,8 +362,9 @@ static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
     ReportIf(hr == E_INVALIDARG);
     bool doInstall = (hr == S_OK) && (buttonPressedId == kBtnIdInstall);
 
-    // persist timeOfLastUpdateCheck
-    SaveSettings();
+    // persist timeOfLastUpdateCheck before a possible ExitProcess
+    ScheduleSaveSettings();
+    FlushScheduledSaveSettings();
     if (!doInstall) {
         file::Delete(installerPath);
         return;
@@ -560,7 +567,7 @@ static void NotifySuspiciousUpdate(HWND hwndParent, Str dlURL) {
     logf("  urlLen=%d hostLen=%d host='%s'\n", len(dlURL), len(kExpectedDlHost), kExpectedDlHost);
     logf("  url hex[0..%d]=%s\n", kUrlHexHead, HexHeadTemp(dlURL, kUrlHexHead));
     logf("  host hex[0..%d]=%s\n", kUrlHexHead, HexHeadTemp(kExpectedDlHost, kUrlHexHead));
-    ReportIfFast(true);
+    ReportIf(true);
     auto title = Tr("SumatraPDF Update");
     auto content = fmt(R"(Suspicious update.
 

@@ -46,3 +46,4 @@ sumatrapdf-tool convert -o book-%d.png book.pdf 1-3,8
 - [Convert to PDF](Convert-to-PDF.md) — comics / images → PDF
 - [Extract text from PDF](Tool-x-extract-text-from-pdf.md)
 - [Extract pages from PDF](Tool-x-extract-pages-from-pdf.md)
+- **Save Selection As Image** (`CmdSaveSelectionAsImage`) — a rectangular selection, at a chosen DPI, not a whole page

@@ -13,6 +13,7 @@ extern "C" {
 }
 
 #include "ImageReader.h"
+#include "EmbeddedResources.h"
 #include "Theme.h"
 #include "SvgIcons.h"
 
@@ -515,7 +516,7 @@ static fz_pixmap* RenderSvgToFzPixmap(fz_context* ctx, Str svgData, int dx, int 
         list = fz_new_display_list_from_svg(ctx, buf, nullptr, nullptr, &svgWidth, &svgHeight);
         pixmap = fz_new_pixmap_with_bbox(ctx, fz_device_rgb(ctx), fz_make_irect(0, 0, dx, dy), nullptr, 1);
         fz_clear_pixmap(ctx, pixmap);
-        dev = fz_new_draw_device(ctx, fz_scale(dx / svgWidth, dy / svgHeight), pixmap);
+        dev = fz_new_draw_device(ctx, fz_scale((float)dx / svgWidth, (float)dy / svgHeight), pixmap);
         fz_run_display_list(ctx, list, dev, fz_identity, fz_infinite_rect, nullptr);
         fz_close_device(ctx, dev);
         fz_drop_device(ctx, dev);
@@ -564,6 +565,12 @@ static Pixmap* RenderSvgToPixmap(Str svgData, int dx, int dy, Color fgCol) {
     memset(px->data, 0, (size_t)px->stride * (size_t)dy);
     px->premultiplied = true;
 
+    // an icon with a <text> needs a base14 font, which mupdf only gets from the
+    // embedded archive; without the loader the render throws and the icon comes
+    // out blank (#6186). EngineMupdf installs it too, but not until a document
+    // is opened, long after the toolbar renders its icons.
+    InstallEmbeddedFontLoader();
+
     fz_context* ctx = fz_new_context_windows();
     fz_pixmap* pixmap = RenderSvgToFzPixmap(ctx, svgData, dx, dy, fgCol);
     if (pixmap) {
@@ -605,7 +612,7 @@ struct SvgPixmapCacheEntry {
 static SvgPixmapCacheEntry* gSvgPixmapCache = nullptr;
 
 // Render `svg` at dx×dy in fg/bg (theme text/control colors if unset).
-// The Pixmap belongs to the cache until DestroySvgPixmapIconsCache().
+// The Pixmap belongs to the cache and stays valid until the app exits.
 Pixmap* GetCachedPixmapForSvg(Str svg, int dx, int dy, Color fg, Color bg) {
     if (str::IsEmptyOrWhiteSpace(svg) || dx <= 0 || dy <= 0) {
         return nullptr;
@@ -636,7 +643,13 @@ Pixmap* GetCachedPixmapForSvg(Str svg, int dx, int dy, Color fg, Color bg) {
     return px;
 }
 
-// Theme, DPI, and shutdown: every cached pixmap is in the current colors/size.
+// Shutdown only. Toolbars, the home page and other VirtCtrls keep non-owning
+// pointers to these pixmaps, so freeing entries while the app runs leaves them
+// dangling until whatever re-binds them runs, and the next paint reads freed
+// memory (crash 2026-09-07-13-07-95c3: the home page painted its view-mode icon
+// after a theme change dropped the cache). A theme or DPI change needs no flush:
+// size and colors are part of the key, so new entries are rendered and the stale
+// ones are simply never looked up again.
 void DestroySvgPixmapIconsCache() {
     ListDelete(gSvgPixmapCache);
     gSvgPixmapCache = nullptr;

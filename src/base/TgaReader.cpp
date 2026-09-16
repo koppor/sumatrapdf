@@ -100,7 +100,11 @@ static bool HasVersion2Footer(const u8* data, size_t n) {
         return false;
     }
     const TgaFooter* footerLE = (const TgaFooter*)(data + n - sizeof(TgaFooter));
-    return str::EqN(Str(footerLE->signature), StrL(kTgaFooterSignature), sizeof(footerLE->signature));
+    // signature is a fixed-size field in file data, not necessarily
+    // NUL-terminated, so we must not strlen() it. Also, comparing all 18 bytes
+    // would never match because the literal is 17 chars long
+    Str sig{footerLE->signature, (int)sizeof(footerLE->signature)};
+    return str::StartsWith(sig, StrL(kTgaFooterSignature));
 }
 
 static const TgaExtArea* GetExtAreaPtr(const u8* data, size_t n) {
@@ -454,3 +458,44 @@ Str PixmapToTgaFormat(Pixmap* pixmap) {
     return tgaData.TakeStr();
 }
 } // namespace tga
+
+#if OS_WIN
+
+namespace tga {
+
+Str SerializeBitmap(HBITMAP hbmp) {
+    BITMAP bmpInfo;
+    GetObject(hbmp, sizeof(BITMAP), &bmpInfo);
+    if ((u32)bmpInfo.bmWidth > USHRT_MAX || (u32)bmpInfo.bmHeight > USHRT_MAX) {
+        return {};
+    }
+
+    Pixmap* pixmap = AllocPixmap(bmpInfo.bmWidth, bmpInfo.bmHeight, PixmapFormat::BGR8);
+    if (!pixmap) {
+        return {};
+    }
+
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = pixmap->width;
+    bmi.bmiHeader.biHeight = -pixmap->height;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 24;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    HDC hDC = GetDC(nullptr);
+    if (!GetDIBits(hDC, hbmp, 0, pixmap->height, pixmap->data, &bmi, DIB_RGB_COLORS)) {
+        ReleaseDC(nullptr, hDC);
+        FreePixmap(pixmap);
+        return {};
+    }
+    ReleaseDC(nullptr, hDC);
+
+    Str res = PixmapToTgaFormat(pixmap);
+    FreePixmap(pixmap);
+    return res;
+}
+
+} // namespace tga
+
+#endif

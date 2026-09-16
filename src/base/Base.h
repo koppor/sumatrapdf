@@ -69,7 +69,7 @@
 #define COMPILER_MINGW 0
 #endif
 
-// Always 0 or 1 so `#if IS_DEBUG` / `#if IS_ASAN` compile under /W4 /WX (C4668).
+// Always 0 or 1 so `#if IS_DEBUG` / `#if IS_ASAN` / `#if IS_PERF_LOG` compile under /W4 /WX (C4668).
 // The build may pass IS_DEBUG=1 / IS_ASAN=1; otherwise IS_DEBUG follows DEBUG
 // and IS_ASAN follows the compiler (/fsanitize=address, -fsanitize=address).
 #ifndef IS_DEBUG
@@ -78,6 +78,10 @@
 #else
 #define IS_DEBUG 0
 #endif
+#endif
+
+#ifndef IS_PERF_LOG
+#define IS_PERF_LOG 0
 #endif
 
 #ifndef IS_ASAN
@@ -243,6 +247,8 @@ using AtomicPtr = void* volatile;
 
 bool AtomicBoolGet(AtomicBool* p);
 void AtomicBoolSet(AtomicBool* p, bool v);
+// sets and returns the previous value, so that exactly one racing thread sees false
+bool AtomicBoolSwap(AtomicBool* p, bool v);
 int AtomicIntGet(AtomicInt* p);
 void AtomicIntSet(AtomicInt* p, int v);
 int AtomicIntAdd(AtomicInt* p, int v);
@@ -410,24 +416,23 @@ inline void CrashMe() {
 // rare cases where we really want to know a given condition happens. Before
 // each release we should audit the uses of ReportAlwaysIf()
 
-extern void _uploadDebugReport(Str, Str, bool, bool);
+extern void _uploadDebugReport(Str, Str, bool);
 
 #define STRINGIZE_(x) #x
 #define STRINGIZE(x) STRINGIZE_(x)
 #define FILE_LINE __FILE__ ":" STRINGIZE(__LINE__)
 
-#define ReportIfCond(cond, condStr, fileLine, isCrash, captureCallstack)                  \
-    __analysis_assume(!(cond));                                                           \
-    do {                                                                                  \
-        if (cond) {                                                                       \
-            _uploadDebugReport(StrL(condStr), StrL(fileLine), isCrash, captureCallstack); \
-        }                                                                                 \
+#define ReportIfCond(cond, condStr, fileLine, isCrash)                  \
+    __analysis_assume(!(cond));                                         \
+    do {                                                                \
+        if (cond) {                                                     \
+            _uploadDebugReport(StrL(condStr), StrL(fileLine), isCrash); \
+        }                                                               \
     } while (0)
 
-#define ReportIf(cond) ReportIfCond(cond, #cond, FILE_LINE, false, true)
-#define ReportIfFast(cond) ReportIfCond(cond, #cond, FILE_LINE, false, false)
+#define ReportIf(cond) ReportIfCond(cond, #cond, FILE_LINE, false)
 #if IS_DEBUG
-#define ReportDebugIf(cond) ReportIfCond(cond, #cond, FILE_LINE, false, true)
+#define ReportDebugIf(cond) ReportIfCond(cond, #cond, FILE_LINE, false)
 #else
 // In release the check is gone, but the condition must still be *read*, or a
 // variable whose only consumer is a ReportDebugIf looks unused: the compiler
@@ -864,6 +869,10 @@ int setMinMax(int& v, int minVal, int maxVal);
 #define defer const auto& CONCAT(defer__, __LINE__) = ExitScopeHelp() + [&]()
 
 extern AtomicInt gAllowAllocFailure;
+
+constexpr u64 kLargeAllocationSize = 1024ull * 1024ull;
+extern u64 (*gTryFreeCachedObjects)(u64 newAllocationSize);
+extern u64 (*gFreeCachedObjects)();
 
 //--- Geom.h ------------------------------------------------------------------
 
@@ -1399,6 +1408,14 @@ auto VecReserve(Arena* arena, T& v, int n) -> decltype(v.els);
 template <typename T>
 inline T* VecReserve(Vec<T>& v, int n);
 
+// Ensure capacity for n more elements (cap >= len + n). Same as VecReserve
+// when the vec is empty (just created or after Reset).
+template <typename T>
+auto VecGrow(Arena* arena, T& v, int n) -> decltype(v.els);
+
+template <typename T>
+inline T* VecGrow(Vec<T>& v, int n);
+
 // Set logical length to newSize (std::vector::resize). Grows capacity if
 // needed; zeros unused capacity beyond the new length.
 template <typename T>
@@ -1605,6 +1622,22 @@ inline T* VecReserve(Vec<T>& v, int n) {
 }
 
 template <typename T>
+auto VecGrow(Arena* arena, T& v, int n) -> decltype(v.els) {
+    if (n <= 0) {
+        return v.els;
+    }
+    if (v.len > INT_MAX - n) {
+        return nullptr;
+    }
+    return VecReserve(arena, v, v.len + n);
+}
+
+template <typename T>
+inline T* VecGrow(Vec<T>& v, int n) {
+    return VecGrow(nullptr, v, n);
+}
+
+template <typename T>
 bool VecResize(Vec<T>& v, int newSize) {
     return VecResizeNT(VecNT(v), (int)sizeof(T), newSize);
 }
@@ -1703,7 +1736,7 @@ bool VecInsertAt(Vec<T>& v, int idx, const VecIdentityT<T>& el) {
 
 template <typename T, typename E>
 bool VecPush(Arena* arena, T& v, E el) {
-    if (!VecReserve(arena, v, v.len + 1)) {
+    if (!VecGrow(arena, v, 1)) {
         return false;
     }
     v.els[v.len] = el;
@@ -1968,8 +2001,8 @@ void TransCharsInPlace(Str& str, Str oldChars, Str newChars);
 
 int NormalizeWSInPlace(Str str);
 TempStr NormalizeWSTemp(Str s);
-int NormalizeNewlinesInPlace(Str s, Str endExclusive);
-int NormalizeNewlinesInPlace(Str s);
+int NormalizeNewlinesToLFInPlace(Str& s);
+TempStr LFToCRLFTemp(Str s);
 int RemoveCharsInPlace(Str str, Str toRemove);
 
 int BufSet(Str dst, Str src);
@@ -2156,6 +2189,9 @@ WStr ToWStr(const wstr::Builder&);
 TempStr ToStrTemp(const str::Builder&);
 
 wchar_t WCharToLower(wchar_t c);
+int FoldCaseRune(int c);
+bool IsCombiningMark(int c);
+int FoldDiacriticsRune(int c);
 int WStrFindSubstr(WStr str, WStr substr);
 int WStrCmpNoCase(WStr a, WStr b);
 

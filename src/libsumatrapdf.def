@@ -220,6 +220,8 @@ EXPORTS
 
 	install_load_windows_font_funcs
 
+	fz_set_builtin_font_loader
+
 	pdf_page_transform
 
 	pdf_page_obj_transform
@@ -1166,6 +1168,10 @@ EXPORTS
 	pdf_annot_quadding
 
 	pdf_set_annot_quadding
+
+	pdf_annot_rich_defaults
+
+	pdf_set_annot_rich_defaults
 
 	pdf_clear_annot_quad_points
 

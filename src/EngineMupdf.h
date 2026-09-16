@@ -1,7 +1,7 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
-#include "PdfCadDetect.h"
+#include "PdfCad.h"
 
 struct Annotation;
 enum class AnnotationChange;
@@ -163,6 +163,12 @@ class EngineMupdf : public EngineBase {
     Mutex renderLock;
     RecursiveMutex docLock;
 
+    // last known HasClipOptimizations() per page ([pageNo - 1]: 0 unknown,
+    // 1 no, 2 yes), the answer while pagesLock is busy. A leaf lock: held only
+    // to read or write this vector.
+    Mutex clipOptLock;
+    Vec<u8> clipOptKnown;
+
     // per-FZ_LOCK-index SRW locks used by mupdf via fz_locks_ctx
     // callbacks. Mupdf holds these only momentarily; do not hold them across
     // your own code.
@@ -205,6 +211,12 @@ class EngineMupdf : public EngineBase {
     // the same annotation, we should be back to 0
     bool modifiedAnnotations = false;
 
+    // set when a Redact annotation is created in this editing session. Apply
+    // Redactions is offered for marks the user made, not for marks that came
+    // with the file (which only show up as pages get loaded, see
+    // EngineMupdfHasUserRedactMarks)
+    bool createdRedactMark = false;
+
     // how many journal operations we have open (see EngineMupdfBeginOperation).
     // MuPDF can't undo / redo while one is, e.g. during a resize drag
     int journalNesting = 0;
@@ -234,7 +246,7 @@ class EngineMupdf : public EngineBase {
     void GetBitmapRecolorSkipRects(int pageNo, float zoom, int rotation, const RectF& renderPageRect, Size bmpSize,
                                    Vec<Rect>& skipRects) override;
 
-    // CAD/engineering-drawing enhancement (PdfCadDetect.cpp)
+    // CAD/engineering-drawing enhancement (PdfCad.cpp)
     bool cadDetectDone = false;
     bool cadDetectEnable = false;
     int cadDetectScore = 0;

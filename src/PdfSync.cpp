@@ -127,8 +127,10 @@ bool Synchronizer::NeedsToRebuildIndex() {
     // older file, a copy that preserves mtime), and that's a change too
     i64 newstamp = SyncFileTimestamp();
     if (newstamp != syncfileTimestamp) {
-        // update time stamp
-        syncfileTimestamp = newstamp;
+        // latch it: only MarkIndexWasRebuilt() clears the flag and adopts the
+        // new time stamp, so a rebuild that fails is retried on the next query
+        // instead of leaving us with an index that was never built
+        needsToRebuildIndex = true;
         return true; // the file has changed!
     }
 
@@ -591,6 +593,49 @@ static Str ConvertLocalToUTF8(Str localStr) {
     return Str(utf8Buf, utf8Len - 1);
 }
 
+// The temp files WriteTempSyncFile() wrote. A synctex scanner reads its file
+// for as long as it lives, so they can only go once, on the way out.
+static StrNode* gSyncTempFiles;
+
+void DeleteSyncTempFiles() {
+    for (StrNode* node = gSyncTempFiles; node; node = node->next) {
+        file::Delete(node->s);
+    }
+    FreeStrNode(nullptr, gSyncTempFiles);
+    gSyncTempFiles = nullptr;
+}
+
+// Writes data to a temp file named <base>.synctex: synctex_parser insists on
+// that extension, so the .tmp GetTempFileNameW hands out has to be renamed.
+// Only that .tmp name is guaranteed free, and the rename frees it again, so a
+// .synctex left behind by a version that didn't delete them, or by a crash,
+// can already be sitting there - replace it instead of failing the search.
+static TempStr WriteTempSyncFile(Str data, Str who) {
+    TempStr tempPath = GetTempFilePathTemp(StrL("stx")); // stxabcdef.tmp
+    if (len(tempPath) == 0) {
+        logf("%s: unable to get temp file path. error: %d.\n", who, errno);
+        return {};
+    }
+    if (!file::WriteFile(tempPath, data)) {
+        logf("%s: unable to write temp file '%s'. error: %d.\n", who, tempPath, errno);
+        return {};
+    }
+
+    TempStr tempPathNoExt = path::GetPathNoExtTemp(tempPath);              // stxabcdef
+    TempStr tempPathSync = str::JoinTemp(tempPathNoExt, StrL(".synctex")); // stxabcdef.synctex
+    if (!file::RenameReplace(tempPathSync, tempPath)) {
+        logf("%s: unable rename from '%s' to '%s'.\n", who, tempPath, tempPathSync);
+        return {};
+    }
+
+    StrNode* node = AllocStrNode(nullptr, tempPathSync);
+    if (node) {
+        node->next = gSyncTempFiles;
+        gSyncTempFiles = node;
+    }
+    return tempPathSync;
+}
+
 static TempStr CopyPlainSyncToTempFile(TempStr pathSync) {
     if (len(pathSync) == 0) {
         return {};
@@ -601,24 +646,9 @@ static TempStr CopyPlainSyncToTempFile(TempStr pathSync) {
         logf("CopyPlainSyncToTempFile: source file '.synctex' '%s' is empty.\n", pathSync);
         // return {};
     }
-    TempStr tempPath = GetTempFilePathTemp(StrL("stx")); // stxabcdef.tmp
-    if (len(tempPath) == 0) {
-        str::Free(data);
-        logf("CopyPlainSyncToTempFile: unable to get temp file path. error: %d.\n", errno);
-        return {};
-    }
-    bool ok = file::WriteFile(tempPath, data);
+    TempStr tempPathSync = WriteTempSyncFile(data, StrL("CopyPlainSyncToTempFile"));
     str::Free(data);
-    if (!ok) {
-        logf("CopyPlainSyncToTempFile: unable to write temp file '%s'. error: %d.\n", tempPath, errno);
-        return {};
-    }
-
-    TempStr tempPathNoExt = path::GetPathNoExtTemp(tempPath);              // stxabcdef
-    TempStr tempPathSync = str::JoinTemp(tempPathNoExt, StrL(".synctex")); // stxabcdef.synctex
-    int ret = rename(tempPath.s, tempPathSync.s);
-    if (ret) {
-        logf("CopyPlainSyncToTempFile: unable rename from '%s' to '%s'. error: %d.\n", tempPath, tempPathSync, errno);
+    if (len(tempPathSync) == 0) {
         return {};
     }
 
@@ -653,25 +683,9 @@ static TempStr DealPlainSync(TempStr pathSync) {
         logf("DealPlainSync: decoded content is empty.\n", pathSync);
         return {};
     }
-    TempStr tempPath = GetTempFilePathTemp(StrL("stx")); // stxabcdef.tmp
-    if (len(tempPath) == 0) {
-        str::Free(dst);
-        logf("DealPlainSync: unable to get temp file path. error: %d.\n", errno);
-        return {};
-    }
-    bool ok = file::WriteFile(tempPath, dst);
+    TempStr tempPathSync = WriteTempSyncFile(dst, StrL("DealPlainSync"));
     str::Free(dst);
-    if (!ok) {
-        logf("DealPlainSync: unable to write temp file '%s'. error: %d.\n", tempPath, errno);
-        return {};
-    }
-    logf("DealPlainSync: utf-8 written to temp file '%s'.\n", tempPath);
-
-    TempStr tempPathNoExt = path::GetPathNoExtTemp(tempPath);              // stxabcdef
-    TempStr tempPathSync = str::JoinTemp(tempPathNoExt, StrL(".synctex")); // stxabcdef.synctex
-    int ret = rename(tempPath.s, tempPathSync.s);
-    if (ret) {
-        logf("DealPlainSync: unable rename from '%s' to '%s'. error: %d.\n", tempPath, tempPathSync, errno);
+    if (len(tempPathSync) == 0) {
         return {};
     }
     logf("DealPlainSync: copied '%s' to '%s'\n", pathSync, tempPathSync);
@@ -704,24 +718,9 @@ static TempStr ungzipToTempSync(Str gzPath) {
         return {};
     }
 
-    TempStr tempPath = GetTempFilePathTemp(StrL("stx")); // stxabcdef.tmp
-    if (len(tempPath) == 0) {
-        str::Free(uncompr);
-        logf("ungzipToTempSync: unable to get temp file path. error: %d.\n", errno);
-        return {};
-    }
-    bool ok = file::WriteFile(tempPath, uncompr);
+    TempStr tempPathSync = WriteTempSyncFile(uncompr, StrL("ungzipToTempSync"));
     str::Free(uncompr);
-    if (!ok) {
-        logf("ungzipToTempSync: unable to write temp file '%s'. error: %d.\n", tempPath, errno);
-        return {};
-    }
-
-    TempStr tempPathNoExt = path::GetPathNoExtTemp(tempPath);              // stxabcdef
-    TempStr tempPathSync = str::JoinTemp(tempPathNoExt, StrL(".synctex")); // stxabcdef.synctex
-    int ret = rename(tempPath.s, tempPathSync.s);
-    if (ret) {
-        logf("ungzipToTempSync: unable rename from '%s' to '%s'. error: %d.\n", tempPath, tempPathSync, errno);
+    if (len(tempPathSync) == 0) {
         return {};
     }
 
@@ -830,7 +829,10 @@ int SyncTex::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
         ReportDebugIf(true);
         return res;
     }
-    ReportIf(!scanner);
+    if (!scanner) {
+        ReportIf(true);
+        return PDFSYNCERR_SYNCFILE_NOTFOUND;
+    }
 
     // Coverity: at this point, this->scanner->flags.has_parsed == 1 and thus
     // synctex_scanner_parse never gets the chance to freeing the scanner
@@ -930,7 +932,10 @@ int SyncTex::SourceToDoc(Str srcfilename, int line, int col, int* page, Vec<Rect
     if (res != PDFSYNCERR_SUCCESS) {
         return res;
     }
-    ReportIf(!scanner);
+    if (!scanner) {
+        ReportIf(true);
+        return PDFSYNCERR_SYNCFILE_NOTFOUND;
+    }
 
     TempStr srcfilepath = srcfilename;
     // convert the source file to an absolute path

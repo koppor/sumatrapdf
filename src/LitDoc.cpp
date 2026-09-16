@@ -210,7 +210,7 @@ static void MsSha1Init(MsSha1* s) {
 static void MsSha1Block(MsSha1* s, const u8* p) {
     u32 w[80];
     for (int i = 0; i < 16; i++) {
-        w[i] = ((u32)p[i * 4] << 24) | ((u32)p[i * 4 + 1] << 16) | ((u32)p[i * 4 + 2] << 8) | (u32)p[i * 4 + 3];
+        w[i] = ((u32)p[i * 4] << 24) | ((u32)p[(i * 4) + 1] << 16) | ((u32)p[(i * 4) + 2] << 8) | (u32)p[(i * 4) + 3];
     }
     for (int t = 16; t < 80; t++) {
         w[t] = rol32(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16], 1);
@@ -294,21 +294,21 @@ static void MsSha1Final(MsSha1* s, u8 digest[20]) {
     }
     u8 lenBuf[8];
     for (int i = 0; i < 8; i++) {
-        lenBuf[i] = (u8)(bitLen >> (56 - i * 8));
+        lenBuf[i] = (u8)(bitLen >> (56 - (i * 8)));
     }
     MsSha1Update(s, lenBuf, 8);
     for (int i = 0; i < 5; i++) {
         digest[i * 4] = (u8)(s->h[i] >> 24);
-        digest[i * 4 + 1] = (u8)(s->h[i] >> 16);
-        digest[i * 4 + 2] = (u8)(s->h[i] >> 8);
-        digest[i * 4 + 3] = (u8)(s->h[i]);
+        digest[(i * 4) + 1] = (u8)(s->h[i] >> 16);
+        digest[(i * 4) + 2] = (u8)(s->h[i] >> 8);
+        digest[(i * 4) + 3] = (u8)(s->h[i]);
     }
 }
 
 //--- little-endian readers with bounds checking
 
 static u32 LitU16(Str d, int off) {
-    if (off < 0 || off + 2 > len(d)) {
+    if (off < 0 || (i64)off + 2 > len(d)) {
         return 0;
     }
     const u8* p = (const u8*)d.s + off;
@@ -316,7 +316,7 @@ static u32 LitU16(Str d, int off) {
 }
 
 static u32 LitU32(Str d, int off) {
-    if (off < 0 || off + 4 > len(d)) {
+    if (off < 0 || (i64)off + 4 > len(d)) {
         return 0;
     }
     const u8* p = (const u8*)d.s + off;
@@ -480,17 +480,23 @@ static bool LitParseHeader(LitFile* lit) {
     int hdrLen = (int)LitU32(d, 12);
     int nPieces = (int)LitU32(d, 16);
     int secHdrLen = (int)LitU32(d, 20);
-    if (hdrLen < 0x28 || nPieces < 5 || nPieces > 16) {
+    if (hdrLen < 0x28 || nPieces < 5 || nPieces > 16 || secHdrLen < 0) {
+        return false;
+    }
+    // hdrLen comes from the file; bound it before computing offsets from it
+    // so hdrLen + nPieces * 16 can't overflow into a negative offset
+    if ((i64)hdrLen + (i64)nPieces * 16 > len(d)) {
         return false;
     }
 
     // secondary header: CAOL / ITSF blocks
     {
-        int off = hdrLen + nPieces * 16;
+        int off = hdrLen + (nPieces * 16);
         Str sec(d.s + off, std::min(secHdrLen, len(d) - off));
         int pos = (int)LitU32(sec, 4);
         bool haveContentOffset = false;
-        while (pos >= 0 && pos + 8 <= len(sec)) {
+        // pos comes from the file: compare without pos + 8 overflowing
+        while (pos >= 0 && pos <= len(sec) - 8) {
             Str blockTag(sec.s + pos, 4);
             u32 ver = LitU32(sec, pos + 4);
             if (str::Eq(blockTag, StrL("CAOL"))) {
@@ -504,7 +510,11 @@ static bool LitParseHeader(LitFile* lit) {
                 if (ver != 4 || LitU32(sec, pos + 20) != 0) {
                     return false;
                 }
-                lit->contentOffset = (int)LitU32(sec, pos + 16);
+                u32 contentOffset = LitU32(sec, pos + 16);
+                if (contentOffset > (u32)len(d)) {
+                    return false;
+                }
+                lit->contentOffset = (int)contentOffset;
                 haveContentOffset = true;
                 pos += 48;
             } else {
@@ -519,7 +529,7 @@ static bool LitParseHeader(LitFile* lit) {
     // header piece 1 is the directory
     i64 dirOff64 = LitU64(d, hdrLen + 16);
     i64 dirLen64 = LitU64(d, hdrLen + 16 + 8);
-    if (dirOff64 <= 0 || dirLen64 <= 32 || dirOff64 + dirLen64 > len(d)) {
+    if (dirOff64 <= 0 || dirLen64 <= 32 || dirOff64 > len(d) || dirLen64 > len(d) - dirOff64) {
         return false;
     }
     Str dir(d.s + (int)dirOff64, (int)dirLen64);
@@ -528,14 +538,14 @@ static bool LitParseHeader(LitFile* lit) {
     }
     int chunkSize = (int)LitU32(dir, 8);
     int nChunks = (int)LitU32(dir, 24);
-    if (chunkSize <= 48 || nChunks <= 0 || 32 + (i64)nChunks * chunkSize != dirLen64) {
+    if (chunkSize <= 48 || nChunks <= 0 || 32 + ((i64)nChunks * chunkSize) != dirLen64) {
         return false;
     }
     if (lit->entryChunkLen && (u32)chunkSize != lit->entryChunkLen) {
         return false;
     }
     for (int i = 0; i < nChunks; i++) {
-        int chunkOff = 32 + i * chunkSize;
+        int chunkOff = 32 + (i * chunkSize);
         Str chunk(dir.s + chunkOff, chunkSize);
         if (!str::StartsWith(chunk, StrL("AOLL"))) {
             continue;
@@ -552,7 +562,8 @@ static bool LitParseHeader(LitFile* lit) {
         int pos = 48;
         for (int j = 0; j < nEntries && pos < dataEnd; j++) {
             int nameLen = LitEncInt(chunk, &pos);
-            if (nameLen <= 0 || pos + nameLen > dataEnd) {
+            // nameLen comes from the file: compare without pos + nameLen overflowing
+            if (nameLen <= 0 || nameLen > dataEnd - pos) {
                 break;
             }
             LitEntry e;
@@ -575,15 +586,19 @@ Str LitFile::GetFile(Str name) {
     if (!e) {
         return {};
     }
+    // offset / size come from the file: check without offset + size overflowing
+    if (e->offset < 0 || e->size < 0) {
+        return {};
+    }
     if (e->section == 0) {
         i64 off = (i64)contentOffset + e->offset;
-        if (off + e->size > len(d)) {
+        if (off < 0 || off > len(d) || e->size > len(d) - off) {
             return {};
         }
         return Str(d.s + (int)off, e->size);
     }
     Str sec = GetSection(e->section);
-    if (e->offset + e->size > len(sec)) {
+    if (e->offset > len(sec) || e->size > len(sec) - e->offset) {
         return {};
     }
     return Str(sec.s + e->offset, e->size);
@@ -600,14 +615,17 @@ static bool LitParseSectionNames(LitFile* lit) {
     }
     int pos = 4;
     for (int i = 0; i < nSections; i++) {
+        if (pos > len(raw) - 2) {
+            return false;
+        }
         int nChars = (int)LitU16(raw, pos);
         pos += 2;
-        if (pos + nChars * 2 + 2 > len(raw)) {
+        if ((i64)nChars * 2 + 2 > (i64)len(raw) - pos) {
             return false;
         }
         WStr ws((const WCHAR*)(raw.s + pos), nChars);
         lit->sectionNames.Append(ToUtf8Temp(ws));
-        pos += nChars * 2 + 2;
+        pos += (nChars * 2) + 2;
     }
     return true;
 }
@@ -706,7 +724,12 @@ static Str LitLzxDecompress(Str content, Str control, Str resetTable) {
         return {};
     }
 
-    int ofsEntry = (int)LitU32(resetTable, 12) + 8;
+    u32 ofsEntry32 = LitU32(resetTable, 12);
+    if (ofsEntry32 > (u32)len(resetTable) - 8) {
+        LZXteardown(lzx);
+        return {};
+    }
+    int ofsEntry = (int)ofsEntry32 + 8;
     int ucLength = (int)LitU32(resetTable, 16);
     if (LitU32(resetTable, 20) != 0) {
         LZXteardown(lzx);
@@ -731,7 +754,7 @@ static Str LitLzxDecompress(Str content, Str control, Str resetTable) {
     bool ok = true;
     int base = 0;
     int idx = 0;
-    while (bytesRemaining > 0 && ofsEntry + 8 <= len(resetTable)) {
+    while (bytesRemaining > 0 && ofsEntry <= len(resetTable) - 8) {
         int size = (int)LitU32(resetTable, ofsEntry);
         if (LitU32(resetTable, ofsEntry + 4) != 0 || size > len(content) || size < base) {
             ok = false;
@@ -803,10 +826,11 @@ Str LitFile::GetSection(int section) {
     bool owned = false; // content starts as a view into d
     Str view = content;
     while (len(transform) >= 16) {
-        int csize = ((int)LitU32(control, 0) + 1) * 4;
-        if (csize <= 0 || csize > len(control)) {
+        i64 csize64 = ((i64)LitU32(control, 0) + 1) * 4;
+        if (csize64 > len(control)) {
             break;
         }
+        int csize = (int)csize64;
         TempStr guid = LitGuidTemp(transform);
         if (str::Eq(guid, Str(kDesGuid))) {
             if (drmLevel == 0 || drmLevel == 5) {
@@ -898,7 +922,7 @@ static bool LitParseManifest(LitFile* lit) {
     int pos = 0;
     while (pos < len(raw)) {
         int slen = (u8)raw.s[pos++];
-        if (slen == 0 || pos + slen > len(raw)) {
+        if (slen == 0 || slen > len(raw) - pos) {
             break;
         }
         pos += slen; // root name, unused
@@ -910,7 +934,7 @@ static bool LitParseManifest(LitFile* lit) {
                 continue;
             }
             for (int i = 0; i < nFiles; i++) {
-                if (pos + 5 > len(raw)) {
+                if (len(raw) < 5 || pos > len(raw) - 5) {
                     return len(lit->manifest) > 0;
                 }
                 pos += 4; // offset, unused
@@ -1001,7 +1025,7 @@ static void LitParseAtoms(LitFile* lit, Str internal, LitAtoms* atoms) {
             return;
         }
         int size = (u8)data.s[pos++];
-        if (size == 0 || pos + size > len(data)) {
+        if (size == 0 || size > len(data) - pos) {
             return;
         }
         atoms->tags.Append(Str(data.s + pos, size));
@@ -1018,7 +1042,7 @@ static void LitParseAtoms(LitFile* lit, Str internal, LitAtoms* atoms) {
         }
         int size = (int)LitU32(data, pos);
         pos += 4;
-        if (size <= 0 || pos + size > len(data)) {
+        if (size <= 0 || size > len(data) - pos) {
             return;
         }
         atoms->attrs.Append(Str(data.s + pos, size));

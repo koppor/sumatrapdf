@@ -6,6 +6,7 @@
 #include "base/GuessFileType.h"
 #include "base/Pixmap.h"
 #include "base/ScopedWin.h"
+#include "base/UITask.h"
 #include "base/Win.h"
 #include "gui/UIModels.h"
 
@@ -70,6 +71,13 @@ namespace OptDetails = ABI::Windows::Graphics::Printing::OptionDetails;
 using PrintRequestedHandler =
     Foundation::ITypedEventHandler<Printing::PrintManager*, Printing::PrintTaskRequestedEventArgs*>;
 
+// Windows 11 hosts the modern dialog in a separate, medium-integrity process.
+// Once that handshake is known to fail (an elevated app, see issue #6156), stay
+// on the classic dialog for the rest of the session.
+static bool gWin11PrintUnavailable = false;
+
+static void RetryWithClassicDialog(HWND__* hwnd);
+
 using OptionChangedHandler =
     Foundation::ITypedEventHandler<OptDetails::PrintTaskOptionDetails*, OptDetails::PrintTaskOptionChangedEventArgs*>;
 
@@ -80,6 +88,28 @@ static const WCHAR* kOptExtraRotation = L"sumatraExtraRotation";
 
 // item ids of the rotation option, which is also how its value comes back
 static const WCHAR* kRotationItems[] = {L"0", L"90", L"180", L"270"};
+
+// The printer options the dialog offers, in the order it shows them. Unlike the
+// classic PrintDlgEx dialog, this one has no button that opens the driver's own
+// property sheet, so an option missing from this list can't be reached at all
+// (discussion #6202). Listing them all is safe: Windows leaves out the ones the
+// selected printer doesn't support.
+using StdOptionGetter = HRESULT (STDMETHODCALLTYPE Printing::IStandardPrintTaskOptionsStatic::*)(HSTRING*);
+static const StdOptionGetter kStdOptions[] = {
+    &Printing::IStandardPrintTaskOptionsStatic::get_Copies,
+    &Printing::IStandardPrintTaskOptionsStatic::get_Orientation,
+    &Printing::IStandardPrintTaskOptionsStatic::get_ColorMode,
+    &Printing::IStandardPrintTaskOptionsStatic::get_Duplex,
+    &Printing::IStandardPrintTaskOptionsStatic::get_Collation,
+    &Printing::IStandardPrintTaskOptionsStatic::get_MediaSize,
+    &Printing::IStandardPrintTaskOptionsStatic::get_MediaType,
+    &Printing::IStandardPrintTaskOptionsStatic::get_PrintQuality,
+    &Printing::IStandardPrintTaskOptionsStatic::get_NUp,
+    &Printing::IStandardPrintTaskOptionsStatic::get_InputBin,
+    &Printing::IStandardPrintTaskOptionsStatic::get_Binding,
+    &Printing::IStandardPrintTaskOptionsStatic::get_Staple,
+    &Printing::IStandardPrintTaskOptionsStatic::get_HolePunch,
+};
 
 struct WinRtApi {
     decltype(&RoInitialize) roInitialize = nullptr;
@@ -423,8 +453,8 @@ static Pixmap* ConvertToBgra(Pixmap* source) {
         return nullptr;
     }
     for (int y = 0; y < source->height; y++) {
-        const u8* src = source->data + (size_t)y * source->stride;
-        u8* dst = converted->data + (size_t)y * converted->stride;
+        const u8* src = source->data + ((size_t)y * source->stride);
+        u8* dst = converted->data + ((size_t)y * converted->stride);
         for (int x = 0; x < source->width; x++) {
             if (source->format == PixmapFormat::BGR8) {
                 dst[0] = src[0];
@@ -655,8 +685,8 @@ class PrintDocumentSource final
         } else {
             target = Rect(printable.x + layout.offset.x, printable.y + layout.offset.y, pageSize.dx, pageSize.dy);
         }
-        D2D1_RECT_F destination = D2D1::RectF(target.x / unitsPerDip, target.y / unitsPerDip,
-                                              target.BR().x / unitsPerDip, target.BR().y / unitsPerDip);
+        D2D1_RECT_F destination = D2D1::RectF((float)target.x / unitsPerDip, (float)target.y / unitsPerDip,
+                                              (float)target.BR().x / unitsPerDip, (float)target.BR().y / unitsPerDip);
         context->DrawBitmap(bitmap.Get(), destination, 1.f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, nullptr,
                             nullptr);
         return S_OK;
@@ -699,6 +729,7 @@ class PrintDocumentSource final
         if (SUCCEEDED(hr)) {
             hr = QueryInterface(IID_PPV_ARGS(collection));
         }
+        logf("Win11 print: GetPreviewPageCollection hr=0x%08x\n", (uint)hr);
         return hr;
     }
 
@@ -716,6 +747,7 @@ class PrintDocumentSource final
         if (SUCCEEDED(hr)) {
             hr = previewTarget->SetJobPageCount(PageCountType::FinalPageCount, (UINT32)len(pages));
         }
+        logf("Win11 print: Paginate pages=%d hr=0x%08x\n", len(pages), (uint)hr);
         return hr;
     }
 
@@ -755,6 +787,9 @@ class PrintDocumentSource final
         }
         if (SUCCEEDED(hr)) {
             hr = previewTarget->DrawPage(jobPage, surface.Get(), previewDpi, previewDpi);
+        }
+        if (FAILED(hr)) {
+            logf("Win11 print: MakePage %d failed: 0x%08x\n", (int)jobPage, (uint)hr);
         }
         return hr;
     }
@@ -856,8 +891,8 @@ class Win11PrintSession {
 
     // Sumatra's Advanced print options go into the dialog's "More settings"
     // pane as custom options; PrintDocumentSource reads them back when it lays
-    // the pages out. The paper tray is a standard option the dialog already
-    // knows how to show, it just isn't among the ones it shows by default.
+    // the pages out. The printer's own settings are standard options the dialog
+    // already knows how to show; ShowAdvancedOptions says which (kStdOptions).
     // The rest of Print_Advanced_Data has no equivalent here: autoRotate is on
     // in both paths and settable in neither, and the two paper-size options
     // work by rewriting a DEVMODE, which the system owns in this path.
@@ -923,7 +958,7 @@ class Win11PrintSession {
         return details->add_OptionChanged(handler.Get(), &optionToken);
     }
 
-    // adds our options, plus the printer's paper tray, to what the dialog shows
+    // adds our options, plus the printer's own, to what the dialog shows
     HRESULT ShowAdvancedOptions(Printing::IPrintTaskOptionsCore* options) {
         ComPtr<Printing::IPrintTaskOptionsCoreUIConfiguration> config;
         HRESULT hr = options->QueryInterface(IID_PPV_ARGS(&config));
@@ -938,10 +973,26 @@ class Win11PrintSession {
         ComPtr<Printing::IStandardPrintTaskOptionsStatic> standard;
         HRESULT stdHr = GetActivationFactory(RuntimeClass_Windows_Graphics_Printing_StandardPrintTaskOptions, standard);
         if (SUCCEEDED(stdHr)) {
-            HSTRING inputBin = nullptr;
-            if (SUCCEEDED(standard->get_InputBin(&inputBin)) && inputBin) {
-                displayed->Append(inputBin);
-                gWinRt.windowsDeleteString(inputBin);
+            // the list *is* what the dialog shows, so replace it rather than
+            // appending to it: Windows seeds it with a few options and we want
+            // all of them. Appending a name that's already there would show it
+            // twice, and comparing HSTRINGs to find out costs more than this
+            displayed->Clear();
+            for (StdOptionGetter getter : kStdOptions) {
+                HSTRING name = nullptr;
+                if (SUCCEEDED((standard.Get()->*getter)(&name)) && name) {
+                    displayed->Append(name);
+                    gWinRt.windowsDeleteString(name);
+                }
+            }
+            // added after Windows 10 1803, so it lives on its own interface
+            ComPtr<Printing::IStandardPrintTaskOptionsStatic3> standard3;
+            if (SUCCEEDED(standard.As(&standard3))) {
+                HSTRING ranges = nullptr;
+                if (SUCCEEDED(standard3->get_CustomPageRanges(&ranges)) && ranges) {
+                    displayed->Append(ranges);
+                    gWinRt.windowsDeleteString(ranges);
+                }
             }
         }
         ScopedHStr center(kOptCenterHorizontally);
@@ -952,6 +1003,7 @@ class Win11PrintSession {
     }
 
     HRESULT OnPrintRequested(Printing::IPrintTaskRequestedEventArgs* args) {
+        logf("Win11 print: PrintTaskRequested\n");
         ComPtr<Printing::IPrintTaskRequest> request;
         HRESULT hr = args->get_Request(&request);
         ComPtr<Printing::IPrintTaskSourceRequestedHandler> sourceHandler;
@@ -963,6 +1015,9 @@ class Win11PrintSession {
                     HRESULT sourceHr = retainedSource.As(&documentSource);
                     if (SUCCEEDED(sourceHr)) {
                         sourceHr = sourceArgs->SetSource(documentSource.Get());
+                    }
+                    if (FAILED(sourceHr)) {
+                        logf("Win11 print: SetSource failed: 0x%08x\n", (uint)sourceHr);
                     }
                     return sourceHr;
                 });
@@ -1007,6 +1062,9 @@ class Win11PrintSession {
         if (SUCCEEDED(hr) && SUCCEEDED(task.As(&task2))) {
             task2->put_IsPreviewEnabled(true);
         }
+        if (FAILED(hr)) {
+            logf("Win11 print: PrintTaskRequested failed: 0x%08x\n", (uint)hr);
+        }
         return hr;
     }
 
@@ -1028,6 +1086,7 @@ class Win11PrintSession {
     HRESULT Initialize(HWND hwnd, EngineBase* engine, int currentPage, PrintScaleAdv scale, float previewDpi) {
         HRESULT hr = EnsureWinRt();
         if (FAILED(hr)) {
+            logf("Win11 print: EnsureWinRt failed: 0x%08x\n", (uint)hr);
             return hr;
         }
 
@@ -1042,6 +1101,7 @@ class Win11PrintSession {
         hr = MakeAndInitialize<PrintDocumentSource>(&source, printEngine, currentPage, scale, previewDpi);
         printEngine->Release();
         if (FAILED(hr)) {
+            logf("Win11 print: PrintDocumentSource initialization failed: 0x%08x\n", (uint)hr);
             return hr;
         }
 
@@ -1065,12 +1125,44 @@ class Win11PrintSession {
         if (SUCCEEDED(hr)) {
             hr = manager->add_PrintTaskRequested(requestedHandler.Get(), &token);
         }
+        if (FAILED(hr)) {
+            logf("Win11 print: session initialization failed: 0x%08x\n", (uint)hr);
+        }
         return hr;
     }
 
     HRESULT Show() {
         ComPtr<__FIAsyncOperation_1_boolean> operation;
-        return interop->ShowPrintUIForWindowAsync(hwnd, IID_PPV_ARGS(&operation));
+        HRESULT hr = interop->ShowPrintUIForWindowAsync(hwnd, IID_PPV_ARGS(&operation));
+        logf("Win11 print: ShowPrintUIForWindowAsync result=0x%08x operation=%p\n", (uint)hr, operation.Get());
+        if (FAILED(hr)) {
+            return hr;
+        }
+        if (!operation) {
+            return E_FAIL;
+        }
+
+        // a successful call only means the request went out. The operation
+        // completes with false (or fails) when the host process couldn't put the
+        // dialog up, which is otherwise silent -- printing just does nothing
+        HWND owner = hwnd;
+        auto completed = Callback<__FIAsyncOperationCompletedHandler_1_boolean>(
+            [owner](__FIAsyncOperation_1_boolean* op, Foundation::AsyncStatus status) -> HRESULT {
+                boolean shown = false;
+                HRESULT opHr = op->GetResults(&shown);
+                logf("Win11 print: ShowPrintUI done status=%d shown=%d hr=0x%08x\n", (int)status, (int)shown,
+                     (uint)opHr);
+                if (status == Foundation::AsyncStatus::Completed && shown) {
+                    return S_OK;
+                }
+                gWin11PrintUnavailable = true;
+                uitask::Post(MkFunc0(RetryWithClassicDialog, owner), "Win11PrintFallback");
+                return S_OK;
+            });
+        if (!completed) {
+            return E_OUTOFMEMORY;
+        }
+        return operation->put_Completed(completed.Get());
     }
 };
 
@@ -1092,16 +1184,31 @@ static bool IsWin11OrGreater() {
 
 bool TryPrintCurrentFileWin11(MainWindow* win, PrintScaleAdv defaultScale) {
     if (!IsWin11OrGreater()) {
+        logf("Win11 print: unavailable before Windows 11\n");
+        return false;
+    }
+    if (gWin11PrintUnavailable) {
+        logf("Win11 print: unavailable, disabled for this session\n");
+        return false;
+    }
+    // the host process runs at medium integrity and refuses an elevated client:
+    // the dialog flashes and vanishes (issue #6156)
+    if (IsProcessRunningElevated()) {
+        logf("Win11 print: unavailable, process is elevated\n");
+        gWin11PrintUnavailable = true;
         return false;
     }
     if (!win || !win->hwndFrame || !win->AsFixed() || !win->CurrentTab()) {
+        logf("Win11 print: unavailable, invalid window or document\n");
         return false;
     }
     if (win->CurrentTab()->selectionOnPage) {
+        logf("Win11 print: unavailable for selection\n");
         return false;
     }
     EngineBase* engine = win->AsFixed()->GetEngine();
     if (!engine) {
+        logf("Win11 print: unavailable, no engine\n");
         return false;
     }
 
@@ -1111,6 +1218,8 @@ bool TryPrintCurrentFileWin11(MainWindow* win, PrintScaleAdv defaultScale) {
         ReleaseDC(win->hwndFrame, hdc);
     }
     previewDpi = std::max(96.f, std::min(240.f, previewDpi));
+    logf("Win11 print: start file='%s' page=%d previewDpi=%g\n", engine->FilePath(), win->AsFixed()->CurrentPageNo(),
+         previewDpi);
 
     delete gPrintSession;
     gPrintSession = new Win11PrintSession();
@@ -1126,6 +1235,15 @@ bool TryPrintCurrentFileWin11(MainWindow* win, PrintScaleAdv defaultScale) {
         return false;
     }
     return true;
+}
+
+// the modern dialog gave up without printing anything, so show the classic one
+static void RetryWithClassicDialog(HWND__* hwnd) {
+    MainWindow* win = FindMainWindowByHwnd(hwnd);
+    if (!win) {
+        return;
+    }
+    PrintCurrentFile(win);
 }
 
 void ShutdownWin11Printing() {

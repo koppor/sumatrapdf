@@ -9,6 +9,7 @@ struct StressTest;
 class SumatraUIAutomationProvider;
 struct FrameRateWnd;
 struct ReadAloudPlaybackBar;
+struct ReadingAutoScrollBar;
 struct VirtText;
 struct VirtCloseButton;
 struct VirtRoot;
@@ -108,6 +109,13 @@ enum class MouseAction {
     SelectingText
 };
 
+enum class ReadingBarDrag {
+    None = 0,
+    Move,
+    ResizeTop,
+    ResizeBottom,
+};
+
 // Edge / corner / interior of a rectangular selection for move/resize
 // (mirrors crop handles in the save-crop-resize image dialog).
 enum class SelectionDragEdge {
@@ -175,6 +183,8 @@ enum class AnnotPlacementKind {
     PolyLine,
     Shape,
     Ink,
+    // not placed: each text selection made while it's on is highlighted
+    Highlighter,
 };
 
 struct AnnotPlacement {
@@ -188,10 +198,6 @@ struct AnnotPlacement {
     Vec<PointF> points;
     Vec<int> strokeCounts;
     bool circle = false;
-    // highlighter brush: an ink stroke painted with a fixed-size translucent
-    // marker instead of the thin pen
-    bool highlightBrush = false;
-    float brushWidthPt = 0.f;
     bool mouseDown = false;
     bool didDrag = false;
     bool constrain = false;
@@ -450,6 +456,10 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
 
     // virtual controls of the home page (header, view buttons, links, ...)
     struct VirtRoot* homeRoot = nullptr;
+    // this window's home page layout, built by HomePageRelayout (owned).
+    // homeRoot's entries paint from it, so it cannot be shared with another
+    // window
+    struct HomePageLayoutCache* homeLayout = nullptr;
     // the frame's virtual controls: the three splitters. The frame paints
     // them and hands them its mouse input
     VirtRoot* frameRoot = nullptr;
@@ -696,6 +706,11 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     FrameRateWnd* frameRateWnd = nullptr;
 
     ReadAloudPlaybackBar* readAloudPlaybackBar = nullptr;
+    ReadingAutoScrollBar* readingAutoScrollBar = nullptr;
+
+    ReadingBarDrag readingBarDrag = ReadingBarDrag::None;
+    int readingBarDragOff = 0;
+    bool readingBarHover = false;
 
     // small floating toolbar shown after a text selection in fixed-page
     // floating selection actions bar (controlled by the SelectionToolbar setting)

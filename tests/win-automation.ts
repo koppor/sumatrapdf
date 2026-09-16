@@ -12,7 +12,7 @@
 // These are for *ad-hoc* tests (not checked in). Put reusable helpers here, not
 // in the individual ad-hoc scripts.
 
-import { cmdId, EXE } from "./util.ts";
+import { cmdId, EXE, setFailureContext } from "./util.ts";
 import {
   testWindowPos,
   waitForWindowIdle,
@@ -40,20 +40,10 @@ import {
   VK_RETURN,
   VK_TAB,
   VK_ESCAPE,
-  VK_RBUTTON,
-  VK_SHIFT,
-  VK_CONTROL,
-  VK_MENU,
-  VK_LCONTROL,
-  VK_RCONTROL,
-  VK_LSHIFT,
-  VK_RSHIFT,
-  VK_LMENU,
-  VK_RMENU,
-  isKeyDownAsync,
-  injectKeyUp,
+  ensureModifierKeysUp,
   getClientRect,
   clientToScreen,
+  getCursorPos,
   setCursorPos,
   sendCopyDataW,
   getPopupMenuHandle,
@@ -64,6 +54,8 @@ import {
   killProcessesNamed,
   type MenuItem,
 } from "./winapi.ts";
+
+export { ensureModifierKeysUp };
 import { ControlClient, uniquePipeName } from "./control.ts";
 
 export { captureWindowToPng, killProcessesNamed };
@@ -97,6 +89,24 @@ export async function takeStderr(proc: Bun.Subprocess): Promise<string> {
   const p = gStderrByProc.get(proc);
   return p ? (await p).trim() : "";
 }
+
+// the process the current test launched last; its stderr is attached to a
+// test failure. stderr only closes when the process exits, so a still-running
+// app yields nothing rather than hanging the report.
+let gLastProc: Bun.Subprocess | null = null;
+const STDERR_GRACE_MS = 1500;
+const STDERR_TAIL_CHARS = 4000;
+
+async function lastProcStderrTail(): Promise<string> {
+  if (!gLastProc) {
+    return "";
+  }
+  const timeout = new Promise<string>((resolve) => setTimeout(() => resolve(""), STDERR_GRACE_MS));
+  const s = await Promise.race([takeStderr(gLastProc), timeout]);
+  return s.length > STDERR_TAIL_CHARS ? "..." + s.slice(-STDERR_TAIL_CHARS) : s;
+}
+
+setFailureContext(lastProcStderrTail);
 
 export function beginSharedControlledSession(): void {
   if (sharedSession || sharedSessionRequested) {
@@ -178,6 +188,7 @@ export async function launchControlled(
     stderr: "pipe",
   });
   drainStderr(proc);
+  gLastProc = proc;
   try {
     const client = await ControlClient.connect(pipe);
     const frame = await waitForFrame(proc.pid!);
@@ -193,50 +204,6 @@ export async function launchControlled(
     await killAndWaitProcess(proc);
     throw e;
   }
-}
-
-// Wheel and key tests read the real modifier state: the app ORs GetKeyState
-// into its Ctrl/Shift/Alt/right-button checks, so a Ctrl the system thinks is
-// held (a key-up lost over RDP, a shortcut typed in another window) turns a
-// wheel notch into a zoom and the test fails as "did not scroll". Release
-// stuck keys with an injected key-up; fail naming the key if it stays down
-// (a physically held key, or the right mouse button, which this can't clear).
-const MODIFIER_KEYS: [string, number][] = [
-  ["Ctrl", VK_CONTROL],
-  ["Shift", VK_SHIFT],
-  ["Alt", VK_MENU],
-  ["right mouse button", VK_RBUTTON],
-];
-// left/right variants must be released too or the generic key stays down
-const KEY_VARIANTS: Record<number, number[]> = {
-  [VK_CONTROL]: [VK_CONTROL, VK_LCONTROL, VK_RCONTROL],
-  [VK_SHIFT]: [VK_SHIFT, VK_LSHIFT, VK_RSHIFT],
-  [VK_MENU]: [VK_MENU, VK_LMENU, VK_RMENU],
-};
-const MODIFIER_RELEASE_TRIES = 5;
-
-function heldModifierKeys(): [string, number][] {
-  return MODIFIER_KEYS.filter(([, vk]) => isKeyDownAsync(vk));
-}
-
-export async function ensureModifierKeysUp(): Promise<void> {
-  for (let attempt = 0; attempt < MODIFIER_RELEASE_TRIES; attempt++) {
-    const held = heldModifierKeys();
-    if (held.length === 0) {
-      return;
-    }
-    if (attempt === 0) {
-      console.log(`releasing stuck modifier keys: ${held.map(([name]) => name).join(", ")}`);
-    }
-    for (const [, vk] of held) {
-      for (const variant of KEY_VARIANTS[vk] ?? []) {
-        injectKeyUp(variant);
-      }
-    }
-    await sleep(100);
-  }
-  const names = heldModifierKeys().map(([name]) => name);
-  throw new Error(`modifier keys held down on this machine: ${names.join(", ")}`);
 }
 
 export function sendCommandSync(hwnd: number, id: number): void {
@@ -342,6 +309,12 @@ export async function clickAt(hwnd: number, x: number, y: number, settleMs = 350
   const lp = packCoords(x, y);
   sendMessage(hwnd, WM_LBUTTONDOWN, MK_LBUTTON | extraMk, lp);
   sendMessage(hwnd, WM_LBUTTONUP, extraMk, lp);
+
+  // someone moving the real mouse (e.g. over RDP) mid-click turns it into a drag
+  const at = getCursorPos();
+  if (at.x !== screen.x || at.y !== screen.y) {
+    console.log(`⚠ clickAt: real mouse moved during the click (to ${at.x},${at.y}, click at ${screen.x},${screen.y})`);
+  }
   await sleep(settleMs);
 }
 

@@ -14,6 +14,12 @@
 #include "gui/Layout.h"
 #include "gui/win/WinGui.h"
 #include "gui/VirtCtrl.h"
+#include "Settings.h"
+#include "AppSettings.h"
+#include "DocController.h"
+#include "MainWindow.h"
+#include "Accelerators.h"
+#include "Translations.h"
 #endif
 
 #include "Commands.h"
@@ -89,7 +95,9 @@ static const struct {
     {CmdNavigateForward, "Alt + Right"}, {CmdZoomIn, "Ctrl + +"}, {CmdZoomOut, "Ctrl + -"}, {CmdZoomFitPage, "Ctrl + 0"},
     {CmdZoomFitWidth, "Ctrl + 2"}, {CmdZoomActualSize, "Ctrl + 1"}, {CmdToggleZoom, "Z"}, {CmdSinglePageView, "Ctrl + 6"},
     {CmdFacingView, "Ctrl + 7"}, {CmdBookView, "Ctrl + 8"}, {CmdToggleContinuousView, "C"}, {CmdRotateLeft, "["},
-    {CmdRotateRight, "]"}, {CmdToggleFullscreen, "F"}, {CmdOpenFile, "Ctrl + O"}, {CmdSaveAs, "Ctrl + S"},
+    {CmdRotateRight, "]"}, {CmdToggleFullscreen, "F"}, {CmdToggleAutomaticallyScroll, "Ctrl + Shift + H"},
+    {CmdToggleReadingBar, ""}, {CmdToggleReadingBarInvert, ""},
+    {CmdOpenFile, "Ctrl + O"}, {CmdSaveAs, "Ctrl + S"},
     {CmdPrint, "Ctrl + P"}, {CmdReloadDocument, "R"}, {CmdClose, "Ctrl + W"}, {CmdNewWindow, "Ctrl + N"},
     {CmdOpenNextFileInFolder, "Ctrl + Shift + Right"}, {CmdOpenPrevFileInFolder, "Ctrl + Shift + Left"},
     {CmdRenameFile, "F2"}, {CmdProperties, "Ctrl + D"}, {CmdFindFirst, "Ctrl + F"}, {CmdFindNext, "F3"},
@@ -802,6 +810,37 @@ void ToggleKeyboardHelp(const KeyboardHelpArgs& args) {
 
 bool IsKeyboardHelpVisible() {
     return gKeyboardHelpWindow != nullptr;
+}
+
+#endif
+
+#if OS_WIN
+
+struct SumatraKeyboardHelpDataSource : KeyboardHelpDataSource {
+    Str Translate(Str s) override { return trans::GetTranslation(s); }
+
+    TempStr CommandDescriptionTemp(int cmdId) override {
+        Str description = GetCommandDescription(cmdId);
+        if (len(description) == 0) {
+            return {};
+        }
+        return str::DupTemp(trans::GetTranslation(description));
+    }
+
+    TempStr CommandShortcutTemp(int cmdId, int maxCount) override { return ShortcutsForCmdTemp(cmdId, maxCount); }
+};
+
+static SumatraKeyboardHelpDataSource gSumatraKeyboardHelpDataSource;
+
+void ToggleKeyboardHelp(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    KeyboardHelpArgs args;
+    args.parent = win->hwndFrame;
+    args.parentFullscreen = win->isFullScreen || win->InPresentation();
+    args.dataSource = &gSumatraKeyboardHelpDataSource;
+    ToggleKeyboardHelp(args);
 }
 
 #endif

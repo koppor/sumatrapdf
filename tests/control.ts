@@ -1,5 +1,5 @@
 import { Socket, createConnection } from "node:net";
-import { killAndWait, testWindowPos } from "./winapi.ts";
+import { ensureModifierKeysUp, killAndWait, testWindowPos } from "./winapi.ts";
 import { SLOW_BUILD_FACTOR } from "./util.ts";
 
 export enum ControlCommand {
@@ -90,6 +90,13 @@ export enum ControlCommand {
   CrashMe = 93,
   TestDocumentProperties = 94,
   TestHiddenTabGoToPage = 95,
+  TestSaveSelectionAsImage = 96,
+  TestReadingAutoScroll = 97,
+  TestReadingBar = 98,
+  TestSeedTextSelection = 99,
+  TestTtsEngineCrash = 100,
+  StartPerfLog = 101,
+  StopPerfLog = 102,
 }
 
 export type ControlArg = number | string | Uint8Array | ControlArg[];
@@ -616,6 +623,28 @@ export class ControlClient {
     return { survived: false, pageNo: -1, textSurvived };
   }
 
+  // Seeds a glyph-level (quad) text selection on `pageNo` of the current tab
+  // and reports the flat page numbers it holds. A rectangle selection is
+  // null-guarded when painted; only a quad one reaches CvtToScreen unguarded.
+  async seedTextSelection(pageNo: number): Promise<{ parts: number; quads: number; first: number; last: number }> {
+    const res = await this.request(ControlCommand.TestSeedTextSelection, [pageNo]);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const raw = String(res[1] ?? "").trim();
+    if (code !== 0) {
+      throw new Error(`TestSeedTextSelection failed: ${raw || code}`);
+    }
+    const m = /^OK parts=(\d+) quads=(\d+) first=(\d+) last=(\d+) pageCount=(\d+)$/.exec(raw);
+    if (!m) {
+      throw new Error(`seedTextSelection: could not parse '${raw}'`);
+    }
+    return {
+      parts: parseInt(m[1], 10),
+      quads: parseInt(m[2], 10),
+      first: parseInt(m[3], 10),
+      last: parseInt(m[4], 10),
+    };
+  }
+
   close(): void {
     this.socket.end();
   }
@@ -626,7 +655,7 @@ export function uniquePipeName(prefix = "sumatra-control"): string {
 }
 
 // exit code SumatraPDF uses when a debug report (ReportIf) fires in a
-// -for-testing run; must match kDebugReportTestExitCode in src/CrashHandler.cpp
+// -for-testing run; must match kDebugReportTestExitCode in src/base/CrashHandler.cpp
 export const DEBUG_REPORT_EXIT_CODE = 105;
 
 // fn also gets the spawned process so a test can combine control commands with
@@ -655,6 +684,8 @@ export async function withControlledSumatra<T>(
   // stderr is piped: on a debug report the app writes the report text there
   // before terminating, and we surface it in the failure below. Drain it
   // immediately so a verbose ASan dump cannot fill the pipe and stall exit.
+  // tests post keys and clicks directly; a held modifier would chord them
+  await ensureModifierKeysUp();
   const proc = Bun.spawn([exe, "-for-testing", ...posArgs, "-dbg-control", pipeName, ...extraArgs], {
     stdout: "ignore",
     stderr: "pipe",

@@ -4,7 +4,7 @@
 #include "base/Base.h"
 
 // must be last due to assert() over-write
-#include "base/UtAssert.h"
+#include "base/tests/UtAssert.h"
 
 struct TestFn0Data {
     int n = 0;
@@ -423,6 +423,13 @@ void BaseUtilTest() {
     utassert(WCharToLower('0') == '0');
     utassert(WCharToLower(0x00C9) == 0x00E9); // É -> é
     utassert(WCharToLower(0x0410) == 0x0430); // А -> а
+
+    utassert(FoldCaseRune(0x0130) == 'i');       // İ -> i
+    utassert(FoldDiacriticsRune(0x00E9) == 'e'); // é -> e
+    utassert(FoldDiacriticsRune(0x0141) == 'L'); // Ł -> L
+    utassert(FoldDiacriticsRune(0x0105) == 'a'); // ą -> a
+    utassert(FoldDiacriticsRune(0x0430) == 0x0430);
+    utassert(IsCombiningMark(0x0301));
 
     utassert(MurmurHash2(nullptr, 0) == 0);
     utassert(MurmurHash2("test", 4) != MurmurHash2("Test", 4));

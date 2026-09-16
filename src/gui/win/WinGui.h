@@ -172,7 +172,7 @@ struct HwndBase {
     HWND CreateCustomHwnd(const CreateCustomArgs&, WStr defaultClassName);
 };
 
-// installed by the app (DarkMode_win.cpp): how WindowBase::ApplyDarkMode()
+// installed by the app (DarkMode.cpp): how WindowBase::ApplyDarkMode()
 // re-applies OS dark mode to a window. gui/ doesn't name darkmodelib; null
 // means there is nothing to apply
 extern void (*gWindowBaseApplyDarkMode)(HWND);
@@ -706,6 +706,8 @@ struct Edit : ControlBase {
     struct CreateArgs {
         HWND parent = nullptr;
         bool isMultiLine = false;
+        // multi-line: ES_AUTOHSCROLL so long lines scroll instead of wrapping
+        bool noWrap = false;
         bool withBorder = false;
         // 1px NC underline under the client area (no WS_EX_CLIENTEDGE)
         bool withBottomBorder = false;
@@ -1051,6 +1053,7 @@ struct TreeView : ControlBase {
     void Clear();
 
     HTREEITEM GetHandleByTreeItem(TreeItem item);
+    void EnsureChildrenPopulated(TreeItem item, HTREEITEM h);
     TempStr GetDefaultTooltipTemp(TreeItem ti);
     TreeItem GetItemAt(int x, int y);
     TreeItem GetTreeItemByHandle(HTREEITEM item);
@@ -1064,6 +1067,7 @@ struct TreeView : ControlBase {
     Size idealSize;
 
     TreeModel* treeModel = nullptr; // not owned by us
+    bool lazyChildren = false;
 
     // for WM_NOTIFY with TVN_GETINFOTIP
     GetTooltipHandler onGetTooltip;

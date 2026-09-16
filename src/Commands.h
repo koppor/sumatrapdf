@@ -107,7 +107,6 @@ enum {
     CmdZoomFitWidthAndContinuous = 296,
     CmdZoomFitPageAndSinglePage = 297,
     CmdContributeTranslation = 298,
-    CmdOpenWithKnownExternalViewerFirst = 299,
     CmdOpenWithExplorer = 300,
     CmdOpenWithDirectoryOpus = 301,
     CmdOpenWithTotalCommander = 302,
@@ -119,7 +118,6 @@ enum {
     CmdOpenWithXpsViewer = 308,
     CmdOpenWithHtmlHelp = 309,
     CmdOpenWithPdfDjvuBookmarker = 310,
-    CmdOpenWithKnownExternalViewerLast = 311,
     CmdOpenSelectedDocument = 312,
     CmdPinSelectedDocument = 313,
     CmdForgetSelectedDocument = 314,
@@ -195,8 +193,6 @@ enum {
     CmdToggleInverseSearch = 384,
     CmdDebugCorruptMemory = 385,
     CmdDebugCrashMe = 386,
-    CmdDebugDownloadSymbols = 387,
-    CmdDebugTestApp = 388,
     CmdDebugShowNotif = 389,
     CmdDebugStartStressTest = 390,
     CmdDebugTogglePredictiveRender = 391,
@@ -313,18 +309,20 @@ enum {
     CmdCopySelectionAsImage = 502,
     CmdSearchGoogleLensPage = 503,
     CmdSearchGoogleLensImage = 504,
-    CmdRefHoverPushToJabRef = 505,
-    CmdNone = 506,
+    CmdSaveSelectionAsImage = 505,
+    CmdToggleTrimEmptyMargins = 506,
+    CmdCopyLocationToClipboard = 507,
+    CmdToggleAutomaticallyScroll = 508,
+    CmdAutomaticallyScrollFaster = 509,
+    CmdAutomaticallyScrollSlower = 510,
+    CmdToggleReadingBar = 511,
+    CmdToggleReadingBarInvert = 512,
+    CmdRefHoverPushToJabRef = 513,
+    CmdNone = 514,
+    CmdFileHistory = 515,
+    CmdFavorite = 516,
 
-    /* range for file history */
-    CmdFileHistoryFirst,
-    CmdFileHistoryLast = CmdFileHistoryFirst + 32,
-
-    /* range for favorites */
-    CmdFavoriteFirst,
-    CmdFavoriteLast = CmdFavoriteFirst + 256,
-
-    CmdLast = CmdFavoriteLast,
+    CmdLast = 516,
     CmdFirstCustom = CmdLast + 100,
 
     // aliases, at the end to not mess ordering
@@ -336,6 +334,7 @@ enum {
 
     CmdCreateAnnotFirst = CmdCreateAnnotText,
     CmdCreateAnnotLast = CmdCreateAnnotFileAttachment,
+    CmdTrimEmptyMargins = CmdToggleTrimEmptyMargins,
 };
 // clang-format on
 // @gen-end cmd-enum
@@ -415,6 +414,8 @@ extern SeqStrings gCommandDescriptions;
 
 int GetCommandIdByName(Str);
 int GetCommandIdByDesc(Str);
+int GetCommandIdByIdx(int idx);
+Str GetCommandName(int commandId);
 Str GetCommandDescription(int commandId);
 
 CustomCommand* CreateCustomCommand(Str definition, int origCmdId, CommandArg* args, Str name = {}, Str key = {});
@@ -467,3 +468,8 @@ void GetCommandsWithOrigId(Vec<CustomCommand*>& commands, int origId);
 #define kCmdArgState StrL("state")
 #define kCmdArgName StrL("name")
 #define kCmdArgExt StrL("ext")
+// path of the file to open, e.g. [CmdFileHistory C:\dir\file.pdf]
+#define kCmdArgFilePath StrL("filepath")
+
+// page of the favorite to go to, as stored in settings (a page number or `bm:<bookmark>`)
+#define kCmdArgPage StrL("page")

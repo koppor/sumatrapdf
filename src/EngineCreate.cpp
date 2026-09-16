@@ -548,11 +548,18 @@ bool EngineHasRedactMarks(EngineBase* engine) {
     return EngineMupdfHasRedactMarks(engine);
 }
 
-Annotation* EngineGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF pos, Annotation* annot) {
+bool EngineHasUserRedactMarks(EngineBase* engine) {
+    if (!IsEngineMupdf(engine)) {
+        return false;
+    }
+    return EngineMupdfHasUserRedactMarks(engine);
+}
+
+Annotation* EngineGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF pos, float padding, Annotation* annot) {
     if (!IsEngineMupdf(engine)) {
         return nullptr;
     }
-    return EngineMupdfGetAnnotationAtPos(engine, pageNo, pos, annot);
+    return EngineMupdfGetAnnotationAtPos(engine, pageNo, pos, padding, annot);
 }
 
 Annotation* EngineGetWidgetAtPos(EngineBase* engine, int pageNo, PointF pos) {

@@ -18,3 +18,6 @@ TempStr ExtractPdfPagesResultTemp(Str destPath, Str pagesSpec, int annotsOnly, i
 // PDF pages → PNG / JPEG / BMP files (issue #5991)
 void ShowConvertPdfToImagesDialog(MainWindow* win);
 TempStr ConvertPagesToImagesResultTemp(Str templatePath, Str pagesSpec, int* exitCodeOut);
+void ShowSaveSelectionAsImageDialog(MainWindow* win);
+TempStr SaveSelectionAsImageResultTemp(Str destPath, int dpi, int pageNo, int x, int y, int dx, int dy,
+                                       int* exitCodeOut);

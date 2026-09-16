@@ -92,7 +92,11 @@ const args = [
     "DumpChm", "dump-chm",
     "Control", "dbg-control",
     "UnitTests", "unit-tests",
+    "ForAi", "for-ai",
     "NewWindowTabs", "new-window-tabs",
+    "HtmlBackend", "html-backend",
+    "StartPerfLog", "start-perf-log",
+    "LogPerfFile", "log-perf-file",
 ];
 
 function generateCode(): string {

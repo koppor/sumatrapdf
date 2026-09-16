@@ -40,13 +40,15 @@
 #include "Translations.h"
 #include "Toolbar.h"
 #include "resource.h"
-#include "DarkMode_win.h"
+#include "DarkMode.h"
 #include "Tabs.h"
 #include "Accelerators.h"
 #include "ImageSaveCropResize.h"
 #include "GoogleLens.h"
 #include "CommandAvailability.h"
-#include "ReadAloudHighlight.h"
+#include "ReadAloud.h"
+#include "ReadingAutoScroll.h"
+#include "ReadingBar.h"
 #include "Menu.h"
 
 // value associated with menu item for owner-drawn purposes
@@ -265,6 +267,10 @@ static MenuDef menuDefView[] = {
         CmdToggleUniformPageWidth,
     },
     {
+        TrN("&Trim Empty Margins"),
+        CmdToggleTrimEmptyMargins,
+    },
+    {
         StrL(kMenuSeparator),
         0,
     },
@@ -287,6 +293,14 @@ static MenuDef menuDefView[] = {
     {
         TrN("F&ullscreen"),
         CmdToggleFullscreen,
+    },
+    {
+        TrN("A&utomatically Scroll"),
+        CmdToggleAutomaticallyScroll,
+    },
+    {
+        TrN("Reading &Bar"),
+        CmdToggleReadingBar,
     },
     {
         StrL(kMenuSeparator),
@@ -698,14 +712,6 @@ static MenuDef menuDefDebug[] = {
         CmdDebugShowFitContentArea,
     },
     {
-        StrL("Download symbols"),
-        CmdDebugDownloadSymbols,
-    },
-    {
-        StrL("Test app"),
-        CmdDebugTestApp,
-    },
-    {
         StrL("Show notification"),
         CmdDebugShowNotif,
     },
@@ -750,6 +756,10 @@ static MenuDef menuDefSelection[] = {
     {
         TrN("Copy As &Image To Clipboard"),
         CmdCopySelectionAsImage,
+    },
+    {
+        TrN("&Save As Image..."),
+        CmdSaveSelectionAsImage,
     },
     {
         TrN("Visual Search With Google &Lens"),
@@ -1415,13 +1425,44 @@ static bool CmdIdInList(UINT_PTR cmdId, UINT_PTR* idsList, int n) {
 
 #define cmdIdInList(name) CmdIdInList(cmdId, name, dimof(name))
 
-static void AddFileMenuItem(HMENU menuFile, Str filePath, int index) {
-    ReportIf(len(filePath) == 0 || !menuFile);
-    if (len(filePath) == 0 || !menuFile) {
+struct FileHistoryEntry {
+    Str path;
+    int cmdId;
+};
+
+// A recent file is a CmdFileHistory command carrying the path as an argument.
+// Custom commands live until the settings are re-read, so reuse the one already
+// made for a path instead of making one per menu rebuild. One pass over the
+// commands serves all the entries.
+static void SetFileHistoryCmdIds(Vec<FileHistoryEntry>& files) {
+    Vec<CustomCommand*> cmds;
+    GetCommandsWithOrigId(cmds, CmdFileHistory);
+    for (CustomCommand* cmd : cmds) {
+        Str path = GetCommandStringArg(cmd, kCmdArgFilePath, {});
+        for (FileHistoryEntry& fe : files) {
+            if (fe.cmdId == 0 && str::EqI(path, fe.path)) {
+                fe.cmdId = cmd->id;
+                break;
+            }
+        }
+    }
+
+    for (FileHistoryEntry& fe : files) {
+        if (fe.cmdId != 0) {
+            continue;
+        }
+        CommandArg* arg = NewStringArg(kCmdArgFilePath, fe.path);
+        fe.cmdId = CreateCustomCommand(StrL("CmdFileHistory"), CmdFileHistory, arg)->id;
+    }
+}
+
+static void AddFileMenuItem(HMENU menuFile, const FileHistoryEntry& fe, int index) {
+    ReportIf(!menuFile);
+    if (!menuFile) {
         return;
     }
 
-    TempStr menuString = path::GetBaseNameTemp(filePath);
+    TempStr menuString = path::GetBaseNameTemp(fe.path);
     // shorten very long file names so that menu isn't too wide
     const int kMaxRunes = 70;
     menuString = ShortenStringUtf8InTheMiddleTemp(menuString, kMaxRunes);
@@ -1429,9 +1470,8 @@ static void AddFileMenuItem(HMENU menuFile, Str filePath, int index) {
     TempStr fileName = MenuToSafeStringTemp(menuString);
     int menuIdx = (index + 1) % 10;
     menuString = fmt("&%d) %s", menuIdx, fileName);
-    uint menuId = CmdFileHistoryFirst + index;
     uint flags = MF_BYCOMMAND | MF_ENABLED | MF_STRING;
-    InsertMenuW(menuFile, CmdExit, flags, menuId, CWStrTemp(menuString));
+    InsertMenuW(menuFile, CmdExit, flags, (uint)fe.cmdId, CWStrTemp(menuString));
 }
 
 static void AppendRecentFilesToMenu(HMENU m) {
@@ -1439,8 +1479,8 @@ static void AppendRecentFilesToMenu(HMENU m) {
         return;
     }
 
-    int i;
-    for (i = 0; i < kFileHistoryMaxRecent; i++) {
+    Vec<FileHistoryEntry> files;
+    for (int i = 0; i < kFileHistoryMaxRecent; i++) {
         FileState* fs = FileHistoryGet(i);
         if (!fs || fs->isMissing) {
             break;
@@ -1450,12 +1490,18 @@ static void AppendRecentFilesToMenu(HMENU m) {
             // comes from settings file so can be missing due to user modifications
             continue;
         }
-        AddFileMenuItem(m, fp, i);
+        VecAppend(files, FileHistoryEntry{fp, 0});
+    }
+    if (len(files) == 0) {
+        return;
     }
 
-    if (i > 0) {
-        InsertMenuW(m, CmdExit, MF_BYCOMMAND | MF_SEPARATOR, 0, nullptr);
+    SetFileHistoryCmdIds(files);
+    for (int i = 0; i < len(files); i++) {
+        AddFileMenuItem(m, files[i], i);
     }
+
+    InsertMenuW(m, CmdExit, MF_BYCOMMAND | MF_SEPARATOR, 0, nullptr);
 }
 
 static void AppendCommandsToMenu(HMENU m, const Vec<CustomCommand*>& cmds, bool isEnabled) {
@@ -1545,9 +1591,8 @@ static void DynamicPartOfFileMenu(HMENU menu, BuildMenuCtx* ctx) {
     // e-mail client, Adobe Reader, Foxit, PDF-XChange
     // Don't hide items here that won't always be hidden
     // (MenuUpdateStateForWindow() is for that)
-    int idFirst = CmdOpenWithKnownExternalViewerFirst + 1;
-    int idLast = CmdOpenWithKnownExternalViewerLast;
-    for (int cmdId = idFirst; cmdId < idLast; cmdId++) {
+    for (int i = 0; gOpenWithKnownExternalViewerCmds[i]; i++) {
+        int cmdId = gOpenWithKnownExternalViewerCmds[i];
         bool remove, disable;
         GetCommandIdState(ctx, cmdId, &remove, &disable);
         if (remove || disable) {
@@ -1683,8 +1728,8 @@ HMENU BuildMenuFromDef(MenuDef* menuDef, HMENU menu, BuildMenuCtx* ctx) {
             if (menuDef == menuDefSelection) {
                 removeMenu |= !ctx->hasSelection && cmdId == CmdCopySelection;
                 if (!isRectSel) {
-                    removeMenu |=
-                        cmdId == CmdCopySelectionAsImage || cmdId == CmdSearchGoogleLens || cmdId == CmdZoomToSelection;
+                    removeMenu |= cmdId == CmdCopySelectionAsImage || cmdId == CmdSaveSelectionAsImage ||
+                                  cmdId == CmdSearchGoogleLens || cmdId == CmdZoomToSelection;
                 }
             }
             if (menuDef == menuDefGoogleLens) {
@@ -1987,6 +2032,9 @@ static void MenuUpdateDisplayMode(MainWindow* win) {
 
     CheckMenuRadioItem(win->menu, CmdViewLayoutFirst, CmdViewLayoutLast, id, MF_BYCOMMAND);
     MenuSetChecked(win->menu, CmdToggleContinuousView, IsContinuous(displayMode));
+    MenuSetChecked(win->menu, CmdToggleAutomaticallyScroll, ReadingAutoScrollIsOn(win));
+    MenuSetChecked(win->menu, CmdToggleReadingBar, ReadingBarIsOn(win));
+    MenuSetChecked(win->menu, CmdToggleReadingBarInvert, gSettings && gSettings->readingBar.invert);
 
     DisplayModel* dm = win->AsFixed();
     if (dm && win->CurrentTab()) {
@@ -1995,6 +2043,8 @@ static void MenuUpdateDisplayMode(MainWindow* win) {
         MenuSetEnabled(win->menu, CmdToggleMangaMode, true);
         MenuSetChecked(win->menu, CmdToggleUniformPageWidth, dm->GetUniformPageWidth());
         MenuSetEnabled(win->menu, CmdToggleUniformPageWidth, true);
+        MenuSetChecked(win->menu, CmdToggleTrimEmptyMargins, dm->GetTrimEmptyMargins());
+        MenuSetEnabled(win->menu, CmdToggleTrimEmptyMargins, true);
     }
 }
 
@@ -2192,7 +2242,7 @@ void ForgetFileFromFrequentlyRead(MainWindow* win, Str filePath) {
         DeleteFileState(fs);
     }
     DeleteThumbnailForFile(path);
-    SaveSettings();
+    ScheduleSaveSettings();
     win->DeleteToolTip();
     win->RedrawAll(true);
 }
@@ -2549,8 +2599,8 @@ void OnWindowContextMenu(MainWindow* win, int x, int y) {
 // the cursor's position after the context menu has closed.
 bool CommandUsesContextMenuPoint(int cmdId) {
     if (cmdId == CmdAnnotationHighlightBrush) {
-        // a drag-to-paint tool, not a point-placed annotation: dispatch it
-        // without a point so it enters brush mode instead of stamping a stroke
+        // a mode that highlights the text selected next, not an annotation
+        // placed at a point: dispatch it without one
         return false;
     }
     if (CmdIdToAnnotationType(cmdId) != AnnotationType::Unknown) {
@@ -3032,7 +3082,7 @@ void ToggleMenuBar(MainWindow* win, bool showTemporarily) {
 
 // --- Menu bar as rebar control (used when tabs are in titlebar) ---
 
-static int MenuBarToolbarIdealDy(MainWindow* win) {
+static int MenuBarToolbarIdealDy() {
     PlatformFont* font = GetAppMenuFont();
     int dy = PlatformFontLineHeight(font) + DpiScale(4);
     int minDy = DpiScale(kTabBarDy);
@@ -3052,7 +3102,7 @@ int GetMenuBarRebarHeight(MainWindow* win) {
         }
         return dy;
     }
-    int ideal = MenuBarToolbarIdealDy(win);
+    int ideal = MenuBarToolbarIdealDy();
     if (IsRunningOnWine()) {
         logf("GetMenuBarRebarHeight: rebar=%p RB_GETBARHEIGHT=%d fallbackIdeal=%d\n", win->hwndMenuReBar, dy, ideal);
     }
@@ -3267,7 +3317,7 @@ void RebuildMenuBarButtons(MainWindow* win) {
 
     if (win->hwndMenuReBar) {
         Rect rc = TbGetItemRect(hwndMb, 0);
-        int menuBarDy = MenuBarToolbarIdealDy(win);
+        int menuBarDy = MenuBarToolbarIdealDy();
         if (rc.dy > 0) {
             menuBarDy = rc.dy + (2 * rc.y);
         }
@@ -3344,7 +3394,7 @@ void CreateMenuBarRebar(MainWindow* win) {
     Rect rc = TbGetItemRect(win->hwndMenuToolbar, 0);
     int menuBarDy = rc.dy + (2 * rc.y);
     if (menuBarDy <= 0) {
-        menuBarDy = MenuBarToolbarIdealDy(win);
+        menuBarDy = MenuBarToolbarIdealDy();
     }
 
     ShowWindow(win->hwndMenuToolbar, SW_SHOW);

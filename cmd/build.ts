@@ -1,49 +1,56 @@
-import { copyFileSync, existsSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { copyFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { cpus } from "node:os";
+import { join, relative } from "node:path";
 import { $ } from "bun";
 import { clearDirPreserveSettings } from "./clean";
+import { ensureNinja, ninjaDir, ninjaToRoot } from "./ninja";
 import { detectVisualStudio2026, runLogged } from "./util";
 
 type BuildMode = "windows" | "all" | "smoke" | "ci" | "daily" | "codeql" | "mingw" | "wine" | "build-no";
-type Config = "debug" | "release";
+type Config = "debug" | "release" | "profile";
 
 interface BuildOptions {
   mode?: BuildMode;
   config?: Config;
   asan: boolean;
   clean: boolean;
+  ninja: boolean;
+  msbuild: boolean;
   win32: boolean;
   run: boolean;
   runArgs: string[];
-  buildNo?: number;
+  buildNo?: string;
 }
 
 const usage = `Usage: bun cmd/build.ts <mode> [options]
 
 Windows builds:
-  -debug | -release       Build SumatraPDF.exe for x64
-  -release -32            Build the 32-bit release
-  -asan [-debug|-release] Build SumatraPDF-static.exe with MSVC ASan
+  -dbg | -rel             Build SumatraPDF.exe for x64
+  -profile                Build a function-timing profile variant (out/prf64)
+  -rel -32                Build the 32-bit release
+  -asan [-dbg|-rel]       Build SumatraPDF-static.exe with MSVC ASan
   -all [-clean]           Build release SumatraPDF and SumatraPDF-static
-  -smoke                  Rebuild release SumatraPDF and test_util, then run test_util
+  -smoke                  Rebuild release SumatraPDF, then run the debug unit tests
   -ci                     Build CI/pre-release artifacts
   -daily                  Build daily artifacts
   -codeql                 Build the static release target for CodeQL
 
 MinGW cross-builds (they still produce a Windows exe):
-  -mingw <-debug|-release> [-clean]
+  -mingw <-dbg|-rel> [-clean]
                            Direct MinGW cross-build on the current host
   -wine [-clean] [-run] [-- <SumatraPDF args>]
                            MinGW build on Linux and optionally run under Wine;
                            from Windows it runs through WSL Ubuntu
 
 Other:
-  -build-no [number]      List recent build numbers or resolve one number
+  -build-no [number|sha1] List recent build numbers or resolve a number or sha1
   -h | -help              Print this help
 
 General options:
   -clean                  Clean the selected output directory first
-  -32                     Select Win32 (valid only with Windows -release)`;
+  -ninja                  Use Ninja instead of MSBuild
+  -msbuild                Use MSBuild (the default)
+  -32                     Select Win32 (valid only with Windows -rel)`;
 
 class CliError extends Error {}
 
@@ -54,9 +61,16 @@ function setMode(opts: BuildOptions, mode: BuildMode): void {
   opts.mode = mode;
 }
 
+// the command-line flag that selects a given configuration
+function configFlag(config: Config): string {
+  if (config === "debug") return "-dbg";
+  if (config === "profile") return "-profile";
+  return "-rel";
+}
+
 function setConfig(opts: BuildOptions, config: Config): void {
   if (opts.config) {
-    throw new CliError(`-${opts.config} and -${config} cannot be used together`);
+    throw new CliError(`${configFlag(opts.config)} and ${configFlag(config)} cannot be used together`);
   }
   opts.config = config;
 }
@@ -73,6 +87,8 @@ function parseArgs(args: string[]): BuildOptions | undefined {
   const opts: BuildOptions = {
     asan: false,
     clean: false,
+    ninja: false,
+    msbuild: false,
     win32: false,
     run: false,
     runArgs: [],
@@ -84,14 +100,21 @@ function parseArgs(args: string[]): BuildOptions | undefined {
       opts.runArgs.push(...args.slice(i + 1));
       break;
     }
-    if (arg === "-debug") setConfig(opts, "debug");
-    else if (arg === "-release") setConfig(opts, "release");
+    if (arg === "-dbg") setConfig(opts, "debug");
+    else if (arg === "-rel") setConfig(opts, "release");
+    else if (arg === "-profile") setConfig(opts, "profile");
     else if (arg === "-asan") {
       if (opts.asan) throw new CliError("-asan can only be specified once");
       opts.asan = true;
     } else if (arg === "-clean") {
       if (opts.clean) throw new CliError("-clean can only be specified once");
       opts.clean = true;
+    } else if (arg === "-ninja") {
+      if (opts.ninja) throw new CliError("-ninja can only be specified once");
+      opts.ninja = true;
+    } else if (arg === "-msbuild") {
+      if (opts.msbuild) throw new CliError("-msbuild can only be specified once");
+      opts.msbuild = true;
     } else if (arg === "-32") {
       if (opts.win32) throw new CliError("-32 can only be specified once");
       opts.win32 = true;
@@ -113,8 +136,7 @@ function parseArgs(args: string[]): BuildOptions | undefined {
       setMode(opts, "build-no");
       const value = args[i + 1];
       if (value && !value.startsWith("-")) {
-        if (!/^\d+$/.test(value)) throw new CliError(`invalid build number: ${value}`);
-        opts.buildNo = Number(value);
+        opts.buildNo = value;
         i++;
       }
     } else {
@@ -138,39 +160,110 @@ function validateOptions(opts: BuildOptions): void {
   const mode = opts.mode!;
   const fixedModes: BuildMode[] = ["all", "smoke", "ci", "daily", "codeql", "wine", "build-no"];
   if (fixedModes.includes(mode)) {
-    reject(!!opts.config, `-${opts.config} is not valid with -${mode}`);
+    reject(!!opts.config, `${opts.config ? configFlag(opts.config) : ""} is not valid with -${mode}`);
     reject(opts.asan, `-asan is not valid with -${mode}`);
   }
   if (mode === "windows") {
-    reject(!opts.config && !opts.asan, "Windows builds require -debug, -release, or -asan");
-    reject(opts.win32 && (opts.config !== "release" || opts.asan), "-32 requires a non-ASan -release build");
+    reject(!opts.config && !opts.asan, "Windows builds require -dbg, -rel, -profile, or -asan");
+    reject(opts.win32 && (opts.config !== "release" || opts.asan), "-32 requires a non-ASan -rel build");
+    reject(opts.asan && opts.config === "profile", "-asan is not supported with -profile");
   }
   if (mode === "mingw") {
-    reject(!opts.config, "-mingw requires -debug or -release");
+    reject(!opts.config, "-mingw requires -dbg or -rel");
     reject(opts.asan, "-asan is not supported with -mingw");
   }
   reject(opts.clean && !["windows", "all", "mingw", "wine"].includes(mode), `-clean is not valid with -${mode}`);
+  reject(opts.ninja && opts.msbuild, "-ninja and -msbuild cannot be used together");
+  reject(opts.ninja && !["windows", "all", "smoke"].includes(mode), `-ninja is not valid with -${mode}`);
+  reject(opts.msbuild && !["windows", "all", "smoke"].includes(mode), `-msbuild is not valid with -${mode}`);
   reject(opts.win32 && mode !== "windows", "-32 is only valid for Windows builds");
   reject(opts.run && mode !== "wine", "-run is only valid with -wine");
   reject(opts.runArgs.length > 0 && mode !== "wine", "arguments after -- are only valid with -wine");
   reject(opts.runArgs.length > 0 && !opts.run, "arguments after -- require -run");
 }
 
-async function buildWindows(config: Config, win32: boolean, clean: boolean): Promise<void> {
-  const configName = config === "release" ? "Release" : "Debug";
+function formatElapsed(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  if (minutes === 0) return `${seconds}s`;
+  return `${minutes}m ${seconds % 60}s`;
+}
+
+async function buildApp(msbuildPath: string, configName: string, platform: string, target: string): Promise<void> {
+  const targets = ["PdfFilter", "PdfPreview", "sumatrapdf-tool", target];
+  for (const name of targets) {
+    await runLogged(msbuildPath, [
+      String.raw`vs2022\SumatraPDF.sln`,
+      `/t:${name}`,
+      `/p:Configuration=${configName};Platform=${platform}`,
+      "/m",
+    ]);
+  }
+}
+
+function windowsConfigName(config: Config): string {
+  if (config === "release") return "Release";
+  if (config === "profile") return "Profile";
+  return "Debug";
+}
+
+function windowsOutDir(config: Config, win32: boolean): string {
+  if (win32) return "rel32";
+  if (config === "release") return "rel64";
+  if (config === "profile") return "prf64";
+  return "dbg64";
+}
+
+async function buildWindows(config: Config, win32: boolean, clean: boolean, ninja: boolean): Promise<void> {
+  const configName = windowsConfigName(config);
   const platform = win32 ? "Win32" : "x64";
-  const outDir = join("out", win32 ? "rel32" : config === "release" ? "rel64" : "dbg64");
-  const timeStart = performance.now();
+  const outDir = join("out", windowsOutDir(config, win32));
   console.log(`${configName} ${platform} build`);
   if (clean) clearDirPreserveSettings(outDir);
-  const { msbuildPath } = detectVisualStudio2026();
-  await runLogged(msbuildPath, [
-    String.raw`vs2022\SumatraPDF.sln`,
-    "/t:SumatraPDF",
-    `/p:Configuration=${configName};Platform=${platform}`,
-    "/m",
+  if (ninja) {
+    await buildNinja([join(ninjaToRoot, outDir, "SumatraPDF.exe")]);
+  } else {
+    const { msbuildPath } = detectVisualStudio2026();
+    await buildApp(msbuildPath, configName, platform, "SumatraPDF");
+  }
+  printBinaries(outDir, new Set(["SumatraPDF.exe"]));
+}
+
+async function buildNinja(targets: string[]): Promise<void> {
+  await ensureNinja();
+  const jobs = Math.max(1, cpus().length - 1);
+  await runLogged("ninja", ["-C", ninjaDir, "-j", `${jobs}`, ...targets]);
+}
+
+function printBinaries(dir: string, targets: Set<string>): void {
+  const paths: string[] = [];
+  const dynamicFiles = new Set([
+    "SumatraPDF.exe",
+    "libsumatrapdf.dll",
+    "PdfFilter.dll",
+    "PdfPreview.dll",
+    "sumatrapdf-tool.exe",
   ]);
-  console.log(`build took ${((performance.now() - timeStart) / 1000).toFixed(1)}s`);
+  const walk = (path: string): void => {
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      const entryPath = join(path, entry.name);
+      if (entry.isDirectory()) {
+        walk(entryPath);
+        continue;
+      }
+      const relPath = relative(dir, entryPath).replaceAll("\\", "/");
+      const isDynamic = targets.has("SumatraPDF.exe") && dynamicFiles.has(relPath);
+      if (entry.isFile() && (targets.has(entry.name) || isDynamic)) {
+        paths.push(entryPath);
+      }
+    }
+  };
+
+  walk(dir);
+  for (const path of paths.sort()) {
+    const size = statSync(path).size;
+    console.log(`${relative(".", path)}: ${(size / 1_000_000).toFixed(1)} MB, ${size.toLocaleString("en-US")}`);
+  }
 }
 
 const asanDllName = "clang_rt.asan_dynamic-x86_64.dll";
@@ -198,67 +291,87 @@ function findAsanDll(vsRoot: string): string {
   throw new Error(`could not find ${asanDllName} under ${vsRoot}`);
 }
 
-async function buildWindowsAsan(config: Config, clean: boolean): Promise<void> {
+async function buildWindowsAsan(config: Config, clean: boolean, ninja: boolean): Promise<void> {
   const configName = config === "release" ? "Release" : "Debug";
   const outDir = join("out", config === "release" ? "rel64_asan" : "dbg64_asan");
-  const timeStart = performance.now();
   console.log(`${configName} ASan build (SumatraPDF-static.exe, x64_asan)`);
   if (clean) clearDirPreserveSettings(outDir);
-  await runLogged(join("bin", "premake5.exe"), ["vs2022"]);
   const { msbuildPath, vsRoot } = detectVisualStudio2026();
-  await runLogged(msbuildPath, [
-    String.raw`vs2022\SumatraPDF.sln`,
-    "/t:SumatraPDF-static",
-    `/p:Configuration=${configName};Platform=x64_asan`,
-    "/m",
-  ]);
+  if (ninja) {
+    await buildNinja([join(ninjaToRoot, outDir, "SumatraPDF-static.exe")]);
+  } else {
+    await runLogged(msbuildPath, [
+      String.raw`vs2022\SumatraPDF.sln`,
+      "/t:SumatraPDF-static",
+      `/p:Configuration=${configName};Platform=x64_asan`,
+      "/m",
+    ]);
+  }
+  printBinaries(outDir, new Set(["SumatraPDF-static.exe"]));
   copyFileSync(findAsanDll(vsRoot), join(outDir, asanDllName));
-  console.log(`build took ${((performance.now() - timeStart) / 1000).toFixed(1)}s`);
   console.log(`exe: ${join(outDir, "SumatraPDF-static.exe")}`);
 }
 
-async function buildAll(clean: boolean): Promise<void> {
+async function buildAll(clean: boolean, ninja: boolean): Promise<void> {
   const outDir = join("out", "rel64");
-  const timeStart = performance.now();
   console.log("Release x64 SumatraPDF and SumatraPDF-static build");
   if (clean) clearDirPreserveSettings(outDir);
-  const { msbuildPath } = detectVisualStudio2026();
-  await runLogged(msbuildPath, [
-    String.raw`vs2022\SumatraPDF.sln`,
-    "/t:SumatraPDF;SumatraPDF-static",
-    "/p:Configuration=Release;Platform=x64",
-    "/m",
-  ]);
-  console.log(`build took ${((performance.now() - timeStart) / 1000).toFixed(1)}s`);
+  if (ninja) {
+    await buildNinja([join(ninjaToRoot, outDir, "SumatraPDF.exe"), join(ninjaToRoot, outDir, "SumatraPDF-static.exe")]);
+  } else {
+    const { msbuildPath } = detectVisualStudio2026();
+    await buildApp(msbuildPath, "Release", "x64", "SumatraPDF");
+    await runLogged(msbuildPath, [
+      String.raw`vs2022\SumatraPDF.sln`,
+      "/t:SumatraPDF-static",
+      "/p:Configuration=Release;Platform=x64",
+      "/m",
+    ]);
+  }
+  printBinaries(outDir, new Set(["SumatraPDF.exe", "SumatraPDF-static.exe"]));
 }
 
-async function buildSmoke(): Promise<void> {
+async function buildSmoke(ninja: boolean): Promise<void> {
   const outDir = join("out", "rel64");
-  const timeStart = performance.now();
   console.log("smoke build");
   clearDirPreserveSettings(outDir);
-  const { msbuildPath } = detectVisualStudio2026();
-  await runLogged(msbuildPath, [
-    String.raw`vs2022\SumatraPDF.sln`,
-    String.raw`/t:SumatraPDF:Rebuild;tools\test_util:Rebuild`,
-    "/p:Configuration=Release;Platform=x64",
-    "/m",
-  ]);
-  await runLogged(resolve(join(outDir, "test_util.exe")), [], outDir);
-  console.log(`smoke build took ${((performance.now() - timeStart) / 1000).toFixed(1)}s`);
+  if (ninja) {
+    await buildNinja([join(ninjaToRoot, outDir, "SumatraPDF.exe")]);
+  } else {
+    const { msbuildPath } = detectVisualStudio2026();
+    await buildApp(msbuildPath, "Release", "x64", "SumatraPDF:Rebuild");
+  }
+  printBinaries(outDir, new Set(["SumatraPDF.exe"]));
+  // unit tests are compiled into the debug SumatraPDF only
+  await runLogged("bun", [join("cmd", "run-unit-tests.ts"), "-dbg"]);
 }
 
-async function showBuildNo(buildNo?: number): Promise<void> {
-  const out = await $`git log --oneline`.text();
-  const lines = out.split("\n").filter((line) => line.trim() !== "");
-  const numberAt = (i: number) => lines.length - i + 1000;
-  if (!buildNo) {
-    for (let i = 0; i < Math.min(32, lines.length); i++) console.log(`${numberAt(i)} ${lines[i]}`);
+async function showBuildNo(query?: string): Promise<void> {
+  const total = Number((await $`git rev-list --count HEAD`.text()).trim());
+  if (!query) {
+    const out = await $`git log -32 --oneline`.text();
+    const lines = out.split("\n").filter((line) => line.trim() !== "");
+    for (let i = 0; i < lines.length; i++) console.log(`${total - i + 1000} ${lines[i]}`);
     return;
   }
-  const index = lines.length - (buildNo - 1000);
-  if (index < 0 || index >= lines.length) throw new Error(`build number ${buildNo} is out of range`);
-  console.log(`${buildNo} ${lines[index]}`);
+  if (/^\d+$/.test(query)) {
+    const buildNo = Number(query);
+    const skip = total - (buildNo - 1000);
+    if (skip >= 0 && skip < total) {
+      const line = (await $`git log -1 --skip ${skip} --oneline`.text()).trim();
+      console.log(`${buildNo} ${line}`);
+      return;
+    }
+  }
+  const sha = (await $`git rev-parse --verify --quiet ${query}^{commit}`.nothrow().text()).trim();
+  if (sha) {
+    const count = Number((await $`git rev-list --count ${sha}`.text()).trim());
+    const line = (await $`git log -1 --oneline ${sha}`.text()).trim();
+    console.log(`${count + 1000} ${line}`);
+    return;
+  }
+  if (/^\d+$/.test(query)) throw new Error(`build number ${query} is out of range`);
+  throw new Error(`unknown commit or build number: ${query}`);
 }
 
 // the wine build runs in WSL Ubuntu when started from Windows
@@ -276,10 +389,10 @@ async function runBuild(opts: BuildOptions): Promise<void> {
   const mode = opts.mode!;
   if (mode === "windows") {
     const config = opts.config ?? "debug";
-    if (opts.asan) await buildWindowsAsan(config, opts.clean);
-    else await buildWindows(config, opts.win32, opts.clean);
-  } else if (mode === "all") await buildAll(opts.clean);
-  else if (mode === "smoke") await buildSmoke();
+    if (opts.asan) await buildWindowsAsan(config, opts.clean, opts.ninja);
+    else await buildWindows(config, opts.win32, opts.clean, opts.ninja);
+  } else if (mode === "all") await buildAll(opts.clean, opts.ninja);
+  else if (mode === "smoke") await buildSmoke(opts.ninja);
   else if (mode === "ci") {
     const { buildCi } = await import("./helper/ci-build");
     await buildCi();
@@ -323,7 +436,12 @@ async function main(): Promise<void> {
     console.log(usage);
     return;
   }
-  await runBuild(opts);
+  const timeStart = performance.now();
+  try {
+    await runBuild(opts);
+  } finally {
+    console.log(`build took ${formatElapsed(performance.now() - timeStart)}`);
+  }
 }
 
 try {

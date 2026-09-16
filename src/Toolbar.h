@@ -6,7 +6,7 @@
 // tree they live in, and when the overlay toolbar shows and hides. It reaches
 // its window through VirtHost, so it names no OS windowing API.
 //
-// Toolbar_win.cpp owns what is left of Win32: the native page-number edit, the
+// Its OS_WIN section owns what is left of Win32: the native page-number edit, the
 // messages VirtHost doesn't model (the edit's colors, dragging the frame by the
 // toolbar), eating the click that dismissed a drop-down, and the handful of
 // calls that reach the frame and canvas windows, which are not hosts yet.
@@ -52,9 +52,9 @@ TempStr ToolbarButtonsResultTemp(int* exitCodeOut);
 //--- hover drop-down
 
 // A toolbar button can open a drop-down when the mouse rests on it, after the
-// same delay a tooltip takes. The content is any layout, so a caller can put
-// whatever it likes in there; NewToolbarHoverMenu() builds the menu-like rows
-// most of them want.
+// same delay a tooltip takes. Right-click opens it at once if it is not already
+// shown. The content is any layout, so a caller can put whatever it likes in
+// there; NewToolbarHoverMenu() builds the menu-like rows most of them want.
 
 // one item: an icon, a label and the command a click runs. NewToolbarHoverMenu()
 // makes each a menu-like row, NewToolbarHoverStrip() a cell in a pyramid.
@@ -70,6 +70,8 @@ struct ToolbarHoverMenuItem {
 // Built every time the drop-down opens, so it shows the current state.
 struct ToolbarHoverBuildEvent {
     MainWindow* win = nullptr;
+    // the button the drop-down is being built for
+    int cmdId = 0;
     // out: the drop-down's content; the drop-down takes ownership
     ILayout* layout = nullptr;
     // out: optional. Hang the drop-down off the middle of the button, instead
@@ -89,7 +91,21 @@ ILayout* NewToolbarHoverStrip(MainWindow*, const Vec<ToolbarHoverMenuItem>&);
 void HideToolbarHoverDropdown(MainWindow*);
 bool ToolbarHoverDropdownContainsScreenPoint(MainWindow*, Point);
 
-//--- shared between Toolbar.cpp and Toolbar_win.cpp, not meant for anyone else
+// the markup buttons' color drop-down, under a rect that is not a toolbar
+// button (the annotation edit toolbar's color chips). withNone adds a swatch
+// for no color at all, which picks kColorUnset. label heads the swatches
+// thickness >= 0 adds the Thickness slider the ink button's drop-down has,
+// starting there; onThickness gets the width when the slider is let go.
+// thicknessLabel names the slider (Thickness when empty), minThickness is its lowest width
+void ShowAnnotColorPopup(MainWindow*, Rect anchor, Color current, bool withNone, Str label, const Func1<Color>& onPick,
+                         int thickness = -1, const Func1<int>& onThickness = {}, Str thicknessLabel = {},
+                         int minThickness = 1);
+void ShowAnnotSliderPopup(MainWindow*, Rect anchor, Str label, int value, int minVal, int maxVal,
+                          const Func1<int>& onValue);
+// for tests: the swatches of the drop-down that is up, if any
+TempStr AnnotColorPopupStateTemp();
+
+//--- internal to Toolbar.cpp, not meant for anyone else
 
 // those are not real commands but we have to refer to toolbar buttons
 // is by a command. those are just background for area to be
@@ -147,11 +163,9 @@ struct ToolbarVirt {
     Str hoverSavedTip;
 };
 
-// implemented in Toolbar.cpp
 Color TbTextColor();
 VirtCtrl* ToolbarItemFromPoint(MainWindow*, Point);
 
-// implemented in Toolbar_win.cpp
 Edit* ToolbarCreatePageEdit(MainWindow*, PlatformFont*, int iconDy);
 Edit* ToolbarCreateChapterEdit(MainWindow*, PlatformFont*, int iconDy);
 void ToolbarSetNativeHooks(MainWindow*, VirtHost*);

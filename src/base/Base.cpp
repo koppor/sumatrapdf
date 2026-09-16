@@ -8,6 +8,37 @@ Kind kindNone = "none";
 // if > 1 we won't crash when memory allocation fails
 AtomicInt gAllowAllocFailure = 0;
 
+u64 (*gTryFreeCachedObjects)(u64 newAllocationSize) = nullptr;
+u64 (*gFreeCachedObjects)() = nullptr;
+
+static void* MallocMaybeTrim(size_t size) {
+    if (size >= kLargeAllocationSize && gTryFreeCachedObjects) {
+        gTryFreeCachedObjects((u64)size);
+    }
+    void* p = malloc(size);
+    if (p) {
+        return p;
+    }
+    if (size >= kLargeAllocationSize && gFreeCachedObjects && gFreeCachedObjects() > 0) {
+        p = malloc(size);
+    }
+    return p;
+}
+
+static void* ReallocMaybeTrim(void* mem, size_t newSize) {
+    if (newSize >= kLargeAllocationSize && gTryFreeCachedObjects) {
+        gTryFreeCachedObjects((u64)newSize);
+    }
+    void* p = realloc(mem, newSize);
+    if (p || newSize == 0) {
+        return p;
+    }
+    if (newSize >= kLargeAllocationSize && gFreeCachedObjects && gFreeCachedObjects() > 0) {
+        p = realloc(mem, newSize);
+    }
+    return p;
+}
+
 // This exits so that I can add temporary instrumentation
 // to catch allocations of a given size and it won't cause
 // re-compilation of everything caused by changing Base.h
@@ -271,7 +302,7 @@ bool QuadF::Contains(PointF p) const {
     for (int i = 0; i < 4; i++) {
         PointF a = pts[i];
         PointF b = pts[(i + 1) % 4];
-        float cross = (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+        float cross = ((b.x - a.x) * (p.y - a.y)) - ((b.y - a.y) * (p.x - a.x));
         if (cross < 0) {
             neg = true;
         } else if (cross > 0) {
@@ -1357,7 +1388,7 @@ void* Alloc(Arena* arena, int size) {
         return nullptr;
     }
     if (!arena) {
-        return malloc(size);
+        return MallocMaybeTrim((size_t)size);
     }
     return arena->Alloc(size);
 }
@@ -1375,7 +1406,10 @@ void* Alloc(Arena* arena, size_t size) {
         return nullptr;
     }
     if (!arena) {
-        return malloc(size);
+        return MallocMaybeTrim(size);
+    }
+    if (size >= kLargeAllocationSize && gTryFreeCachedObjects) {
+        gTryFreeCachedObjects((u64)size);
     }
     return arena->Push((u64)size, 8, false);
 }
@@ -1385,18 +1419,21 @@ void* AllocZero(Arena* arena, size_t size) {
         return nullptr;
     }
     if (!arena) {
-        void* mem = malloc(size);
+        void* mem = MallocMaybeTrim(size);
         if (mem) {
             memset(mem, 0, size);
         }
         return mem;
+    }
+    if (size >= kLargeAllocationSize && gTryFreeCachedObjects) {
+        gTryFreeCachedObjects((u64)size);
     }
     return arena->Push((u64)size, 8, true);
 }
 
 void* Realloc(Arena* arena, void* mem, size_t newSize, size_t copySize) {
     if (!arena) {
-        return realloc(mem, newSize);
+        return ReallocMaybeTrim(mem, newSize);
     }
     // Arena has no realloc: allocate fresh and copy. Old memory is not freed
     // (arena lifetime handles it).
@@ -1576,9 +1613,9 @@ NO_INLINE void* VecInsertSpaceNT(VecNonTemplated* v, int elSize, int idx, int co
     if (!VecReserveNT(nullptr, v, elSize, newLen)) {
         return nullptr;
     }
-    char* res = (char*)v->els + (size_t)idx * (size_t)elSize;
+    char* res = (char*)v->els + ((size_t)idx * (size_t)elSize);
     if (len > idx) {
-        char* dst = res + (size_t)count * (size_t)elSize;
+        char* dst = res + ((size_t)count * (size_t)elSize);
         memmove(dst, res, (size_t)(len - idx) * (size_t)elSize);
     }
     v->len = newLen;
@@ -1598,7 +1635,7 @@ NO_INLINE bool VecResizeNT(VecNonTemplated* v, int elSize, int newSize) {
     }
     v->len = newSize;
     if (v->els && curCap > newSize) {
-        char* tail = (char*)v->els + (size_t)newSize * (size_t)elSize;
+        char* tail = (char*)v->els + ((size_t)newSize * (size_t)elSize);
         memset(tail, 0, (size_t)(curCap - newSize) * (size_t)elSize);
     }
     return true;
@@ -1608,12 +1645,12 @@ NO_INLINE void VecRemoveAtNT(VecNonTemplated* v, int elSize, int idx, int count)
     int len = v->len;
     char* els = (char*)v->els;
     if (len > idx + count) {
-        char* dst = els + (size_t)idx * (size_t)elSize;
-        char* src = els + (size_t)(idx + count) * (size_t)elSize;
+        char* dst = els + ((size_t)idx * (size_t)elSize);
+        char* src = els + ((size_t)(idx + count) * (size_t)elSize);
         memmove(dst, src, (size_t)(len - idx - count) * (size_t)elSize);
     }
     len -= count;
-    memset(els + (size_t)len * (size_t)elSize, 0, (size_t)count * (size_t)elSize);
+    memset(els + ((size_t)len * (size_t)elSize), 0, (size_t)count * (size_t)elSize);
     v->len = len;
 }
 
@@ -1626,8 +1663,8 @@ NO_INLINE void VecRemoveAtFastNT(VecNonTemplated* v, int elSize, int idx) {
         return;
     }
     char* els = (char*)v->els;
-    char* toRemove = els + (size_t)idx * (size_t)elSize;
-    char* last = els + (size_t)(len - 1) * (size_t)elSize;
+    char* toRemove = els + ((size_t)idx * (size_t)elSize);
+    char* last = els + ((size_t)(len - 1) * (size_t)elSize);
     if (toRemove != last) {
         memcpy(toRemove, last, (size_t)elSize);
     }
@@ -1694,7 +1731,7 @@ NO_INLINE void VecCopyFromNT(VecNonTemplated* v, int elSize, int srcLen, const v
     if (zeroTail && v->els) {
         int curCap = v->cap < 0 ? -v->cap : v->cap;
         if (curCap > srcLen) {
-            char* tail = (char*)v->els + (size_t)srcLen * (size_t)elSize;
+            char* tail = (char*)v->els + ((size_t)srcLen * (size_t)elSize);
             memset(tail, 0, (size_t)(curCap - srcLen) * (size_t)elSize);
         }
     }
@@ -1718,8 +1755,6 @@ void LogArenaStats(Str what, Arena* a) {
 #define _strdup strdup
 #define _stricmp strcasecmp
 #define _strnicmp strncasecmp
-// TODO: not sure if that's correct
-#define sscanf_s sscanf
 #endif
 
 // StrArena: u32 handle from ArenaPtrCompress. Arena layout is unsigned LEB128
@@ -1845,6 +1880,62 @@ wchar_t WCharToLower(wchar_t c) {
     }
     return (wchar_t)towlower((wint_t)c);
 #endif
+}
+
+// locale-independent lowercase of a codepoint for case-insensitive matching
+int FoldCaseRune(int c) {
+    // CharLowerW maps İ (U+0130) to 'i' only under Turkish locale (issue #5597)
+    if (c == 0x0130) {
+        return 'i';
+    }
+    if (c > 0 && c <= 0xffff) {
+        return WCharToLower((wchar_t)c);
+    }
+    return c;
+}
+
+bool IsCombiningMark(int c) {
+    return c >= 0x300 && c <= 0x36f;
+}
+
+// strip diacritics from a codepoint: 'é' -> 'e', 'ł' -> 'l'. Case is preserved
+int FoldDiacriticsRune(int c) {
+    if (c < 0x80 || c > 0xffff) {
+        return c;
+    }
+
+    // letters that don't decompose into base + combining mark
+    switch (c) {
+        case 0x141: // Ł
+            return 'L';
+        case 0x142: // ł
+            return 'l';
+        case 0x110: // Đ
+            return 'D';
+        case 0x111: // đ
+            return 'd';
+        case 0xd8: // Ø
+            return 'O';
+        case 0xf8: // ø
+            return 'o';
+        case 0x126: // Ħ
+            return 'H';
+        case 0x127: // ħ
+            return 'h';
+        case 0x131: // ı
+            return 'i';
+    }
+
+#if OS_WIN
+    // 'é' -> 'e' + U+0301
+    WCHAR w = (WCHAR)c;
+    WCHAR decomposed[8];
+    int n = FoldStringW(MAP_COMPOSITE, &w, 1, decomposed, dimofi(decomposed));
+    if (n > 1 && IsCombiningMark(decomposed[1])) {
+        return decomposed[0];
+    }
+#endif
+    return c;
 }
 
 // Locale-independent Unicode lowercase folding for case-insensitive matching.
@@ -2722,44 +2813,62 @@ TempStr NormalizeWSTemp(Str s) {
     return res;
 }
 
-static bool isNl(char c) {
-    return '\r' == c || '\n' == c;
-}
+constexpr char kCR = '\r';
+constexpr char kLF = '\n';
 
-// replaces '\r\n' and '\r' with just '\n' and removes empty lines
-int NormalizeNewlinesInPlace(Str s, Str endExclusive) {
-    int endOff = endExclusive.s ? (int)(endExclusive.s - s.s) : s.len;
-    int read = 0;
-    while (read < endOff && isNl(s.s[read])) {
-        read++;
+// kCR kLF and a lone kCR become kLF, in place: the result is never longer.
+// Empty lines are preserved.
+// s must own a writeable, nul-terminated buffer.
+int NormalizeNewlinesToLFInPlace(Str& s) {
+    if (len(s) == 0) {
+        return 0;
     }
 
     int dst = 0;
-    bool inNewline = false;
-    while (read < endOff) {
-        if (isNl(s.s[read])) {
-            if (!inNewline) {
-                s.s[dst++] = '\n';
+    for (int i = 0; i < s.len; i++) {
+        char c = s.s[i];
+        if (c == kCR) {
+            // kCR followed by kLF is a single newline
+            if (i + 1 < s.len && s.s[i + 1] == kLF) {
+                i++;
             }
-            inNewline = true;
-            read++;
-        } else {
-            s.s[dst++] = s.s[read++];
-            inNewline = false;
+            c = kLF;
         }
+        s.s[dst++] = c;
     }
-    if (dst < endOff) {
-        s.s[dst] = 0;
-    }
-    while (dst > 0 && s.s[dst - 1] == '\n') {
-        dst--;
-        s.s[dst] = 0;
-    }
+    s.s[dst] = 0;
+    s.len = dst;
+
     return dst;
 }
 
-int NormalizeNewlinesInPlace(Str s) {
-    return NormalizeNewlinesInPlace(s, Str(s.s + s.len, 0));
+// Every kLF not already preceded by a kCR becomes kCR kLF (what win32 edit
+// controls expect). Returns s unchanged (no allocation) if there's nothing to do.
+TempStr LFToCRLFTemp(Str s) {
+    int n = s.len;
+    int nLF = 0;
+    for (int i = 0; i < n; i++) {
+        if (s.s[i] == kLF && (i == 0 || s.s[i - 1] != kCR)) {
+            nLF++;
+        }
+    }
+    if (nLF == 0) {
+        return s;
+    }
+    char* res = AllocArrayTemp<char>(n + nLF + 1);
+    if (!res) {
+        return {};
+    }
+    int dst = 0;
+    for (int i = 0; i < n; i++) {
+        char c = s.s[i];
+        if (c == kLF && (i == 0 || s.s[i - 1] != kCR)) {
+            res[dst++] = kCR;
+        }
+        res[dst++] = c;
+    }
+    res[dst] = 0;
+    return Str(res, dst);
 }
 
 // Remove all characters in "toRemove" from "str", in place.
@@ -3109,7 +3218,7 @@ TempStr EncodeTemp(Str s) {
         return str::DupTemp(StrL(""));
     }
     int n = len(s);
-    char* buf = AllocArrayTemp<char>(n * 3 + 1);
+    char* buf = AllocArrayTemp<char>((n * 3) + 1);
     int dst = 0;
     for (int i = 0; i < n; i++) {
         UrlAppendEncodedByte(buf, dst, (u8)s.s[i]);
@@ -3128,7 +3237,7 @@ TempStr EncodePathTemp(Str path) {
         return str::DupTemp(StrL(""));
     }
     int n = len(path);
-    char* buf = AllocArrayTemp<char>(n * 3 + 1);
+    char* buf = AllocArrayTemp<char>((n * 3) + 1);
     int dst = 0;
     for (int i = 0; i < n; i++) {
         u8 c = (u8)path.s[i];
@@ -3698,7 +3807,7 @@ bool wstr::BuilderReserve(Builder& b, int cap) {
 }
 
 bool wstr::Builder::AppendChar(WCHAR c) {
-    if (!VecReserve(*this, len + 1)) {
+    if (!VecGrow(*this, 1)) {
         return false;
     }
     els[len++] = c;
@@ -3710,7 +3819,7 @@ bool wstr::Builder::Append(WStr src) {
     if (wstr::IsNull(src) || 0 == src.len) {
         return true;
     }
-    if (!VecReserve(*this, len + src.len)) {
+    if (!VecGrow(*this, src.len)) {
         return false;
     }
     memcpy(els + len, src.s, (size_t)src.len * sizeof(WCHAR));
@@ -6959,7 +7068,6 @@ static int CalcCapForJoin(const StrVec* v, Str joint) {
 
 static void JoinInner(const StrVec* v, Str joint, str::Builder& res) {
     int jointLen = joint.len;
-    // TODO: possibly not handling null values in the middle. need to add more tests and fix
     int firstForJoint = 0;
     int i = 0;
     for (auto s : *v) {
@@ -7034,9 +7142,6 @@ WStr Utf8ToWStr(Str s, Arena* a) {
     }
     int cchConverted = MultiByteToWideChar(CP_UTF8, 0, s.s, s.len, res, cchNeeded);
     ReportIf(cchConverted != cchNeeded);
-    // TODO: not sure if invalid test or it's more subtle
-    // triggers in Dune.epub
-    // ReportIf(cchConverted != s.len);
     return WrapAllocatedWStr(res, cchConverted);
 #else
     TempWStr res = ToWStrTemp(s);
@@ -7268,6 +7373,7 @@ void UnpackColor(Color c, u8& r, u8& g, u8& b) {
 }
 
 #if OS_WIN
+// TODO: use AdjustLightness instead to compensate for the alpha?
 Gdiplus::Color Unblend(Color c, u8 alpha) {
     u8 r, g, b, a;
     UnpackColor(c, r, g, b, a);
@@ -7291,8 +7397,6 @@ Gdiplus::Color GdiRgbaFromColor(Color c) {
 }
 #endif
 
-// TODO: use AdjustLightness instead to compensate for the alpha?
-// TODO: not sure if that's the exact translation of the original (above)
 TempStr SerializeColorTemp(Color c) {
     u8 r, g, b, a;
     UnpackColor(c, r, g, b, a);
@@ -7552,3 +7656,74 @@ u8 GetAlpha(Color rgb) {
     rgb = (rgb >> 24) & 0xff;
     return (u8)rgb;
 }
+
+#if OS_WIN
+
+int AtomicRefCountAdd(AtomicRefCount* v) {
+    return (int)InterlockedIncrement(v);
+}
+
+int AtomicRefCountDec(AtomicRefCount* v) {
+    return (int)InterlockedDecrement(v);
+}
+
+bool AtomicBoolGet(AtomicBool* p) {
+    return InterlockedOr(p, 0) != 0;
+}
+
+void AtomicBoolSet(AtomicBool* p, bool v) {
+    InterlockedExchange(p, v ? 1 : 0);
+}
+
+bool AtomicBoolSwap(AtomicBool* p, bool v) {
+    return InterlockedExchange(p, v ? 1 : 0) != 0;
+}
+
+int AtomicIntGet(AtomicInt* p) {
+    return (int)InterlockedOr(p, 0);
+}
+
+void AtomicIntSet(AtomicInt* p, int v) {
+    InterlockedExchange(p, (LONG)v);
+}
+
+int AtomicIntAdd(AtomicInt* p, int v) {
+    return (int)InterlockedAdd(p, (LONG)v);
+}
+
+int AtomicIntInc(AtomicInt* p) {
+    return (int)InterlockedIncrement(p);
+}
+
+int AtomicIntDec(AtomicInt* p) {
+    return (int)InterlockedDecrement(p);
+}
+
+void* AtomicPtrGet(AtomicPtr* p) {
+    // comparing nullptr against nullptr never stores, so this is just an
+    // atomic read - there is no InterlockedGetPointer
+    return InterlockedCompareExchangePointer(p, nullptr, nullptr);
+}
+
+void AtomicPtrSet(AtomicPtr* p, void* v) {
+    InterlockedExchangePointer(p, v);
+}
+
+// stores v and returns what was there before
+void* AtomicPtrExchange(AtomicPtr* p, void* v) {
+    return InterlockedExchangePointer(p, v);
+}
+
+// milliseconds since the unix epoch (1970-01-01), for timestamps we persist.
+// FILETIME counts 100 ns ticks since 1601-01-01, hence the constant.
+i64 UnixTimeMsNow() {
+    constexpr i64 kTicksFrom1601To1970 = 116444736000000000LL;
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER value;
+    value.LowPart = ft.dwLowDateTime;
+    value.HighPart = ft.dwHighDateTime;
+    return ((i64)value.QuadPart - kTicksFrom1601To1970) / 10000;
+}
+
+#endif

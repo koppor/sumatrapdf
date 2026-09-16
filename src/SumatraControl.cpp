@@ -8,7 +8,6 @@
 
 #include "gui/UIModels.h"
 #include "gui/Layout.h"
-#include "gui/Layout_win.h"
 #include "gui/PlatformFont.h"
 #include "gui/Gfx.h"
 #include "gui/VirtCtrl.h"
@@ -61,7 +60,10 @@
 #include "EutlTrust.h"
 #include "CommandPalette.h"
 #include "PdfTools.h"
-#include "ReadAloudPlaybackBar.h"
+#include "ReadAloud.h"
+#include "ReadingAutoScroll.h"
+#include "ReadingBar.h"
+#include "PerfLog.h"
 #include "SumatraControl.h"
 
 extern bool gIsStartup;
@@ -587,7 +589,8 @@ static TempStr MarkupAnnotsResultTemp(Str action, int x, int y, int* exitCodeOut
         bool isStamp = tp == AnnotationType::Stamp;
         bool isRedact = tp == AnnotationType::Redact;
         bool isFileAttachment = tp == AnnotationType::FileAttachment;
-        if (!isMarkup && !isShape && !isStamp && !isRedact && !isFileAttachment) {
+        bool isFreeText = tp == AnnotationType::FreeText;
+        if (!isMarkup && !isShape && !isStamp && !isRedact && !isFileAttachment && !isFreeText) {
             continue;
         }
         Str typeName = StrL("other");
@@ -615,6 +618,8 @@ static TempStr MarkupAnnotsResultTemp(Str action, int x, int y, int* exitCodeOut
             typeName = StrL("Redact");
         } else if (tp == AnnotationType::FileAttachment) {
             typeName = StrL("FileAttachment");
+        } else if (tp == AnnotationType::FreeText) {
+            typeName = StrL("FreeText");
         }
         if (isRedact) {
             Vec<RectF> quads = GetQuadPointsAsRect(a);
@@ -629,7 +634,7 @@ static TempStr MarkupAnnotsResultTemp(Str action, int x, int y, int* exitCodeOut
             n++;
             continue;
         }
-        if (isShape || isStamp || isFileAttachment) {
+        if (isShape || isStamp || isFileAttachment || isFreeText) {
             RectF r = GetRect(a);
             Rect screen = dm->CvtToScreen(PageNo(a), r);
             out.Append(fmt("type=%s page=%d rect=%g,%g,%g,%g screen=%d,%d,%d,%d\n", typeName, PageNo(a), r.x, r.y, r.dx,
@@ -640,19 +645,37 @@ static TempStr MarkupAnnotsResultTemp(Str action, int x, int y, int* exitCodeOut
             if (tp == AnnotationType::PolyLine || tp == AnnotationType::Polygon) {
                 Vec<PointF> pts = GetVertices(a);
                 bool closed = len(pts) > 2 && pts[0] == VecLast(pts);
-                out.Append(fmt("polyline vertices=%d closed=%d\n", len(pts), closed ? 1 : 0));
+                out.Append(fmt("polyline vertices=%d closed=%d pts=", len(pts), closed ? 1 : 0));
+                for (int i = 0; i < len(pts); i++) {
+                    out.Append(fmt(i == 0 ? "%g,%g" : ";%g,%g", pts[i].x, pts[i].y));
+                }
+                out.Append(StrL("\n"));
             }
             if (tp == AnnotationType::Ink) {
                 Vec<int> strokeCounts;
                 Vec<PointF> points;
                 GetInkList(a, strokeCounts, points);
-                out.Append(fmt("ink strokes=%d points=%d opacity=%d\n", len(strokeCounts), len(points), Opacity(a)));
+                out.Append(fmt("ink strokes=%d points=%d opacity=%d width=%d\n", len(strokeCounts), len(points),
+                               Opacity(a), BorderWidth(a)));
+                // extent of the stroke points, without line width
+                if (len(points) > 0) {
+                    PointF lo = points[0];
+                    PointF hi = points[0];
+                    for (PointF p : points) {
+                        lo = {std::min(lo.x, p.x), std::min(lo.y, p.y)};
+                        hi = {std::max(hi.x, p.x), std::max(hi.y, p.y)};
+                    }
+                    out.Append(fmt("inkRect=%g,%g,%g,%g\n", lo.x, lo.y, hi.x - lo.x, hi.y - lo.y));
+                }
             }
             n++;
             continue;
         }
         Vec<RectF> quads = GetQuadPointsAsRect(a);
         out.Append(fmt("type=%s page=%d quads=%d\n", typeName, PageNo(a), len(quads)));
+        out.Append(StrL("color="));
+        SerializePdfColor(GetColor(a), out);
+        out.Append(StrL("\n"));
         for (int i = 0; i < len(quads); i++) {
             RectF r = quads[i];
             out.Append(fmt("rect=%g,%g,%g,%g\n", r.x, r.y, r.dx, r.dy));
@@ -692,6 +715,7 @@ static TempStr MarkupAnnotsResultTemp(Str action, int x, int y, int* exitCodeOut
                    tab->selectedAnnotation ? 1 : 0, gWindows[0]->annotationUnderCursor ? 1 : 0,
                    gWindows[0]->pdfAnnotationsToolbarEnabled ? 1 : 0, hasNotification ? 1 : 0, selectedHover ? 1 : 0));
     out.Append(AnnotEditToolbarStateTemp(gWindows[0]));
+    out.Append(AnnotColorPopupStateTemp());
     out.Append(AnnotFilterToolbarStateTemp(gWindows[0]));
     out.Append(AnnotationHoverOverlayStateTemp(gWindows[0]));
     out.Append(FreeTextInPlaceEditStateTemp(gWindows[0]));
@@ -872,6 +896,13 @@ enum class ControlCmd : u16 {
     CrashMe = 93,
     TestDocumentProperties = 94,
     TestHiddenTabGoToPage = 95,
+    TestSaveSelectionAsImage = 96,
+    TestReadingAutoScroll = 97,
+    TestReadingBar = 98,
+    TestSeedTextSelection = 99,
+    TestTtsEngineCrash = 100,
+    StartPerfLog = 101,
+    StopPerfLog = 102,
 };
 
 enum class ControlArgType : u16 {
@@ -1806,6 +1837,25 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestSaveSelectionAsImage: {
+            Str destPath = StringArg(req, 0);
+            i32 dpi = 0;
+            i32 pageNo = 0;
+            i32 x = 0;
+            i32 y = 0;
+            i32 dx = 0;
+            i32 dy = 0;
+            if (len(destPath) == 0 || !IntArg(req, 1, dpi) || !IntArg(req, 2, pageNo) || !IntArg(req, 3, x) ||
+                !IntArg(req, 4, y) || !IntArg(req, 5, dx) || !IntArg(req, 6, dy)) {
+                AppendError(req, StrL("TestSaveSelectionAsImage expects path, dpi, page, x, y, dx, dy"));
+                break;
+            }
+            int exitCode = 0;
+            Str res = SaveSelectionAsImageResultTemp(destPath, dpi, pageNo, x, y, dx, dy, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestConvertToPdf: {
             Str srcPath = StringArg(req, 0);
             Str destPath = StringArg(req, 1);
@@ -1832,6 +1882,12 @@ static void ExecuteControlRequest(ControlRequest* req) {
                 break;
             }
             int cmdId = GetCommandIdByName(name);
+            if (cmdId <= 0 && str::IndexOfChar(name, ' ') >= 0) {
+                CustomCommand* custom = CreateCommandFromDefinition(name);
+                if (custom) {
+                    cmdId = custom->id;
+                }
+            }
             if (cmdId <= 0) {
                 AppendError(req, StrL("TestInvokeCommand expects a command name"));
                 break;
@@ -1880,7 +1936,13 @@ static void ExecuteControlRequest(ControlRequest* req) {
             } else if (str::EqI(surf, StrL("toolbar"))) {
                 surface = CommandSurface::Toolbar;
             }
-            AppCommandCtx ctx = NewAppCommandCtx(gWindows[0]);
+            Point pt{};
+            i32 x = 0;
+            i32 y = 0;
+            if (IntArg(req, 2, x) && IntArg(req, 3, y)) {
+                pt = Point{x, y};
+            }
+            AppCommandCtx ctx = NewAppCommandCtx(gWindows[0], pt);
             CommandVisibility vis = GetCommandVisibility(cmdId, ctx, surface);
             Str visName = StrL("show");
             if (vis == CommandVisibility::Hide) {
@@ -1927,6 +1989,20 @@ static void ExecuteControlRequest(ControlRequest* req) {
             log(StrL("ControlCmd::CrashMe\n"));
             CrashMe();
             break;
+
+        case ControlCmd::TestTtsEngineCrash: {
+            Str action = StringArg(req, 0);
+            if (str::EqI(action, StrL("crash"))) {
+                str::ReplaceWithCopy(&gSettings->readAloudVoiceId, StrL("test-voice"));
+                if (!TtsTestEngineCrash()) {
+                    AppendTestResult(req, 1, StrL("FAIL could not start the crashing thread"));
+                    break;
+                }
+            }
+            TempStr state = fmt("crashed=%d voice='%s'", (int)TtsEngineCrashed(), gSettings->readAloudVoiceId);
+            AppendTestResult(req, 0, state);
+            break;
+        }
 
         case ControlCmd::TestCanvasFlags: {
             Str action = StringArg(req, 0);
@@ -2103,12 +2179,48 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestSeedTextSelection: {
+            i32 pageNo = 1;
+            if (!IntArg(req, 0, pageNo)) {
+                AppendError(req, StrL("TestSeedTextSelection expects int pageNo (1-based)"));
+                break;
+            }
+            int exitCode = 0;
+            Str res = SeedTextSelectionResultTemp(pageNo, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestHiddenTabGoToPage: {
             int exitCode = 0;
             Str res = HiddenTabGoToPageResultTemp(&exitCode);
             AppendTestResult(req, exitCode, res);
             break;
         }
+
+        case ControlCmd::TestReadingAutoScroll: {
+            int exitCode = 0;
+            Str res = ReadingAutoScrollBarStateTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestReadingBar: {
+            int exitCode = 0;
+            Str res = ReadingBarStateTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::StartPerfLog:
+            StartPerfLog();
+            AppendTestResult(req, 0, StrL("OK"));
+            break;
+
+        case ControlCmd::StopPerfLog:
+            StopPerfLog();
+            AppendTestResult(req, 0, StrL("OK"));
+            break;
 
         default:
             AppendError(req, StrL("unknown control command"));
@@ -2343,6 +2455,9 @@ static void SumatraControlThread(ControlThreadArg* arg) {
         if (connected) {
             stop = ProcessControlConnection(pipe);
         }
+        // DisconnectNamedPipe discards data the client hasn't read yet; wait
+        // until it has, or the Quit reply is lost and the client sees EPIPE
+        FlushFileBuffers(pipe);
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
         if (stop) {

@@ -6,8 +6,10 @@ import { join } from "node:path";
 // - Change: dialog to pick a new app/document preference or mode
 // - Set: dialog to assign an optional per-object value or integration string
 //
+// A removed command keeps its slot, with an empty name, so that the ids of the
+// commands after it don't shift (they are persisted in keyboard shortcuts).
 // prettier-ignore
-export const commands = [
+const commandsRaw = [
     "CmdOpenFile", "Open File...",
     "CmdClose", "Close Document",
     "CmdCloseCurrentDocument", "Close Current Document",
@@ -106,7 +108,7 @@ export const commands = [
     "CmdZoomFitWidthAndContinuous", "Zoom: Fit Width And Continuous",
     "CmdZoomFitPageAndSinglePage", "Zoom: Fit Page and Single Page",
     "CmdContributeTranslation", "Contribute Translation",
-    "CmdOpenWithKnownExternalViewerFirst", "don't use",
+    "", "removed: CmdOpenWithKnownExternalViewerFirst",
     "CmdOpenWithExplorer", "Open Directory In Explorer",
     "CmdOpenWithDirectoryOpus", "Open Directory In Directory Opus",
     "CmdOpenWithTotalCommander", "Open Directory In Total Commander",
@@ -118,7 +120,7 @@ export const commands = [
     "CmdOpenWithXpsViewer", "Open in Microsoft XPS Viewer",
     "CmdOpenWithHtmlHelp", "Open in Microsoft HTML Help",
     "CmdOpenWithPdfDjvuBookmarker", "Open With Pdf&Djvu Bookmarker",
-    "CmdOpenWithKnownExternalViewerLast", "don't use",
+    "", "removed: CmdOpenWithKnownExternalViewerLast",
     "CmdOpenSelectedDocument", "Open Selected Document",
     "CmdPinSelectedDocument", "Pin Selected Document",
     "CmdForgetSelectedDocument", "Remove Selected Document From History",
@@ -194,8 +196,8 @@ export const commands = [
     "CmdToggleInverseSearch", "Toggle Inverse Search",
     "CmdDebugCorruptMemory", "Debug: Corrupt Memory",
     "CmdDebugCrashMe", "Debug: Crash Me",
-    "CmdDebugDownloadSymbols", "Debug: Download Symbols",
-    "CmdDebugTestApp", "Debug: Test App",
+    "", "removed: CmdDebugDownloadSymbols",
+    "", "removed: CmdDebugTestApp",
     "CmdDebugShowNotif", "Debug: Show Notification",
     "CmdDebugStartStressTest", "Debug: Start Stress Test",
     "CmdDebugTogglePredictiveRender", "Debug: Toggle Predictive Rendering",
@@ -307,28 +309,41 @@ export const commands = [
     "CmdSearchGoogleLens", "Search with Google Lens",
     "CmdNavigateThumbnail", "Navigate Thumbnails",
     "CmdShowAnnotationText", "Show Comment",
-    "CmdAnnotationHighlightBrush", "Highlight with Brush",
+    "CmdAnnotationHighlightBrush", "Highlighter",
     "CmdFindAnnotation", "Find Annotation",
     "CmdOpenFileNoHistory", "Open File Without History...",
     "CmdCopySelectionAsImage", "Copy Selection As Image",
     "CmdSearchGoogleLensPage", "Search Page with Google Lens",
     "CmdSearchGoogleLensImage", "Search Image with Google Lens",
+    "CmdSaveSelectionAsImage", "Save As Image...",
+    "CmdToggleTrimEmptyMargins", "Toggle Trim Empty Margins",
+    "CmdCopyLocationToClipboard", "Copy Location To Clipboard",
+    "CmdToggleAutomaticallyScroll", "Automatically Scroll",
+    "CmdAutomaticallyScrollFaster", "Automatically Scroll Faster",
+    "CmdAutomaticallyScrollSlower", "Automatically Scroll Slower",
+    "CmdToggleReadingBar", "Reading Bar",
+    "CmdToggleReadingBarInvert", "Reading Bar Invert",
     "CmdRefHoverPushToJabRef", "Push Reference to JabRef",
     "CmdNone", "Do nothing",
+    "CmdFileHistory", "Open Recent File",
+    "CmdFavorite", "Go to Favorite",
 ];
+
+// removed slots are dropped: nothing outside the generators should see them
+export const commands: string[] = commandsRaw.filter((_, i) => commandsRaw[i - (i % 2)] !== "");
 
 function getNames(): string[] {
   const names: string[] = [];
-  for (let i = 0; i < commands.length; i += 2) {
-    names.push(commands[i]);
+  for (let i = 0; i < commandsRaw.length; i += 2) {
+    names.push(commandsRaw[i]);
   }
   return names;
 }
 
 function getDescs(): string[] {
   const descs: string[] = [];
-  for (let i = 0; i < commands.length; i += 2) {
-    descs.push(commands[i + 1]);
+  for (let i = 0; i < commandsRaw.length; i += 2) {
+    descs.push(commandsRaw[i + 1]);
   }
   return descs;
 }
@@ -349,19 +364,14 @@ function generateEnum(): string {
   for (let i = 0; i < names.length; i++) {
     let cmd = names[i];
     let id = firstCmdId + i;
+    if (cmd === "") {
+      continue; // removed command, its id stays unused
+    }
     lines.push(`    ${cmd} = ${id},`);
   }
 
   lines.push("");
-  lines.push("    /* range for file history */");
-  lines.push("    CmdFileHistoryFirst,");
-  lines.push("    CmdFileHistoryLast = CmdFileHistoryFirst + 32,");
-  lines.push("");
-  lines.push("    /* range for favorites */");
-  lines.push("    CmdFavoriteFirst,");
-  lines.push("    CmdFavoriteLast = CmdFavoriteFirst + 256,");
-  lines.push("");
-  lines.push("    CmdLast = CmdFavoriteLast,");
+  lines.push(`    CmdLast = ${firstCmdId + names.length - 1},`);
   lines.push("    CmdFirstCustom = CmdLast + 100,");
   lines.push("");
   lines.push("    // aliases, at the end to not mess ordering");
@@ -373,6 +383,7 @@ function generateEnum(): string {
   lines.push("");
   lines.push("    CmdCreateAnnotFirst = CmdCreateAnnotText,");
   lines.push("    CmdCreateAnnotLast = CmdCreateAnnotFileAttachment,");
+  lines.push("    CmdTrimEmptyMargins = CmdToggleTrimEmptyMargins,");
   lines.push("};");
   lines.push("// clang-format on");
 
@@ -382,35 +393,32 @@ function generateEnum(): string {
 function generateArrays(): string {
   const names = getNames();
   const descs = getDescs();
+  const liveNames = names.filter((n) => n !== "");
+  const liveDescs = descs.filter((_, i) => names[i] !== "");
   const lines: string[] = [];
 
   lines.push("// clang-format off");
 
   // gCommandNames: SeqStrings (null-separated, double-null terminated)
   lines.push("static SeqStrings gCommandNames =");
-  for (let i = 0; i < names.length; i++) {
-    const chunk = names.slice(i, i + 1);
-    const parts = chunk.map((s) => `"${s}\\0"`).join(" ");
-    lines.push(`    ${parts}`);
+  for (const name of liveNames) {
+    lines.push(`    "${name}\\0"`);
   }
   lines.push(`    "\\0";`);
   lines.push("");
 
   // gCommandIds
   lines.push("static i32 gCommandIds[] = {");
-  for (let i = 0; i < names.length; i++) {
-    const chunk = names.slice(i, i + 1).join(", ");
-    lines.push(`    ${chunk},`);
+  for (const name of liveNames) {
+    lines.push(`    ${name},`);
   }
   lines.push("};");
   lines.push("");
 
   // gCommandDescriptions
   lines.push("SeqStrings gCommandDescriptions =");
-  for (let i = 0; i < descs.length; i++) {
-    const chunk = descs.slice(i, i + 1);
-    const parts = chunk.map((s) => `"${s}\\0"`).join(" ");
-    lines.push(`    ${parts}`);
+  for (const desc of liveDescs) {
+    lines.push(`    "${desc}\\0"`);
   }
   lines.push(`    "\\0";`);
   lines.push("// clang-format on");

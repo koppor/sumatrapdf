@@ -2,13 +2,10 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
-// This file must only contain code that doesn't depend on
-// external libraries (ext/). GuessFileTypeFromFile.cpp has
-// the parts that need base/Archive.h (and thus ext/libarchive).
-
 #include "base/Base.h"
 #include "base/File.h"
 #include "base/ByteReaderWriter.h"
+#include "base/Archive.h"
 #include "base/GuessFileType.h"
 
 // http://en.wikipedia.org/wiki/.nfo
@@ -16,7 +13,9 @@
 // http://en.wikipedia.org/wiki/Read.me
 // http://www.cix.co.uk/~gidds/Software/TCR.html
 
-// TODO: should .prc be FileType::PalmDoc instead of FileType::Mobi?
+// .prc stays Mobi: it is Mobipocket's own extension, PalmDoc's is .pdb.
+// A PalmDoc that uses .prc anyway is caught by its creator id when
+// sniffing, which wins over the extension.
 // .zip etc. are at the end so that .fb2.zip etc. is recognized at fb2
 #define DEF_EXT_KIND(V)                \
     V(".txt", FileType::Txt)           \
@@ -213,11 +212,14 @@ static bool IsPSFileContent(Str d) {
     }
     // Windows-format EPS file - cf. http://partners.adobe.com/public/developer/en/ps/5002.EPSF_Spec.pdf
     if (str::StartsWith(header, StrL("\xC5\xD0\xD3\xC6"))) {
-        DWORD psStart = ByteReader(d).UInt32LE(4);
-        if ((int)psStart >= n - 12) {
+        // unsigned: a psStart with the high bit set is not a small negative
+        // offset into d, it's past the end of what we sniffed
+        u32 psStart = ByteReader(d).UInt32LE(4);
+        if (psStart >= (u32)(n - 12)) {
+            // can't verify what we don't have; assume it's EPS
             return true;
         }
-        Str sub = Str(header.s + psStart, header.len - (int)psStart);
+        Str sub = Str(header.s + psStart, n - (int)psStart);
         return str::StartsWith(sub, StrL("%!PS-Adobe-"));
     }
     if (str::StartsWith(header, StrL("%!PS-Adobe-"))) {
@@ -234,7 +236,8 @@ static bool IsPSFileContent(Str d) {
 
 // https://github.com/file/file/blob/7449263e1d6167233b3b6abfc3e4c13407d6432c/magic/Magdir/animation#L265
 // https://nokiatech.github.io/heif/technical.html
-// TODO: need to figure out heif vs. heic
+// HEIF is the container, HEIC is its HEVC-coded flavour. We decode both
+// the same way, so .heif and .heic share one FileType.
 static FileType DetectHicAndAvif(Str d) {
     if (d.len < 0x18) {
         return FileType::Unknown;
@@ -288,7 +291,7 @@ bool FindWebpChunk(Str d, const char fourcc[4], Str& out) {
     while (idx + 8 <= r.len) {
         int size = (int)r.UInt32LE(idx + 4);
         int payload = idx + 8;
-        if (size < 0 || payload + size > r.len) {
+        if (size < 0 || !r.CanRead(payload, size)) {
             return false;
         }
         if (MemEq(r.d + idx, fourcc, 4)) {
@@ -347,7 +350,11 @@ static bool HasTgaVersion2Footer(const u8* data, size_t n) {
         return false;
     }
     const TgaFooter* footer = (const TgaFooter*)(data + n - sizeof(TgaFooter));
-    return str::EqN(Str(footer->signature), StrL("TRUEVISION-XFILE."), sizeof(footer->signature));
+    // signature is a fixed-size field, not necessarily NUL-terminated, so we
+    // must not strlen() it. Also, comparing all 18 bytes would never match
+    // because the literal is 17 chars long
+    Str sig{footer->signature, (int)sizeof(footer->signature)};
+    return str::StartsWith(sig, StrL("TRUEVISION-XFILE."));
 }
 
 static bool IsSupportedTgaPixelFormat(const TgaHeader* header) {
@@ -699,7 +706,7 @@ static Size TiffIfdSize(ByteReader r, int off, bool isBE, bool isJxr) {
         int valOff = idx + 8;
         if (nVals > 4u / typeSize) {
             valOff = (int)r.UInt32(idx + 8, isBE);
-            if (valOff < 0 || valOff + typeSize > r.len) {
+            if (!r.CanRead(valOff, typeSize)) {
                 continue;
             }
         }
@@ -732,7 +739,7 @@ static void ParseTiff(ByteReader r, FileTypeInfo& res, bool isJxr) {
     int cap = 0;
     u32 off = r.UInt32(4, isBE);
     // 4096 iterations bound protects against cycles in corrupt data
-    while (off > 0 && (int)off + 2 <= r.len && nIfds < 4096) {
+    while (off > 0 && r.CanRead((int)off, 2) && nIfds < 4096) {
         Size size = TiffIfdSize(r, (int)off, isBE, isJxr);
         if (nIfds == 0) {
             res.imageDx = size.dx;
@@ -742,7 +749,7 @@ static void ParseTiff(ByteReader r, FileTypeInfo& res, bool isJxr) {
         nIfds++;
         u16 nEntries = r.UInt16((int)off, isBE);
         int nextOff = (int)off + 2 + (nEntries * 12);
-        if (nextOff + 4 > r.len) {
+        if (!r.CanRead(nextOff, 4)) {
             break;
         }
         off = r.UInt32(nextOff, isBE);
@@ -766,7 +773,7 @@ static void ParseIco(ByteReader r, FileTypeInfo& res) {
     int cap = 0;
     int got = 0;
     for (int i = 0; i < n; i++) {
-        int ent = 6 + i * 16;
+        int ent = 6 + (i * 16);
         if (ent + 16 > r.len) {
             break;
         }
@@ -779,7 +786,7 @@ static void ParseIco(ByteReader r, FileTypeInfo& res) {
             dy = 256;
         }
         int imgOff = (int)r.UInt32LE(ent + 12);
-        if (imgOff >= 0 && imgOff + 24 <= r.len && MemEq(r.d + imgOff, "\x89PNG\r\n\x1a\n", 8) &&
+        if (r.CanRead(imgOff, 24) && MemEq(r.d + imgOff, "\x89PNG\r\n\x1a\n", 8) &&
             MemEq(r.d + imgOff + 12, "IHDR", 4)) {
             dx = (int)r.UInt32BE(imgOff + 16);
             dy = (int)r.UInt32BE(imgOff + 20);
@@ -1393,6 +1400,109 @@ TempStr GfxFileExtFromTypeTemp(FileType ft) {
 TempStr GfxFileExtFromDataTemp(Str d) {
     FileType ft = GuessFileTypeFromData(d);
     return GfxFileExtFromTypeTemp(ft);
+}
+
+static bool IsEpubArchive(Archive* archive) {
+    auto* container = archive->GetFileDataByName(StrL("META-INF/container.xml"));
+    if (container && container->data) {
+        return true;
+    }
+
+    auto* mimeType = archive->GetFileDataByName(StrL("mimetype"));
+    if (!mimeType || !mimeType->data) {
+        return false;
+    }
+
+    char* mt = mimeType->data;
+    int n = mimeType->fileSizeUncompressed;
+    for (int i = n; i > 0; i--) {
+        if (!str::IsWs(mt[i - 1])) {
+            n = i;
+            break;
+        }
+        mt[i - 1] = '\0';
+        if (i == 1) {
+            n = 0;
+        }
+    }
+
+    Str mtStr = Str(mt, n);
+    if (str::Eq(mtStr, StrL("application/epub+zip"))) {
+        return true;
+    }
+    return str::Eq(mtStr, StrL("application/x-ibooks+zip"));
+}
+
+static bool IsXpsArchive(Archive* archive) {
+    bool res = archive->GetFileId(StrL("_rels/.rels")) >= 0 || archive->GetFileId(StrL("_rels/.rels/[0].piece")) >= 0 ||
+               archive->GetFileId(StrL("_rels/.rels/[0].last.piece")) >= 0;
+    return res;
+}
+
+// Single .fb2 member, optionally with companion .url files (same rule as
+// Fb2Doc::loadFromFile / loadFromData).
+static bool IsFb2Archive(Archive* archive) {
+    auto files = archive->GetFileInfos();
+    int nFb2 = 0;
+    for (auto* fi : files) {
+        auto name = fi->name;
+        if (str::EndsWithI(name, StrL(".fb2"))) {
+            nFb2++;
+        } else if (!str::EndsWithI(name, StrL(".url"))) {
+            return false;
+        }
+    }
+    return nFb2 == 1;
+}
+
+FileType GuessFileTypeFromFile(Str path) {
+    ReportIf(len(path) == 0);
+    if (path::IsDirectory(path)) {
+        TempStr mimetypePath = path::JoinTemp(path, StrL("mimetype"));
+        if (file::StartsWith(mimetypePath, StrL("application/epub+zip"))) {
+            return FileType::Epub;
+        }
+        return FileType::Unknown;
+    }
+
+    char buf[2048 + 1]{};
+    int n = file::ReadN(path, (u8*)buf, dimof(buf) - 1);
+    if (n <= 0) {
+        return FileType::Unknown;
+    }
+
+    Str d = Str((char*)buf, n);
+    auto res = GuessFileTypeFromData(d);
+    if (res != FileType::Zip) {
+        return res;
+    }
+    ArchiveExtractProgressCb emptyCb;
+    Archive* archive = OpenArchiveFromFile(path, /*eagerLoad=*/false, emptyCb);
+    if (!archive) {
+        return res;
+    }
+    if (IsXpsArchive(archive)) {
+        res = FileType::Xps;
+    }
+    if (IsEpubArchive(archive)) {
+        res = FileType::Epub;
+    }
+    if (IsFb2Archive(archive)) {
+        res = FileType::Fb2z;
+    }
+    delete archive;
+    return res;
+}
+
+FileType GuessFileType(Str path, bool sniff) {
+    if (sniff) {
+        FileType ft = GuessFileTypeFromFile(path);
+        if (ft != FileType::Unknown) {
+            return ft;
+        }
+        return GuessFileTypeFromName(path);
+    }
+    return GuessFileTypeFromName(path);
 }
 
 // compares the guessed type's canonical extension (the first extension

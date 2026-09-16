@@ -2,7 +2,13 @@
 
 Our build system uses [Premake 5](https://premake.github.io/). For convenience, we keep the `premake5.exe` binary in the `bin` directory.
 
-Premake generates the Visual Studio solution in the `vs2022` directory from the `premake5.lua` file. The generated solution files are stored in the repository for convenience.
+Premake generates the Visual Studio solution in the `vs2022` directory and the
+ignored Ninja graph in `.work/ninja/`, both from `premake5.lua`. The generated
+solution files are stored in the repository for convenience.
+
+`bun cmd/build.ts` builds with MSBuild by default. Pass `-ninja` to generate the
+Ninja graph when needed and build with Ninja instead. To regenerate the graph
+without building, run `bun cmd/ninja.ts`.
 
 ## When to run premake
 
@@ -34,7 +40,7 @@ Instead, we have the `src\BuildConfig.h` file. It's empty by default, but you ca
 
 ## Build variants
 
-We have `Debug`, `Release`, and `ReleaseAnalyze` configurations. `ReleaseAnalyze` runs code analysis.
+We have `Debug`, `Release`, `ReleaseAnalyze`, and `Profile` configurations. `ReleaseAnalyze` runs code analysis. `Profile` compiles Sumatra sources with MSVC `/callcap` function enter/exit hooks; it writes timings to `sumperf.txt` when launched with `-start-perf-log`. Build it with `bun cmd/build.ts -profile`.
 
 We have platforms:
 

@@ -16,6 +16,9 @@
     <Filter Include="ext\synctex">
       <UniqueIdentifier>{73E6124D-DF9B-8B42-6890-8519D4448246}</UniqueIdentifier>
     </Filter>
+    <Filter Include="ext\webview2">
+      <UniqueIdentifier>{302B3E82-1C8E-CD26-C513-06DDB15599A9}</UniqueIdentifier>
+    </Filter>
     <Filter Include="src">
       <UniqueIdentifier>{2DAB880B-99B4-887C-2230-9F7C8E38947C}</UniqueIdentifier>
     </Filter>
@@ -28,6 +31,9 @@
     <Filter Include="src\gui">
       <UniqueIdentifier>{210530A9-8DE4-AE44-96FC-391B025B15A6}</UniqueIdentifier>
     </Filter>
+    <Filter Include="src\gui\tests">
+      <UniqueIdentifier>{C384B012-2F45-2C49-F87F-75C664FF7025}</UniqueIdentifier>
+    </Filter>
     <Filter Include="src\gui\win">
       <UniqueIdentifier>{9E7B1B1E-0A31-9413-9325-8EEAFFD98A17}</UniqueIdentifier>
     </Filter>
@@ -36,6 +42,9 @@
     </Filter>
     <Filter Include="src\testcode">
       <UniqueIdentifier>{D744682D-C3A7-F7D1-6C2D-3088586FC354}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\tests">
+      <UniqueIdentifier>{CF8328B6-3BEE-DC2C-842C-8ED2F0D5BA81}</UniqueIdentifier>
     </Filter>
     <Filter Include="src\uia">
       <UniqueIdentifier>{1B3F30A9-871E-AF44-9036-3A1BFC9415A6}</UniqueIdentifier>
@@ -138,10 +147,10 @@
     <ClInclude Include="..\src\BuildConfig.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\Canvas.h">
+    <ClInclude Include="..\src\CachedObjects.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\CaptionGlyphs.h">
+    <ClInclude Include="..\src\Canvas.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\ChapterTable.h">
@@ -165,10 +174,7 @@
     <ClInclude Include="..\src\Commands.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\CrashHandler.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\DarkMode_win.h">
+    <ClInclude Include="..\src\DarkMode.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\DisplayMode.h">
@@ -252,9 +258,6 @@
     <ClInclude Include="..\src\GoogleLens.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\GumboHelpers.h">
-      <Filter>src</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\GumboHtmlParser.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -324,10 +327,7 @@
     <ClInclude Include="..\src\PalmDbReader.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\PdfCadDetect.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\PdfCadEnhanceDevice.h">
+    <ClInclude Include="..\src\PdfCad.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\PdfCreator.h">
@@ -357,13 +357,16 @@
     <ClInclude Include="..\src\ProgressUpdateUI.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\ReadAloudHighlight.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\ReadAloudPlaybackBar.h">
+    <ClInclude Include="..\src\ReadAloud.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\ReaderModel.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ReadingAutoScroll.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\ReadingBar.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\RefHover.h">
@@ -376,9 +379,6 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\RenderCache.h">
-      <Filter>src</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Scratch.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\Screenshot.h">
@@ -450,9 +450,6 @@
     <ClInclude Include="..\src\TextSelection.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\TextToSpeech.h">
-      <Filter>src</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\Theme.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -477,8 +474,11 @@
     <ClInclude Include="..\src\base\Archive.h">
       <Filter>src\base</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\base\UtAssert.h">
+    <ClInclude Include="..\src\base\CrashHandler.h">
       <Filter>src\base</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\base\tests\UtAssert.h">
+      <Filter>src\base\tests</Filter>
     </ClInclude>
     <ClInclude Include="..\src\gui\DocumentView.h">
       <Filter>src\gui</Filter>
@@ -490,9 +490,6 @@
       <Filter>src\gui</Filter>
     </ClInclude>
     <ClInclude Include="..\src\gui\Layout.h">
-      <Filter>src\gui</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\gui\Layout_win.h">
       <Filter>src\gui</Filter>
     </ClInclude>
     <ClInclude Include="..\src\gui\PasswordDialog.h">
@@ -593,6 +590,9 @@
     <ClCompile Include="..\ext\synctex\synctex_parser_utils.c">
       <Filter>ext\synctex</Filter>
     </ClCompile>
+    <ClCompile Include="..\ext\webview2\WebView2Loader.cpp">
+      <Filter>ext\webview2</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\AIAntiGravity.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -644,22 +644,19 @@
     <ClCompile Include="..\src\AppTools.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\AppUnitTests.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\AvifReader.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\BasePch.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\CachedObjects.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\Canvas.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\CanvasAboutUI.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\CaptionGlyphs.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\ChangeColorDialog.cpp">
@@ -695,13 +692,10 @@
     <ClCompile Include="..\src\Commands.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\CrashHandler.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\CustomZoomDialog.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\DarkMode_win.cpp">
+    <ClCompile Include="..\src\DarkMode.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\DisplayMode.cpp">
@@ -809,9 +803,6 @@
     <ClCompile Include="..\src\GoogleLens.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\GumboHelpers.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\GumboHtmlParser.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -830,9 +821,6 @@
     <ClCompile Include="..\src\ImageReader.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\ImageReader_win.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\ImageSaveCropResize.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -849,9 +837,6 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\KeyboardHelp.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\KeyboardHelp_win.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\LinkFollow.cpp">
@@ -899,10 +884,7 @@
     <ClCompile Include="..\src\PalmDbReader.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\PdfCadDetect.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\PdfCadEnhanceDevice.cpp">
+    <ClCompile Include="..\src\PdfCad.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\PdfCreator.cpp">
@@ -962,13 +944,16 @@
     <ClCompile Include="..\src\PrintWin11.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\ReadAloudHighlight.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\ReadAloudPlaybackBar.cpp">
+    <ClCompile Include="..\src\ReadAloud.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\ReaderModel.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ReadingAutoScroll.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\ReadingBar.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\RefHover.cpp">
@@ -1008,9 +993,6 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\RenderCache.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\Scratch.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Screenshot.cpp">
@@ -1067,9 +1049,6 @@
     <ClCompile Include="..\src\SumatraPDF.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\SumatraStartup.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\SumatraTest.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -1103,22 +1082,13 @@
     <ClCompile Include="..\src\TextSelection.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\TextToSpeech.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\TextViewWnd.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Theme.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\Theme_win.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\Toolbar.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\Toolbar_win.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\TranslationLangs.cpp">
@@ -1142,7 +1112,7 @@
     <ClCompile Include="..\src\base\Archive.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\UtAssert.cpp">
+    <ClCompile Include="..\src\base\CrashHandler.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\AppendStore_ut.cpp">
@@ -1193,19 +1163,22 @@
     <ClCompile Include="..\src\base\tests\Str_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\base\tests\UtAssert.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\base\tests\Vec_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\Win_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\gui\GfxDirect2D_win.cpp">
+    <ClCompile Include="..\src\gui\Gfx.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\gui\GfxGdiplus_win.cpp">
+    <ClCompile Include="..\src\gui\GfxDirect2D.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\gui\Gfx_win.cpp">
+    <ClCompile Include="..\src\gui\GfxGdiplus.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
     <ClCompile Include="..\src\gui\GuiColors.cpp">
@@ -1214,35 +1187,32 @@
     <ClCompile Include="..\src\gui\Layout.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\gui\Layout_win.cpp">
-      <Filter>src\gui</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\gui\PasswordDialog.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
     <ClCompile Include="..\src\gui\PlatformFont.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\gui\PlatformFont_win.cpp">
-      <Filter>src\gui</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\gui\PlatformText.cpp">
-      <Filter>src\gui</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\gui\PlatformText_win.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
     <ClCompile Include="..\src\gui\UIModels.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\gui\UiPlatform_win.cpp">
+    <ClCompile Include="..\src\gui\UiPlatform.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
     <ClCompile Include="..\src\gui\VirtCtrl.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\gui\VirtHost_win.cpp">
+    <ClCompile Include="..\src\gui\VirtHost.cpp">
       <Filter>src\gui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\tests\Layout_ut.cpp">
+      <Filter>src\gui\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\gui\tests\VirtCtrl_ut.cpp">
+      <Filter>src\gui\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\gui\win\BrowserDocView.cpp">
       <Filter>src\gui\win</Filter>
@@ -1300,6 +1270,54 @@
     </ClCompile>
     <ClCompile Include="..\src\testcode\TestTab.cpp">
       <Filter>src\testcode</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\AnnotSearch_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\CachedObjects_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\ChapterTable_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\CommandPalette_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\LitDoc_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\MobiDoc_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\PagePosition_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\PageRenderPolicy_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\PdfDarkModeImageClassifier_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\PdfDarkModeOklab_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\PdfSync_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\ReadAloudHighlight_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\ShortcutParse_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\SimpleLog_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\Sumatra_ut.cpp">
+      <Filter>src\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\tests\TextSelection_ut.cpp">
+      <Filter>src\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\uia\DocumentProvider.cpp">
       <Filter>src\uia</Filter>

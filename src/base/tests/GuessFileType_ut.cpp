@@ -3,9 +3,10 @@
 
 #include "base/Base.h"
 #include "base/GuessFileType.h"
+#include "base/TgaReader.h"
 
 // must be last due to assert() over-write
-#include "base/UtAssert.h"
+#include "base/tests/UtAssert.h"
 
 static FileTypeInfo infoFromBytes(const u8* d, int n) {
     return GuessFileInfoFromData(Str((char*)d, n));
@@ -517,6 +518,77 @@ static void jxlTest() {
     utassert(fti.hasImageSize);
 }
 
+static void tgaTest() {
+    // header alone: 24-bit truecolor 64x32
+    u8 tga[18 + 26] = {};
+    tga[2] = 2;      // imageType: truecolor
+    tga[12] = 64;    // width
+    tga[14] = 32;    // height
+    tga[16] = 24;    // bitDepth
+    FileTypeInfo fti = infoFromBytes(tga, 18);
+    utassert(fti.ft == FileType::Tga);
+    utassert(fti.imageDx == 64);
+    utassert(fti.imageDy == 32);
+
+    // an image type we don't support isn't sniffed as tga
+    tga[2] = 5;
+    utassert(infoFromBytes(tga, 18).ft == FileType::Unknown);
+
+    // ... unless it has a v2 footer. Its signature is a fixed 18-byte field
+    // holding the 17-char string plus a NUL, so it must be compared by
+    // length, not strlen()'d
+    memcpy(tga + 18 + 8, "TRUEVISION-XFILE.", 18);
+    fti = infoFromBytes(tga, dimofi(tga));
+    utassert(fti.ft == FileType::Tga);
+    utassert(fti.imageDx == 64);
+    utassert(fti.imageDy == 32);
+
+    // a footer that isn't NUL-terminated is still a valid signature
+    tga[18 + 8 + 17] = 0x8d;
+    utassert(infoFromBytes(tga, dimofi(tga)).ft == FileType::Tga);
+
+    tga[18 + 8] = 'X';
+    utassert(infoFromBytes(tga, dimofi(tga)).ft == FileType::Unknown);
+
+    // TgaReader has its own copy of the footer check, with the same pitfalls
+    tga[18 + 8] = 'T';
+    utassert(tga::HasSignature(Str((char*)tga, dimofi(tga))));
+    tga[18 + 8] = 'X';
+    utassert(!tga::HasSignature(Str((char*)tga, dimofi(tga))));
+}
+
+// issue 6159 / crash 2026-09-09-19-32-4dfd: a Windows EPS header whose 32-bit
+// psStart offset has the high bit set passed the "past the end" check as a
+// negative int, then was indexed with as unsigned -> wild pointer read
+static void epsTest() {
+    u8 eps[128];
+    memset(eps, 0x8d, sizeof(eps));
+    eps[0] = 0xC5;
+    eps[1] = 0xD0;
+    eps[2] = 0xD3;
+    eps[3] = 0xC6;
+    // psStart = 0x8d8d8d1a: past the end, so unverifiable and assumed EPS.
+    // used to be read back as a negative int and indexed with as unsigned
+    utassert(infoFromBytes(eps, dimofi(eps)).ft == FileType::PS);
+    // the repro file is 64 bytes, the smallest we sniff at all
+    utassert(infoFromBytes(eps, 64).ft == FileType::PS);
+    utassert(infoFromBytes(eps, 63).ft == FileType::Unknown);
+
+    // psStart pointing at the postscript header
+    static const char kPS[] = "%!PS-Adobe-3.0";
+    int psStart = 64;
+    memcpy(eps + psStart, kPS, dimofi(kPS) - 1);
+    eps[4] = (u8)psStart;
+    eps[5] = 0;
+    eps[6] = 0;
+    eps[7] = 0;
+    utassert(infoFromBytes(eps, dimofi(eps)).ft == FileType::PS);
+
+    // ... but not at something else
+    eps[psStart] = 'x';
+    utassert(infoFromBytes(eps, dimofi(eps)).ft == FileType::Unknown);
+}
+
 static void nonImageTest() {
     static const char pdf[] = "%PDF-1.4\nhello";
     FileTypeInfo fti = GuessFileInfoFromData(StrL(pdf));
@@ -550,6 +622,43 @@ static void extMapTest() {
     utassert(len(GetExtForFileTypeTemp(FileType::Unknown)) == 0);
 }
 
+static void hugeOffsetTest() {
+    // fuzzed files whose offsets are near INT_MAX: bounds checks that compute
+    // off + n overflow and let the read through (issue #6161)
+    static const u8 tiffHugeIfdOff[] = {
+        'M',  'M',  0,    0x2A, // header
+        0x7F, 0xFF, 0xFF, 0xFF, // first IFD offset
+        0,    0,
+    };
+    utassert(infoFromBytes(tiffHugeIfdOff, dimofi(tiffHugeIfdOff)).ft == FileType::Tiff);
+
+    static const u8 tiffHugeValOff[] = {
+        'M',  'M',  0,    0x2A,             // header
+        0,    0,    0,    8,                // first IFD offset
+        0,    1,                            // 1 entry
+        0x01, 0x00, 0,    4,    0, 0, 0, 5, // ImageWidth (long), 5 values at...
+        0x7F, 0xFF, 0xFF, 0xFF,             // ... offset 0x7FFFFFFF
+    };
+    utassert(infoFromBytes(tiffHugeValOff, dimofi(tiffHugeValOff)).ft == FileType::Tiff);
+
+    static const u8 jxrHugeIfdOff[] = {
+        'I',  'I',  0xBC, 0,    // header
+        0xFF, 0xFF, 0xFF, 0x7F, // first IFD offset
+        0,    0,
+    };
+    utassert(infoFromBytes(jxrHugeIfdOff, dimofi(jxrHugeIfdOff)).ft == FileType::Jxr);
+
+    static const u8 icoHugeImgOff[] = {
+        0,    0,    1,    0, // ICONDIR
+        0xFF, 0xFF,          // 65535 entries
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, // entry 0, image data at 0x7FFFFFFF
+    };
+    FileTypeInfo fti = infoFromBytes(icoHugeImgOff, dimofi(icoHugeImgOff));
+    utassert(fti.ft == FileType::Ico);
+    FreeFileTypeInfo(&fti);
+}
+
 void GuessFileTypeTest() {
     extMapTest();
     pngTest();
@@ -563,4 +672,7 @@ void GuessFileTypeTest() {
     heifTest();
     jxlTest();
     nonImageTest();
+    tgaTest();
+    epsTest();
+    hugeOffsetTest();
 }

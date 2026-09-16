@@ -2,6 +2,7 @@
    License: GPLv3 */
 
 #include "base/Base.h"
+#include "base/UITask.h"
 #include "gui/Dpi.h"
 #include "base/File.h"
 #include "base/Win.h"
@@ -32,9 +33,11 @@
 #include "ExternalViewers.h"
 #include "Flags.h"
 #include "DisplayModel.h"
+#include "Selection.h"
 #include "Theme.h"
+#include "Notifications.h"
 
-#include "DarkMode_win.h"
+#include "DarkMode.h"
 #include "Commands.h"
 #include "PdfTools.h"
 
@@ -1876,6 +1879,490 @@ void ShowConvertPdfToImagesDialog(MainWindow* win) {
     logf("ShowConvertPdfToImagesDialog: opening for '%s'\n", tab->filePath);
 
     auto* dlg = new ConvertPdfToImagesDialog();
+    if (!dlg->Create(win, tab)) {
+        delete dlg;
+    }
+}
+
+// rectangular selection → PNG / JPEG / BMP at a chosen DPI, independent of
+// the current zoom (issue #6127)
+constexpr i64 kMaxSaveSelectionPixels = 100 * 1000 * 1000;
+constexpr int kMaxSaveSelectionSide = 16384;
+constexpr int kSaveSelectionDefaultDpi = 300;
+
+static const int kSaveSelectionDpiChoices[] = {72, 150, 300, 600, 1200};
+
+static float SaveSelectionZoom(EngineBase* engine, float dpi) {
+    float fileDpi = engine->GetFileDPI();
+    if (fileDpi <= 0) {
+        fileDpi = 72.0f;
+    }
+    if (dpi < 1) {
+        dpi = (float)kSaveSelectionDefaultDpi;
+    }
+    return dpi / fileDpi;
+}
+
+static bool SaveSelectionSizeOk(int w, int h) {
+    if (w <= 0 || h <= 0) {
+        return false;
+    }
+    if (w > kMaxSaveSelectionSide || h > kMaxSaveSelectionSide) {
+        return false;
+    }
+    i64 pixels = (i64)w * (i64)h;
+    return pixels <= kMaxSaveSelectionPixels;
+}
+
+static bool EstimateSelectionPx(RectF rect, float zoom, int& w, int& h) {
+    w = (int)floorf((rect.dx * zoom) + 0.5f);
+    h = (int)floorf((rect.dy * zoom) + 0.5f);
+    return w > 0 && h > 0;
+}
+
+static Kind kNotifSaveSelectionAsImage = "notifSaveSelectionAsImage";
+
+static Pixmap* RenderSelectionPixmap(EngineBase* engine, int rotation, int pageNo, RectF rect, float dpi) {
+    if (!engine || rect.IsEmpty()) {
+        return nullptr;
+    }
+    if (pageNo < 1 || pageNo > engine->PageCount()) {
+        return nullptr;
+    }
+    float zoom = SaveSelectionZoom(engine, dpi);
+    int estW = 0;
+    int estH = 0;
+    if (!EstimateSelectionPx(rect, zoom, estW, estH) || !SaveSelectionSizeOk(estW, estH)) {
+        logf("RenderSelectionPixmap: %dx%d at %.0f DPI is too large\n", estW, estH, dpi);
+        return nullptr;
+    }
+    RenderPageArgs args(pageNo, zoom, rotation, &rect, RenderTarget::Export);
+    Pixmap* px = engine->RenderPage(args);
+    if (!px) {
+        logf("RenderSelectionPixmap: RenderPage failed page %d\n", pageNo);
+        return nullptr;
+    }
+    px->xres = dpi;
+    px->yres = dpi;
+    if (px->format != PixmapFormat::Native) {
+        return px;
+    }
+    Pixmap* converted = PixmapCopyAs32bppDIB(px);
+    FreePixmap(px);
+    return converted;
+}
+
+static bool WriteSelectionPixmap(Pixmap* px, Str destPath) {
+    if (!px || len(destPath) == 0) {
+        return false;
+    }
+    bool ok = false;
+    if (str::EndsWithI(destPath, StrL(".png"))) {
+        // lodepng has no pHYs, so EngineImages displays 1:1. Encode+zopfli
+        // here so the file is final before we open it (GDI+ then async zopfli
+        // used to open a tiny pHYs page, then reload after rewrite).
+        Str png = EncodeAndOptimizePngFromPixmap(px);
+        ok = len(png) > 0 && file::WriteFile(destPath, png);
+        str::Free(png);
+        if (!ok) {
+            file::Delete(destPath);
+        }
+    } else {
+        ok = SavePixmapAsImageFile(px, destPath);
+    }
+    return ok;
+}
+
+static bool SavePageRectAsImage(EngineBase* engine, int rotation, int pageNo, RectF rect, Str destPath, float dpi,
+                                int* widthOut, int* heightOut) {
+    if (widthOut) {
+        *widthOut = 0;
+    }
+    if (heightOut) {
+        *heightOut = 0;
+    }
+    Pixmap* px = RenderSelectionPixmap(engine, rotation, pageNo, rect, dpi);
+    if (!px) {
+        return false;
+    }
+    bool ok = WriteSelectionPixmap(px, destPath);
+    if (ok) {
+        if (widthOut) {
+            *widthOut = px->width;
+        }
+        if (heightOut) {
+            *heightOut = px->height;
+        }
+    }
+    FreePixmap(px);
+    return ok;
+}
+
+struct SaveSelImgWork {
+    Pixmap* px = nullptr;
+    Str destPath;
+    HWND hwndCanvas = nullptr;
+    MainWindow* win = nullptr;
+    bool ok = false;
+};
+
+static void FinishSaveSelImg(SaveSelImgWork* d) {
+    if (IsWindow(d->hwndCanvas)) {
+        RemoveNotificationsForGroup(d->hwndCanvas, kNotifSaveSelectionAsImage);
+    }
+    if (d->ok) {
+        logf("SaveSelectionAsImage: wrote '%s'\n", d->destPath);
+        if (IsMainWindowValidAndNotClosing(d->win)) {
+            LoadArgs args(d->destPath, d->win);
+            StartLoadDocument(&args);
+        }
+    } else {
+        HWND parent = nullptr;
+        if (IsMainWindowValidAndNotClosing(d->win)) {
+            parent = d->win->hwndFrame;
+        }
+        MessageBoxWarning(parent, StrL("Failed to save the selection as an image."), Tr("Save Selection As Image"));
+    }
+    str::Free(d->destPath);
+    delete d;
+}
+
+static void SaveSelImgThread(SaveSelImgWork* d) {
+    d->ok = WriteSelectionPixmap(d->px, d->destPath);
+    FreePixmap(d->px);
+    d->px = nullptr;
+    uitask::Post(MkFunc0(FinishSaveSelImg, d), "FinishSaveSelImg");
+}
+
+TempStr SaveSelectionAsImageResultTemp(Str destPath, int dpi, int pageNo, int x, int y, int dx, int dy,
+                                       int* exitCodeOut) {
+    auto finish = [&](int code, TempStr s) -> TempStr {
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        return s;
+    };
+    if (len(gWindows) == 0) {
+        return finish(2, str::DupTemp(StrL("NOTREADY no-window")));
+    }
+    MainWindow* win = gWindows[0];
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+    if (!engine) {
+        return finish(2, str::DupTemp(StrL("NOTREADY no-engine")));
+    }
+    if (len(destPath) == 0 || dpi < 1 || dx <= 0 || dy <= 0) {
+        return finish(1, str::DupTemp(StrL("ERROR bad-args")));
+    }
+    TempStr withExt = WithDefaultImageExtTemp(destPath);
+    if (len(withExt) == 0) {
+        return finish(1, str::DupTemp(StrL("ERROR bad-ext")));
+    }
+    RectF rect{(float)x, (float)y, (float)dx, (float)dy};
+    int w = 0;
+    int h = 0;
+    if (!SavePageRectAsImage(engine, dm->GetRotation(), pageNo, rect, withExt, (float)dpi, &w, &h)) {
+        return finish(1, str::DupTemp(StrL("ERROR save-failed")));
+    }
+    return finish(0, fmt("OK w=%d h=%d path=%s", w, h, withExt));
+}
+
+struct SaveSelectionAsImageDialog : PdfToolDialog {
+    int pageNo = 0;
+    RectF selRect;
+    DropDown* dropFormat = nullptr;
+    DropDown* dropDpi = nullptr;
+    VirtText* sizeLabel = nullptr;
+    bool syncingFormat = false;
+
+    bool Create(MainWindow* win, WindowTab* tab);
+    void DoIt(VirtMouseEvent* ev = nullptr) override;
+    void OnBrowseDest(VirtMouseEvent* ev = nullptr);
+    void OnFormatChanged();
+    void OnDpiChanged();
+    void SetDestExtFromFormat();
+    void SyncFormatFromPath(Str path);
+    void UpdateSizeLabel();
+    int SelectedFormatIdx() const;
+    int SelectedDpi() const;
+};
+
+int SaveSelectionAsImageDialog::SelectedFormatIdx() const {
+    if (!dropFormat) {
+        return 0;
+    }
+    int idx = CbGetCurrentSelection(dropFormat);
+    if (idx < 0 || idx >= ConvertImageFormatCount()) {
+        return 0;
+    }
+    return idx;
+}
+
+int SaveSelectionAsImageDialog::SelectedDpi() const {
+    if (!dropDpi) {
+        return kSaveSelectionDefaultDpi;
+    }
+    int idx = CbGetCurrentSelection(dropDpi);
+    if (idx < 0 || idx >= dimofi(kSaveSelectionDpiChoices)) {
+        return kSaveSelectionDefaultDpi;
+    }
+    return kSaveSelectionDpiChoices[idx];
+}
+
+void SaveSelectionAsImageDialog::SetDestExtFromFormat() {
+    if (!destEdit) {
+        return;
+    }
+    TempStr dest = destEdit->GetTextTemp();
+    if (len(dest) == 0) {
+        return;
+    }
+    Str ext = kConvertImageFormats[SelectedFormatIdx()].ext;
+    TempStr noExt = path::GetPathNoExtTemp(dest);
+    TempStr newDest = str::JoinTemp(noExt, ext);
+    if (str::EqI(dest, newDest)) {
+        return;
+    }
+    destEdit->SetText(newDest);
+}
+
+void SaveSelectionAsImageDialog::SyncFormatFromPath(Str path) {
+    if (!dropFormat) {
+        return;
+    }
+    int idx = ConvertImageFormatIdxFromPath(path);
+    if (idx == CbGetCurrentSelection(dropFormat)) {
+        return;
+    }
+    syncingFormat = true;
+    CbSetCurrentSelection(dropFormat, idx);
+    syncingFormat = false;
+}
+
+void SaveSelectionAsImageDialog::UpdateSizeLabel() {
+    if (!sizeLabel || !win) {
+        return;
+    }
+    DisplayModel* dm = win->AsFixed();
+    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+    if (!engine) {
+        return;
+    }
+    float zoom = SaveSelectionZoom(engine, (float)SelectedDpi());
+    int w = 0;
+    int h = 0;
+    EstimateSelectionPx(selRect, zoom, w, h);
+    if (!SaveSelectionSizeOk(w, h)) {
+        sizeLabel->SetText(Tr("Too large for this DPI"));
+        if (actionBtn) {
+            actionBtn->SetIsEnabled(false);
+        }
+    } else {
+        sizeLabel->SetText(fmt("%d x %d px", w, h));
+        if (actionBtn) {
+            TempStr dest = destEdit ? destEdit->GetTextTemp() : Str{};
+            actionBtn->SetIsEnabled(len(dest) > 0);
+        }
+    }
+    sizeLabel->RequestLayout();
+}
+
+void SaveSelectionAsImageDialog::OnFormatChanged() {
+    if (syncingFormat) {
+        return;
+    }
+    SetDestExtFromFormat();
+}
+
+void SaveSelectionAsImageDialog::OnDpiChanged() {
+    UpdateSizeLabel();
+}
+
+void SaveSelectionAsImageDialog::OnBrowseDest(VirtMouseEvent*) {
+    WCHAR dstFileName[MAX_PATH + 1]{};
+    TempStr current = destEdit->GetTextTemp();
+    wstr::BufSet(WStr(dstFileName, MAX_PATH), ToWStrTemp(current));
+
+    int fmtIdx = SelectedFormatIdx();
+    OPENFILENAME ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFile = dstFileName;
+    ofn.nMaxFile = dimof(dstFileName);
+    ofn.lpstrFilter = L"PNG\0*.png\0JPEG\0*.jpg;*.jpeg\0BMP\0*.bmp\0All Files\0*.*\0";
+    ofn.nFilterIndex = (DWORD)(fmtIdx + 1);
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.lpstrDefExt = kConvertImageFormats[fmtIdx].defExt.s;
+
+    if (!GetSaveFileNameW(&ofn)) {
+        return;
+    }
+    TempStr picked = ToUtf8Temp(dstFileName);
+    destEdit->SetText(picked);
+    int filterIdx = (int)ofn.nFilterIndex - 1;
+    if (filterIdx >= 0 && filterIdx < ConvertImageFormatCount()) {
+        syncingFormat = true;
+        CbSetCurrentSelection(dropFormat, filterIdx);
+        syncingFormat = false;
+        SetDestExtFromFormat();
+    } else {
+        SyncFormatFromPath(picked);
+    }
+    UpdateSizeLabel();
+}
+
+void SaveSelectionAsImageDialog::DoIt(VirtMouseEvent*) {
+    TempStr destPath = destEdit->GetTextTemp();
+    if (len(destPath) == 0) {
+        return;
+    }
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+    if (!engine) {
+        return;
+    }
+    TempStr withExt = WithDefaultImageExtTemp(destPath);
+    if (len(withExt) == 0) {
+        MessageBoxWarning(hwnd, StrL("Unsupported image format."), Tr("Save Selection As Image"));
+        return;
+    }
+    int dpi = SelectedDpi();
+    Pixmap* px = RenderSelectionPixmap(engine, dm->GetRotation(), pageNo, selRect, (float)dpi);
+    if (!px) {
+        MessageBoxWarning(hwnd, StrL("Failed to save the selection as an image."), Tr("Save Selection As Image"));
+        return;
+    }
+
+    auto* work = new SaveSelImgWork();
+    work->px = px;
+    work->destPath = str::Dup(withExt);
+    work->hwndCanvas = win->hwndCanvas;
+    work->win = win;
+
+    NotificationCreateArgs nargs;
+    nargs.hwndParent = win->hwndCanvas;
+    nargs.msg = Tr("Saving image...");
+    nargs.groupId = kNotifSaveSelectionAsImage;
+    nargs.timeoutMs = kNotifNoTimeout;
+    ShowNotification(nargs);
+
+    Close();
+    RunAsync(MkFunc0(SaveSelImgThread, work), StrL("SaveSelImg"));
+}
+
+bool SaveSelectionAsImageDialog::Create(MainWindow* w, WindowTab* tab) {
+    if (!tab || !tab->selectionOnPage || len(*tab->selectionOnPage) == 0) {
+        return false;
+    }
+    SelectionOnPage& sel = (*tab->selectionOnPage)[0];
+    if (sel.rect.IsEmpty()) {
+        return false;
+    }
+    pageNo = sel.pageNo;
+    selRect = sel.rect;
+
+    if (!CreateToolDialog(w, tab, Tr("Save Selection As Image"))) {
+        return false;
+    }
+    AddPathRow();
+
+    TempStr noExt = path::GetPathNoExtTemp(srcPath);
+    TempStr pngPath = MakeUniqueFilePathTemp(str::JoinTemp(noExt, StrL("-sel.png")));
+
+    HBox* destRow = AddRow();
+    destRow->gap = font->averageCharWidth;
+
+    Edit::CreateArgs dargs;
+    dargs.parent = hwnd;
+    dargs.withBorder = true;
+    dargs.font = font;
+    dargs.text = pngPath;
+    dargs.isRtl = IsUIRtl();
+    destEdit = new Edit();
+    destEdit->Create(dargs);
+    destRow->AddChild(destEdit, 1);
+
+    {
+        auto* dd = new DropDown();
+        DropDown::CreateArgs ddargs;
+        ddargs.parent = hwnd;
+        ddargs.font = font;
+        ddargs.isRtl = IsUIRtl();
+        dd->Create(ddargs);
+        StrVec items;
+        for (int i = 0; i < ConvertImageFormatCount(); i++) {
+            items.Append(kConvertImageFormats[i].label);
+        }
+        dd->SetItems(items);
+        CbSetCurrentSelection(dd, 0);
+        dd->SetColors(ThemeWindowTextColor(), ThemeWindowControlBackgroundColor());
+        dd->onSelectionChanged =
+            MkMethod0<SaveSelectionAsImageDialog, &SaveSelectionAsImageDialog::OnFormatChanged>(this);
+        dropFormat = dd;
+        destRow->AddChild(dropFormat);
+    }
+
+    browseBtn = NewButton(StrL("..."), false);
+    browseBtn->onClick =
+        MkMethod1<SaveSelectionAsImageDialog, VirtMouseEvent*, &SaveSelectionAsImageDialog::OnBrowseDest>(this);
+    destRow->AddChild(browseBtn);
+
+    if (pathLabel) {
+        pathLabel->padding.left = destEdit->GetLeftTextMargin();
+    }
+
+    HBox* dpiRow = AddRow();
+    dpiRow->gap = font->averageCharWidth;
+    dpiRow->AddChild(NewVirtText({.s = Tr("DPI:"), .font = font, .isRtl = IsUIRtl()}));
+
+    {
+        auto* dd = new DropDown();
+        DropDown::CreateArgs ddargs;
+        ddargs.parent = hwnd;
+        ddargs.font = font;
+        ddargs.isRtl = IsUIRtl();
+        dd->Create(ddargs);
+        StrVec items;
+        int selIdx = 0;
+        for (int i = 0; i < dimofi(kSaveSelectionDpiChoices); i++) {
+            items.Append(fmt("%d", kSaveSelectionDpiChoices[i]));
+            if (kSaveSelectionDpiChoices[i] == kSaveSelectionDefaultDpi) {
+                selIdx = i;
+            }
+        }
+        dd->SetItems(items);
+        CbSetCurrentSelection(dd, selIdx);
+        dd->SetColors(ThemeWindowTextColor(), ThemeWindowControlBackgroundColor());
+        dd->onSelectionChanged = MkMethod0<SaveSelectionAsImageDialog, &SaveSelectionAsImageDialog::OnDpiChanged>(this);
+        dropDpi = dd;
+        dpiRow->AddChild(dropDpi);
+    }
+
+    sizeLabel = NewVirtText({.s = StrL(""), .font = font, .isRtl = IsUIRtl()});
+    dpiRow->AddChild(sizeLabel, 1);
+
+    AddButtonsRow(Tr("Save"));
+    FinishDialog(destEdit);
+
+    destEdit->onTextChanged = MkMethod0<SaveSelectionAsImageDialog, &SaveSelectionAsImageDialog::UpdateSizeLabel>(this);
+    UpdateSizeLabel();
+    return true;
+}
+
+void ShowSaveSelectionAsImageDialog(MainWindow* win) {
+    if (!win || !win->IsDocLoaded()) {
+        return;
+    }
+    if (!HasPermission(Perm::CopySelection) || !CanAccessDisk()) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    if (!tab || !IsRectangularSelection(win)) {
+        return;
+    }
+    logf("ShowSaveSelectionAsImageDialog: opening for '%s'\n", tab->filePath);
+
+    auto* dlg = new SaveSelectionAsImageDialog();
     if (!dlg->Create(win, tab)) {
         delete dlg;
     }

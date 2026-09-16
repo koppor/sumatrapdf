@@ -54,6 +54,12 @@ import { testit as issue1914 } from "./issue-1914.ts";
 import { testit as issue1198 } from "./issue-1198.ts";
 import { testit as issue2568 } from "./issue-2568.ts";
 import { testit as issue2799 } from "./issue-2799.ts";
+import { testit as issue6190 } from "./issue-6190.ts";
+import { testit as issue6201 } from "./issue-6201.ts";
+import { testit as issue6206 } from "./issue-6206.ts";
+import { testit as issue6194 } from "./issue-6194.ts";
+import { testit as inkAnnotationBounds } from "./ink-annotation-bounds.ts";
+import { testit as issue6197 } from "./issue-6197.ts";
 import { testit as findMatchSelect } from "./issue-find-match-select.ts";
 import { testit as findResultsSorted } from "./find-results-sorted.ts";
 import { testit as findWindowLayout } from "./find-window-layout.ts";
@@ -97,6 +103,7 @@ import { testit as issue3731 } from "./issue-3731.ts";
 import { testit as issue5095 } from "./issue-5095.ts";
 import { testit as issue5751 } from "./issue-5751.ts";
 import { testit as issue5780 } from "./issue-5780.ts";
+import { testit as issue2155 } from "./issue-2155.ts";
 import { testit as issue2254 } from "./issue-2254.ts";
 import { testit as issue1846 } from "./issue-1846.ts";
 import { testit as xmpProperties } from "./xmp-properties.ts";
@@ -104,6 +111,8 @@ import { testit as issue5950 } from "./issue-5950.ts";
 import { testit as issue5993 } from "./issue-5993.ts";
 import { testit as issue5845 } from "./issue-5845.ts";
 import { testit as issue5870 } from "./issue-5870.ts";
+import { testit as issue6199 } from "./issue-6199.ts";
+import { testit as comicFitPageRelayout } from "./comic-fit-page-relayout.ts";
 import { testit as ghsaP2ph2rvmQ37m } from "./security-ghsa-p2ph-2rvm-q37m.ts";
 import { testit as issue4753 } from "./issue-4753.ts";
 import { testit as issue4055 } from "./issue-4055.ts";
@@ -117,10 +126,17 @@ import { testit as issue6050 } from "./issue-6050.ts";
 import { testit as issue5911 } from "./issue-5911.ts";
 import { testit as issue6088 } from "./issue-6088.ts";
 import { testit as annotContentsClickAway } from "./annot-contents-click-away.ts";
+import { testit as annotColorDropdown } from "./annot-color-dropdown.ts";
+import { testit as inkThickness } from "./ink-thickness.ts";
 import { testit as issue6137Contents } from "./issue-6137-contents.ts";
 import { testit as issue6093 } from "./issue-6093.ts";
 import { testit as toolbarHoverDropdown } from "./toolbar-hover-dropdown.ts";
 import { testit as issue6095 } from "./issue-6095.ts";
+import { testit as epubRelayoutStalePage } from "./epub-relayout-stale-page.ts";
+import { testit as epubThemeRestyle } from "./epub-theme-restyle.ts";
+import { testit as embeddedImageAttachment } from "./embedded-image-attachment.ts";
+import { testit as ttsEngineCrashRecovery } from "./tts-engine-crash-recovery.ts";
+import { testit as lazyTabStateAfterSave } from "./lazy-tab-state-after-save.ts";
 import { testit as issue5943 } from "./issue-5943.ts";
 import { testit as issue6117 } from "./issue-6117.ts";
 import { testit as issue6118 } from "./issue-6118.ts";
@@ -130,6 +146,8 @@ import { testit as customZoomDialog } from "./custom-zoom-dialog.ts";
 import { testit as issue1106 } from "./issue-1106.ts";
 import { testit as issue814 } from "./issue-814.ts";
 import { testit as issue1422 } from "./issue-1422.ts";
+import { testit as issue6151 } from "./issue-6151.ts";
+import { testit as issue6161 } from "./issue-6161.ts";
 import { testit as issue1438 } from "./issue-1438.ts";
 import { testit as issue1136 } from "./issue-1136.ts";
 import { testit as issue893 } from "./issue-893.ts";
@@ -151,6 +169,7 @@ import { testit as issue5899 } from "./issue-5899.ts";
 import { testit as issue5907 } from "./issue-5907.ts";
 import { testit as settingsPersist } from "./settings-persist.ts";
 import { testit as issue5970 } from "./issue-5970.ts";
+import { testit as homeThemeIcons } from "./home-theme-icons.ts";
 import { testit as issue5971 } from "./issue-5971.ts";
 import { testit as issue5933 } from "./issue-5933.ts";
 import { testit as issue6037 } from "./issue-6037.ts";
@@ -160,6 +179,7 @@ import { testit as issue6046 } from "./issue-6046.ts";
 import { testit as issue6048 } from "./issue-6048.ts";
 import { testit as issue6053 } from "./issue-6053.ts";
 import { testit as issue6054 } from "./issue-6054.ts";
+import { testit as favoritesMenu } from "./favorites-menu.ts";
 import { testit as favoritesTabAfterDocumentClose } from "./favorites-tab-after-document-close.ts";
 import { testit as movePolygonPolylineInk } from "./move-polygon-polyline-ink.ts";
 
@@ -168,13 +188,18 @@ import { testit as annotCopyPaste } from "./annot-copy-paste.ts";
 import { testit as annotFilterCloseTab } from "./annot-filter-close-tab.ts";
 import { testit as annotFilterCloseWindow } from "./annot-filter-close-window.ts";
 import { testit as issue6136 } from "./issue-6136.ts";
+import { testit as issueTrimMargins } from "./issue-trim-margins.ts";
+import { testit as trimEmptyMarginsRestore } from "./trim-empty-margins-restore.ts";
 import { testit as issue1930 } from "./issue-1930.ts";
 import { testit as annotFilterSyntax } from "./annot-filter-syntax.ts";
 import { testit as annotCutPaste } from "./annot-cut-paste.ts";
+import { testit as ctxMenuReload } from "./ctx-menu-reload.ts";
+import { testit as homeTwoWindows } from "./home-two-windows.ts";
 import { testit as annotUndoRedo } from "./annot-undo-redo.ts";
 import { testit as textAnnotationPlacement } from "./text-annotation-placement.ts";
 import { testit as freeTextAnnotationPlacement } from "./free-text-annotation-placement.ts";
 import { testit as freeTextEditToolbar } from "./free-text-edit-toolbar.ts";
+import { testit as issue6198 } from "./issue-6198.ts";
 import { testit as createAnnotEntersEditMode } from "./create-annot-enters-edit-mode.ts";
 import { testit as issue6111 } from "./issue-6111.ts";
 import { testit as annotListPlacement } from "./annot-list-placement.ts";
@@ -197,12 +222,20 @@ import { testit as imageOnlyPaletteItems } from "./image-only-palette-items.ts";
 import { testit as commandPaletteShortcutFilter } from "./command-palette-shortcut-filter.ts";
 import { testit as commandPaletteThumbnails } from "./command-palette-thumbnails.ts";
 import { testit as commandPaletteAnnotations } from "./command-palette-annotations.ts";
+import { testit as paletteDeleteAnnotation } from "./palette-delete-annotation.ts";
+import { testit as paletteCommandAvailability } from "./palette-command-availability.ts";
+import { testit as recentFilesMenu } from "./recent-files-menu.ts";
+import { testit as commandPaletteSettings } from "./command-palette-settings.ts";
+import { testit as commandPaletteDeleteTab } from "./command-palette-delete-tab.ts";
 import { testit as issue6104 } from "./issue-6104.ts";
 import { testit as issue6106 } from "./issue-6106.ts";
 import { testit as issue6107 } from "./issue-6107.ts";
 
 import { testit as issue5968 } from "./issue-5968.ts";
 import { testit as issue5978 } from "./issue-5978.ts";
+import { testit as issue6167 } from "./issue-6167.ts";
+import { testit as issue6168 } from "./issue-6168.ts";
+import { testit as issue5918 } from "./issue-5918.ts";
 import { testit as issue6101 } from "./issue-6101.ts";
 import { testit as issue5963 } from "./issue-5963.ts";
 import { testit as issue5964 } from "./issue-5964.ts";
@@ -210,6 +243,11 @@ import { testit as issue5965 } from "./issue-5965.ts";
 import { testit as issue1315 } from "./issue-1315.ts";
 import { testit as issue5581 } from "./issue-5581.ts";
 import { testit as issue5991 } from "./issue-5991.ts";
+import { testit as issue6127 } from "./issue-6127.ts";
+import { testit as issue6163 } from "./issue-6163.ts";
+import { testit as issue6166 } from "./issue-6166.ts";
+import { testit as issue6169 } from "./issue-6169.ts";
+import { testit as issue5771 } from "./issue-5771.ts";
 import { testit as issue5980 } from "./issue-5980.ts";
 import { testit as issue5982 } from "./issue-5982.ts";
 import { testit as issue6035 } from "./issue-6035.ts";
@@ -241,6 +279,8 @@ import { testit as issue6025 } from "./issue-6025.ts";
 import { testit as issue5946 } from "./issue-5946.ts";
 import { testit as issue6012 } from "./issue-6012.ts";
 import { testit as issue6080 } from "./issue-6080.ts";
+import { testit as issue6203 } from "./issue-6203.ts";
+import { testit as issue6205 } from "./issue-6205.ts";
 import { testit as advSettingsFreshDefaults } from "./adv-settings-fresh-defaults.ts";
 import { testit as issue6137AdvSettings } from "./issue-6137-adv-settings.ts";
 import { testit as advSettingsHomeReload } from "./adv-settings-home-reload.ts";
@@ -255,6 +295,9 @@ import { testit as issue6142 } from "./issue-6142.ts";
 import { testit as issue6143 } from "./issue-6143.ts";
 import { testit as issue6144 } from "./issue-6144.ts";
 import { testit as toolbarTabSwitchPos } from "./toolbar-tab-switch-pos.ts";
+import { testit as mdMissingFile } from "./ad-hoc-md-missing-file.ts";
+import { testit as issue6148 } from "./issue-6148.ts";
+import { testit as issue6184 } from "./issue-6184.ts";
 
 async function annotationClipboardTests(): Promise<void> {
   beginSharedControlledSession();
@@ -271,14 +314,34 @@ export const tests: NamedTest[] = [
   // first: it drives the home page, whose thumbnail selection follows the
   // mouse, so it is the one test that cares what the machine was doing before
   ["issue-5978", issue5978],
+  ["annot-moveable-types", annotMoveableTypes],
+  ["move-polygon-polyline-ink", movePolygonPolylineInk],
+  ["issue-5918", issue5918],
+  ["issue-6167", issue6167],
+  ["issue-6168", issue6168],
+  ["ctx-menu-reload", ctxMenuReload],
+  ["home-two-windows", homeTwoWindows],
+  ["issue-5870", issue5870],
+  ["issue-6199", issue6199],
+  ["comic-fit-page-relayout", comicFitPageRelayout],
+  ["issue-6133", issue6133],
+  ["issue-6184", issue6184],
+  ["image-only-palette-items", imageOnlyPaletteItems],
+  ["issue-6151", issue6151],
+  ["issue-6161", issue6161],
   ["issue-6140", issue6140],
+  ["ad-hoc-md-missing-file", mdMissingFile],
   ["issue-6142", issue6142],
+  ["issue-6148", issue6148],
   ["issue-6143", issue6143],
   ["issue-6144", issue6144],
   ["issue-5993", issue5993],
   ["issue-2629", issue2629],
   ["issue-6135", issue6135],
   ["issue-4276", issue4276],
+  ["embedded-image-attachment", embeddedImageAttachment],
+  ["tts-engine-crash-recovery", ttsEngineCrashRecovery],
+  ["lazy-tab-state-after-save", lazyTabStateAfterSave],
   ["issue-4705", issue4705],
   ["toc-tree-sent-click", tocTreeSentClick],
   ["issue-5956", issue5956],
@@ -295,7 +358,6 @@ export const tests: NamedTest[] = [
   ["issue-893", issue893],
   ["annotation clipboard tests", annotationClipboardTests],
   ["cmyk-image-save", cmykImageSave],
-  ["image-only-palette-items", imageOnlyPaletteItems],
   ["issue-5868", issue5868],
   ["issue-2252", issue2252],
   ["issue-5944", issue5944],
@@ -329,16 +391,18 @@ export const tests: NamedTest[] = [
   ["issue-6048", issue6048],
   ["issue-6053", issue6053],
   ["issue-6054", issue6054],
-  ["move-polygon-polyline-ink", movePolygonPolylineInk],
   ["pdf-edit-toolbar-interaction", pdfEditToolbarInteraction],
   ["text-annotation-placement", textAnnotationPlacement],
   ["free-text-annotation-placement", freeTextAnnotationPlacement],
   ["free-text-edit-toolbar", freeTextEditToolbar],
+  ["issue-6198", issue6198],
   ["create-annot-enters-edit-mode", createAnnotEntersEditMode],
+  ["issue-6166", issue6166],
+  ["issue-6169", issue6169],
+  ["issue-5771", issue5771],
   ["issue-6111", issue6111],
   ["annot-list-placement", annotListPlacement],
   ["exit-edit-pdf-deselects", exitEditPdfDeselects],
-  ["annot-moveable-types", annotMoveableTypes],
   ["stamp-caret-annotation-placement", stampCaretAnnotationPlacement],
   ["issue-6112", issue6112],
   ["line-annotation-placement", lineAnnotationPlacement],
@@ -348,6 +412,8 @@ export const tests: NamedTest[] = [
   ["issue-1315", issue1315],
   ["issue-5581", issue5581],
   ["issue-5991", issue5991],
+  ["issue-6127", issue6127],
+  ["issue-6163", issue6163],
   ["issue-4973", issue4973],
   ["issue-2083", issue2083],
   ["issue-5329", issue5329],
@@ -363,6 +429,12 @@ export const tests: NamedTest[] = [
   ["issue-1198", issue1198],
   ["issue-2568", issue2568],
   ["issue-2799", issue2799],
+  ["issue-6190", issue6190],
+  ["issue-6201", issue6201],
+  ["issue-6206", issue6206],
+  ["issue-6194", issue6194],
+  ["ink-annotation-bounds", inkAnnotationBounds],
+  ["issue-6197", issue6197],
   ["issue-find-match-select", findMatchSelect],
   ["find-results-sorted", findResultsSorted],
   ["find-window-layout", findWindowLayout],
@@ -400,6 +472,7 @@ export const tests: NamedTest[] = [
   ["issue-5317", issue5317],
   ["issue-5694", issue5694],
   ["issue-1699", issue1699],
+  ["issue-2155", issue2155],
   ["issue-2254", issue2254],
   ["issue-1846", issue1846],
   ["xmp-properties", xmpProperties],
@@ -409,11 +482,11 @@ export const tests: NamedTest[] = [
   ["security-ghsa-p2ph-2rvm-q37m", ghsaP2ph2rvmQ37m],
   ["issue-5780", issue5780],
   ["issue-5845", issue5845],
-  ["issue-5870", issue5870],
   ["issue-5963", issue5963],
   ["issue-5965", issue5965],
 
   // --- isolated session: -appdata, saveSettings, or own window placement -
+  ["favorites-menu", favoritesMenu],
   ["favorites-tab-after-document-close", favoritesTabAfterDocumentClose],
   ["issue-6045", issue6045],
   ["issue-3744", issue3744],
@@ -431,9 +504,13 @@ export const tests: NamedTest[] = [
   ["issue-5911", issue5911],
   ["issue-6088", issue6088],
   ["annot-contents-click-away", annotContentsClickAway],
+  ["annot-color-dropdown", annotColorDropdown],
+  ["ink-thickness", inkThickness],
   ["issue-6137-contents", issue6137Contents],
   ["issue-6093", issue6093],
   ["issue-6095", issue6095],
+  ["epub-theme-restyle", epubThemeRestyle],
+  ["epub-relayout-stale-page", epubRelayoutStalePage],
   ["issue-5943", issue5943],
   ["issue-6117", issue6117],
   ["issue-6118", issue6118],
@@ -463,10 +540,16 @@ export const tests: NamedTest[] = [
   ["issue-5899", issue5899],
   ["settings-persist", settingsPersist],
   ["issue-5970", issue5970],
+  ["home-theme-icons", homeThemeIcons],
   ["issue-5971", issue5971],
   ["command-palette-shortcut-filter", commandPaletteShortcutFilter],
   ["command-palette-thumbnails", commandPaletteThumbnails],
   ["command-palette-annotations", commandPaletteAnnotations],
+  ["palette-delete-annotation", paletteDeleteAnnotation],
+  ["palette-command-availability", paletteCommandAvailability],
+  ["recent-files-menu", recentFilesMenu],
+  ["command-palette-settings", commandPaletteSettings],
+  ["command-palette-delete-tab", commandPaletteDeleteTab],
   ["issue-6104", issue6104],
   ["issue-6106", issue6106],
   ["issue-6107", issue6107],
@@ -499,13 +582,16 @@ export const tests: NamedTest[] = [
   ["issue-5946", issue5946],
   ["issue-6012", issue6012],
   ["issue-6080", issue6080],
+  ["issue-6203", issue6203],
+  ["issue-6205", issue6205],
   ["adv-settings-fresh-defaults", advSettingsFreshDefaults],
   ["issue-6137-adv-settings", issue6137AdvSettings],
   ["adv-settings-home-reload", advSettingsHomeReload],
   ["toc-title-fallback", tocTitleFallback],
   ["issue-6132", issue6132],
-  ["issue-6133", issue6133],
   ["toolbar-tab-switch-pos", toolbarTabSwitchPos],
+  ["issue-trim-margins", issueTrimMargins],
+  ["trim-empty-margins-restore", trimEmptyMarginsRestore],
 ];
 
 export async function testit(opts?: SuiteOptions): Promise<void> {

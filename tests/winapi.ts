@@ -33,6 +33,8 @@ const user32 = dlopen("user32.dll", {
   GetWindowLongW: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
   SetWindowLongW: { args: [FFIType.ptr, FFIType.i32, FFIType.i32], returns: FFIType.i32 },
   ShowWindow: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.bool },
+  InvalidateRect: { args: [FFIType.ptr, FFIType.ptr, FFIType.bool], returns: FFIType.bool },
+  UpdateWindow: { args: [FFIType.ptr], returns: FFIType.bool },
   IsZoomed: { args: [FFIType.ptr], returns: FFIType.bool },
   GetClientRect: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
   GetScrollInfo: { args: [FFIType.ptr, FFIType.i32, FFIType.ptr], returns: FFIType.bool },
@@ -73,6 +75,7 @@ const user32 = dlopen("user32.dll", {
     returns: FFIType.bool,
   },
   FillRect: { args: [FFIType.u64, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
+  GetMenuItemID: { args: [FFIType.u64, FFIType.i32], returns: FFIType.u32 },
   GetMenuItemCount: { args: [FFIType.u64], returns: FFIType.i32 },
   GetSubMenu: { args: [FFIType.u64, FFIType.i32], returns: FFIType.u64 },
   GetMenuStringW: { args: [FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.i32, FFIType.u32], returns: FFIType.i32 },
@@ -174,7 +177,7 @@ const kernel32 = dlopen("kernel32.dll", {
   DeleteFileW: { args: [FFIType.ptr], returns: FFIType.bool },
 });
 
-// Authenticode helpers (mirror src/base/Crypto_win.cpp GetExecutableSignerTemp / IsPEFileSigned).
+// Authenticode helpers (mirror src/base/Crypto.cpp GetExecutableSignerTemp / IsPEFileSigned).
 // crypt32 for embedded PKCS#7 signer name; wintrust for signature validity.
 const crypt32 = dlopen("crypt32.dll", {
   CryptQueryObject: {
@@ -288,6 +291,7 @@ export const VK_UP = 0x26;
 export const VK_RIGHT = 0x27;
 export const VK_DOWN = 0x28;
 export const VK_DELETE = 0x2e;
+export const VK_F4 = 0x73;
 // PrintWindow flags
 export const PW_CLIENTONLY = 0x00000001;
 export const PW_RENDERFULLCONTENT = 0x00000002;
@@ -307,9 +311,11 @@ const SIF_ALL = 0x17;
 export const TVM_GETNEXTITEM = 0x110a;
 export const TVM_SELECTITEM = 0x110b;
 export const TVM_EXPAND = 0x1102;
+export const TVM_GETCOUNT = 0x1105;
 export const TVM_GETITEMHEIGHT = 0x111c;
 export const TVGN_ROOT = 0x0;
 export const TVGN_NEXT = 0x1;
+export const TVGN_CHILD = 0x4;
 export const TVGN_CARET = 0x9;
 export const TVGN_NEXTVISIBLE = 0x6;
 export const TVE_COLLAPSE = 0x1;
@@ -596,6 +602,16 @@ export function postMessage(hwnd: number, msg: number, wParam: number, lParam: n
   return user32.symbols.PostMessageW(hwnd, msg, BigInt(wParam), BigInt(lParam));
 }
 
+// Post a character to a main window. The app drops a char it sees as a chord
+// (Ctrl+v, Alt+v), and it reads the modifiers from the real key state, so a
+// Ctrl that went down while its window was in front silently eats the char.
+// Posting a key-up does not clear that state (only injected input does), so
+// release the modifiers for real first.
+export async function postChar(hwnd: number, ch: string): Promise<boolean> {
+  await ensureModifierKeysUp();
+  return postMessage(hwnd, WM_CHAR, ch.charCodeAt(0), 0);
+}
+
 // SendMessage is synchronous: use it when you need the return value, or need the
 // target window to finish handling the message before reading state. Returns the
 // LRESULT as a bigint -- TreeView messages return HTREEITEM pointers that can
@@ -638,6 +654,16 @@ export function treeExpand(tree: number, action: number, item: bigint): void {
   sendMessage(tree, TVM_EXPAND, action, item);
 }
 
+export function treeExpandRecursively(tree: number, action: number, item = treeGetRoot(tree)): void {
+  for (let it = item; it !== 0n; it = treeGetNextItem(tree, TVGN_NEXT, it)) {
+    treeExpand(tree, action, it);
+    const child = treeGetNextItem(tree, TVGN_CHILD, it);
+    if (child !== 0n) {
+      treeExpandRecursively(tree, action, child);
+    }
+  }
+}
+
 export function treeGetItemHeight(tree: number): number {
   return Number(sendMessage(tree, TVM_GETITEMHEIGHT, 0, 0));
 }
@@ -660,6 +686,13 @@ export function collapseTreeRoots(tree: number): void {
     treeExpand(tree, TVE_COLLAPSE, it);
     it = treeGetNextItem(tree, TVGN_NEXT, it);
   }
+}
+
+// force hwnd to repaint now: invalidate its client area and let UpdateWindow
+// deliver WM_PAINT (works cross-process, unlike posting WM_PAINT ourselves)
+export function repaintWindow(hwnd: number): void {
+  user32.symbols.InvalidateRect(hwnd, null, true);
+  user32.symbols.UpdateWindow(hwnd);
 }
 
 export function moveWindow(hwnd: number, x: number, y: number, w: number, h: number, repaint = true): boolean {
@@ -715,6 +748,84 @@ const KEYEVENTF_KEYUP = 0x0002;
 // inject a key-up for vk, clearing a key the system thinks is still held
 export function injectKeyUp(vk: number): void {
   user32.symbols.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0n);
+}
+
+// Wheel and key tests read the real modifier state: the app ORs GetKeyState
+// into its Ctrl/Shift/Alt/right-button checks, and TranslateAccelerator reads
+// it too, so a held Ctrl turns a posted wheel notch into a zoom and a posted
+// key into a shortcut.
+//
+// Over RDP a Ctrl can stay down with nobody at the server pressing it: the
+// client sends a Ctrl down and never the up (logged right after it re-synced
+// its modifier state, which it does when its window gets focus), and a
+// session disconnected with the key down keeps it down.
+// SumatraPDF started with -for-testing or -dbg-control clears the key state
+// it inherits (ReleaseThreadKeyState()), so a stuck key only matters if it
+// goes down while a test window is in front. Release stuck keys with injected
+// key-ups anyway. They are dropped while the session is disconnected or an
+// elevated window is in front; then warn and carry on.
+const MODIFIER_KEYS: [string, number][] = [
+  ["Ctrl", VK_CONTROL],
+  ["Shift", VK_SHIFT],
+  ["Alt", VK_MENU],
+  ["right mouse button", VK_RBUTTON],
+];
+// left/right variants must be released too or the generic key stays down
+const KEY_VARIANTS: Record<number, number[]> = {
+  [VK_CONTROL]: [VK_CONTROL, VK_LCONTROL, VK_RCONTROL],
+  [VK_SHIFT]: [VK_SHIFT, VK_LSHIFT, VK_RSHIFT],
+  [VK_MENU]: [VK_MENU, VK_LMENU, VK_RMENU],
+};
+// a key physically held for a moment (a shortcut typed in another window
+// mid-run) keeps auto-repeating over our key-ups, so give it a second
+const MODIFIER_RELEASE_TRIES = 10;
+// the keys we last warned about as impossible to release, so a session that
+// stays disconnected doesn't repeat the warning before every test
+let unreleasedWarned = "";
+
+function heldModifierKeys(): [string, number][] {
+  return MODIFIER_KEYS.filter(([, vk]) => isKeyDownAsync(vk));
+}
+
+function modifierNames(keys: [string, number][]): string {
+  return keys.map(([name]) => name).join(", ");
+}
+
+export async function ensureModifierKeysUp(): Promise<void> {
+  let held = heldModifierKeys();
+  if (held.length === 0) {
+    unreleasedWarned = "";
+    return;
+  }
+  const names = modifierNames(held);
+  for (let attempt = 0; attempt < MODIFIER_RELEASE_TRIES && held.length > 0; attempt++) {
+    for (const [, vk] of held) {
+      // no key-up for the right mouse button: an injected one pops up a
+      // context menu in whatever window is under the cursor
+      for (const variant of KEY_VARIANTS[vk] ?? []) {
+        injectKeyUp(variant);
+      }
+    }
+    await sleep(100);
+    held = heldModifierKeys();
+  }
+  const when = new Date().toLocaleTimeString();
+  if (held.length === 0) {
+    console.log(`released modifier keys stuck down on this machine at ${when}: ${names}`);
+    unreleasedWarned = "";
+    return;
+  }
+  const stuck = modifierNames(held);
+  if (stuck === unreleasedWarned) {
+    return;
+  }
+  unreleasedWarned = stuck;
+  const fg = getForegroundWindow();
+  const fgDesc = fg ? `"${getWindowText(fg)}" (pid ${getWindowPid(fg)})` : "none";
+  console.log(
+    `⚠ can't release modifier keys held down on this machine at ${when}: ${stuck}; foreground window: ${fgDesc}. ` +
+      "Carrying on: the app under test ignores keys held when it starts.",
+  );
 }
 
 // a null-terminated UTF-16 (wide) string buffer, for LPCWSTR args
@@ -1313,7 +1424,7 @@ export function captureCursorToPng(hcursor: bigint, outPath: string, zoom = 4): 
 
 // Simple display name of the Authenticode signer (e.g. "Krzysztof Kowalczyk",
 // "Microsoft Windows"), or null if the file is unsigned / unreadable.
-// Mirrors GetExecutableSignerTemp in src/base/Crypto_win.cpp.
+// Mirrors GetExecutableSignerTemp in src/base/Crypto.cpp.
 export function getExecutableSigner(filePath: string): string | null {
   const pathW = wideZ(filePath);
   const hStore = new BigUint64Array(1);
@@ -1387,7 +1498,7 @@ export function getExecutableSigner(filePath: string): string | null {
 }
 
 // True if WinVerifyTrust accepts the embedded Authenticode signature.
-// Mirrors IsPEFileSigned in src/base/Crypto_win.cpp.
+// Mirrors IsPEFileSigned in src/base/Crypto.cpp.
 export function isPeFileSigned(filePath: string): boolean {
   const pathW = wideZ(filePath);
 
@@ -1567,6 +1678,11 @@ export function getPopupMenuHandle(hwndPopup: number): bigint {
 
 export function getMenuItemCount(hmenu: bigint): number {
   return user32.symbols.GetMenuItemCount(hmenu);
+}
+
+// command id of the item at `pos`, 0 if it's a separator or a submenu
+export function getMenuItemId(hmenu: bigint, pos: number): number {
+  return user32.symbols.GetMenuItemID(hmenu, pos);
 }
 
 export function getSubMenu(hmenu: bigint, pos: number): bigint {

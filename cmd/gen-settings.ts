@@ -659,6 +659,29 @@ const antiGravity: Field[] = [
   field("BgColor", Color, "#ffffff", "background color of the Antigravity chat panel"),
 ];
 
+const readingBar: Field[] = [
+  field(
+    "Background",
+    Color,
+    rgba(255, 224, 130, 0x66),
+    "fill of the reading bar in highlight mode. #aarrggbb sets opacity " +
+      "(00 = transparent, FF = opaque); #rrggbb is fully opaque",
+  ).ver("3.7"),
+  field(
+    "Invert",
+    Bool,
+    false,
+    "if true, dim the page except the reading bar (screen mask); if false, draw a colored highlight band",
+  ).ver("3.7"),
+  field(
+    "Height",
+    Int,
+    0,
+    "height of the reading bar in pixels at 96 DPI; 0 uses a default of about three lines. " +
+      "dragging the top or bottom edge of the bar also changes this",
+  ).ver("3.7"),
+];
+
 const fullscreen: Field[] = [
   field(
     "ShowToolbar",
@@ -794,20 +817,20 @@ const annotations: Field[] = [
   field(
     "UnderlineColor",
     Color,
-    rgb(0x00, 0xff, 0x0),
+    rgb(0x8b, 0xf0, 0x5d),
     "color of newly created underline annotations. #aarrggbb sets default opacity " + "the same way as HighlightColor",
   ),
   field(
     "SquigglyColor",
     Color,
-    rgb(0xff, 0x00, 0xff),
+    rgb(0xf1, 0x99, 0xd2),
     "color of newly created squiggly underline annotations. #aarrggbb sets default opacity " +
       "the same way as HighlightColor",
   ).ver("3.5"),
   field(
     "StrikeOutColor",
     Color,
-    rgb(0xff, 0x00, 0x00),
+    rgb(0xe2, 0x47, 0x45),
     "color of newly created strike out annotations. #aarrggbb sets default opacity " + "the same way as HighlightColor",
   ).ver("3.5"),
   field("FreeTextColor", Color, "", "text color of newly created free text annotations").ver("3.5"),
@@ -829,7 +852,78 @@ const annotations: Field[] = [
     "how text is aligned in newly created free text annotations (Text Alignment in the compact " +
       "property row): left, center or right. Right-to-left scripts (Arabic, Hebrew, Persian) want right",
   ).ver("3.7"),
+  field(
+    "PresetColors",
+    Str,
+    "#ffff00 #8bf05d #99defa #f199d2 #e24745 #ff0000 #0000ff #000000",
+    "colors offered by the drop-down on the annotation toolbar's buttons, separated by space. " +
+      "Picking one sets the color of new annotations of that type. The color a button currently makes " +
+      "annotations in is added when it is missing",
+  ).ver("3.7"),
   field("TextIconColor", Color, "", "color of newly created text (sticky note) annotations"),
+  field(
+    "LineColor",
+    Color,
+    "",
+    "color of newly created line annotations. If not set, the PDF engine's default (red) is used",
+  ).ver("3.7"),
+  field(
+    "PolyLineColor",
+    Color,
+    "",
+    "color of newly created polyline annotations. If not set, the PDF engine's default (red) is used",
+  ).ver("3.7"),
+  field(
+    "SquareColor",
+    Color,
+    "",
+    "color of newly created square annotations. If not set, the PDF engine's default (red) is used",
+  ).ver("3.7"),
+  field(
+    "CircleColor",
+    Color,
+    "",
+    "color of newly created circle annotations. If not set, the PDF engine's default (red) is used",
+  ).ver("3.7"),
+  field(
+    "PolygonColor",
+    Color,
+    "",
+    "color of newly created polygon annotations. If not set, the PDF engine's default (red) is used",
+  ).ver("3.7"),
+  field(
+    "InkColor",
+    Color,
+    rgba(0xff, 0xff, 0x0, 0x66),
+    "color of newly created ink annotations, as #aarrggbb: the alpha is how translucent the stroke is " +
+      "(00 = transparent, FF = opaque), so the color is exactly what ends up on the page",
+  ).ver("3.7"),
+  field(
+    "InkColors",
+    Str,
+    "#66ffff00 #668bf05d #6699defa #66f199d2 #66e24745",
+    "colors offered by the ink button's drop-down, separated by space. Use #aarrggbb values: " +
+      "the alpha is the stroke's opacity. The color ink currently draws in is added when it is missing",
+  ).ver("3.7"),
+  field("InkBorderWidth", Int, 16, "width of the stroke of new ink annotations, in points").ver("3.7"),
+  field(
+    "StampColor",
+    Color,
+    "",
+    "color of newly created stamp annotations. If not set, the PDF engine's default (red) is used",
+  ).ver("3.7"),
+  field(
+    "CaretColor",
+    Color,
+    "",
+    "color of newly created caret annotations. If not set, the PDF engine's default (red) is used",
+  ).ver("3.7"),
+  field(
+    "FileAttachmentColor",
+    Color,
+    "",
+    "color of newly created file attachment annotations. If not set, the PDF engine's default (red) is used",
+  ).ver("3.7"),
   field(
     "TextIconType",
     Str,
@@ -867,7 +961,6 @@ const favorite: Field[] = [
   )
     .structName("PointF")
     .ver("3.7"),
-  field("MenuId", Int, 0, "id of this favorite in the menu (assigned by AppendFavMenuItems)").notSaved(),
   // search-start mark ("/") from Find; session-only. Field is in metadata so
   // SerializeStruct can skip array elements with IsTemporary=true; the field
   // itself is never written (SettingsUtil) (issue #5862)
@@ -984,6 +1077,12 @@ const fileState: Field[] = [
     "1",
     "number of the last read page, or `bm:<bookmark>` for documents with chapters (folds in ReparseIdx; see PagePosition.cpp)",
   ),
+  field(
+    "PageCount",
+    Int,
+    0,
+    "number of pages in the document when it was last open; 0 if unknown. Used to show reading progress on the home page",
+  ).ver("3.7"),
   field("Zoom", Str, "fit page", "zoom (in %) or one of those values: fit page, fit width, fit height, fit content"),
   field("Rotation", Int, 0, "how far pages have been rotated as a multiple of 90 degrees"),
   field(
@@ -1002,6 +1101,9 @@ const fileState: Field[] = [
     false,
     "if true, percentage zoom scales every page to the width page 1 has at that zoom level",
   ).ver("3.7"),
+  field("TrimEmptyMargins", Bool, false, "if true, empty margins around page content are trimmed from display").ver(
+    "3.7",
+  ),
   field("BgCol", Color, "", "if given, overrides the background color for this document").ver("3.7"),
   field("TabCol", Color, "", "if given, overrides the tab color for this document").ver("3.7"),
   compactArray(
@@ -1041,6 +1143,7 @@ const fileStateLayout = [
   "TabCol",
   "OpenCount",
   "PageNo",
+  "PageCount",
   "Rotation",
   "WindowState",
   "SidebarDx",
@@ -1054,6 +1157,7 @@ const fileStateLayout = [
   "ShowToc",
   "DisplayR2L",
   "UniformPageWidth",
+  "TrimEmptyMargins",
 ];
 fileState.sort((a, b) => fileStateLayout.indexOf(a.Name) - fileStateLayout.indexOf(b.Name));
 
@@ -1181,6 +1285,18 @@ const globalPrefs: Field[] = [
     .ver("3.7")
     .doc("valid values: (empty), os, sumatrapdf"),
   field(
+    "PrinterUI",
+    Str,
+    "",
+    "which dialog Print (Ctrl+P) opens: empty or auto (the Windows 11 dialog with print " +
+      "preview where it's available, the classic one everywhere else), modern (the Windows 11 " +
+      "dialog), or classic (the classic dialog, whose Preferences button opens the printer " +
+      "driver's own property sheet). modern falls back to the classic dialog when Windows " +
+      "can't show the modern one",
+  )
+    .ver("3.7")
+    .doc("valid values: (empty), auto, modern, classic"),
+  field(
     "ReloadModifiedDocuments",
     Bool,
     true,
@@ -1212,6 +1328,12 @@ const globalPrefs: Field[] = [
   field("ShowPageNumberInTabs", Bool, false, "if true, show the current page as n/N after the file name on tabs").ver(
     "3.7",
   ),
+  field(
+    "ShowHomePageReadingProgress",
+    Bool,
+    true,
+    "if true, show reading progress (n/N, or chapter:page for ebooks) on home page thumbnails and list rows",
+  ).ver("3.7"),
   field("ShowTips", Bool, true, "if true, show tips on the home page").ver("3.7"),
   field(
     "CustomColors",
@@ -1264,6 +1386,16 @@ const globalPrefs: Field[] = [
     "if true, put the bookmarks / favorites sidebar on the right of the window " +
       "(left is the default; right-to-left UI languages already put it on the right)",
   ).ver("3.7"),
+  field(
+    "SidebarWindowSize",
+    Str,
+    "",
+    "what showing / hiding the bookmarks / favorites sidebar does to the window: empty or keep " +
+      "(the window keeps its size and position, the document area shrinks), or grow (the window " +
+      "grows by the sidebar width where the document can't spare it, and shrinks back on hide)",
+  )
+    .ver("3.7")
+    .doc("valid values: (empty), keep, grow"),
   field("ShowLinks", Bool, false, "if true, draw a blue border around links in the document").ver("3.6"),
   field(
     "HighlightFormFields",
@@ -1312,6 +1444,15 @@ const globalPrefs: Field[] = [
       "Alt + wheel still scrolls, Shift + wheel scrolls horizontally and Ctrl + wheel zooms",
   ).ver("3.7"),
   field(
+    "ScrollEdgeTurnsPage",
+    Bool,
+    true,
+    "if true, in single page / facing / book view, scrolling past the top or bottom of a " +
+      "zoomed-in page goes to the previous / next page; if false, scrolling stops at the edge " +
+      "and the page is changed only by the keyboard, toolbar or scrollbar. A page that fits the " +
+      "window has nothing to scroll, so a wheel notch turns it either way",
+  ).ver("3.7"),
+  field(
     "ShowDocumentFocusIndicator",
     Bool,
     false,
@@ -1322,6 +1463,12 @@ const globalPrefs: Field[] = [
     Bool,
     true,
     'if true, show a tip when hovering an annotation (e.g. "Highlight annotation. Ctrl+click to edit.")',
+  ).ver("3.7"),
+  field(
+    "ShowFileNavigateHint",
+    Bool,
+    true,
+    "if true, at the end of a document show a hint to open the next file in the folder. Closing the hint sets it to false",
   ).ver("3.7"),
   field(
     "ShowAnnotationAuthorInTooltip",
@@ -1360,6 +1507,12 @@ const globalPrefs: Field[] = [
     Int,
     16,
     "distance, in screen pixels at 96 DPI, scrolled by an arrow-key press or one mouse-wheel line; values below 1 use 16",
+  ).ver("3.7"),
+  field(
+    "SaveMemory",
+    Int,
+    50,
+    "how hard to free unused page and image caches to save RAM (0 to 100). 0 keeps them until an allocation fails; 100 drops them as soon as a page is off-screen",
   ).ver("3.7"),
   field(
     "PaddingAfterLastPage",
@@ -1404,6 +1557,17 @@ const globalPrefs: Field[] = [
     Float,
     1,
     "playback speed multiplier for Read Aloud text-to-speech (0.5 .. 3.0), 1 is normal speed; can also be changed from the Read Aloud playback bar",
+  ).ver("3.7"),
+  field(
+    "ReadingAutoScrollSpeed",
+    Float,
+    40,
+    "pixels per second for Automatically Scroll (View menu / Ctrl+Shift+H). 8 to 320; also changed from the auto-scroll bar and the arrow keys while scrolling",
+  ).ver("3.7"),
+  struct(
+    "ReadingBar",
+    readingBar,
+    "reading bar (View menu): a horizontal band on the page to keep your place. Highlight fills the band; Invert dims everything else",
   ).ver("3.7"),
   field(
     "FastScrollOverScrollbar",
@@ -1519,7 +1683,7 @@ const globalPrefs: Field[] = [
   field(
     "EngineeringDrawingEnhance",
     Str,
-    "auto",
+    "off",
     "CAD/engineering PDF line rendering: off, auto (enhance if a CAD drawing is detected) or on",
   ).ver("3.7"),
   field(
@@ -1790,6 +1954,7 @@ const globalPrefsLayout = [
   "VersionToSkip",
   "ChmUI",
   "MainWindowBackground",
+  "PrinterUI",
   "PrinterDefaults",
   "ForwardSearch",
   "Fullscreen",
@@ -1804,8 +1969,11 @@ const globalPrefsLayout = [
   "Annotations",
   "SidebarDx",
   "ScrollLineAmount",
+  "SaveMemory",
   "CitationHoverDelay",
   "ReadAloudSpeed",
+  "ReadingAutoScrollSpeed",
+  "ReadingBar",
   "TabWidth",
   "TocDy",
   "ToolbarSize",
@@ -1840,12 +2008,15 @@ const globalPrefsLayout = [
   "ShowMenubar",
   "ShowMenubarWithTabs",
   "ShowTips",
+  "ShowPageNumberInTabs",
+  "ShowHomePageReadingProgress",
   "ShowToolbar",
   "SearchUIFloating",
   "ShowFavorites",
   "SortFavoritesByName",
   "ShowToc",
   "SidebarOnRight",
+  "SidebarWindowSize",
   "ShowLinks",
   "HighlightFormFields",
   "ClickEdgeToTurnPage",
@@ -1853,8 +2024,10 @@ const globalPrefsLayout = [
   "ExplorerQuickLook",
   "RememberViewOffsetOnPageTurn",
   "MouseWheelTurnsPage",
+  "ScrollEdgeTurnsPage",
   "ShowDocumentFocusIndicator",
   "ShowAnnotationNotification",
+  "ShowFileNavigateHint",
   "ShowAnnotationAuthorInTooltip",
   "ShowTocPageNumbers",
   "ShowStartPage",

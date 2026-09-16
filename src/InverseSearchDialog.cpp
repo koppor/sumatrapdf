@@ -20,7 +20,7 @@
 #include "SumatraPDF.h"
 #include "AppTools.h"
 #include "Translations.h"
-#include "DarkMode_win.h"
+#include "DarkMode.h"
 #include "SumatraDialogs.h"
 
 // Label, Help and OK/Cancel are VirtCtrl; the command line is an editable DropDown.
@@ -79,7 +79,7 @@ void InverseSearchWnd::OnOk(VirtMouseEvent*) {
     TempStr tmp = dropDown ? dropDown->GetTextTemp() : Str{};
     str::ReplaceWithCopy(&gSettings->inverseSearchCmdLine, tmp);
     gSettings->enableTeXEnhancements = true;
-    SaveSettings();
+    ScheduleSaveSettings();
     ScheduleDelete();
 }
 

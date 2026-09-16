@@ -7,7 +7,6 @@ enum class FileType : u8;
 
 #include "OverlayScrollbar.h"
 
-constexpr const WCHAR* kCanvasClassName = L"SUMATRA_PDF_CANVAS";
 constexpr const WCHAR* kFrameClassName = L"SUMATRA_PDF_FRAME";
 
 constexpr int kFrameResizeHitTest = 5;
@@ -34,8 +33,6 @@ constexpr int kRepaintMessageDelayInMs = 1000;
 
 constexpr int kAutoReloadTimerID = 5;
 
-constexpr int kReadAloudHighlightTimerID = 8;
-constexpr int kReadAloudHighlightDelayInMs = 80;
 // debounce: coalesce bursts of file-change notifications (a single save can
 // fire several) into one reload. SetTimer() with the same id resets it, so the
 // reload only happens once the file has been quiet for this long (#5690).
@@ -117,7 +114,6 @@ extern RenderCache* gRenderCache;
 extern bool gSupressNextAltMenuTrigger;
 extern HBITMAP gBitmapReloadingCue;
 extern HCURSOR gCursorDrag;
-extern bool gCrashOnOpen;
 extern HWND gLastActiveFrameHwnd;
 
 struct DocController;
@@ -128,13 +124,12 @@ DocControllerCallback* CreateControllerCallbackHandler(MainWindow* win);
 
 #define gPluginMode ((bool)gPluginURL)
 
-bool NeedsWindowEmbeddingHacks();
 bool SettingsUseTabs();
-bool SettingsRestoreSession();
 bool SettingsRememberOpenedFiles();
 
+void CrashHandlerSetSettings(Str settings);
+
 void InitializePolicies(bool restrict);
-void RestrictPolicies(Perm revokePermission);
 bool HasPermission(Perm permission);
 bool CanAccessDisk();
 bool AnnotationsAreDisabled();
@@ -145,43 +140,11 @@ bool MaybeLaunchDocumentation(Str url);
 bool OpenFileExternally(Str path);
 void CloseCurrentTab(MainWindow* win, bool quitIfLast);
 void CloseTab(WindowTab* tab, bool quitIfLast);
-bool CanContinueReadAloud(WindowTab* tab);
 bool MaybeSaveAnnotations(WindowTab* tab);
 void DeleteFileFromDiskAndHistory(Str path);
 WindowTab* FindTabByFilePath(Str path);
 // the tab that currently owns this controller, null if it is no longer shown
 WindowTab* FindTabByController(DocController*);
-WindowTab* GetReadAloudSourceTab();
-void ReadAloudForgetTab(WindowTab*);
-void ReadAloudAfterTtsEvents();
-
-constexpr UINT CmdTtsVoiceDefault = 0x7100;
-constexpr UINT CmdTtsVoiceFirst = 0x7101;
-constexpr UINT CmdTtsVoiceLast = 0x71ff;
-constexpr UINT CmdTtsMenuReadCurrentPage = 0x7200;
-constexpr UINT CmdTtsMenuContinueReading = 0x7201;
-constexpr UINT CmdTtsMenuReadSelection = 0x7202;
-constexpr UINT CmdTtsMenuPauseReading = 0x7203;
-constexpr UINT CmdTtsMenuReadFromCursor = 0x7204;
-constexpr UINT CmdTtsMenuStopReading = 0x7205;
-constexpr UINT CmdTtsSpeedFirst = 0x7300;
-constexpr UINT CmdTtsSpeedLast = 0x730f;
-
-TempStr ReadAloudSpeedLabelTemp(float speed);
-int ReadAloudSpeedCount();
-float ReadAloudSpeedAt(int idx);
-int ReadAloudClosestSpeedIdx();
-void ReadAloudSetSpeedIdx(int idx);
-
-void RebuildReadAloudMenu(MainWindow* win, HMENU menu, bool includeCursorItem = false, bool canReadFromCursor = false);
-bool HandleReadAloudMenuCommand(MainWindow* win, int cmdId);
-void SetReadAloudAppSubmenu(HMENU menu);
-HMENU GetReadAloudAppSubmenu();
-bool IsReadAloudAppSubmenu(HMENU menu);
-void SetReadAloudContextSubmenu(HMENU menu);
-void ShowTtsVoiceMenu(MainWindow* win, Rect buttonScreen);
-bool IsReadAloudContextSubmenu(HMENU menu);
-HMENU GetReadAloudContextSubmenu();
 bool CanCloseWindow(MainWindow* win);
 void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose);
 void PostAppExit();
@@ -233,7 +196,6 @@ void UpdateTabFileDisplayStateForTab(WindowTab* tab);
 void ReloadDocument(MainWindow* win, bool autoRefresh, bool canAskForPassword = true);
 bool AutoReloadFileStillChanging(WindowTab* tab);
 void DeleteControllerAsync(DocController* ctrl);
-void WaitForPendingControllerDeletes();
 void ToggleFullScreen(MainWindow* win, bool presentation = false);
 
 // flags for ScheduleUiUpdate
@@ -253,6 +215,7 @@ constexpr u32 kUiSidebarDirty = 0x20; // repaint toc/favorites boxes and their s
 void ScheduleUiUpdate(MainWindow* win, u32 flags = kUiRelayout, int sidebarDx = -1);
 void DuplicateTabInNewWindow(WindowTab* tab);
 void CopyFilePath(WindowTab*);
+void CopyLocationToClipboard(WindowTab*);
 
 MainWindow* FindMainWindowByFile(Str file, bool focusTab, MainWindow* limitWin = nullptr);
 MainWindow* FindMainWindowBySyncFile(Str path, bool focusTab);
@@ -338,7 +301,6 @@ void StartLoadDocument(LoadArgs* args);
 void StartLoadDocuments(StrVec& paths, MainWindow* win, bool skipHistory = false);
 MainWindow* CreateAndShowMainWindow(SessionData* data = nullptr, bool showWin = true);
 void ShowMainWindow(MainWindow* win, int windowState);
-void MaybeShowDefaultAppNotification(MainWindow* win);
 DocController* CreateControllerForEngineOrFile(EngineBase* engine, Str path, PasswordUI* pwdUI, MainWindow* win);
 bool OpenDocumentFromMemory(MainWindow* win, Str data, Str nameHint);
 
@@ -369,16 +331,12 @@ void SwitchToDisplayMode(MainWindow* win, DisplayMode displayMode, bool keepCont
 void OnDocumentVerticalScrollIntent(MainWindow* win, bool down);
 void DismissNextFileScrollHint(MainWindow* win);
 void MainWindowRerender(MainWindow* win, bool includeNonClientArea = false);
-LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
-void ShutdownCleanup();
 
 TempStr PageInfoOverlayResultTemp(Str pathTwoPages, Str pathOnePage, int* exitCodeOut = nullptr);
 TempStr WindowStateDuringLoadResultTemp(int* exitCodeOut = nullptr);
 bool DocIsSupportedFileType(FileType);
-TempStr GetLogFilePathTemp();
 void ShowErrorLoadingNotification(MainWindow* win, Str path, bool noSavePrefs, bool showWin = true);
 void ShowFileInFolder(MainWindow* win, Str path);
 void SmartZoom(MainWindow* win, float factor, Point* pt, bool smartZoom);
 TempStr GetSumatraDataDirTemp();
-TempStr GetCrashInfoDirTemp();
 TempStr GetSumatraBuildSpecificDirTemp();

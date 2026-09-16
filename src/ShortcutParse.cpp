@@ -114,6 +114,11 @@ static SeqStrNum gVirtKeysNum =
     "`\0" "\x80\x03" \
     "[\0" "\xb6\x03" \
     "]\0" "\xba\x03" \
+    "=\0" "\xf6\x02" \
+    ",\0" "\xf8\x02" \
+    ".\0" "\xfc\x02" \
+    "\\\0" "\xb8\x03" \
+    "'\0" "\xbc\x03" \
     "\0";
 // clang-format on
 // @gen-end virt-keys-num
@@ -194,6 +199,26 @@ static TempStr getVirtTemp(BYTE key, bool isEng) {
     return SeqStrNumStrByNumber(gVirtKeysNum, key);
 }
 
+// US layout: Shift + these keys is the glyph people type (Shift+/ is "?").
+static const struct {
+    BYTE vk;
+    char unshifted;
+    char shifted;
+} kPunctKeys[] = {
+    {VK_OEM_2, '/', '?'}, {VK_OEM_COMMA, ',', '<'}, {VK_OEM_PERIOD, '.', '>'},
+    {VK_OEM_4, '[', '{'}, {VK_OEM_6, ']', '}'},     {VK_OEM_5, '\\', '|'},
+    {VK_OEM_1, ';', ':'}, {VK_OEM_7, '\'', '"'},    {VK_OEM_3, '`', '~'},
+};
+
+static BYTE PunctVk(char unshifted) {
+    for (auto& p : kPunctKeys) {
+        if (unshifted == p.unshifted) {
+            return p.vk;
+        }
+    }
+    return 0;
+}
+
 // Parses a string like Ctrl+Shift+A into ACCEL structure
 // We accept variants: "Ctrl+A", "Ctrl-A", "Ctrl + A"
 static bool ParseShortcut(Str shortcut, ACCEL& accel) {
@@ -229,7 +254,7 @@ again:
     accel.fVirt = fVirt;
 
     // when user puts e.g. "~" it's actually "`" but with SHIFT
-    static Str shiftKeys = Str("~`,<.>/?;:'\"-_=+[{]}\\|");
+    static Str shiftKeys = Str("`~,<.>/?;:'\"-_=+[{]}\\|");
     char buf[2] = {};
     Str toFind = cursor;
     bool usedShiftKeyMap = false;
@@ -253,6 +278,10 @@ again:
         return true;
     }
     if (usedShiftKeyMap) {
+        BYTE punctVk = PunctVk(buf[0]);
+        if (punctVk) {
+            accel.key = punctVk;
+        }
         return true;
     }
 
@@ -366,20 +395,11 @@ bool ParseShortcutString(Str shortcut, ACCEL& accel) {
     return ParseShortcut(shortcut, accel);
 }
 
-// US layout: Shift + these keys is the glyph people type (Shift+/ is "?").
+// only a VK_OEM code: VK_RIGHT is 0x27, same as '\''
 static char ShiftedPunctGlyph(BYTE key) {
-    static const struct {
-        BYTE vk;
-        char unshifted;
-        char shifted;
-    } kMap[] = {
-        {VK_OEM_2, '/', '?'}, {VK_OEM_COMMA, ',', '<'}, {VK_OEM_PERIOD, '.', '>'},
-        {VK_OEM_4, '[', '{'}, {VK_OEM_6, ']', '}'},     {VK_OEM_5, '\\', '|'},
-        {VK_OEM_1, ';', ':'}, {VK_OEM_7, '\'', '"'},    {VK_OEM_3, '`', '~'},
-    };
-    for (int i = 0; i < dimofi(kMap); i++) {
-        if (key == kMap[i].vk || key == (BYTE)kMap[i].unshifted) {
-            return kMap[i].shifted;
+    for (auto& p : kPunctKeys) {
+        if (key == p.vk) {
+            return p.shifted;
         }
     }
     return 0;
@@ -466,39 +486,3 @@ Exit:
     TempStr res = str::JoinTemp(menuStr, ToStr(str));
     return res;
 }
-
-#if IS_DEBUG
-#include "base/UtAssert.h"
-
-static bool AccelShowsAs(BYTE virt, WORD key, Str expected) {
-    ACCEL a{};
-    a.fVirt = virt;
-    a.key = key;
-    TempStr s = AppendAccelKeyToMenuStringTemp(StrL(""), a);
-    if (len(s) < 1 || s.s[0] != '\t') {
-        return false;
-    }
-    return str::Eq(Str(s.s + 1, len(s) - 1), expected);
-}
-
-bool ShortcutParse_UnitTestShiftedPunct() {
-    auto prevLang = gShortcutLangCode;
-    gShortcutLangCode = nullptr;
-
-    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_2, StrL("?")));
-    utassert(AccelShowsAs(FVIRTKEY, VK_OEM_2, StrL("/")));
-    utassert(AccelShowsAs(FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_2, StrL("Ctrl + ?")));
-    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_COMMA, StrL("<")));
-    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_PERIOD, StrL(">")));
-    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_4, StrL("{")));
-    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_6, StrL("}")));
-    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_5, StrL("|")));
-    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_1, StrL(":")));
-    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_7, StrL("\"")));
-    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, VK_OEM_3, StrL("~")));
-    utassert(AccelShowsAs(FSHIFT | FVIRTKEY, 'A', StrL("Shift + A")));
-
-    gShortcutLangCode = prevLang;
-    return true;
-}
-#endif

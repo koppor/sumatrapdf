@@ -6,23 +6,20 @@
  * for x64 targets using x86_64-w64-mingw32-g++.
  *
  * NOTE: .asm (NASM) files are skipped; C fallbacks are used instead.
- * NOTE: Font embedding (.cff/.ttf/.otf) uses objcopy.
  * NOTE: WebView2 is not used for mingw builds. WebView.cpp provides stub
  * implementations; CHM and the in-app manual fall back to IE / online docs.
  */
 
 import { mkdirSync, existsSync, rmSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { join, extname, dirname, basename } from "node:path";
+import { join, extname, dirname } from "node:path";
 import {
   type BuildTools,
   type FileGroup,
   type LibDef,
   DEFAULT_JOBS,
-  FONT_FILES,
   buildLibrary,
   compileAll,
-  embedBinaryFile,
   objPath,
   resolveSources,
   spawnCmd,
@@ -56,7 +53,6 @@ export interface MingwTools {
   cxx: string;
   ar: string;
   windres: string;
-  objcopy: string;
 }
 
 const DEFAULT_MINGW_TOOLS: MingwTools = {
@@ -64,7 +60,6 @@ const DEFAULT_MINGW_TOOLS: MingwTools = {
   cxx: "x86_64-w64-mingw32-g++",
   ar: "x86_64-w64-mingw32-ar",
   windres: "x86_64-w64-mingw32-windres",
-  objcopy: "x86_64-w64-mingw32-objcopy",
 };
 
 let mingwTools: MingwTools = { ...DEFAULT_MINGW_TOOLS };
@@ -78,7 +73,6 @@ function mingwBuildTools(): BuildTools {
     cc: mingwTools.cc,
     cxx: mingwTools.cxx,
     ar: mingwTools.ar,
-    embed: mingwTools.objcopy,
   };
 }
 
@@ -96,12 +90,12 @@ const utils: LibDef = {
     "src",
     "ext/lzma/C",
     "ext/heicdec",
-    "ext/libwebp/src",
+    "ext/a-libwebp",
     "ext/dav1d/include",
     "ext/jxldec",
     "ext/mupdf/include",
     "ext/a-zlib",
-    "ext/libarchive",
+    "ext/a-libarchive",
   ],
   files: [
     {
@@ -111,41 +105,34 @@ const utils: LibDef = {
         "AppendStore.cpp",
         "ApiHook.*",
         "Archive.*",
-        "Arena_win.cpp",
+        "Arena.cpp",
         "Base.h",
         "Base.cpp",
-        "Base_win.cpp",
         "ByteReaderWriter.*",
         "CmdLineArgs.h",
         "CmdLineArgs.cpp",
-        "CmdLineArgs_win.cpp",
         "Crypto.h",
-        "Crypto_win.cpp",
+        "Crypto.cpp",
         "CssParser.*",
         "DbgHelpDyn.h",
-        "DbgHelpDyn_win.cpp",
+        "DbgHelpDyn.cpp",
         "Dict.*",
         "DirScan.h",
         "DirScan.cpp",
-        "DirScan_win.cpp",
         "Exif.*",
         "GuessFileType.*",
-        "GuessFileTypeFromFile.cpp",
         "File.h",
         "File.cpp",
-        "File_win.cpp",
         "FileWatcher.*",
         "GdiPlusUtil.cpp",
         "HtmlTags.*",
         "HtmlPrettyPrint.*",
         "Http.h",
         "Http.cpp",
-        "Http_win.cpp",
         "JsonParser.*",
         "Log.*",
         "LzmaSimpleArchive.*",
         "Pixmap.*",
-        "Pixmap_win.cpp",
         "RegistryPaths.*",
         "SettingsUtil.*",
         "SquareTreeParser.*",
@@ -153,18 +140,17 @@ const utils: LibDef = {
         "StrQueue.*",
         "TempAllocator.*",
         "TgaReader.*",
-        "TgaReader_win.cpp",
         "TxtParser.*",
         "UITask.*",
         "WinDynCalls.h",
-        "WinDynCalls_win.cpp",
+        "WinDynCalls.cpp",
         "Win.*",
         "Zip.*",
       ],
     },
     {
       dir: "src/gui",
-      patterns: ["Dpi_win.cpp"],
+      patterns: ["Dpi.cpp"],
     },
     // LzSA decoder (LzmaDecode + x86 BCJ). Bra.c not needed.
     {
@@ -181,6 +167,10 @@ const utilsDebugExtra: FileGroup[] = [];
 // Combines: darkmodelib_files, synctex_files, mui_files, gui_files,
 // uia_files, engines_files, sumatrapdf_files
 const sumatraFiles: FileGroup[] = [
+  {
+    dir: "src/base",
+    patterns: ["CrashHandler.*"],
+  },
   // darkmodelib
   {
     dir: "ext/darkmodelib/src",
@@ -203,26 +193,23 @@ const sumatraFiles: FileGroup[] = [
   },
   // mui
   { dir: "src/mui", patterns: ["Mui.cpp", "TextRender.cpp"] },
-  // gui (portable + Windows). Dpi_win.cpp lives in src/gui but is compiled
+  // gui (portable + Windows). Dpi.cpp lives in src/gui but is compiled
   // into the base/utils lib because Win.cpp calls it.
   {
     dir: "src/gui",
     patterns: [
-      "Gfx_win.cpp",
-      "GfxGdiplus_win.cpp",
-      "GfxDirect2D_win.cpp",
+      "Gfx.cpp",
+      "GfxGdiplus.cpp",
+      "GfxDirect2D.cpp",
       "GuiColors.cpp",
       "PasswordDialog.cpp",
       "Layout.cpp",
-      "Layout_win.cpp",
       "PlatformFont.cpp",
-      "PlatformFont_win.cpp",
       "PlatformText.cpp",
-      "PlatformText_win.cpp",
       "UIModels.cpp",
       "VirtCtrl.cpp",
-      "VirtHost_win.cpp",
-      "UiPlatform_win.cpp",
+      "VirtHost.cpp",
+      "UiPlatform.cpp",
     ],
   },
   { dir: "src/gui/win", patterns: ["*.cpp"] },
@@ -241,6 +228,7 @@ const sumatraFiles: FileGroup[] = [
       "ChmFile.*",
       "DocProperties.*",
       "EngineBase.*",
+      "CachedObjects.*",
       "EngineCreate.*",
       "EngineDjvuDec.*",
       "EngineEbook.*",
@@ -254,8 +242,7 @@ const sumatraFiles: FileGroup[] = [
       "HtmlFormatter.*",
       "LitDoc.*",
       "MobiDoc.*",
-      "PdfCadDetect.*",
-      "PdfCadEnhanceDevice.*",
+      "PdfCad.*",
       "PdfDarkModeAnalysis.cpp",
       "PdfDarkModeCache.cpp",
       "PdfDarkModeColor.cpp",
@@ -280,7 +267,7 @@ const sumatraFiles: FileGroup[] = [
       "ShortcutParse.*",
       "Actions.*",
       "AvifReader.*",
-      "DarkMode_win.*",
+      "DarkMode.*",
       "AppSettings.*",
       "PagePosition.*",
       "AppTools.*",
@@ -296,14 +283,11 @@ const sumatraFiles: FileGroup[] = [
       "ChmModel.*",
       "AdvancedSettingsDialog.*",
       "AIChatCommon.*",
-      "AppUnitTests.*",
       "AIChatPanel.*",
       "AIAntiGravity.*",
       "AICodexBuild.*",
       "AIGrokBuild.*",
       "KeyboardHelp.*",
-      "KeyboardHelp_win.cpp",
-      "CaptionGlyphs.*",
       "AddFavoriteDialog.*",
       "ChangeColorDialog.*",
       "ChangeLanguageDialog.*",
@@ -333,7 +317,6 @@ const sumatraFiles: FileGroup[] = [
       "CommandPalette.*",
       "FilterUtil.*",
       "WebpReader.*",
-      "CrashHandler.*",
       "DisplayModel.*",
       "DocumentLayout.*",
       "DisplayMode.*",
@@ -352,10 +335,8 @@ const sumatraFiles: FileGroup[] = [
       "Flags.*",
       "ImageReader.h",
       "ImageReader.cpp",
-      "ImageReader_win.cpp",
       "GlobalHotkeys.*",
       "GlobalPrefs.*",
-      "GumboHelpers.*",
       "HangDetector.*",
       "HomePage.*",
       "Installer.*",
@@ -372,8 +353,9 @@ const sumatraFiles: FileGroup[] = [
       "PrintWin11.*",
       "ProgressUpdateUI.*",
       "PreviewPipe.*",
-      "ReadAloudHighlight.*",
-      "ReadAloudPlaybackBar.*",
+      "ReadAloud.*",
+      "ReadingAutoScroll.*",
+      "ReadingBar.*",
       "RefHover.*",
       "RefHoverCanvas.*",
       "RefHoverDetect.*",
@@ -403,7 +385,6 @@ const sumatraFiles: FileGroup[] = [
       "SumatraControl.*",
       "SumatraLog.cpp",
       "SumatraPDF.cpp",
-      "SumatraStartup.cpp",
       "SumatraConfig.cpp",
       "SumatraDialogs.*",
       "DocumentProperties.*",
@@ -419,10 +400,8 @@ const sumatraFiles: FileGroup[] = [
       "TextSelection.*",
       "TextViewWnd.*",
       "Theme.*",
-      "Theme_win.*",
       "TipText.*",
       "Toolbar.*",
-      "Toolbar_win.*",
       "Translations.*",
       "TranslationLangs.cpp",
       "UpdateCheck.*",
@@ -431,6 +410,7 @@ const sumatraFiles: FileGroup[] = [
       "Uninstaller.cpp",
     ],
   },
+  { dir: "src/tests", patterns: ["Sumatra_ut.cpp"] },
 ];
 
 // Debug-only extra files for SumatraPDF
@@ -443,7 +423,7 @@ const sumatraDebugExtra: FileGroup[] = [
     patterns: ["TestApp.cpp", "TestTab.cpp", "TestLayout.cpp"],
   },
   // note: src/base/tests/*.cpp omitted for mingw (not essential, may pull extra headers)
-  { dir: "src/base", patterns: ["UtAssert.*"] },
+  { dir: "src/base/tests", patterns: ["UtAssert.*"] },
 ];
 
 // ── System libraries for final link ─────────────────────────────────────────
@@ -456,7 +436,7 @@ const SYSTEM_LIBS = [
   "version",
   "windowscodecs",
   "wininet",
-  "winhttp", // HttpPostUrl (Http_win.cpp); not pulled via #pragma on mingw
+  "winhttp", // HttpPostUrl (Http.cpp); not pulled via #pragma on mingw
   "uiautomationcore",
   "uxtheme",
   "wintrust",
@@ -525,10 +505,10 @@ async function buildSumatraExe(outDir: string, isRelease: boolean, archives: str
     "ext/a-zopfli",
     "ext/darkmodelib/include",
     "ext/heicdec",
-    "ext/libwebp/src",
+    "ext/a-libwebp",
     "ext/jxldec",
     "ext/a-zlib",
-    "ext/libarchive",
+    "ext/a-libarchive",
     "ext/cmark-gfm/src",
     "ext/cmark-gfm/extensions",
     "ext/mupdf/scripts/cmark-gfm",
@@ -593,46 +573,6 @@ namespace _com_util {
   }
   exeObjs.push(comUtilObj);
 
-  // ── TextToSpeech stub (WinRT headers unavailable for mingw cross-compile) ──
-  const ttsStubSrc = join(outDir, "obj", "_tts_stub.cpp");
-  const ttsStubObj = join(outDir, "obj", "_tts_stub.o");
-  await writeFile(
-    ttsStubSrc,
-    `
-#include "base/Base.h"
-#include "TextToSpeech.h"
-
-bool TtsSpeakUtf8(Str) { return false; }
-void TtsStop() {}
-void TtsRelease() {}
-bool TtsIsSpeaking() { return false; }
-int TtsGetSpokenPosUtf8() { return -1; }
-void TtsSetNotifyWindow(HWND, UINT, WPARAM, LPARAM) {}
-void TtsProcessEvents() {}
-Vec<TtsVoiceInfo> TtsGetVoices() { return Vec<TtsVoiceInfo>(); }
-void TtsFreeVoices(Vec<TtsVoiceInfo>&) {}
-bool TtsSetVoiceById(Str) { return false; }
-Str TtsGetVoiceId() { return Str(); }
-void TtsSetSpeed(float) {}
-float TtsGetSpeed() { return 1.0f; }
-`,
-  );
-  const ttsRes = await spawnCmd([
-    mingwTools.cxx,
-    "-Os",
-    ...MINGW_CXX_FLAGS,
-    "-Isrc",
-    "-c",
-    ttsStubSrc,
-    "-o",
-    ttsStubObj,
-  ]);
-  if (!ttsRes.ok) {
-    console.error(`Failed to compile TextToSpeech stub: ${ttsRes.stderr}`);
-    throw new Error("TextToSpeech stub compile failed");
-  }
-  exeObjs.push(ttsStubObj);
-
   // ── debug test stubs (TestPlugin/TestPreview don't build cleanly with mingw GDI+) ──
   const testStubSrc = join(outDir, "obj", "_test_stub.cpp");
   const testStubObj = join(outDir, "obj", "_test_stub.o");
@@ -660,21 +600,6 @@ void TestPreview(WStr) {}
   }
   exeObjs.push(testStubObj);
 
-  // ── Embed font files ──────────────────────────────────────────────────
-  console.log("Embedding font files...");
-  const fontObjs: string[] = [];
-  for (const font of FONT_FILES) {
-    if (!existsSync(font.path)) {
-      console.error(`  WARNING: font not found: ${font.path}`);
-      continue;
-    }
-    const base = basename(font.path, `.${font.ext}`).replace(/-/g, "_");
-    const sym = `_binary_${base}_${font.ext}`;
-    const obj = join(outDir, "obj", "fonts", `${base}.o`);
-    await embedBinaryFile(mingwBuildTools(), "pe", font.path, obj, sym);
-    fontObjs.push(obj);
-  }
-
   // ── Compile .rc resource file ─────────────────────────────────────────
   console.log("Compiling resources...");
   const rcObj = join(outDir, "obj", "sumatrapdf", "SumatraPDF.res.o");
@@ -686,8 +611,24 @@ void TestPreview(WStr) {}
   const rcTmpPath = join(outDir, "obj", "sumatrapdf", "SumatraPDF_mingw.rc");
   await writeFile(rcTmpPath, rcFixed);
   const rcTmpAbsolute = join(process.cwd(), rcTmpPath);
+  // IDR_EMBEDDED_PAK (translations, marked/mermaid, manual) is staged and packed
+  // by the Windows build's prebuild (cmd/pack-embedded-prebuild.cmd, needs
+  // MakeLZSA.exe) into out/<cfg>/embedded-static.lzsa; reuse one of those.
+  const embeddedFlags: string[] = [];
+  for (const cfg of ["rel64", "dbg64", "dbgfull64"]) {
+    const archive = join(process.cwd(), "out", cfg, "embedded-static.lzsa");
+    if (existsSync(archive)) {
+      embeddedFlags.push(`-DEMBEDDED_PAK=${archive.replace(/\\/g, "/")}`);
+      break;
+    }
+  }
+  if (embeddedFlags.length === 0) {
+    console.error(
+      "  WARNING: no out/<cfg>/embedded-static.lzsa (build SumatraPDF-static on Windows first); resources will fail",
+    );
+  }
   const rcRes = await spawnCmd(
-    [mingwTools.windres, "-I", ".", "-D_WIN64", ...defineFlags, rcTmpAbsolute, "-o", rcObjAbsolute],
+    [mingwTools.windres, "-I", ".", "-D_WIN64", ...defineFlags, ...embeddedFlags, rcTmpAbsolute, "-o", rcObjAbsolute],
     { cwd: "src" },
   );
   const rcObjs: string[] = [];
@@ -737,7 +678,7 @@ void TestPreview(WStr) {}
   const exePath = join(outDir, "SumatraPDF.exe");
 
   // use response file to avoid excessive command-line length with hundreds of .o files
-  const linkObjs = [...exeObjs, ...rcObjs, ...fontObjs, ...archives];
+  const linkObjs = [...exeObjs, ...rcObjs, ...archives];
   const rspPath = join(outDir, "obj", "sumatrapdf", "link.rsp");
   const rspLines = linkObjs.map((p) => p);
   await writeFile(rspPath, rspLines.join("\n") + "\n");

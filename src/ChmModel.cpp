@@ -276,9 +276,9 @@ bool ChmModel::DisplayPage(Str pageUrl) {
         // open external links in an external browser
         // (same as for PDF, XPS, etc. documents)
         if (cb) {
-            auto* item = NewChmTocItem(nullptr, nullptr, {}, 0, pageUrl);
-            cb->GotoLink(item->dest);
-            FreeTocItemRec(nullptr, item);
+            IPageDestination* dest = NewChmNamedDest(nullptr, pageUrl, 0);
+            cb->GotoLink(dest);
+            delete dest;
         }
         return true;
     }
@@ -340,7 +340,7 @@ bool ChmModel::HandleLink(IPageDestination* link, ILinkHandler* /*linkHandler*/)
     Kind k = link->GetKind();
     if (k != kindDestinationScrollTo) {
         logf("ChmModel::HandleLink: unsupported kind '%s'\n", Str(k));
-        ReportIfFast(link->GetKind() != kindDestinationScrollTo);
+        ReportIf(link->GetKind() != kindDestinationScrollTo);
     }
     Str url = PageDestGetName(link);
     if (DisplayPage(url)) {
@@ -618,10 +618,10 @@ void ChmModel::OnDocumentComplete(Str url) {
         restoreHtmlScrollPos = true;
     }
 
-    // TODO: setting zoom before the first page is loaded seems not to work
-    // (might be a regression from between r4593 and r4629), so the intended
-    // zoom is applied here instead. Re-apply it after *every* load: the hosted
-    // control is recreated when switching tabs, which resets it to 100%.
+    // setting zoom before the first page is loaded doesn't work, so the
+    // intended zoom is applied here instead. Re-apply it after *every* load:
+    // the hosted control is recreated when switching tabs, which resets it
+    // to 100%.
     if (IsValidZoom(initZoom)) {
         zoomVirtual = initZoom;
         initZoom = kInvalidZoom;
@@ -666,10 +666,9 @@ bool ChmModel::OnBeforeNavigate(Str url, bool newWindow) {
     // (same as FixedPageUI / SimpleBrowserWindow; issue #5920 for downloads)
     if (newWindow || IsExternalUrl(url)) {
         if (url && cb) {
-            // TODO: optimize, create just destination
-            auto* item = NewChmTocItem(nullptr, nullptr, {}, 1, url);
-            cb->GotoLink(item->dest);
-            FreeTocItemRec(nullptr, item);
+            IPageDestination* dest = NewChmNamedDest(nullptr, url, 1);
+            cb->GotoLink(dest);
+            delete dest;
         }
         return false;
     }
@@ -924,6 +923,7 @@ void ChmModel::GetDisplayState(FileState* fs) {
     ZoomToString(&fs->zoom, GetZoomVirtual(), fs);
 
     str::ReplaceWithCopy(&fs->pageNo, StoredPagePosFromCtrlTemp(this));
+    fs->pageCount = PageCount();
     SaveHtmlScrollPos();
     fs->scrollPos = htmlScrollPos;
 }

@@ -750,7 +750,11 @@ static bool PrintPageInBands(EngineBase& engine, HDC hdc, int pageNo, float zoom
         if (abortCookie) {
             abortCookie->Clear();
         }
-        if (!bmp || !bmp->hbmp) {
+        // BlitPixmap() draws a heap-backed pixmap through StretchDIBits, so only
+        // a missing pixel buffer is a failure. Requiring a DIB section (hbmp)
+        // threw away every band the image engine rendered -- it returns heap
+        // pixmaps -- and printed a blank page (issue #6150).
+        if (!bmp || !bmp->data) {
             FreePixmap(bmp);
             // couldn't allocate even a band: try thinner bands before giving up,
             // so we still print at full resolution (never the old whole-page shrink)
@@ -1097,7 +1101,9 @@ class PrintThreadData {
     ThreadHandle thread = nullptr; // close the print thread handle after execution
 
     // called when printing has been canceled
-    void RemovePrintNotification(NotificationWnd* = nullptr) {
+    void OnNotifClosed(NotificationClosedEvent*) { RemovePrintNotification(); }
+
+    void RemovePrintNotification() {
         isCanceled = true;
         cookie.Abort();
         if (this->wnd && IsMainWindowValid(win)) {
@@ -1112,8 +1118,8 @@ class PrintThreadData {
         NotificationCreateArgs args;
         args.hwndParent = win->hwndCanvas;
         args.timeoutMs = 0;
-        auto fn = MkMethod1<PrintThreadData, NotificationWnd*, &PrintThreadData::RemovePrintNotification>(this);
-        args.onRemoved = fn;
+        auto fn = MkMethod1<PrintThreadData, NotificationClosedEvent*, &PrintThreadData::OnNotifClosed>(this);
+        args.onClosed = fn;
         // don't use a groupId for this notification so that
         // multiple printing notifications could coexist between tabs
         args.groupId = nullptr;
@@ -1273,6 +1279,19 @@ static int CollateDefaultPref() {
     return -1;
 }
 
+// The PrinterUI setting. Empty, "auto" and "modern" all take the Windows 11
+// dialog where it's available and the classic one everywhere else; they differ
+// only in saying so. "classic" never takes the Windows 11 one: only the classic
+// dialog has a Preferences button, which opens the printer driver's own property
+// sheet. The modern dialog has no way to show that sheet (discussion #6202), so
+// this is how a driver-only setting is reached.
+static bool PrinterUIWantsClassic() {
+    if (!gSettings) {
+        return false;
+    }
+    return str::EqI(gSettings->printerUI, StrL("classic"));
+}
+
 // apply a collate preference (1 = collate, 0 = no-collate) to a DEVMODE handle
 static void SetDevModeCollate(HGLOBAL hDevMode, int collate) {
     if (!hDevMode || collate < 0) {
@@ -1357,6 +1376,8 @@ void PrintCurrentFile(MainWindow* win, bool waitForCompletion) {
     // the print dialog needs the real total up front; no progress UI here
     EnsureFullLayout(dm);
     int nPages = dm->PageCount();
+    logf("PrintCurrentFile: start wait=%d file='%s' pages=%d selection=%d\n", (int)waitForCompletion,
+         engine->FilePath(), nPages, (int)(win->CurrentTab()->selectionOnPage != nullptr));
 
 #ifndef DISABLE_DOCUMENT_RESTRICTIONS
     if (!engine->AllowsPrinting()) {
@@ -1377,8 +1398,12 @@ void PrintCurrentFile(MainWindow* win, bool waitForCompletion) {
 
     // the Windows 11 dialog runs the whole job itself; -print-to and friends
     // need the synchronous classic path
-    if (!waitForCompletion && TryPrintCurrentFileWin11(win, defaultScaleAdv)) {
-        return;
+    if (!waitForCompletion && !PrinterUIWantsClassic()) {
+        bool usedWin11Dialog = TryPrintCurrentFileWin11(win, defaultScaleAdv);
+        logf("PrintCurrentFile: Windows 11 dialog=%d\n", (int)usedWin11Dialog);
+        if (usedWin11Dialog) {
+            return;
+        }
     }
 
     PRINTDLGEXW pdex{};
@@ -1445,7 +1470,11 @@ void PrintCurrentFile(MainWindow* win, bool waitForCompletion) {
         }
     }
 
+    logf("PrintCurrentFile: PrintDlgEx start flags=0x%x pages=%d hDevMode=%p hDevNames=%p collate=%d\n", pdex.Flags,
+         nPages, pdex.hDevMode, pdex.hDevNames, collatePref);
     HRESULT res = PrintDlgExW(&pdex);
+    logf("PrintCurrentFile: PrintDlgEx result=0x%08x action=%u flags=0x%x ranges=%u hDevMode=%p hDevNames=%p\n",
+         (uint)res, pdex.dwResultAction, pdex.Flags, pdex.nPageRanges, pdex.hDevMode, pdex.hDevNames);
 
     // PrintDlgExW pumps messages, so the window may have been closed/destroyed while the dialog was open
     if (!IsMainWindowValidAndNotClosing(win)) {
@@ -1457,12 +1486,13 @@ void PrintCurrentFile(MainWindow* win, bool waitForCompletion) {
     }
 
     if (res != S_OK) {
-        logf("PrintCurrentFile: PrintDlgEx failed\n");
+        logf("PrintCurrentFile: PrintDlgEx failed, CommDlgExtendedError=0x%x\n", (uint)CommDlgExtendedError());
         MessageBoxWarning(win->hwndFrame, Tr("Couldn't initialize printer"), Tr("Printing problem."));
     }
     auto action = pdex.dwResultAction;
     if (action != PD_RESULT_PRINT) {
         // it's cancel or apply so silently ignore as it's not an error
+        logf("PrintCurrentFile: PrintDlgEx ended without print, action=%u\n", action);
         goto Exit;
     }
 
@@ -1483,6 +1513,7 @@ void PrintCurrentFile(MainWindow* win, bool waitForCompletion) {
     nPages = dm->PageCount();
 
     if (!pdex.hDevNames) {
+        logf("PrintCurrentFile: PrintDlgEx returned no hDevNames\n");
         MessageBoxWarning(win->hwndFrame, Tr("Couldn't get printer name"), Tr("Printing problem."));
         goto Exit;
     }
@@ -1493,6 +1524,7 @@ void PrintCurrentFile(MainWindow* win, bool waitForCompletion) {
             // printerInfo.pDriverName = (LPWSTR)devNames + devNames->wDriverOffset;
             WCHAR* printerName = (WCHAR*)devNames + devNames->wDeviceOffset;
             TempStr name = ToUtf8Temp(printerName);
+            logf("PrintCurrentFile: selected printer='%s'\n", name);
             printer = NewPrinter(name);
             // printerInfo.pPortName = (LPWSTR)devNames + devNames->wOutputOffset;
             GlobalUnlock(pdex.hDevNames);
@@ -1500,11 +1532,15 @@ void PrintCurrentFile(MainWindow* win, bool waitForCompletion) {
     }
 
     if (!printer) {
+        logf("PrintCurrentFile: couldn't create selected printer\n");
         MessageBoxWarning(win->hwndFrame, Tr("Couldn't initialize printer"), Tr("Printing problem."));
         goto Exit;
     }
 
     devMode = (DEVMODEW*)GlobalLock(pdex.hDevMode);
+    if (!devMode) {
+        logf("PrintCurrentFile: GlobalLock(hDevMode) failed, err=%u\n", GetLastError());
+    }
 
     if (pdex.dwResultAction == PD_RESULT_PRINT || pdex.dwResultAction == PD_RESULT_APPLY) {
         // remember settings for this process

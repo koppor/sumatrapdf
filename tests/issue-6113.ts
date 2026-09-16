@@ -118,10 +118,11 @@ function isDark(shot: Shot, x: number, y: number): boolean {
   return shot.data[i]! + shot.data[i + 1]! + shot.data[i + 2]! < bg - 80;
 }
 
-// Midpoint of the longest solid dark run on the ink-densest row. For "Zoom: 125%"
-// that run is the Z's bar: left half when glyphs are upright, right half when
-// the toast was BitBlt-mirrored.
-function longestBarMid(shot: Shot): { y: number; x: number; dx: number; mid: number } {
+type Bar = { y: number; x: number; dx: number };
+
+// Longest solid dark run on the ink-densest row. For "Zoom: 125%" that run is
+// the Z's bar. dx is 0 when the shot has no ink yet.
+function longestBar(shot: Shot): Bar {
   let bestY = 0;
   let bestN = 0;
   for (let y = 0; y < shot.h; y++) {
@@ -154,20 +155,47 @@ function longestBarMid(shot: Shot): { y: number; x: number; dx: number; mid: num
     }
     x = j;
   }
-  if (dx < 6) {
-    throw new Error(`issue-6113: no long ink bar (y=${bestY} dx=${dx} ${shot.w}x${shot.h})`);
+  return { y: bestY, x: x0, dx };
+}
+
+function longestBarDx(shot: Shot): number {
+  return longestBar(shot).dx;
+}
+
+// Midpoint of the Z's bar: left half when glyphs are upright, right half when
+// the toast was BitBlt-mirrored.
+function longestBarMid(shot: Shot): { y: number; x: number; dx: number; mid: number } {
+  const bar = longestBar(shot);
+  if (bar.dx < MIN_BAR_DX) {
+    throw new Error(`issue-6113: no long ink bar (y=${bar.y} dx=${bar.dx} ${shot.w}x${shot.h})`);
   }
-  return { y: bestY, x: x0, dx, mid: x0 + dx / 2 };
+  return { ...bar, mid: bar.x + bar.dx / 2 };
+}
+
+// a capture can land before the toast painted its text (blank 122x35 shot with
+// no ink): re-capture until a bar shows up
+const TOAST_PAINT_TIMEOUT_MS = 3000;
+const MIN_BAR_DX = 6;
+
+function hasInk(shot: Shot): boolean {
+  return longestBarDx(shot) >= MIN_BAR_DX;
 }
 
 async function grabZoomToast(frame: number, canvas: number, label: string): Promise<Shot> {
   sendCommandSync(frame, cmdId("CmdZoom125"));
   const hwnd = await waitNotif(canvas, true);
   const png = tmpPath(`6113-${label}.png`);
-  if (!captureWindowToPng(hwnd, png)) {
-    throw new Error(`issue-6113: capture failed (${label})`);
+  const deadline = Date.now() + TOAST_PAINT_TIMEOUT_MS;
+  for (;;) {
+    if (!captureWindowToPng(hwnd, png)) {
+      throw new Error(`issue-6113: capture failed (${label})`);
+    }
+    const shot = loadPng(png);
+    if (hasInk(shot) || Date.now() > deadline) {
+      return shot;
+    }
+    await sleep(40);
   }
-  return loadPng(png);
 }
 
 export async function testit(): Promise<void> {

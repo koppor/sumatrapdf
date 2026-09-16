@@ -6,7 +6,7 @@
 #include <inttypes.h>
 
 // must be last due to assert() over-write
-#include "base/UtAssert.h"
+#include "base/tests/UtAssert.h"
 
 template <typename T>
 concept CanNegateVec = requires(T v) {
@@ -54,6 +54,21 @@ void VecTest() {
     utassert(ints[0] == 1 && ints[1] == 3);
     VecReset(ints);
     utassert(len(ints) == 0);
+
+    {
+        Vec<int> g;
+        utassert(VecGrow(g, 10));
+        utassert(len(g) == 0);
+        utassert(VecCap(g) >= 10);
+        VecAppend(g, 1);
+        utassert(len(g) == 1);
+        utassert(VecGrow(g, 10));
+        utassert(VecCap(g) >= 11);
+        VecReset(g);
+        utassert(len(g) == 0);
+        utassert(VecGrow(g, 8));
+        utassert(VecCap(g) >= 8);
+    }
 
     for (int i = 0; i < 1000; i++) {
         VecAppend(ints, i);
