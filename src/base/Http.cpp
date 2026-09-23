@@ -236,7 +236,7 @@ Exit:
 bool HttpPost(Str serverA, int port, Str urlA, str::Builder* headers, str::Builder* data, str::Builder* outResp,
               DWORD* outStatusCode) {
     str::Builder resp;
-    str::BuilderReserve(resp, 2048);
+    resp.Reserve(2048);
     bool ok = false;
     if (outStatusCode) {
         *outStatusCode = 0;
