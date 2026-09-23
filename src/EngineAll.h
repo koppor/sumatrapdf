@@ -8,10 +8,12 @@ struct PasswordUI;
 struct FileArgs;
 struct AnnotCreateArgs;
 struct PropValue;
+struct djvu_text_zone;
 
 bool IsEngineDjVuSupportedFileType(FileType kind);
 EngineBase* CreateEngineDjvuDecFromFile(Str path);
 EngineBase* CreateEngineDjvuDecFromData(Str data);
+PageText DjvuZonesToPageText(djvu_text_zone* root, float dpiF);
 extern bool gMemoryMapLargeFiles;
 
 EngineBase* CreateEngineEpubFromFile(Str fileName);
@@ -123,7 +125,12 @@ bool EngineMupdfSupportsAnnotations(EngineBase*);
 bool EngineMupdfIsPdf(EngineBase* engine);
 bool EngineMupdfIsEncrypted(EngineBase* engine);
 bool EngineMupdfHeadingTocPending(EngineBase* engine);
-void EngineMupdfStartHeadingToc(EngineBase* engine, const Func0& onDone);
+// IfEnabled: only when the AutoGenerateTOC setting is on; Always: on demand
+enum class HeadingTocStart {
+    IfEnabled,
+    Always
+};
+void EngineMupdfStartHeadingToc(EngineBase* engine, const Func0& onDone, HeadingTocStart start);
 void EngineMupdfCancelHeadingToc(EngineBase* engine);
 Str EngineMupdfGetPassword(EngineBase* engine);
 bool EngineMupdfSaveUpdated(EngineBase* engine, Str path, const ShowErrorCb& showErrorFunc);
@@ -152,7 +159,6 @@ struct PdfSignArgs {
     Str imagePath;            // optional PNG/JPEG drawn on the left of the appearance
 };
 
-#if OS_WIN
 void EngineMupdfGetUnsignedSignatureFields(EngineBase*, StrVec& names, Vec<int>& pageNos);
 bool IsUnsignedSignatureWidget(Annotation*, TempStr* fieldNameOut);
 bool EngineMupdfSignDocument(EngineBase*, const PdfSignArgs&, Str* errOut);
@@ -166,14 +172,15 @@ struct PdfSigCert {
 };
 PdfSigCert* EngineMupdfGetSignatureCerts(EngineBase*);
 void FreePdfSigCerts(PdfSigCert*);
-#endif
 Annotation* EngineMupdfGetAnnotationAtPos(EngineBase*, int pageNo, PointF pos, float padding, Annotation*);
 Annotation* EngineMupdfGetWidgetAtPos(EngineBase*, int pageNo, PointF pos);
+void EngineMupdfGetPageWidgets(EngineBase*, int pageNo, Vec<Annotation*>& out);
 Annotation* EngineMupdfGetAdjacentWidget(EngineBase*, Annotation* cur, bool forward);
 void EngineMupdfGetFormFieldHighlightRects(EngineBase*, int pageNo, Annotation* skip, Vec<RectF>& out);
 void EngineMupdfSetDisableJavaScript(bool disable);
 float EngineMupdfSetEbookLayoutAspect(float dyOverDx);
 void EngineMupdfSetAllowExternalImages(bool allow);
+void EngineMupdfSetAutoHeadingToc(bool enable);
 enum class AnnotAuthorVisibility {
     Hide,
     Show

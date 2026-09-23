@@ -19,7 +19,7 @@ Anything that is not recognized as a known option is interpreted as a file path,
 - `-for-testing` : for ad-hoc testing by humans or agents. Always starts a new instance, doesn't restore a session (only loads files given on the command line) and doesn't save settings (**ver 3.7+**)
 - `-quicklook` : open the file in a chrome-less always-on-top preview window (Explorer Space preview). Esc or Space closes it (**ver 3.7+**, fixes #2568)
 - `-quicklook-agent` : run the hidden File Explorer Space-bar helper with no UI. Started automatically when `ExplorerQuickLook` is true (**ver 3.7+**)
-- `-dbg-control <named-pipe>` : starts a test control server on a named pipe. Used by automated tests through `tests/control.ts`; combine with `-for-testing`. (**ver 3.7+**). In a profile build, the control commands `StartPerfLog` / `StopPerfLog` enable function-timing logs around a region of code
+- `-dbg-control <named-pipe>` : starts a test control server on a named pipe. Used by automated tests through `tests/control.ts`; combine with `-for-testing`. (**ver 3.7+**). In a profile build, the control commands `StartPerfLog` / `StopPerfLog` enable function-timing logs around a region of code. `WaitSessionRestored` waits until startup session restore (tabs, selected document, first layout) has finished; needed because `-for-testing` skips restore
 - `-start-perf-log` : in a profile build (`bun cmd/build.ts -profile`), start writing function enter/exit timings immediately. Off by default. The log is saved to `sumperf.txt` next to the exe on exit, or to `-log-perf-file <path>`
 - `-log-perf-file <path>` : write the profile function-timing log to this path instead of `sumperf.txt` (**ver 3.7+**)
 - `-dump-chm <file>` : headlessly opens a CHM file, lists contained files with sizes, unpacks each file to memory to validate retrieval, and prints TOC/index metadata to stdout. Exits with a non-zero code if the CHM can't be opened, enumerated, or unpacked.
@@ -41,7 +41,7 @@ Anything that is not recognized as a known option is interpreted as a file path,
 
   Combine with `-reuse-instance` if the document is already open.
 
-- `-zoom <zoom-level>` : sets the zoom level for the first indicated file. Alternatives are `"fit page"`, `"fit width"`, `"fit height"`, `"fit content"`, or any percentage value. Combine with `-reuse-instance` if the document is already open.
+- `-zoom <zoom-level>` : sets the zoom level for the first indicated file. Alternatives are `"fit page"`, `"fit width"`, `"fit height"`, `"fit content"`, `"fit visible"`, or any percentage value. Combine with `-reuse-instance` if the document is already open.
 - `-scroll <x,y>` : scrolls to the given coordinates for the first indicated file. Combine with `-reuse-instance` if the document is already open.
 - `-search <term>` : start a search for a given term when opening a document, e.g. `SumatraPDF -search "foo" bar.pdf`. **Ver 3.4+**. The leading `-` is required.
 - `/A "<params>"` : Adobe Reader-compatible open parameters for the first file (**ver 3.5+**). `params` is a list of `name=value` pairs separated by `;`, `#`, or `&`. Recognized names:
@@ -69,6 +69,7 @@ For a detailed printing guide with examples for common tasks, see [Printing](Pri
     - `disable-auto-rotation` : by default a page wider than it is tall is rotated 90 degrees to fit the paper; this prints the content in its original orientation instead (available since 3.5)
     - `rotate=<degrees>` : rotate the printout by an extra `90`, `180` or `270` degrees (on top of the automatic rotation). Useful to fix a wrong orientation, e.g. upside-down (`rotate=180`) output on virtual printers
     - `noscale`, `shrink`, `fit` and `stretch` (`stretch` fills the paper in both dimensions, ignoring the aspect ratio)
+    - `dpi=<n>` : the resolution to assume for the document, e.g. `dpi=300` for a 300 dpi scan whose file doesn't record it. Decides how big `noscale` prints an image; ignored for documents with real page sizes like PDF (available since 3.7, [details](Printing.md#printing-at-actual-size-11))
     - `center` : horizontally center the page on the paper. Useful with `noscale` when the page is smaller than the paper (e.g. envelopes or A5 stock fed through a tray that centers the paper)
     - `color` or `monochrome`
     - `collate` or `nocollate` : when printing multiple copies, collate (1,2,3,1,2,3) or don't (1,1,2,2,3,3)
@@ -105,7 +106,7 @@ With multiple files, the exit code is `0` only if all printed; otherwise it's th
 
 - `-forward-search "<sourcepath>" <line> "<pdfpath>"`: performs a forward search from a LaTeX source file to a loaded PDF document (using PdfSync or SyncTeX). This is an alternative to the ForwardSearch DDE command. E.g. `-forward-search "/path/to/main.tex" 123 "/path/to/main.pdf"` highlights all text related to line 123 in main.tex.
 - `-reuse-instance` : tells an already open SumatraPDF to load the indicated files. If there are several running instances, behavior is undefined. Only needed when communicating with SumatraPDF through DDE (use the ReuseInstance setting instead otherwise).
-- `-inverse-search <command-line>` : sets the command line to be used for performing an inverse search from a PDF document (usually back to a LaTeX source file). The inverse search command line can also be set from the **Set Inverse Search Command Line** dialog (`Ctrl + K` command palette), from _Settings / Options_ when `EnableTeXEnhancements` is enabled, or via the `InverseSearchCmdLine` advanced setting. Use the variable %f for the current filename and %l for the current line.
+- `-inverse-search <command-line>` : sets the command line to be used for performing an inverse search from a PDF document (usually back to a LaTeX source file). The inverse search command line can also be set with `Ctrl + K`, `Set Inverse Search Command Line` command in [Command Palette](Command-Palette.md), from `Settings` / `Settings...` when `EnableTeXEnhancements` is enabled, or via the `InverseSearchCmdLine` advanced setting. Use the variable %f for the current filename and %l for the current line.
 - `-fwdsearch-offset <offset> -fwdsearch-width <width> -fwdsearch-color <hexcolor> -fwdsearch-permanent <flag>` : lets you customize the forward-search highlight. Set the offset to a positive number to change the highlight style to a rectangle at the left of the page (instead of rectangles over all the text). The flag for `-fwdsearch-permanent` can be 0 (make the highlight fade away, the default) or 1.
   [Deprecated]: Use the corresponding advanced settings instead.
 

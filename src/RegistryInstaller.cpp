@@ -5,7 +5,7 @@
 #include "base/File.h"
 #include "base/Win.h"
 #include "base/DirScan.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 
 #include "SumatraConfig.h"
 #include "Version.h"
@@ -580,7 +580,7 @@ static bool IsSumatraDefaultForExt(Str ext) {
     }
     WCHAR* appNameW = CWStrTemp(StrL(kAppName));
 
-    ScopedComPtr<IApplicationAssociationRegistration> aar;
+    AutoReleaseComPtr<IApplicationAssociationRegistration> aar;
     HRESULT hr =
         CoCreateInstance(CLSID_ApplicationAssociationRegistration, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&aar));
     if (SUCCEEDED(hr) && aar) {

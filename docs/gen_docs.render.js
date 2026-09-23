@@ -59,6 +59,9 @@
           inCols = false;
           return "\n</div>\n";
         }
+        if (line.trim() === ":askai") {
+          return '\n<div class="askai"></div>\n';
+        }
         return line;
       })
       .join("\n");
@@ -186,11 +189,26 @@
         items.push("<a" + cls + ' href="' + href + '">' + title + "</a>");
       }
     }
-    const searchHint =
-      '<div onclick="window.openSearchDialog()" class="search-trigger-2"><kbd>Ctrl + K</kbd> to search...</div>\n';
-    return (
-      '<nav class="sidebar-toc">\n' + searchHint + '<div class="toc-title"></div>\n' + items.join("\n") + "\n</nav>"
-    );
+    return '<nav class="sidebar-toc">\n' + items.join("\n") + "\n</nav>";
+  }
+
+  const kDocsImgCdn = "https://files.sumatrapdfreader.org/assets/sumatrapdf/";
+
+  function docsImgToCdnUrl(src) {
+    let s = (src || "").replace(/%20/g, " ").replace(/\\/g, "/");
+    if (s.indexOf("https://") === 0 || s.indexOf("http://") === 0) {
+      return s;
+    }
+    if (s.indexOf("./") === 0) {
+      s = s.slice(2);
+    }
+    if (s.indexOf("/img/") === 0) {
+      s = s.slice(1);
+    }
+    if (s.indexOf("img/") === 0) {
+      return kDocsImgCdn + s.slice(4);
+    }
+    return s;
   }
 
   function createMarkdownRenderer(md) {
@@ -220,6 +238,12 @@
       const text = getInlineText(tokens[idx - 1]);
       const id = slugify(text);
       return '<a class="hlink" href="#' + id + '"> # </a></' + tok.tag + ">\n";
+    };
+
+    md.renderer.rules.image = function (tokens, idx, options, env, self) {
+      const tok = tokens[idx];
+      tok.attrSet("src", docsImgToCdnUrl(tok.attrGet("src") || ""));
+      return self.renderToken(tokens, idx, options);
     };
 
     md.renderer.rules.link_open = function (tokens, idx, options, env, self) {
@@ -381,6 +405,9 @@
         }
         if (typeof window.rebuildPageToc === "function") {
           window.rebuildPageToc();
+        }
+        if (typeof window.initAskAi === "function") {
+          window.initAskAi();
         }
         if (titleEl) {
           const title = currentHtml.replace(".html", "").replace(/-/g, " ");

@@ -2,7 +2,7 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/Win.h"
 #include "gui/Dpi.h"
 
@@ -11,7 +11,6 @@
 
 #include "Theme.h"
 #include "FilterHighlightDraw.h"
-#include "FilterUtil.h"
 
 // approximate "is this UTF-8 byte part of a word character?": any byte >= 0x80
 // is part of a multi-byte rune (CJK / Cyrillic / accented Latin -> treat as a

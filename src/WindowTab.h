@@ -6,9 +6,6 @@ struct WatchedFile;
 struct MainWindow;
 struct PushedCitation;
 struct LoadArgs;
-namespace str {
-struct Builder;
-}
 struct ReadAloudHighlightMap;
 
 struct AutoScroll {

@@ -9,15 +9,14 @@ You can send selected text to the Google or Bing search engine, or to the Google
 
 ![Context Menu Selection](img/context-menu-selection-90e6.png)
 
-- use the `Selection` submenu and select the web service to use for translation or search:
+- use the `Selection` submenu, then `Translate with` or `Search with`, and select the web service:
 
 ![Context Menu Translate](img/context-menu-translate-e2f3.png)
 
-You can also use the command palette (`Ctrl + K`):
+You can also use the [Command Palette](Command-Palette.md):
 
 - select text
-- press `Ctrl + K` to open the command palette
-- type, for example, `deepl` to find the `Translate with DeepL` command
+- `Ctrl + K`, `Translate with DeepL` command in [Command Palette](Command-Palette.md) (type `deepl` to find it)
 
 ![Using Command Palette](img/cmd-palette-translate-c1af.png)
 
@@ -29,7 +28,7 @@ You can add more web services using [advanced settings](https://www.sumatrapdfre
 
 To configure a selection handler:
 
-- use the `Settings / Advanced Settings...` menu to open the configuration file
+- use the `Settings` / `Open Advanced Settings File...` menu to open the configuration file
 - modify the `SelectionHandlers` section
 
 Here is an example that adds the [DuckDuckGo](https://duckduckgo.com/) search engine:

@@ -3,7 +3,6 @@
 
 #include "base/Base.h"
 #include "gui/Dpi.h"
-#include "base/BitManip.h"
 #include "base/File.h"
 #include "base/Pixmap.h"
 #include "base/UITask.h"
@@ -38,6 +37,7 @@
 #include "AnnotEditToolbar.h"
 #include "AnnotFilterToolbar.h"
 #include "Tabs.h"
+#include "PagePosition.h"
 #include "gui/Layout.h"
 #include "gui/win/WinGui.h"
 #include "gui/PlatformFont.h"
@@ -80,7 +80,7 @@ static ToolbarButtonInfo gToolbarButtons[] = {
     {gIconNavigateBack, CmdNavigateBack, TrN("Back")},
     {gIconNavigateForward, CmdNavigateForward, TrN("Forward")},
     {nullptr, 0, {}}, // separator
-    {gIconSpeak, CmdReadAloud, TrN("Read Aloud")},
+    {gIconSpeak, CmdToggleReadAloud, TrN("Read Aloud")},
     {nullptr, 0, {}}, // separator
     {gIconLayoutContinuous, CmdZoomFitWidthAndContinuous, TrN("Fit Width and Show Pages Continuously")},
     {gIconLayoutSinglePage, CmdZoomFitPageAndSinglePage, TrN("Fit a Single Page")},
@@ -454,7 +454,7 @@ static bool IsCmdAvailable(MainWindow* win, int cmdId, AppCommandCtx* ctx) {
         case CmdFindToggleMatchCase:
         case CmdFindToggleMatchWholeWord:
             return NeedsFindUI(win);
-        case CmdReadAloud:
+        case CmdToggleReadAloud:
             // opt-in: the button and its drop-down only show if asked for
             return gSettings->toolbarShowReadAloud;
         case PageInfoId:
@@ -671,7 +671,7 @@ void ToolbarUpdateStateForWindow(MainWindow* win, bool setButtonsVisibility) {
         bool isEnabled = IsCmdEnabled(win, cmdId, ctx);
         SetToolbarButtonEnabledByIdx(win, i, isEnabled);
 
-        if (cmdId == CmdReadAloud || cmdId == CmdPauseReadAloud) {
+        if (cmdId == CmdToggleReadAloud || cmdId == CmdPauseReadAloud) {
             bool speaking = TtsIsSpeaking();
             SetToolbarButtonImageByIdx(win, i, speaking ? gIconPauseSpeaking : gIconSpeak);
             // tooltip reflects what clicking the button will do
@@ -1119,7 +1119,7 @@ void UpdateToolbarPageText(MainWindow* win, int pageCount, bool updateOnly) {
         return;
     }
 
-    bool hasChapters = win->ctrl && win->ctrl->HasChapters();
+    bool hasChapters = ShowChapterUi(win->ctrl);
     if (tb->pageLabel) {
         tb->pageLabel->SetText(hasChapters ? Tr("Chapter:") : Tr("Page:"));
     }
@@ -1500,7 +1500,7 @@ static void OnToolbarButtonClicked(MainWindow* win, VirtMouseEvent* ev) {
     if (cmdId == PageInfoId || cmdId == 0) {
         return;
     }
-    if (ToolbarDropdownJustClosed() && (cmdId == CmdReadAloud || cmdId == CmdPauseReadAloud)) {
+    if (ToolbarDropdownJustClosed() && (cmdId == CmdToggleReadAloud || cmdId == CmdPauseReadAloud)) {
         ev->didHandle = true;
         return;
     }
@@ -1816,7 +1816,7 @@ static TempStr HoverDropdownStateTemp(MainWindow* win) {
 // the drop-down has to say when the cursor leaves it.
 static void OnHoverDropdownMouseLeave(MainWindow* win) {
     ToolbarVirt* tb = win ? win->toolbarVirt : nullptr;
-    if (tb && tb->host && tb->hoverCmdId != 0) {
+    if (tb && tb->host && tb->hoverCmdId != 0 && !tb->hoverSticky) {
         tb->host->SetTimer(kCloseHoverDropdownTimerId, kCloseHoverDropdownDelayMs);
     }
 }
@@ -1939,6 +1939,7 @@ void HideToolbarHoverDropdown(MainWindow* win) {
     GiveHoverButtonTooltipBack(win);
     tb->hoverPendingCmdId = 0;
     tb->hoverCmdId = 0;
+    tb->hoverSticky = false;
     if (tb->host) {
         tb->host->KillTimer(kOpenHoverDropdownTimerId);
         tb->host->KillTimer(kCloseHoverDropdownTimerId);
@@ -2074,6 +2075,7 @@ static bool ShowToolbarButtonDropdown(MainWindow* win, int cmdId) {
         if (tb->host) {
             tb->host->KillTimer(kCloseHoverDropdownTimerId);
         }
+        tb->hoverSticky = true;
         return true;
     }
     if (tb->hoverCmdId != 0) {
@@ -2086,11 +2088,13 @@ static bool ShowToolbarButtonDropdown(MainWindow* win, int cmdId) {
             GiveHoverButtonTooltipBack(win);
             tb->hoverCmdId = cmdId;
             TakeHoverButtonTooltip(win, cmdId);
+            tb->hoverSticky = true;
             return true;
         }
         HideToolbarHoverDropdown(win);
     }
     OpenHoverDropdown(win, cmdId);
+    tb->hoverSticky = true;
     return true;
 }
 
@@ -2147,6 +2151,9 @@ static void ToolbarHoverDropdownOnMouseMove(MainWindow* win, const Point* client
             OpenHoverDropdown(win, cmdId);
             return;
         }
+        if (tb->hoverSticky) {
+            return;
+        }
         tb->host->SetTimer(kCloseHoverDropdownTimerId, kCloseHoverDropdownDelayMs);
         return;
     }
@@ -2175,6 +2182,9 @@ static void OnHoverDropdownTimer(MainWindow* win, int timerId) {
         return;
     }
     tb->host->KillTimer(kCloseHoverDropdownTimerId);
+    if (tb->hoverSticky) {
+        return;
+    }
     Point pt = UiCursorScreenPos();
     if (ToolbarHoverDropdownContainsScreenPoint(win, pt)) {
         return;
@@ -3319,7 +3329,7 @@ static void BuildToolbarLayout(MainWindow* win) {
         } else {
             auto* ib = new VirtIconButton();
             ib->padding = {cyPad, iconPad, cyPad, iconPad};
-            ib->hasDropdown = (bi.cmdId == CmdReadAloud);
+            ib->hasDropdown = (bi.cmdId == CmdToggleReadAloud);
             Str svg = bi.svgIcon ? bi.svgIcon : Str(bi.icon);
             ib->pixmap = GetCachedPixmapForSvg(svg, tb->iconSize, tb->iconSize, fg, TbBgColor());
             ib->pixmapDisabled = GetCachedPixmapForSvg(svg, tb->iconSize, tb->iconSize, dis, TbBgColor());
@@ -3460,7 +3470,7 @@ void CreateToolbar(MainWindow* win) {
     DocController* ctrl = win->ctrl;
     UpdateToolbarPageText(win, ctrl ? ctrl->PageCount() : -1);
     if (ctrl && win->pageEdit) {
-        if (ctrl->HasChapters()) {
+        if (ShowChapterUi(ctrl)) {
             Location cur = ctrl->CurrentLocation();
             win->pageEdit->SetText(fmt("%d", cur.page));
             if (win->chapterEdit) {
@@ -3496,8 +3506,6 @@ void ReCreateToolbar(MainWindow* win) {
     DestroyToolbar(win);
     CreateToolbar(win);
 }
-
-#if OS_WIN
 
 // What the toolbar still needs Win32 for, now that VirtHost owns its window:
 // the colors of the native page-number edit, dragging the frame by an empty
@@ -3565,7 +3573,7 @@ static void OnLocationEditChar(MainWindow* win, Edit::CharEvent* ev) {
     switch ((Key)ev->c) {
         case Key::Enter: {
             DocController* ctrl = win->ctrl;
-            if (ctrl->HasChapters()) {
+            if (ShowChapterUi(ctrl)) {
                 int chapter = win->chapterEdit ? ParseInt(win->chapterEdit->GetTextTemp()) : 1;
                 int page = win->pageEdit ? ParseInt(win->pageEdit->GetTextTemp()) : 1;
                 Location loc = ctrl->ClampLocation({chapter, page});
@@ -3724,5 +3732,3 @@ static void OnToolbarNativeMsg(MainWindow* win, VirtHostNativeMsg* ev) {
 void ToolbarSetNativeHooks(MainWindow* win, VirtHost* host) {
     host->onNativeMsg = MkFunc1(OnToolbarNativeMsg, win);
 }
-
-#endif

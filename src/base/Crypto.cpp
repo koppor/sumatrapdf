@@ -3,8 +3,6 @@
 
 #include "base/Base.h"
 
-#if OS_WIN
-
 #include <wincrypt.h>
 #include <wintrust.h>
 #include <softpub.h>
@@ -65,85 +63,6 @@ void CalcSHA1Digest(Str data, u8 digest[20]) {
 
 void CalcSHA2Digest(Str data, u8 digest[32]) {
     CalcDigestWin(data, digest, 32, MS_ENH_RSA_AES_PROV, PROV_RSA_AES, CALG_SHA_256);
-}
-
-static bool ExtractSignature(Str hexSignature, Str& data, ScopedMem<BYTE>& signature, size_t& signatureLen) {
-    // verify hexSignature format - must be either
-    // * a string starting with "sha1:" followed by the signature (and optionally whitespace and further content)
-    // * empty, then the signature must be found on the last line of non-binary data, starting at " Signature sha1:"
-    Str hex = hexSignature;
-    if (!str::TrimPrefix(hex, StrL("sha1:"))) {
-        if (len(hex) == 0) {
-            if (data.len < 20 || memchr(data.s, 0, data.len)) {
-                return false;
-            }
-            const char* lastLine = data.s + data.len - 1;
-            while (lastLine > data.s && *(lastLine - 1) != '\n') {
-                lastLine--;
-            }
-            if (lastLine == data.s || !str::Contains(Str(lastLine), StrL(" Signature sha1:"))) {
-                return false;
-            }
-            data.len = (int)(lastLine - data.s);
-            str::Cut(Str(lastLine), StrL(" Signature sha1:"), nullptr, &hex);
-        } else {
-            return false;
-        }
-    }
-
-    Vec<BYTE> signatureBytes;
-    for (int off = 0; off + 1 < hex.len && !str::IsWs(hex.s[off]); off += 2) {
-        unsigned int val;
-        if (1 != sscanf_s(hex.s + off, "%02x", &val)) {
-            return false;
-        }
-        VecAppend(signatureBytes, (BYTE)val);
-    }
-    signatureLen = len(signatureBytes);
-    signature.Set(VecTake(signatureBytes));
-    return true;
-}
-
-bool VerifySHA1Signature(Str data, Str hexSignature, Str pubkey) {
-    HCRYPTPROV hProv = 0;
-    HCRYPTKEY hPubKey = 0;
-    HCRYPTHASH hHash = 0;
-    BOOL ok = false;
-    ScopedMem<BYTE> signature;
-    size_t signatureLen;
-    // set after ExtractSignature below, which shortens data
-    const BYTE* dataPtr = nullptr;
-    size_t dataLen = 0;
-
-#define Check(val)                     \
-    do {                               \
-        ok = (val);                    \
-        if (ok == FALSE) goto CleanUp; \
-    } while (0)
-    Check(ExtractSignature(hexSignature, data, signature, signatureLen));
-    dataPtr = (const BYTE*)data.s;
-    dataLen = (size_t)data.len;
-    Check(CryptAcquireContext(&hProv, nullptr, MS_DEF_PROV, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT));
-    Check(CryptImportKey(hProv, (const BYTE*)pubkey.s, (DWORD)pubkey.len, 0, 0, &hPubKey));
-    Check(CryptCreateHash(hProv, CALG_SHA1, 0, 0, &hHash));
-#ifdef _WIN64
-    for (; dataLen > DWORD_MAX; dataPtr += DWORD_MAX, dataLen -= DWORD_MAX) {
-        Check(CryptHashData(hHash, dataPtr, DWORD_MAX, 0));
-    }
-#endif
-    Check(dataLen <= DWORD_MAX && (size_t)pubkey.len <= DWORD_MAX && signatureLen <= DWORD_MAX);
-    Check(CryptHashData(hHash, dataPtr, (DWORD)dataLen, 0));
-    Check(CryptVerifySignature(hHash, signature, (DWORD)signatureLen, hPubKey, nullptr, 0));
-#undef Check
-
-CleanUp:
-    if (hHash) {
-        CryptDestroyHash(hHash);
-    }
-    if (hProv) {
-        CryptReleaseContext(hProv, 0);
-    }
-    return ok;
 }
 
 // extracts the content (e.g. PDF) from a PKCS#7 / .p7m wrapper using Win32 crypto APIs
@@ -262,5 +181,3 @@ TempStr GetExecutableSignerTemp(Str exePath) {
     CertCloseStore(hStore, 0);
     return res;
 }
-
-#endif

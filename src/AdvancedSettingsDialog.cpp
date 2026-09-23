@@ -43,14 +43,16 @@ constexpr const char* kSettingsDocsUrl = "https://www.sumatrapdfreader.org/setti
 // smallest client width the user can drag the dialog to (96 dpi pixels)
 constexpr int kAdvSettingsMinClientDx = 480;
 
-// a single editable setting; fieldPtr points into gSettings, the pending
-// (possibly edited) value is kept here and only written back on Save
+// a single editable setting; the pending (possibly edited) value is kept
+// here and only written back on Save. The field is addressed by its offset
+// into gSettings, not a pointer: a settings reload (file watcher, Save)
+// frees and re-creates gSettings while the dialog stays open
 namespace {
 struct SettingItem {
     Str name;    // dotted path, e.g. "FixedPageUI.TextColor", owned
     Str comment; // doc comment describing the setting, owned
     SettingType type = SettingType::Bool;
-    u8* fieldPtr = nullptr;
+    int fieldOffset = 0;
     const char** enumValues = nullptr; // non-null for enum (string) settings
 
     // pending value; strVal (owned) is used for String, Color and Compact
@@ -187,7 +189,7 @@ static void EndPreviewSettingChange() {
 }
 
 static void SetItemChanged(SettingItem* item) {
-    u8* p = item->fieldPtr;
+    u8* p = SettingFieldPtr(item->fieldOffset);
     switch (item->type) {
         case SettingType::Bool:
             item->changed = item->boolVal != *(bool*)p;
@@ -210,96 +212,63 @@ static void SetItemChanged(SettingItem* item) {
     }
 }
 
-// collect editable leaf settings from the metadata, recursing into
-// sub-structs with a dotted path prefix
-static void CollectSettings(Vec<SettingItem*>& items, const StructInfo* info, u8* base, Str prefix) {
-    const char* fieldName = info->fieldNames;
-    const char* fieldComment = info->fieldComments; // parallel to fieldNames
-    for (size_t i = 0; i < info->fieldCount; i++) {
-        const FieldInfo& field = info->fields[i];
-        Str name(fieldName);
-        fieldName += len(name) + 1;
-        Str comment;
-        if (fieldComment) {
-            comment = Str(fieldComment);
-            fieldComment += len(comment) + 1;
-        }
-        // internal settings (WindowState, OpenCountWeek, deprecated keys ...) are
-        // app-managed and not shown to the user. The generated metadata marks
-        // them, so no comment-string matching is needed here.
-        if (field.internal) {
+// one dialog item per editable setting, seeded with the current value
+static void CollectSettings(Vec<SettingItem*>& items) {
+    Vec<SettingField> fields;
+    CollectSettingFields(fields);
+    for (const SettingField& sf : fields) {
+        const FieldInfo& field = *sf.field;
+        u8* fieldPtr = SettingFieldPtr(sf.offset);
+        if (field.type == SettingType::Compact) {
+            // only all-int compact structs; the "Open Settings File" button
+            // covers the rest
+            const auto* sub = (const StructInfo*)field.value;
+            if (!CompactIsAllInts(sub)) {
+                continue;
+            }
+            auto* item = new SettingItem();
+            item->name = str::Dup(sf.path);
+            item->comment = str::Dup(sf.comment);
+            item->type = field.type;
+            item->fieldOffset = sf.offset;
+            item->compactInfo = sub;
+            item->strVal = str::Dup(FormatCompactIntsTemp(sub, fieldPtr, false));
+            item->defStr = str::Dup(FormatCompactIntsTemp(sub, fieldPtr, true));
+            VecAppend(items, item);
             continue;
         }
-        if (field.type == SettingType::Comment) {
-            continue;
-        }
-        u8* fieldPtr = base + field.offset;
-        TempStr path = len(prefix) > 0 ? fmt("%s.%s", prefix, name) : str::DupTemp(name);
+
+        auto* item = new SettingItem();
+        item->name = str::Dup(sf.path);
+        item->comment = str::Dup(sf.comment);
+        item->type = field.type;
+        item->fieldOffset = sf.offset;
+        // field.value holds the default: the value itself for Bool/Int,
+        // a string pointer for Float/String/Color (null == empty). It's
+        // NOT a valid pointer for Bool/Int, so only deref it for the
+        // string-backed types.
         switch (field.type) {
-            case SettingType::Struct: {
-                const auto* sub = (const StructInfo*)field.value;
-                CollectSettings(items, sub, fieldPtr, path);
-                break;
-            }
-            case SettingType::Compact: {
-                const auto* sub = (const StructInfo*)field.value;
-                if (!CompactIsAllInts(sub)) {
-                    break;
-                }
-                auto* item = new SettingItem();
-                item->name = str::Dup(path);
-                item->comment = str::Dup(comment);
-                item->type = field.type;
-                item->fieldPtr = fieldPtr;
-                item->compactInfo = sub;
-                item->strVal = str::Dup(FormatCompactIntsTemp(sub, fieldPtr, false));
-                item->defStr = str::Dup(FormatCompactIntsTemp(sub, fieldPtr, true));
-                VecAppend(items, item);
-                break;
-            }
             case SettingType::Bool:
-            case SettingType::Int:
-            case SettingType::Float:
-            case SettingType::String:
-            case SettingType::Color: {
-                auto* item = new SettingItem();
-                item->name = str::Dup(path);
-                item->comment = str::Dup(comment);
-                item->type = field.type;
-                item->fieldPtr = fieldPtr;
-                // field.value holds the default: the value itself for Bool/Int,
-                // a string pointer for Float/String/Color (null == empty). It's
-                // NOT a valid pointer for Bool/Int, so only deref it for the
-                // string-backed types.
-                switch (field.type) {
-                    case SettingType::Bool:
-                        item->boolVal = *(bool*)fieldPtr;
-                        item->defBool = field.value != 0;
-                        break;
-                    case SettingType::Int:
-                        item->intVal = *(int*)fieldPtr;
-                        item->defInt = (int)field.value;
-                        break;
-                    case SettingType::Float:
-                        item->floatVal = *(float*)fieldPtr;
-                        str::Parse(Str((const char*)field.value), "%f", &item->defFloat);
-                        break;
-                    default:
-                        item->strVal = str::Dup(*(Str*)fieldPtr);
-                        item->defStr = str::Dup(Str((const char*)field.value));
-                        if (field.type == SettingType::String) {
-                            item->enumValues = GetSettingsEnumValues(path);
-                        }
-                        break;
-                }
-                VecAppend(items, item);
+                item->boolVal = *(bool*)fieldPtr;
+                item->defBool = field.value != 0;
                 break;
-            }
+            case SettingType::Int:
+                item->intVal = *(int*)fieldPtr;
+                item->defInt = (int)field.value;
+                break;
+            case SettingType::Float:
+                item->floatVal = *(float*)fieldPtr;
+                str::Parse(Str((const char*)field.value), "%f", &item->defFloat);
+                break;
             default:
-                // arrays and non-int compact structs; the "Open Settings File"
-                // button covers those
+                item->strVal = str::Dup(*(Str*)fieldPtr);
+                item->defStr = str::Dup(Str((const char*)field.value));
+                if (field.type == SettingType::String) {
+                    item->enumValues = GetSettingsEnumValues(sf.path);
+                }
                 break;
         }
+        VecAppend(items, item);
     }
 }
 
@@ -318,62 +287,6 @@ struct ListBoxModelSettings : ListBoxModel {
     }
 };
 
-// The doc comment of the selected setting, wrapped to the dialog's width.
-// Its height is fixed to a number of lines so the rest of the dialog doesn't
-// jump around as comments of different lengths come and go
-struct CommentText : VirtRichText {
-    int nLines = 6;
-
-    int FixedDy() {
-        int lineDy = PlatformFontMeasureText(font, StrL("Ag")).dy;
-        return (lineDy * nLines) + padding.top + padding.bottom;
-    }
-
-    // the height is ours in all three, or the box would follow the text: it is
-    // laid out (and sized) while empty, and every comment is a different length
-    Size GetIdealSize() override {
-        Size sz = VirtRichText::GetIdealSize();
-        sz.dy = FixedDy();
-        return sz;
-    }
-
-    int MinIntrinsicHeight(int width) override {
-        VirtRichText::MinIntrinsicHeight(width); // wraps to `width`
-        return FixedDy();
-    }
-
-    Size Layout(Constraints bc) override {
-        Size sz = VirtRichText::Layout(bc);
-        sz.dy = FixedDy();
-        return bc.Constrain(sz);
-    }
-
-    // the box is a fixed number of lines, so a longer comment has to be cut off
-    // rather than spill over the hints below it
-    void Paint(VirtPaintCtx& ctx) override {
-        Rect clip = ctx.bounds.Intersect(ctx.clip);
-        if (clip.IsEmpty()) {
-            return;
-        }
-        ctx.gfx->PushClip(clip);
-        Color bg = GetColor(kColRichBg);
-        if (!ColorSkipsPaint(bg)) {
-            ctx.gfx->FillRect(ctx.bounds, bg);
-        }
-        VirtRichText::Paint(ctx);
-        ctx.gfx->DrawRect(ctx.bounds, ThemeEdgeColor());
-        ctx.gfx->PopClip();
-    }
-
-    // Reset() drops the word layout, so re-wrap to the width we already have
-    void SetText(Str s) {
-        Reset();
-        AddPlainText(s);
-        LayoutText(ContentRectInWindow().dx);
-        Invalidate();
-    }
-};
-
 struct AdvancedSettingsWnd : WindowBase {
     ~AdvancedSettingsWnd() override;
 
@@ -384,8 +297,8 @@ struct AdvancedSettingsWnd : WindowBase {
     // controls; the filter and the in-place editors are real HWNDs
     Edit* editFilter = nullptr;
     VirtListBox* listBox = nullptr;
-    ListBoxModelSettings* model = nullptr; // owned by listBox
-    CommentText* commentText = nullptr;    // shows the selected setting's doc comment
+    ListBoxModelSettings* model = nullptr;     // owned by listBox
+    VirtFixedLinesText* commentText = nullptr; // shows the selected setting's doc comment
     // "changed settings: n" under the list, above the setting help; collapsed when n == 0
     ILayout* changedCountRow = nullptr;
     VirtFill* changedCountBg = nullptr;
@@ -952,7 +865,7 @@ void AdvancedSettingsWnd::ApplyChangesAndSave() {
             continue;
         }
         didChange = true;
-        u8* p = item->fieldPtr;
+        u8* p = SettingFieldPtr(item->fieldOffset);
         switch (item->type) {
             case SettingType::Bool:
                 *(bool*)p = item->boolVal;
@@ -995,12 +908,17 @@ void AdvancedSettingsWnd::ApplyChangesAndSave() {
     ApplyChangedSettingsAndRelayout(before);
 }
 
-void AdvancedSettingsWnd::OnOpenSettingsFile(VirtMouseEvent*) {
+// opens the settings file in the editor associated with .txt files
+void OpenSettingsFileInEditor() {
     if (!CanAccessDisk()) {
         return;
     }
     TempStr path = GetSettingsPathTemp();
     LaunchFileIfExists(path);
+}
+
+void AdvancedSettingsWnd::OnOpenSettingsFile(VirtMouseEvent*) {
+    OpenSettingsFileInEditor();
 }
 
 void AdvancedSettingsWnd::OnHelp(VirtMouseEvent*) {
@@ -1225,7 +1143,7 @@ bool AdvancedSettingsWnd::Create(MainWindow* mainWin) {
     win = mainWin;
     // OnSize repositions in-place editors after DoLayout; skip the generic path
     autoLayout = false;
-    CollectSettings(items, &gSettingsInfo, (u8*)gSettings, {});
+    CollectSettings(items);
 
     {
         CreateCustomArgs args;
@@ -1314,8 +1232,9 @@ bool AdvancedSettingsWnd::Create(MainWindow* mainWin) {
 
     // selected setting's doc comment (the help area)
     {
-        auto* c = new CommentText();
+        auto* c = new VirtFixedLinesText();
         c->font = font;
+        c->borderCol = ThemeEdgeColor();
         // don't let the doc text touch the edges of the dialog
         c->padding = DpiScaledInsets(4);
         commentText = c;
@@ -1328,7 +1247,7 @@ bool AdvancedSettingsWnd::Create(MainWindow* mainWin) {
         hbox->alignMain = MainAxisAlign::MainCenter;
         hbox->alignCross = CrossAxisAlign::CrossCenter;
         auto* c = NewVirtText({
-            .s = Tr("Enter or double-click to edit. Bold value: different from default"),
+            .s = Tr("Bold: differs from default"),
             .font = font,
             .isRtl = isRtl,
         });

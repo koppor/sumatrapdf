@@ -10,13 +10,11 @@
 #endif
 
 extern "C" {
-#include "mupdf/fitz.h"
 #include "../ext/mupdf/source/fitz/color-imp.h"
 }
 
-#if OS_WIN
 #include "base/File.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/TgaReader.h"
 #include "base/Win.h"
 #include "base/GdiPlusUtil.h"
@@ -28,7 +26,6 @@ extern "C" {
 #pragma warning(disable : 4668)
 #endif
 #include <wincodec.h>
-#endif
 
 #include "ImageReader.h"
 
@@ -307,8 +304,6 @@ Size ImageSizeFromData(Str d) {
     return result;
 }
 
-#if OS_WIN
-
 using Gdiplus::Bitmap;
 using Gdiplus::BitmapData;
 using Gdiplus::Ok;
@@ -342,10 +337,10 @@ static Bitmap* WICFrameToBitmap(IWICImagingFactory* pFactory, IWICBitmapFrameDec
 
 #define HR(hr) \
     if (FAILED(hr)) return nullptr;
-    ScopedComPtr<IWICFormatConverter> pConverter;
+    AutoReleaseComPtr<IWICFormatConverter> pConverter;
 
     int orientation = 0;
-    ScopedComPtr<IWICMetadataQueryReader> pMetadataReader;
+    AutoReleaseComPtr<IWICMetadataQueryReader> pMetadataReader;
     hr = srcFrame->GetMetadataQueryReader(&pMetadataReader);
     if (SUCCEEDED(hr)) {
         PROPVARIANT variant;
@@ -391,17 +386,17 @@ static Bitmap* WICFrameToBitmap(IWICImagingFactory* pFactory, IWICBitmapFrameDec
 }
 
 static Bitmap* WICDecodeImageFromStream(IStream* stream) {
-    ScopedCom com;
+    AutoCoUninitialize com;
 
 #define HR(hr) \
     if (FAILED(hr)) return nullptr;
-    ScopedComPtr<IWICImagingFactory> pFactory;
+    AutoReleaseComPtr<IWICImagingFactory> pFactory;
     if (!pFactory.Create(CLSID_WICImagingFactory)) {
         return nullptr;
     }
-    ScopedComPtr<IWICBitmapDecoder> pDecoder;
+    AutoReleaseComPtr<IWICBitmapDecoder> pDecoder;
     HR(pFactory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &pDecoder));
-    ScopedComPtr<IWICBitmapFrameDecode> srcFrame;
+    AutoReleaseComPtr<IWICBitmapFrameDecode> srcFrame;
     HR(pDecoder->GetFrame(0, &srcFrame));
 #undef HR
     return WICFrameToBitmap(pFactory, srcFrame);
@@ -437,7 +432,7 @@ static void MaybeFlipBitmap(Bitmap* bmp) {
 
 static Bitmap* DecodeWithWIC(Str bmpData) {
     auto* strm = CreateStreamFromData(bmpData);
-    ScopedComPtr<IStream> stream(strm);
+    AutoReleaseComPtr<IStream> stream(strm);
     if (!stream) {
         return nullptr;
     }
@@ -446,7 +441,7 @@ static Bitmap* DecodeWithWIC(Str bmpData) {
 
 static Bitmap* DecodeWithGdiplus(Str bmpData) {
     auto* strm = CreateStreamFromData(bmpData);
-    ScopedComPtr<IStream> stream(strm);
+    AutoReleaseComPtr<IStream> stream(strm);
     if (!stream) {
         return nullptr;
     }
@@ -536,16 +531,16 @@ constexpr i64 kMaxDecodedFrameBytes = 512LL * 1024 * 1024;
 static Vec<Pixmap*> PixmapsFromWicFrames(Str bmpData) {
     Vec<Pixmap*> res;
     auto* strm = CreateStreamFromData(bmpData);
-    ScopedComPtr<IStream> stream(strm);
+    AutoReleaseComPtr<IStream> stream(strm);
     if (!stream) {
         return res;
     }
-    ScopedCom com;
-    ScopedComPtr<IWICImagingFactory> pFactory;
+    AutoCoUninitialize com;
+    AutoReleaseComPtr<IWICImagingFactory> pFactory;
     if (!pFactory.Create(CLSID_WICImagingFactory)) {
         return res;
     }
-    ScopedComPtr<IWICBitmapDecoder> pDecoder;
+    AutoReleaseComPtr<IWICBitmapDecoder> pDecoder;
     HRESULT hr = pFactory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &pDecoder);
     if (FAILED(hr)) {
         return res;
@@ -558,7 +553,7 @@ static Vec<Pixmap*> PixmapsFromWicFrames(Str bmpData) {
     nFrames = std::min(nFrames, kMaxImageFrames);
     i64 decodedBytes = 0;
     for (UINT i = 0; i < nFrames; i++) {
-        ScopedComPtr<IWICBitmapFrameDecode> srcFrame;
+        AutoReleaseComPtr<IWICBitmapFrameDecode> srcFrame;
         if (FAILED(pDecoder->GetFrame(i, &srcFrame))) {
             break;
         }
@@ -692,5 +687,3 @@ RenderedBitmap* LoadRenderedBitmap(Str path) {
 
     return rendered;
 }
-
-#endif

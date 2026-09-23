@@ -101,7 +101,7 @@ static Mutex gCmarkInitLock;
 static bool gCmarkInitialized = false;
 
 static void EnsureCmarkPluginsRegistered() {
-    ScopedMutex scope(&gCmarkInitLock);
+    AutoUnlockMutex scope(&gCmarkInitLock);
     if (gCmarkInitialized) {
         return;
     }
@@ -392,12 +392,8 @@ void ParseMarkdownTocsParallel(StrVec& files, bool htmlMode, Vec<MarkdownFileToc
         VecAppend(threads, StartThread(fn, StrL("MdTocParse")));
     }
     for (ThreadHandle h : threads) {
-#if OS_WIN
         WaitForSingleObject(h, INFINITE);
         SafeCloseThreadHandle(&h);
-#else
-        SafeCloseThreadHandle(&h);
-#endif
     }
 }
 
@@ -859,8 +855,6 @@ bool MarkdownToc_UnitTestHtmlLinks() {
     mem->free(body);
     return linksOk && anchorsOk;
 }
-
-void ParseHtmlHeadingsData(Str data, Vec<MarkdownHeadingItem>& headingsOut);
 
 bool MarkdownToc_UnitTestHtmlHeadings() {
     Str html = StrL(

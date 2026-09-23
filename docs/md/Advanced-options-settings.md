@@ -1,17 +1,21 @@
-# Advanced options / settings
+# Advanced settings
 
-SumatraPDF has many [advanced settings](https://www.sumatrapdfreader.org/settings/settings) to customize look and behavior.
+You can cusotmize SumatraPDF using [advanced settings](https://www.sumatrapdfreader.org/settings/settings), stored in `SumatraPDF-settings.txt` file.
 
-To open advanced settings file:
+To edit advanced settings:
 
-- menu `Settings` / `Advanced options...`
-- or with Command Palette: `Ctrl + K`, type `adv` to narrow down to command, press `Enter` to select `Advanced Options...` command
+- menu `Settings` / `Advanced Settings...` opens setting editor
+- or `Ctrl + K` `Advanced Settings...` command in [Command Palette](Command-Palette.md)
+- or directly in `Ctrl + K` Command Palette: type `=` for settings editor
 
-This opens a settings text file in default .txt editor. Make changes and save the file.
+Some settings, like keyboard shortcuts, can only be set by editing settings file:
+-  menu `Settings` / `Open Advanced Settings File...`
+-  or with Command Palette: `Ctrl + K`, type `open settings`, press `Enter`
+- or the **Open Settings File** button in the Advanced Settings dialog
+
+This opens `SumatraPDF-settings.txt` file in default .txt editor.  Make changes and save the file.
 
 To reset to default settings, delete settings file. SumatraPDF will re-create it with default values.
-
-Most settings take effect immediately after saving the settings file. Some settings (e.g. `UseTabs`) require closing and re-starting SumatraPDF.
 
 Documentation for all settings is at [https://www.sumatrapdfreader.org/settings/settings](https://www.sumatrapdfreader.org/settings/settings)
 
@@ -22,7 +26,7 @@ Here are some things you can customize:
 - window background color with `FixedPageUI.BackgroundColor`
 - color used to highlight text with `FixedPageUI.SelectionColor`
 - control scrollbar mode with `FixedPageUI.Scrollbars` (values: `windows`, `smart`, `overlay`, `hidden`)
-- CAD / engineering-drawing line rendering with `EngineeringDrawingEnhance` — [CAD / Engineering Drawings](CAD-Engineering-Drawings.md)
+- CAD / engineering-drawing line rendering enhancements `EngineeringDrawingEnhance` — [CAD / Engineering Drawings](CAD-Engineering-Drawings.md)
 
 Advanced settings file also stores the history and state of opened files so that we can e.g. re-open on the page
 
@@ -40,8 +44,8 @@ If you add or remove lines with square brackets, **make sure to always add/remov
 ; fit page; a remembered FileState still wins
 DefaultDisplayMode = automatic
 
-; default zoom. valid values: fit page, fit width, fit height, fit content or
-; percent like 100%
+; default zoom. valid values: fit page, fit width, fit height, fit content, fit
+; visible or percent like 100%
 DefaultZoom = fit page
 
 ; if true, JavaScript in PDF documents is disabled (e.g. form-field calculations
@@ -99,14 +103,17 @@ PrinterUI =
 ; version 2.5)
 ReloadModifiedDocuments = true
 
-; if true, remember which documents were opened and their display settings
+; if true, keep a history of opened documents and their display settings
+; (FileStates); closing a document doesn't remove it from the history. Also
+; required for saving SessionData
 RememberOpenedFiles = true
 
 ; if true, store display settings for each document separately (i.e. everything
 ; after UseDefaultState in FileStates)
 RememberStatePerDocument = true
 
-; if true and SessionData isn't empty, that session will be restored at startup
+; if true, documents that were still open when the last window was closed
+; (SessionData) are reopened at startup
 RestoreSession = true
 
 ; if true, open documents in the already running SumatraPDF instead of starting
@@ -128,6 +135,13 @@ ShowPageNumberInTabs = false
 ; if true, show reading progress (n/N, or chapter:page for ebooks) on home page
 ; thumbnails and list rows (introduced in version 3.7)
 ShowHomePageReadingProgress = true
+
+; if true, a document with chapters (EPUB, MOBI) shows the current place as a
+; chapter and a page within that chapter, in the toolbar, Go to Page and the
+; page-info tip. if false, those show one page number for the whole document.
+; the saved position stays a chapter bookmark either way, and next / previous
+; page still cross chapters (introduced in version 3.7)
+ShowChaptersInEbooks = false
 
 ; if true, show tips on the home page (introduced in version 3.7)
 ShowTips = true
@@ -237,6 +251,11 @@ ShowAnnotationAuthorInTooltip = false
 ; table-of-contents entries (introduced in version 3.7)
 ShowTocPageNumbers = true
 
+; if true, a PDF without an outline gets a table of contents built from numbered
+; headings in its text (Generate Table Of Contents command does it on demand)
+; (introduced in version 3.7)
+AutoGenerateTOC = false
+
 ; if true, show a list of frequently read documents when no document is loaded
 ShowStartPage = true
 
@@ -341,6 +360,11 @@ TabWidth = 300
 ; Ayu, Palenight, System (introduced in version 3.5)
 Theme = Light
 
+; color theme of the in-app manual (F1): app (follow the app's theme), light or
+; dark. The switch in the manual's top-right corner changes it (introduced in
+; version 3.7)
+HelpTheme = app
+
 ; the light theme the light/dark toggle and the System theme switch to
 ; (introduced in version 3.7)
 LastLightTheme = 
@@ -444,6 +468,10 @@ ZoomIncrement = 0
 
 ; customization options for PDF, XPS, DjVu and PostScript UI
 FixedPageUI [
+    ; if true, render document pages in grayscale. Toggle with
+    ; CmdToggleGrayscale (introduced in version 3.7)
+    Grayscale = false
+
     ; color used instead of black for the document's text
     TextColor = #000000
 
@@ -600,8 +628,8 @@ ComicBookUI [
     DefaultDisplayMode = 
 
     ; default zoom for comic books; empty uses fit page. valid values: fit page,
-    ; fit width, fit height, fit content, shrink to fit or percent like 100%
-    ; (introduced in version 3.7)
+    ; fit width, fit height, fit content, fit visible, shrink to fit or percent
+    ; like 100% (introduced in version 3.7)
     DefaultZoom = 
 
     ; if true, in facing and book view a landscape page (wider than tall)
@@ -618,8 +646,8 @@ ImageUI [
     WindowBgCol = 
 
     ; default zoom for image files. valid values: fit page, fit width, fit
-    ; height, fit content, shrink to fit or percent like 100% (introduced in
-    ; version 3.7)
+    ; height, fit content, fit visible, shrink to fit or percent like 100%
+    ; (introduced in version 3.7)
     DefaultZoom = shrink to fit
 
     ; if true, absolute zoom never makes a page wider than the window (each page
@@ -729,8 +757,8 @@ CodexBuild [
 
 ; settings for the Antigravity chat sidebar (introduced in version 3.7)
 AntiGravity [
-    ; Antigravity model ID for --model (e.g. gemini-3.6-flash)
-    Model = gemini-3.6-flash
+    ; Antigravity model ID for --model (e.g. gemini-3.8-flash-medium)
+    Model = gemini-3.8-flash-medium
 
     ; extra Antigravity model IDs for the dropdown, comma-separated
     Models = 
@@ -929,6 +957,11 @@ PrinterDefaults [
     ; default value for collate in the print dialog (default, collate,
     ; nocollate) (introduced in version 3.7)
     Collate = default
+
+    ; resolution to assume for the document when printing at original size (e.g.
+    ; 300 for a 300 dpi scan whose file doesn't say); 0 uses the resolution
+    ; recorded in the file (introduced in version 3.7)
+    PrintDpi = 0
 ]
 
 ; options for fullscreen mode (introduced in version 3.7)
@@ -1153,7 +1186,8 @@ SearchUIWindowPos = 0 0 0 0
 ; position/size of the in-app Help: Manual window (introduced in version 3.7)
 HelpWindowPos = 0 0 0 0
 
-; information about opened files (in most recently used order)
+; history of opened files, most recently used first. A closed file stays here
+; until it drops off the list or the history is cleared
 FileStates [
   [
     ; pages of this document bookmarked in the Favorites menu
@@ -1235,7 +1269,7 @@ FileStates [
     DisplayMode = automatic
 
     ; zoom (in %) or one of those values: fit page, fit width, fit height, fit
-    ; content
+    ; content, fit visible
     Zoom = fit page
 
     ; if given, overrides the background color for this document (introduced in
@@ -1300,11 +1334,15 @@ FileStates [
     ; if true, empty margins around page content are trimmed from display
     ; (introduced in version 3.7)
     TrimEmptyMargins = false
+
+    ; if true, the view can be panned past the page edges, so any part of a page
+    ; can be brought to the center of the window (introduced in version 3.7)
+    FreePan = false
   ]
 ]
 
-; state of the last session, usage depends on RestoreSession (introduced in
-; version 3.1)
+; windows and tabs still open when SumatraPDF was last closed; reopened at
+; startup if RestoreSession is true (introduced in version 3.1)
 SessionData [
   [
     ; data required for restoring the view state of a single tab
@@ -1322,7 +1360,7 @@ SessionData [
         PageNo = 1
 
         ; zoom (in %) or one of those values: fit page, fit width, fit height,
-        ; fit content
+        ; fit content, fit visible
         Zoom = fit page
 
         ; how far pages have been rotated as a multiple of 90 degrees

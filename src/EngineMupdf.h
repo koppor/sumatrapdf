@@ -112,6 +112,7 @@ class EngineMupdf : public EngineBase {
     bool HasToc() override;
     TocTree* GetToc() override;
     int LayOutChapter(int chapter) override;
+    void WarmChapter(int chapter) override;
     Location ResolveDest(IPageDestination* dest) override;
     TocTree* BuildToc();
     void StartHeadingTocIfNeeded();
@@ -285,15 +286,13 @@ void MarkNotificationAsModified(EngineMupdf*, Annotation*);
 void MarkNotificationAsModified(EngineMupdf*, Annotation*, AnnotationChange);
 Annotation* MakeAnnotationWrapper(EngineMupdf* engine, pdf_annot* annot, int pageNo);
 int EngineMupdfUndoPos(EngineMupdf* e, int* stepsOut);
-void EngineMupdfBeginOperation(EngineBase*, const char* name);
-void EngineMupdfEndOperation(EngineBase*);
 
 // Everything changed while this is alive becomes one undo step. Use it for a
 // gesture that makes several changes (creating an annotation sets its geometry,
 // colors and contents; a resize drag writes on every mouse move).
-struct ScopedEngineOperation {
+struct AutoEndEngineOperation {
     EngineBase* engine = nullptr;
 
-    ScopedEngineOperation(EngineBase* e, const char* name) : engine(e) { EngineMupdfBeginOperation(e, name); }
-    ~ScopedEngineOperation() { EngineMupdfEndOperation(engine); }
+    AutoEndEngineOperation(EngineBase* e, const char* name);
+    ~AutoEndEngineOperation();
 };

@@ -50,40 +50,42 @@ struct Pixmap {
     float yres = 96.0f;
     u8* data = nullptr; // pixel buffer; owned by malloc, or by hbmp when DIB-section-backed
 
-#if OS_WIN
     // When non-null, the Pixmap is backed by a GDI DIB section: `data` is its pixels and
     // the bitmap is directly blittable (BlitPixmap). Owns these handles.
     HBITMAP hbmp = nullptr;
     HANDLE hMap = nullptr; // optional file mapping backing hbmp
-#endif
 };
 
 Str PixmapToBmpFormat(const Pixmap* pixmap);
 Pixmap* GetClipboardImageAsPixmap();
 
-#if OS_WIN
 struct RenderedBitmap;
 
 // DIB-section-backed 32bpp BGRA8. Use only when this pixmap must be SelectObject'd
-// or must adopt a GDI HBITMAP / Native DIB. Heap pixels blit via StretchDIBits
-// with no extra copy (BlitPixmap / BlitPixmapAlpha).
+// or must adopt a GDI HBITMAP / Native DIB. Heap pixels blit via SetDIBitsToDevice
+// (1:1) or StretchDIBits (BlitPixmap / BlitPixmapAlpha).
 Pixmap* AllocPixmapDIB(int w, int h);
 Pixmap* PixmapFromHICON(HICON);
 bool BlitPixmap(Pixmap* p, HDC hdc, Rect target);
 bool BlitPixmapAlpha(Pixmap* p, HDC hdc, Rect target);
 bool BlitPixmapRegion(Pixmap* p, HDC hdc, Rect target, Rect source);
+bool BlitPixmapDibBits(const Pixmap* p, HDC hdc, Rect target, Rect source);
 Pixmap* PixmapFromHBITMAP(HBITMAP hbmp, Size size, HANDLE hMap = nullptr);
 // an opaque 32bpp copy of a DIB-backed Pixmap, for code that needs to read pixels
 // out of one whose format is Native. Returns null if there's nothing to copy
 Pixmap* PixmapCopyAs32bppDIB(const Pixmap* p);
+Pixmap* PixmapToBgra(Pixmap* p);
 Pixmap* PixmapFromRenderedBitmap(RenderedBitmap* rb);
 RenderedBitmap* RenderedBitmapFromPixmap(Pixmap* px);
 void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor = 0, Vec<Rect>* skipRects = nullptr);
 
 void FreePixmapNativeBitmap(Pixmap* p);
-#endif
 
+// 0 for Native: those pixels can only be read through GDI
 inline int PixmapBytesPerPixel(PixmapFormat fmt) {
+    if (fmt == PixmapFormat::Native) {
+        return 0;
+    }
     return fmt == PixmapFormat::BGR8 ? 3 : 4;
 }
 
@@ -100,6 +102,9 @@ inline Pixmap* AllocPixmap(int w, int h, PixmapFormat fmt = PixmapFormat::BGRA8,
         return nullptr;
     }
     size_t bpp = (size_t)PixmapBytesPerPixel(fmt);
+    if (bpp == 0) {
+        return nullptr;
+    }
     size_t stride = (((size_t)w * bpp) + 3) & ~(size_t)3;
     size_t nBytes = stride * (size_t)h;
     // guard against overflow on absurd dimensions
@@ -120,24 +125,15 @@ inline Pixmap* AllocPixmap(int w, int h, PixmapFormat fmt = PixmapFormat::BGRA8,
     return p;
 }
 
-#if !OS_WIN
-// No GDI DIB section off Windows; same heap buffer as AllocPixmap.
-inline Pixmap* AllocPixmapDIB(int w, int h) {
-    return AllocPixmap(w, h);
-}
-#endif
-
 inline void FreePixmap(Pixmap* p) {
     if (!p) {
         return;
     }
-#if OS_WIN
     if (p->hbmp) {
         FreePixmapNativeBitmap(p);
         delete p;
         return;
     }
-#endif
     free(p->data);
     delete p;
 }

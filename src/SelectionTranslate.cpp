@@ -3,7 +3,7 @@
 
 #include "base/Base.h"
 #include "base/CmdLineArgs.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/UITask.h"
 #include "base/Win.h"
 #include "base/Http.h"
@@ -405,10 +405,10 @@ static TempStr FormatTranslationErrorForDisplayTemp(AIChatBackend backend, Str r
                    "then try again."));
         }
         if (backend == AIChatBackend::Grok) {
-            return str::DupTemp(Tr("Grok Build is not signed in. Sign in to Grok Build, then try again."));
+            return str::DupTemp(Tr("Grok Build is not signed in."));
         }
         if (backend == AIChatBackend::Codex) {
-            return str::DupTemp(Tr("OpenAI Codex is not signed in. Sign in to Codex, then try again."));
+            return str::DupTemp(Tr("OpenAI Codex is not signed in."));
         }
         if (backend == AIChatBackend::AntiGravity) {
             return str::DupTemp(Tr(
@@ -655,7 +655,7 @@ static TempStr BuildCodexTranslateCmdLineTemp(Str exePath, Str prompt, Str cwd) 
 static TempStr BuildAntiGravityTranslateCmdLineTemp(Str exePath, Str prompt) {
     Str model = gSettings->antiGravity.model;
     if (str::IsEmptyOrWhiteSpace(model)) {
-        model = StrL("gemini-3.6-flash");
+        model = Str(kAntiGravityDefaultModel);
     }
     // agy takes -p/--print's next argument as the prompt and ignores flags
     // after it (see AIAntiGravity.cpp). Putting -p first made the prompt
@@ -865,7 +865,7 @@ static bool RunTranslation(AIChatBackend backend, Str srcLang, Str dstLang, Str 
     }
 
     str::Builder output;
-    str::BuilderReserve(output, 4096);
+    output.Reserve(4096);
     ReadPipeToStrBuilder(launch.hReadPipe, output);
     CloseHandle(launch.hReadPipe);
     launch.hReadPipe = nullptr;
@@ -883,7 +883,7 @@ static bool RunTranslation(AIChatBackend backend, Str srcLang, Str dstLang, Str 
     LogTranslation(backend, StrL("<<< raw"), ToStr(output));
 
     str::Builder translation;
-    str::BuilderReserve(translation, 1024);
+    translation.Reserve(1024);
     ParseTranslationOutput(backend, ToStr(output), translation);
     LogTranslation(backend, StrL("<<< parsed"), ToStr(translation));
     if (len(translation) == 0) {

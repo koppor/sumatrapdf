@@ -60,7 +60,6 @@ Click a selected shape annotation (including polygon, polyline, and ink) and dra
 
 To put a picture of your signature (or any other image) on a PDF page:
 
-- **File → Insert Image...**, or
 - right-click the page → **Document → Insert Image...**, or
 - right-click the page → **Create annotation under cursor → Image From File...**
 
@@ -72,7 +71,7 @@ Pick a PNG (or JPEG, etc.). The image is stamped on the page and you can drag or
 
 The **Highlighter** is a marker pen: drag on the page and it paints a wide translucent stroke wherever the mouse goes, over pictures and blank areas as well as text. The selection-based **Highlight** (`a`) still needs text to attach to.
 
-Start it from the **Annotations** toolbar, from the command palette, or with right-click → **Create annotation under cursor → Highlighter**. Drag to paint, release the mouse or pen to finish, `Esc` to cancel. Closing the hint at the bottom of the window also finishes polyline. The stroke keeps a constant on-screen width while you draw, whatever the zoom.
+Start it from the **Annotations** toolbar, with `Ctrl + K`, `Highlighter` command in [Command Palette](Command-Palette.md), or with right-click → **Create annotation under cursor → Highlighter**. Drag to paint, release the mouse or pen to finish, `Esc` to cancel. Closing the hint at the bottom of the window also finishes polyline. The stroke keeps a constant on-screen width while you draw, whatever the zoom.
 
 **Ink** is the same on a tablet: release commits that stroke and the tool stays selected so you can draw another. `Esc` or closing the hint leaves the tool.
 
@@ -104,7 +103,7 @@ To move an annotation on the page, left-click it and drag it in Edit PDF mode.
 
 ## Default colors, size, and opacity
 
-Open **Settings → Advanced Options...** and edit the `Annotations` block:
+Open **Settings → Advanced Settings...** and edit the `Annotations.*` settings (or the `Annotations` block in the settings file, via **Open Advanced Settings File...**):
 
 | Setting                                     | Used for                                       |
 | ------------------------------------------- | ---------------------------------------------- |
@@ -123,7 +122,7 @@ Highlight, underline, squiggly and strike-out colors accept `#aarrggbb` so you c
 
 Free-text opacity is the separate `FreeTextOpacity` percent (0–100).
 
-See [Advanced options / settings](Advanced-options-settings.md) for the full list.
+See [Advanced settings](Advanced-options-settings.md) for the full list.
 
 ### Keyboard shortcuts with custom colors
 
@@ -135,12 +134,12 @@ Add annotation commands to the toolbar via the `Shortcuts` array — see [Custom
 
 ## Saving workflow
 
-| Action                   | Shortcut / command                                                                                                     |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| Save annotations to file | `Ctrl + Shift + S` (`CmdSaveAnnotations`), or the save button at the end of the Edit PDF toolbar                       |
-| Save to a new PDF        | `CmdSaveAnnotationsNewFile` (tab context menu, command palette, or the last button of the Edit PDF toolbar)            |
-| Discard unsaved changes  | `CmdDiscardChanges` (tab context menu **Discard changes**, or `Ctrl + K` command palette) — reloads the file from disk |
-| Save when closing        | Prompt dialog — choose existing file, new file, or discard                                                             |
+| Action                   | Shortcut / command                                                                                                                                                         |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Save annotations to file | `Ctrl + Shift + S` (`CmdSaveAnnotations`), or the save button at the end of the Edit PDF toolbar                                                                           |
+| Save to a new PDF        | `CmdSaveAnnotationsNewFile` (tab context menu, command palette, or the last button of the Edit PDF toolbar)                                                                |
+| Discard unsaved changes  | `CmdDiscardChanges` (tab context menu **Discard changes**, or `Ctrl + K`, `Discard Changes` command in [Command Palette](Command-Palette.md)) — reloads the file from disk |
+| Save when closing        | Prompt dialog — choose existing file, new file, or discard                                                                                                                 |
 
 `Ctrl + Z` undoes the last change and `Ctrl + Shift + Z` redoes it (see **Undo and redo** above). Delete an annotation with `Delete` when it is selected, or with **Delete Annotation** in the floating list.
 

@@ -910,7 +910,7 @@ static Pixmap* PixmapFromAnnotIconFz(fz_pixmap* src) {
     int srcAlpha = src->alpha;
     for (int y = 0; y < src->h; y++) {
         u8* s = src->samples + (src->stride * y);
-        u8* d = px->data + (px->stride * y);
+        u8* d = px->data + ((ptrdiff_t)px->stride * y);
         for (int x = 0; x < src->w; x++) {
             d[0] = s[2];
             d[1] = s[1];
@@ -1256,7 +1256,7 @@ static HBITMAP CreateMenuGlyphBitmap(int dx, int dy, PopupGlyphKind glyph, Str i
                 if (dyOut < 0 || dyOut >= dy) {
                     continue;
                 }
-                u8* s = src->data + (y * src->stride);
+                u8* s = src->data + ((ptrdiff_t)y * src->stride);
                 for (int x = 0; x < src->width; x++) {
                     int dxOut = x + ox;
                     if (dxOut < 0 || dxOut >= dx) {
@@ -1385,7 +1385,7 @@ static bool ChooseSystemFont(HWND hwnd, Str& family, int& style) {
 
 // a font other than the base 14 is embedded in the PDF
 static bool ConfirmFontEmbedding(HWND hwnd) {
-    Str msg = Tr("This font will be embedded in the PDF, which can add hundreds of kilobytes or more to its size.");
+    Str msg = Tr("Embedding this font can add hundreds of kilobytes to the PDF.");
     int res = MessageBoxW(hwnd, ToWStrTemp(msg).s, ToWStrTemp(Tr("Embed Font")).s, MB_OKCANCEL | MB_ICONWARNING);
     return res == IDOK;
 }
@@ -1463,6 +1463,8 @@ static void ChipColorPicked(AnnotEditToolbar* tb, Color col) {
     PdfColor pdfCol = isNone ? 0 : WinToPdfColor(col);
     u8 opacity = isNone ? 0 : PdfColorAlpha(pdfCol);
     bool setsOpacity = !isNone && AnnotationSupportsOpacity(type);
+    // a color and its opacity: one undo step
+    AutoEndEngineOperation op(annot->engine, "Set color");
     switch (tb->colorPickKind) {
         case AnnotEditKind::Color:
             // SetColor() takes the opacity from the color's alpha
@@ -1658,7 +1660,7 @@ static void OnChipClick(AnnotEditChip* chip, VirtMouseEvent*) {
             }
             WCHAR pathW[MAX_PATH + 1]{};
             str::Builder fileFilter;
-            str::BuilderReserve(fileFilter, 256);
+            fileFilter.Reserve(256);
             fileFilter.Append(Tr("All files"));
             fileFilter.Append(StrL("\1*.*\1"));
             Str fileFilterStr = ToStr(fileFilter);
@@ -2432,6 +2434,8 @@ void EndFreeTextInPlaceEdit(bool accept) {
         HwndSetFocus(win->hwndCanvas);
     }
     if (accept && AnnotationIsLive(annot)) {
+        // the box may be enlarged and the text set: one undo step
+        AutoEndEngineOperation op(annot->engine, "Edit text");
         DisplayModel* dm = winOk ? win->AsFixed() : nullptr;
         int pageNo = PageNo(annot);
         if (dm && dm->ValidPageNo(pageNo)) {

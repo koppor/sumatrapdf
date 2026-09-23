@@ -3,10 +3,9 @@
 
 #include "base/Base.h"
 
-#if OS_WIN
 #include "base/GdiPlusUtil.h"
 #include "base/Pixmap.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/Win.h"
 
 #include "gui/UIModels.h"
@@ -63,8 +62,8 @@ void GfxHdc::DrawDashedRect(const Rect& r, Color col) {
         return;
     }
     AutoDeletePen pen(CreatePen(PS_DASH, 1, col));
-    ScopedSelectObject restorePen(hdc, pen);
-    ScopedSelectObject restoreBrush(hdc, GetStockObject(HOLLOW_BRUSH));
+    AutoRestoreGdiObject restorePen(hdc, pen);
+    AutoRestoreGdiObject restoreBrush(hdc, GetStockObject(HOLLOW_BRUSH));
     Rectangle(hdc, r.x, r.y, r.Right() + 1, r.Bottom() + 1);
 }
 
@@ -136,7 +135,7 @@ void GfxHdc::FillQuads(const Point* pts, int nQuads, Color col, u8 alpha, int ou
     GdiplusOnHdc gh(hdc);
     Gdiplus::GraphicsPath path(Gdiplus::FillModeWinding);
     for (int i = 0; i < nQuads; i++) {
-        const Point* p = pts + (i * 4);
+        const Point* p = pts + ((ptrdiff_t)i * 4);
         Gdiplus::Point gp[4] = {{p[0].x, p[0].y}, {p[1].x, p[1].y}, {p[2].x, p[2].y}, {p[3].x, p[3].y}};
         path.AddPolygon(gp, 4);
     }
@@ -259,13 +258,13 @@ static uint ToDrawTextFormat(u32 flags) {
 
 // sets the color / background mode DrawText needs and puts back what it found,
 // so a caller that paints many items into one DC doesn't have to
-struct ScopedTextState {
+struct AutoRestoreTextState {
     HDC hdc;
     Color prevCol = kColorUnset;
     int prevBkMode = 0;
     bool setCol = false;
 
-    ScopedTextState(HDC hdc, Color col) {
+    AutoRestoreTextState(HDC hdc, Color col) {
         this->hdc = hdc;
         setCol = (col != kColorUnset);
         if (setCol) {
@@ -273,7 +272,7 @@ struct ScopedTextState {
         }
         prevBkMode = SetBkMode(hdc, TRANSPARENT);
     }
-    ~ScopedTextState() {
+    ~AutoRestoreTextState() {
         if (setCol) {
             SetTextColor(hdc, prevCol);
         }
@@ -287,7 +286,7 @@ void GfxHdc::DrawText(Str s, const Rect& r, u32 flags, PlatformFont* font, Color
     if (r.IsEmpty() || len(s) == 0) {
         return;
     }
-    ScopedTextState st(hdc, col);
+    AutoRestoreTextState st(hdc, col);
     HdcDrawText(hdc, s, r, ToDrawTextFormat(flags), font ? font->GetHFont() : nullptr);
 }
 
@@ -295,7 +294,7 @@ void GfxHdc::DrawTextAt(Str s, Point pos, u32 flags, PlatformFont* font, Color c
     if (len(s) == 0) {
         return;
     }
-    ScopedTextState st(hdc, col);
+    AutoRestoreTextState st(hdc, col);
     HdcDrawText(hdc, s, pos, ToDrawTextFormat(flags), font ? font->GetHFont() : nullptr);
 }
 
@@ -308,7 +307,7 @@ Size GfxHdc::MeasureText(Str s, PlatformFont* font) {
         // no font given: measure with whatever the surface has selected
         return HdcGetTextExtentPoint32(hdc, s);
     }
-    ScopedSelectFont prev(hdc, hf);
+    AutoRestoreFont prev(hdc, hf);
     return HdcGetTextExtentPoint32(hdc, s);
 }
 
@@ -474,5 +473,3 @@ Gfx* GfxCreateWithDoubleBuffer(HwndBase* w, HDC hdc) {
     w->gfxDoubleBufferDy = b.dy;
     return gfx;
 }
-
-#endif

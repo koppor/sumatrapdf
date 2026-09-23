@@ -4,10 +4,7 @@
 #include "base/Base.h"
 #include "gui/Dpi.h"
 
-#if OS_WIN
 #include "base/Win.h"
-
-#endif
 
 #include "gui/Layout.h"
 
@@ -35,7 +32,7 @@ void LogConstraints(Constraints c, Str suffix) {
     // Debug-only; "dx: Inf - Inf dy: Inf - Inf <suffix>" is tiny.
     char sScratch[128]{};
     str::Builder s;
-    str::BuilderUseExternalBuffer(s, Str(sScratch, sizeofi(sScratch)));
+    s.UseExternalBuffer(Str(sScratch, sizeofi(sScratch)));
     if (c.min.dx == c.max.dx) {
         dbglayout(StrL("dx: "));
         LogAppendNum(s, c.min.dx, StrL(" "));
@@ -1820,8 +1817,6 @@ void Wrap::SetBounds(Rect bounds) {
     }
 }
 
-#if OS_WIN
-
 void LayoutAndSizeToContent(ILayout* layout, int minDx, int minDy, HWND hwnd) {
     DpiSetFromHwnd(hwnd);
     dbglayout(fmt("\nLayoutAndSizeToContent() %d,%d\n", minDx, minDy));
@@ -1885,5 +1880,3 @@ void HwndSlot::SetBounds(Rect bounds) {
     }
     HwndMoveWindow(hwnd, &bounds);
 }
-
-#endif

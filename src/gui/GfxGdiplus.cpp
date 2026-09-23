@@ -17,10 +17,9 @@
 
 #include "base/Base.h"
 
-#if OS_WIN
 #include "base/GdiPlusUtil.h"
 #include "base/Pixmap.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 
 #include "gui/PlatformFont.h"
 #include "gui/Gfx.h"
@@ -96,7 +95,7 @@ void GfxGdiplus::FillQuads(const Point* pts, int nQuads, Color col, u8 alpha, in
     }
     GraphicsPath path(Gdiplus::FillModeWinding);
     for (int i = 0; i < nQuads; i++) {
-        const Point* p = pts + (i * 4);
+        const Point* p = pts + ((ptrdiff_t)i * 4);
         Gdiplus::Point gp[4] = {{p[0].x, p[0].y}, {p[1].x, p[1].y}, {p[2].x, p[2].y}, {p[3].x, p[3].y}};
         path.AddPolygon(gp, 4);
     }
@@ -401,5 +400,3 @@ void GfxGdiplus::PopClip() {
 bool GfxGdiplus::SetMirrored(bool) {
     return false;
 }
-
-#endif

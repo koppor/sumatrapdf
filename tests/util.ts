@@ -10,12 +10,14 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { inflateSync } from "node:zlib";
 import { ensureModifierKeysUp, enumWindows, getWindowPid, getWindowText, hasInteractiveDesktop } from "./winapi.ts";
 
 export const ROOT = join(import.meta.dir, "..");
@@ -65,6 +67,8 @@ const SOURCE_EXE = EXE_FROM_ARGV || process.env.SUMATRA_TEST_EXE || join(ROOT, "
 // every test run. This prevents a manual run, or an earlier test that saves
 // settings, from changing the starting state of later tests.
 export const TESTS_TMP_DIR = join(ROOT, ".work", "tests-tmp");
+// scratch files of tests (see tmpPath())
+export const TMP_DIR = join(TESTS_TMP_DIR, "tmp");
 export let EXE = SOURCE_EXE;
 
 export function prepareTestEnvironment(): void {
@@ -75,7 +79,8 @@ export function prepareTestEnvironment(): void {
     throw new Error(`test executable PDB not found: ${sourcePdb}`);
   }
   rmSync(TESTS_TMP_DIR, { recursive: true, force: true });
-  mkdirSync(TESTS_TMP_DIR, { recursive: true });
+  // a test may have resolved a tmpPath() at import, before this wipe
+  mkdirSync(TMP_DIR, { recursive: true });
   const testExe = join(TESTS_TMP_DIR, exeName);
   copyFileSync(sourceExe, testExe);
   copyFileSync(sourcePdb, join(TESTS_TMP_DIR, sourcePdb.split("\\").pop()!));
@@ -90,6 +95,34 @@ export function prepareTestEnvironment(): void {
 // same but its path no longer says asan
 export const IS_ASAN = /asan/i.test(EXE);
 export const SLOW_BUILD_FACTOR = IS_ASAN ? 4 : 1;
+
+export function isClosedPipeError(e: unknown): boolean {
+  const err = e as { code?: string; message?: string };
+  return /EPIPE|ECONNRESET|ERR_SOCKET_CLOSED|broken pipe/i.test(`${err?.code ?? ""} ${err?.message ?? e}`);
+}
+
+export function drainProcStderr(stderr: Bun.Subprocess["stderr"]): Promise<string> {
+  if (!stderr) {
+    return Promise.resolve("");
+  }
+  const stream = stderr as unknown as { on?: (ev: string, fn: (e: Error) => void) => void };
+  stream.on?.("error", () => {});
+  return new Response(stderr).text().catch((e: unknown) => {
+    if (isClosedPipeError(e)) {
+      return "";
+    }
+    throw e;
+  });
+}
+
+// Quit / kill closing a control pipe or stderr can reject after the test has
+// already passed; Bun would print EPIPE into the next test's progress line
+process.on("unhandledRejection", (reason) => {
+  if (isClosedPipeError(reason)) {
+    return;
+  }
+  console.error("unhandledRejection:", reason);
+});
 
 // Extract page text via the debug -extract-text harness (hex-encoded UTF-8).
 // The GUI exe's stdout often does not reach a Bun pipe on Windows; PowerShell
@@ -305,11 +338,39 @@ export function requireDpiShrank(name: string, high: number, low: number): void 
 // TESTS_TMP_DIR so explicit -appdata directories are isolated from the user's
 // settings and from the executable used by the test. Use tmpPath() to get a
 // path inside it (dir created on demand).
-export const TMP_DIR = join(TESTS_TMP_DIR, "tmp");
-
 export function tmpPath(name: string): string {
   mkdirSync(TMP_DIR, { recursive: true });
   return join(TMP_DIR, name);
+}
+
+// path of an installed Ghostscript console exe, "" when none
+export function findGhostscript(): string {
+  for (const base of ["C:\\Program Files\\gs", "C:\\Program Files (x86)\\gs"]) {
+    if (!existsSync(base)) {
+      continue;
+    }
+    for (const ver of readdirSync(base)) {
+      for (const exe of ["gswin64c.exe", "gswin32c.exe"]) {
+        const path = join(base, ver, "bin", exe);
+        if (existsSync(path)) {
+          return path;
+        }
+      }
+    }
+  }
+  return "";
+}
+
+// convert a PDF to PostScript with Ghostscript
+export async function pdfToPs(gs: string, src: string, dst: string): Promise<void> {
+  const proc = Bun.spawn([gs, "-q", "-dNOPAUSE", "-dBATCH", "-sDEVICE=ps2write", `-sOutputFile=${dst}`, src], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const code = await proc.exited;
+  if (code !== 0 || !existsSync(dst)) {
+    throw new Error(`ghostscript could not make ${dst} (exit ${code})`);
+  }
 }
 
 // format a duration in ms for test output (e.g. 34.3ms, 2.3s, 3m 2.3s)
@@ -553,4 +614,82 @@ export async function runStandalone(testit: () => void | Promise<void>, name?: s
     process.exit(1);
   }
   process.exit(0);
+}
+
+export type PngImage = { w: number; h: number; nComp: number; data: Uint8Array };
+
+function paethPredictor(a: number, b: number, c: number): number {
+  const p = a + b - c;
+  const pa = Math.abs(p - a);
+  const pb = Math.abs(p - b);
+  const pc = Math.abs(p - c);
+  if (pa <= pb && pa <= pc) {
+    return a;
+  }
+  return pb <= pc ? b : c;
+}
+
+// Minimal PNG reader: 8-bit RGB or RGBA, no interlace (what the app and
+// captureWindowToPng write).
+export function loadPng(path: string): PngImage {
+  const buf = readFileSync(path);
+  let off = 8;
+  let w = 0;
+  let h = 0;
+  let colorType = 0;
+  const idat: Buffer[] = [];
+  while (off + 8 <= buf.length) {
+    const n = buf.readUInt32BE(off);
+    const type = buf.toString("latin1", off + 4, off + 8);
+    const data = buf.subarray(off + 8, off + 8 + n);
+    if (type === "IHDR") {
+      w = data.readUInt32BE(0);
+      h = data.readUInt32BE(4);
+      colorType = data[9]!;
+    } else if (type === "IDAT") {
+      idat.push(data);
+    } else if (type === "IEND") {
+      break;
+    }
+    off += 12 + n;
+  }
+  const nComp = colorType === 6 ? 4 : colorType === 2 ? 3 : 0;
+  if (!nComp || w <= 0 || h <= 0) {
+    throw new Error(`loadPng: unsupported png ${path} ct=${colorType} ${w}x${h}`);
+  }
+  const raw = inflateSync(Buffer.concat(idat));
+  const stride = w * nComp;
+  const data = new Uint8Array(h * stride);
+  let src = 0;
+  for (let y = 0; y < h; y++) {
+    const filter = raw[src++]!;
+    const row = y * stride;
+    const prev = (y - 1) * stride;
+    for (let x = 0; x < stride; x++) {
+      const left = x >= nComp ? data[row + x - nComp]! : 0;
+      const up = y > 0 ? data[prev + x]! : 0;
+      const ul = y > 0 && x >= nComp ? data[prev + x - nComp]! : 0;
+      const v = raw[src++]!;
+      let recon = v;
+      if (filter === 1) {
+        recon = (v + left) & 255;
+      } else if (filter === 2) {
+        recon = (v + up) & 255;
+      } else if (filter === 3) {
+        recon = (v + ((left + up) >> 1)) & 255;
+      } else if (filter === 4) {
+        recon = (v + paethPredictor(left, up, ul)) & 255;
+      } else if (filter !== 0) {
+        throw new Error(`loadPng: png filter ${filter}`);
+      }
+      data[row + x] = recon;
+    }
+  }
+  return { w, h, nComp, data };
+}
+
+// [r, g, b] of one pixel
+export function pngPixel(img: PngImage, x: number, y: number): [number, number, number] {
+  const i = (y * img.w + x) * img.nComp;
+  return [img.data[i]!, img.data[i + 1]!, img.data[i + 2]!];
 }

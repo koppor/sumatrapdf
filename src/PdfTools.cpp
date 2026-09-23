@@ -1886,7 +1886,7 @@ void ShowConvertPdfToImagesDialog(MainWindow* win) {
 
 // rectangular selection → PNG / JPEG / BMP at a chosen DPI, independent of
 // the current zoom (issue #6127)
-constexpr i64 kMaxSaveSelectionPixels = 100 * 1000 * 1000;
+constexpr i64 kMaxSaveSelectionPixels = 100LL * 1000 * 1000;
 constexpr int kMaxSaveSelectionSide = 16384;
 constexpr int kSaveSelectionDefaultDpi = 300;
 
@@ -1944,12 +1944,7 @@ static Pixmap* RenderSelectionPixmap(EngineBase* engine, int rotation, int pageN
     }
     px->xres = dpi;
     px->yres = dpi;
-    if (px->format != PixmapFormat::Native) {
-        return px;
-    }
-    Pixmap* converted = PixmapCopyAs32bppDIB(px);
-    FreePixmap(px);
-    return converted;
+    return PixmapToBgra(px);
 }
 
 static bool WriteSelectionPixmap(Pixmap* px, Str destPath) {
@@ -1958,14 +1953,15 @@ static bool WriteSelectionPixmap(Pixmap* px, Str destPath) {
     }
     bool ok = false;
     if (str::EndsWithI(destPath, StrL(".png"))) {
-        // lodepng has no pHYs, so EngineImages displays 1:1. Encode+zopfli
-        // here so the file is final before we open it (GDI+ then async zopfli
-        // used to open a tiny pHYs page, then reload after rewrite).
-        Str png = EncodeAndOptimizePngFromPixmap(px);
+        // lodepng (no pHYs, so EngineImages displays 1:1) now, zopfli in the
+        // background: a 300 dpi page takes it many seconds
+        Str png = EncodePngFromPixmap(px);
         ok = len(png) > 0 && file::WriteFile(destPath, png);
         str::Free(png);
         if (!ok) {
             file::Delete(destPath);
+        } else {
+            OptimizePngFileAsync(destPath);
         }
     } else {
         ok = SavePixmapAsImageFile(px, destPath);

@@ -3,9 +3,7 @@
 
 #include "base/Base.h"
 
-#if OS_WIN
 #include "base/File.h"
-#endif
 
 #include "base/CmdLineArgs.h"
 
@@ -16,7 +14,7 @@ TempStr QuoteCmdLineArgTemp(Str arg) {
 
     char resScratch[1024]{};
     str::Builder res;
-    str::BuilderUseExternalBuffer(res, Str(resScratch, sizeof(resScratch)));
+    res.UseExternalBuffer(Str(resScratch, sizeof(resScratch)));
     res.AppendChar('"');
     int n = arg.len;
     int i = 0;
@@ -58,8 +56,6 @@ bool CouldBeArg(Str s) {
     return (c == '-') || (c == '/');
 }
 
-#if OS_WIN
-
 StrNode* ParseCmdLine(WStr cmdLine) {
     StrNode* root = nullptr;
     StrNode* tail = nullptr;
@@ -86,5 +82,3 @@ StrNode* ParseCmdLine(Str cmdLine) {
     TempWStr s = ToWStrTemp(cmdLine);
     return ParseCmdLine(s);
 }
-
-#endif

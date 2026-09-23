@@ -26,13 +26,14 @@ CmdNewWindow,Ctrl + N,Open New SumatraPDF Window,
 CmdOpenFile,Ctrl + O,Open File...,"uses the Windows file picker or Navigate Files in Folder according to the `FilePicker` advanced setting (empty/os = Windows, sumatrapdf = in-app), ver 3.7+"
 CmdOpenFileNoHistory,,Open File Without History...,"same picker as Open File, but the document is not added to File History or Windows Recent Documents (fixes #6121), ver 3.7+"
 CmdOpenFileWithOSFilePicker,,Open File With Windows File Picker...,"always the standard Windows multi-select file open dialog, ver 3.7+"
-CmdToggleFilePicker,,SumatraPDF File Picker,"checkbox under File and Settings; toggles `FilePicker` empty/os ↔ sumatrapdf, ver 3.7+"
+CmdOpenFileWithSumatraFilePicker,,Open File With SumatraPDF File Picker...,"always the in-app Navigate Files in Folder window, ver 3.7+"
+CmdToggleFilePicker,,SumatraPDF File Picker,"checkbox under File / Open; toggles `FilePicker` empty/os ↔ sumatrapdf, ver 3.7+"
 CmdToggleBoolSetting,,Toggle Boolean Setting,"in the Command Palette, lists boolean advanced settings; Enter or a click toggles one and closes. Custom shortcuts: `CmdToggleBoolSetting <SettingName>` (case-insensitive leaf or dotted path), e.g. `Fullscreen.ShowMenubar` (fixes #5912), ver 3.7+"
 CmdFixDefaultApp,,Fix Default App For Extension,"`CmdFixDefaultApp .pdf` opens the OS dialog to set the default app for that extension; used by the home-page bottom bar when Sumatra is no longer the default, ver 3.7+"
 CmdFileHistory,,Open Recent File,"`CmdFileHistory <path>` opens that file; used for the recent files listed in the File menu, each of which carries its own path, ver 3.7+"
 CmdFavorite,,Go to Favorite,"`CmdFavorite <path> page=<page>` goes to that favorite; used for the favorites listed in the Favorites menu, each of which carries its own file path and page, ver 3.7+"
 CmdOpenNextFileInFolder,Shift + Ctrl + Right,Open Next File In Folder,
-CmdNavigateFilesInFolder,Shift + Ctrl + Up,Navigate Files in Folder,"directory browser for openable files in the current file's folder (stays open; Enter/double-click replaces the current tab, Ctrl+Enter/Ctrl+double-click switches to the tab already showing the file or opens a new tab, Alt+Up goes to the parent directory, Del moves the selected file to the recycle bin, F5 re-reads the directory); also used when `FilePicker = sumatrapdf`, ver 3.7+"
+CmdNavigateFilesInFolder,Shift + Ctrl + Up,Navigate Files in Folder,"directory browser for openable files in the current file's folder (stays open; Enter/double-click replaces the current tab, Ctrl+Enter/Ctrl+double-click switches to the tab already showing the file or opens a new tab, Alt+Up or Backspace goes to the parent directory (from a drive root: to Home), Alt+Left and Alt+Right go back and forward through the folders visited, Home lists drives and Explorer's Quick access, the search field (Ctrl+F, or just start typing) filters the list the way the command palette matches, clicking the folder path edits it in place (Enter goes to that directory or to a file's directory with the file selected, Esc or an invalid path restores it), Del moves the selected file to the recycle bin, F5 re-reads the directory); also used when `FilePicker = sumatrapdf`; also listed in the command palette as `Browse Files In Folder...`, ver 3.7+"
 CmdOpenPrevFileInFolder,Shift + Ctrl + Left,Open Previous File In Folder,
 CmdOpenSelectedDocument,,Open Selected Document,
 CmdPinSelectedDocument,,Pin Selected Document,
@@ -49,6 +50,7 @@ CmdToggleTableOfContents,,Toggle Table Of Contents,ver 3.6+
 CmdCollapseAll,,Collapse All,"Bookmarks: collapse the outline; if there is only one top-level entry with children, expand it one level (Word-style TOC), ver 3.7+"
 CmdExpandAll,,Expand All,
 CmdExpandToCurrentPage,,Expand TOC to Current Page,"In the Bookmarks (table of contents) sidebar, expand the tree down to the entry for the current page and select it, ver 3.7+"
+CmdAutoGenerateTOC,,Generate Table Of Contents,"For a PDF without an outline, build Bookmarks from numbered headings in the text and show them; the AutoGenerateTOC setting does this on open, ver 3.7+"
 CmdTocExpandToLevel1,,Bookmarks: Expand to Level 1,"Collapse the Bookmarks tree so only top-level entries are visible (context menu), ver 3.7+"
 CmdTocExpandToLevel2,,Bookmarks: Expand to Level 2,"Expand top-level Bookmarks once (context menu), ver 3.7+"
 CmdTocExpandToLevel3,,Bookmarks: Expand to Level 3,"Expand Bookmarks two levels deep (context menu), ver 3.7+"
@@ -57,6 +59,7 @@ CmdOpenEmbeddedPDF,,Open Embedded PDF,
 CmdSaveEmbeddedFile,,Save Embedded File...,
 CmdCreateShortcutToFile,,Create .lnk Shortcut,
 CmdSelectAll,Ctrl + A,Select All,
+CmdSelectCurrentPage,,Select Current Page,"selects the text of the current page only; Selection menu and selection context menu, ver 3.7+"
 CmdExtendSelectionCharLeft,,Extend Selection One Character Left,"ver 3.7+, no default shortcut; grows or shrinks the existing text selection (see below)"
 CmdExtendSelectionCharRight,,Extend Selection One Character Right,"ver 3.7+, no default shortcut; grows or shrinks the existing text selection (see below)"
 CmdExtendSelectionWordLeft,,Extend Selection One Word Left,"ver 3.7+, no default shortcut; grows or shrinks the existing text selection (see below)"
@@ -68,6 +71,7 @@ CmdCopyLinkTarget,,Copy Link Target,
 CmdCopySelection,"Ctrl + C, Ctrl + Insert",Copy Selection,"in Edit PDF mode with an annotation selected, copies that annotation instead of text"
 CmdCopySelectionAsImage,,Copy Selection As Image,"copy a rectangular selection as an image, ver 3.7+"
 CmdSaveSelectionAsImage,,Save As Image...,"save a rectangular (Ctrl+drag) selection as PNG, JPEG or BMP at a chosen DPI, independent of the current zoom, ver 3.7+ (fixes #6127)"
+CmdPrintSelection,,Print Selection...,"open the print dialog with Selection pre-selected to print only the rectangular (Ctrl+drag) selection; also in the selection context menu, ver 3.7+ (fixes #6222)"
 CmdSearchGoogleLens,,Search with Google Lens,"opens the selection, image under the cursor, or current page in Google Lens, ver 3.7+"
 CmdSearchGoogleLensPage,,Search Page with Google Lens,"current page (or the page under the cursor from the context menu), ver 3.7+"
 CmdSearchGoogleLensImage,,Search Image with Google Lens,"image under the cursor, ver 3.7+"
@@ -98,6 +102,7 @@ Command IDs,Keyboard shortcuts,Command Palette,Notes
 CmdBookView,"Ctrl + 8, Ctrl + Numpad 8",Book View,
 CmdFacingView,"Ctrl + 7, Ctrl + Numpad 7",Facing View,
 CmdInvertColors,Shift + I,Invert Colors,was `i` before 3.6
+CmdToggleGrayscale,,Toggle Grayscale,"ver 3.7+, render document pages in grayscale; saved in `FixedPageUI.Grayscale`"
 CmdRotateLeft,"[, Shift + Ctrl + Subtract",Rotate Left,
 CmdRotateRight,"], Shift + Ctrl + Add",Rotate Right,
 CmdSinglePageView,"Ctrl + 6, Ctrl + Numpad 6",Single Page View,
@@ -108,6 +113,7 @@ CmdToggleFullscreen,"f, Shift + Ctrl + L, F11",Toggle Fullscreen,
 CmdToggleMangaMode,,Toggle Manga Mode,"Right-to-left facing/book layout for fixed-page documents; before 3.7 this was limited to comic books"
 CmdToggleUniformPageWidth,,Toggle Uniform Page Width,"At percentage zoom levels, scales every page to the width page 1 has at that zoom; remembered per document (fixes #5512)"
 CmdToggleTrimEmptyMargins,,Toggle Trim Empty Margins,"Trims empty margins around page content from display on demand, ver 3.7+"
+CmdToggleFreePan,,Toggle Free Pan,"Lets the view go past the page edges by half a window, so any part of a page (a corner of a drawing) can be brought to the center of the screen; remembered per document, ver 3.7+"
 CmdToggleMenuBar,F9,Toggle Menu Bar,
 CmdTogglePageInfo,i,Show / Hide Current Page Number,was Shift + i before 3.6
 CmdTogglePageBoxes,,Toggle Page Boxes,"ver 3.7+, outlines the PDF MediaBox, CropBox, BleedBox, TrimBox and ArtBox on each page (only boxes that page actually has) and labels them. Palette and Debug menu. No default shortcut (fixes #814)"
@@ -142,6 +148,7 @@ Command IDs,Keyboard shortcuts,Command Palette,Notes
 CmdCloseAllTabs,,Close All Tabs,ver 3.6+
 CmdCloseTabsToTheLeft,,Close Tabs To The Left,ver 3.6+
 CmdCloseTabsToTheRight,,Close Tabs To The Right,ver 3.6+
+CmdGoToHomePage,,Go To Home Page,"switches to the Home tab; adds it as the first tab when `NoHomeTab` removed it (fixes #6228), ver 3.7+"
 CmdCloseOtherTabs,,Close Other Tabs,ver 3.6+
 CmdNextTab,Ctrl + PageUp,Next Tab,
 CmdPrevTab,Ctrl + PageDown,Previous Tab,
@@ -256,6 +263,7 @@ CmdToggleZoom,z,Toggle Zoom,
 CmdZoomActualSize,"Ctrl + 1, Ctrl + Numpad 1",Zoom: Actual Size,
 CmdZoomCustom,Ctrl + Y,Zoom: Custom...,
 CmdZoomFitContent,"Ctrl + 3, Ctrl + Numpad 3",Zoom: Fit Content,
+CmdZoomFitVisible,,Zoom: Fit Visible,"ver 3.7+, fits the width of the page content (blank margins cropped, 2pt of them kept) to the window and scrolls vertically, like Fit Width without the margins; Foxit calls it Fit Visible (fixes #6241)"
 CmdZoomToSelection,"Ctrl + 4, Ctrl + Numpad 4",Zoom: To Selection,"ver 3.7+, zooms so the current selection (Ctrl + drag rectangle or selected text) fills the window and centers it; the selection is kept so it can still be copied, and Navigate Back (Alt + Left) returns to the view it was zoomed from. Also in the Zoom menu and the right-click menu (fixes #1699)"
 CmdZoomShrinkToFit,,Zoom: Shrink To Fit,"Shows at 100% if page is smaller than view area, otherwise fits page"
 CmdZoomFitPage,"Ctrl + 0, Ctrl + Numpad 0",Zoom: Fit Page,
@@ -327,8 +335,8 @@ CmdRefHoverPushToJabRef,Ctrl + J,Push Reference to JabRef,"ver 3.7+, pushes the 
 
 ```commands
 Command IDs,Keyboard shortcuts,Command Palette,Notes
-CmdAdvancedOptions,,Advanced Options...,Opens the settings file in a text editor
-CmdAdvancedSettings,,Advanced Settings...,"ver 3.7+, opens a dialog for viewing and editing the advanced settings: filter by name, click a setting to toggle / pick / edit its value, then Save"
+CmdOpenSettingsFile,,Open Advanced Settings File...,"Opens the settings file in the text editor associated with .txt files; menu `Settings` / `Open Advanced Settings File...`, ver 3.7+"
+CmdAdvancedSettings,,Advanced Settings...,"ver 3.7+, opens a dialog for viewing and editing the advanced settings: filter by name, click a setting to toggle / pick / edit its value, then Save; `CmdAdvancedOptions` in a shortcut definition still means this command; also listed in the command palette as `Advanced Options...`"
 CmdChangeLanguage,,Change Language...,
 CmdCheckUpdate,,Check For Updates,
 CmdClearHistory,,Clear History,Clears history of opened files (for recently opened list in home page)
@@ -337,7 +345,7 @@ CmdDeleteCachedFiles,,Delete Cached Files,"ver 3.7+, deletes local copies of com
 CmdContributeTranslation,,Contribute Translation,
 CmdForgetSelectedDocument,,Remove Selected Document From History,
 CmdListPrinters,,List Printers,ver 3.7+
-CmdOptions,,Options...,
+CmdOptions,,Settings...,
 CmdSetInverseSearch,,Set Inverse Search Command Line,"ver 3.7+, opens a dialog to set the SyncTeX inverse-search command and enables TeX enhancements"
 CmdScreenshot,,Take Screenshot,"ver 3.7+, can be registered as a global hotkey via Shortcuts entry (e.g. Key = Global PrtSc) or through the Settings menu"
 CmdCropImage,,Crop Image,ver 3.7+
@@ -378,12 +386,13 @@ CmdPdfExtractPages,,Extract Pages From PDF,"Extract pages from a PDF file using 
 CmdPdfEncrypt,,Encrypt PDF,"Encrypt a PDF file with a password using AES-256 encryption, ver 3.7+"
 CmdPdfDecrypt,,Decrypt PDF,"Decrypt an encrypted PDF file, removing password protection, ver 3.7+"
 CmdSetScreenshotHotkey,,Set Screenshot Hotkey,"Open dialog to set or remove a global hotkey for taking screenshots, ver 3.7+"
-CmdReadAloud,,Read Aloud,"Read selected text (or from the viewport if no selection) through the end of the document using Windows text-to-speech. Invoking again pauses reading. Voice is chosen in the Read Aloud Voice submenu and remembered in ReadAloudVoiceId, ver 3.7+"
+CmdToggleReadAloud,,Toggle Read Aloud,"Read aloud using Windows text-to-speech. Reads the selection if there is one, otherwise from the first visible text through the end of the document. Invoking again pauses reading; invoking when paused continues. Voice is chosen in the Read Aloud Voice submenu and remembered in ReadAloudVoiceId, ver 3.7+"
 CmdPauseReadAloud,,Pause Reading,"Pause reading text aloud; resume with CmdContinueReadAloud, ver 3.7+"
 CmdContinueReadAloud,,Continue Reading,"Continue reading text aloud from where it was paused, ver 3.7+"
 CmdStopReadAloud,,Stop Reading,"Stop reading text aloud and clear the resume position. Always in the Read Aloud menu (disabled when nothing is being read) and in the command palette while a session is active, even when the playback bar is not visible, ver 3.7+"
 CmdReadAloudFromTopPage,,Start Reading From Top,"Read from the first visible text in the viewport through the end of the document, ver 3.7+"
 CmdReadAloudSelection,,Start Reading Selection,"Read the current text selection aloud, ver 3.7+"
+CmdReadAloudFromCursorPosition,,Start Reading From Cursor Position,"Read from the text under the mouse cursor through the end of the document. From the command palette, uses the mouse position from before the palette was opened, ver 3.7+"
 CmdToggleToolbarShowReadAloud,,Read Aloud: Show In Toolbar,"Show or hide the Read Aloud buttons in the toolbar; remembered in the `ToolbarShowReadAloud` setting, ver 3.7+"
 ```
 
@@ -546,7 +555,7 @@ Arguments for `CmdCreateAnnotHighlight` plus:
 - `color` : default, color of text and border, black if not given
 - `bgcolor` : background color of annotation, fully transparent if not given
 - `textsize` : size of annotation text, 12 if not given
-- `borderwidth` : border width, 1 if not given
+- `borderwidth` : border width of free text, ink, line, polyline, polygon, square and circle annotations, 1 if not given
 - `alignment` : **ver 3.7+**, how free text is aligned in its box: `left`, `center`, or `right`. Left if not given
 - `opacity` : opacity of annotation, 0 = fully transparent (i.e. invisible), 100 = fully opaque (default if not given)
 - `interiorcolor` : interior color for circle, square, etc. annotations, fully transparent if not given
@@ -608,6 +617,7 @@ Arguments:
   - `fit page`
   - `fit width`
   - `fit content`
+  - `fit visible`
 
 Example:
 

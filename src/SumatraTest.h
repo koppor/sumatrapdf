@@ -1,6 +1,7 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
+void EnsureTestSettings();
 TempStr SynctexResultTemp(Str pdfPath, Str srcPath, int line);
 TempStr InverseSearchResultTemp(Str pdfPath, int pageNo, int x, int y);
 TempStr SearchResultTemp(Str pdfPath, Str needle, Str password = Str());
@@ -35,7 +36,12 @@ TempStr ListSigningCertsResultTemp(int* exitCodeOut = nullptr);
 TempStr SignDocumentResultTemp(Str pdfPath, Str destPath, Str thumbprint, Str certPath, Str certPassword,
                                Str imagePath = {}, int appearanceFlags = -1, int* exitCodeOut = nullptr);
 TempStr CmykImageSaveResultTemp(Str jpegPath, Str tiffPath, int* exitCodeOut = nullptr);
+TempStr ImageOrientationResultTemp(Str pdfPath, int pageNo, Str bmpPath = {}, int* exitCodeOut = nullptr);
 TempStr ChapterInfoResultTemp(int* exitCodeOut = nullptr);
 TempStr GoToLocationResultTemp(int chapter, int page, int* exitCodeOut = nullptr);
 TempStr HiddenTabGoToPageResultTemp(int* exitCodeOut = nullptr);
 TempStr SeedTextSelectionResultTemp(int pageNo, int* exitCodeOut = nullptr);
+TempStr RenderSelectionsResultTemp(int* exitCodeOut = nullptr);
+TempStr ToggleFormButtonResultTemp(int pageNo, int idx, int* exitCodeOut = nullptr);
+void DiscardUnsavedChangesInAllTabs();
+TempStr ResolveUnsavedChangesResultTemp(Str action, Str path, int* exitCodeOut = nullptr);

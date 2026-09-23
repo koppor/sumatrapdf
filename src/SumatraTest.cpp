@@ -2,13 +2,13 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/ScopedWin.h"
 #include "base/File.h"
 #include "base/Pixmap.h"
 #include "base/ByteReaderWriter.h"
 
 extern "C" {
 #include <mupdf/fitz.h>
+#include <mupdf/pdf.h>
 }
 
 #include "Settings.h"
@@ -29,7 +29,9 @@ extern "C" {
 #include "TextSelection.h"
 #include "TextSearch.h"
 #include "MainWindow.h"
+#include "SumatraPDF.h"
 #include "WindowTab.h"
+#include "PagePosition.h"
 #include "Selection.h"
 #include "SearchAndDDE.h"
 #include "ReadAloud.h"
@@ -46,7 +48,7 @@ extern "C" {
 // internal LZX test hook, defined in chm.c but not exposed in chm.h
 extern "C" int LZX_test_pretree_make_decode_table(void);
 
-static void EnsureTestSettings() {
+void EnsureTestSettings() {
     // engine creation reads a few fields off gSettings (e.g. disableAntiAlias)
     if (!gSettings) {
         gSettings = NewSettings({});
@@ -60,9 +62,6 @@ static void EnsureTestSettings() {
 // the synctex index (decompressing .synctex/.synctex.gz as needed) and runs a
 // SourceToDoc query, returning a machine-readable result line.
 TempStr SynctexResultTemp(Str pdfPath, Str srcPath, int line) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
-
     str::Builder out;
     EngineBase* engine = CreateEngineFromFile(pdfPath, nullptr, false);
     if (!engine) {
@@ -94,9 +93,6 @@ TempStr SynctexResultTemp(Str pdfPath, Str srcPath, int line) {
 // Synchronizer, and resolves (page, point) -> (srcfile, line, col) via
 // DocToSource, returning a machine-readable result line.
 TempStr InverseSearchResultTemp(Str pdfPath, int pageNo, int x, int y) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
-
     str::Builder out;
     EngineBase* engine = CreateEngineFromFile(pdfPath, nullptr, false);
     if (!engine) {
@@ -147,9 +143,6 @@ class TestPasswordUI : public PasswordUI {
 };
 
 TempStr SearchResultTemp(Str pdfPath, Str needle, Str password) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
-
     str::Builder out;
     TestPasswordUI pwdUI(password);
     EngineBase* engine = CreateEngineFromFile(pdfPath, password ? &pwdUI : nullptr, false);
@@ -175,9 +168,6 @@ TempStr SearchResultTemp(Str pdfPath, Str needle, Str password) {
 // Headless search restricted to pages first..last (0 = unbounded). Reports
 // every match page in document order. Used by tests/issue-5694.ts.
 TempStr FindPageRangeResultTemp(Str pdfPath, Str needle, int first, int last, Str spec, int* exitCodeOut) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
-
     str::Builder out;
     auto finish = [&](int code) -> TempStr {
         if (exitCodeOut) {
@@ -257,9 +247,6 @@ static TocItem* NthTocItemWithDest(TocItem* item, int target, int& counter) {
 // SumatraPDF units (1.0 == 100%); zoom=0 means "retain current zoom" (what /XYZ
 // ... 0 must map to). Used by tests/issue-5537.ts.
 TempStr DestResultTemp(Str pdfPath, int destNo) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
-
     str::Builder out;
     EngineBase* engine = CreateEngineFromFile(pdfPath, nullptr, false);
     if (!engine) {
@@ -288,9 +275,6 @@ TempStr DestResultTemp(Str pdfPath, int destNo) {
 // (CleanRemoteDestNameInPlace + GetNamedDest), returning the resolved page.
 // Used by tests/issue-5642.ts.
 TempStr NamedDestResultTemp(Str pdfPath, Str destName) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
-
     str::Builder out;
     EngineBase* engine = CreateEngineFromFile(pdfPath, nullptr, false);
     if (!engine) {
@@ -315,9 +299,6 @@ TempStr NamedDestResultTemp(Str pdfPath, Str destName) {
 // reads every entry, and optionally loads ChmFile / EngineChm.
 // Used by tests/issue-chm-lzx.ts; not meant for end users.
 TempStr ChmResultTemp(Str chmPath, int* exitCodeOut) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
-
     str::Builder out;
     bool ok = true;
 
@@ -976,9 +957,6 @@ static TempStr ExtractSelectionTextTemp(TextSelection& ts) {
 // the middle of <clickWord>, runs the same TextSelection steps as a double-click
 // followed by a triple-click (without the mouse-up trim), and checks the result.
 TempStr TripleClickLineSelectResultTemp(Str pdfPath, Str clickWord, Str expectedLine, int* exitCodeOut) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
-
     str::Builder out;
     if (str::IsEmptyOrWhiteSpace(pdfPath) || str::IsEmptyOrWhiteSpace(clickWord) ||
         str::IsEmptyOrWhiteSpace(expectedLine)) {
@@ -1492,9 +1470,6 @@ static void AppendTocItems(str::Builder& out, TocItem* item, int depth = 0) {
 // one line per TOC entry: "title|page=N", indented two spaces per nesting
 // level. Used by tests/issue-1201.ts and tests/issue-5317.ts.
 TempStr GetTocResultTemp(Str path, int* exitCodeOut) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
-
     str::Builder out;
     EngineBase* engine = CreateEngineFromFile(path, nullptr, false);
     if (!engine) {
@@ -1523,9 +1498,6 @@ TempStr GetTocResultTemp(Str path, int* exitCodeOut) {
 // Headless test for page link elements. Returns one line per link:
 // "kind=<kind> value=<value>". Used by tests/ad-hoc-md-links.ts.
 TempStr PageLinksResultTemp(Str path, int pageNo, int* exitCodeOut) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
-
     str::Builder out;
     EngineBase* engine = CreateEngineFromFile(path, nullptr, false);
     if (!engine) {
@@ -1580,9 +1552,6 @@ TempStr PageLinksResultTemp(Str path, int pageNo, int* exitCodeOut) {
 // Hover-tip strings for annotation comments on a page (issue #5329).
 // Newlines in a tip are reported as "|".
 TempStr PageCommentsResultTemp(Str path, int pageNo, int* exitCodeOut) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
-
     str::Builder out;
     EngineBase* engine = CreateEngineFromFile(path, nullptr, false);
     if (!engine) {
@@ -1629,9 +1598,6 @@ TempStr PageCommentsResultTemp(Str path, int pageNo, int* exitCodeOut) {
 // on, so a test can tell what that enhancement did to the page's grays. Reports
 // the most common neutral grays as "gray=<value> count=<n>" (issue #5937).
 TempStr CadEnhanceColorsResultTemp(Str path, int pageNo, int zoomPercent, int* exitCodeOut) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
-
     str::Builder out;
     auto fail = [&out, exitCodeOut](Str msg) {
         if (exitCodeOut) {
@@ -1705,10 +1671,11 @@ TempStr CadEnhanceColorsResultTemp(Str path, int pageNo, int zoomPercent, int* e
 // Render an image page and report dest size plus the RGB of the left and right
 // edge pixels. clipKind=1 uses the slightly-off page rect that Copy Selection
 // produces after CvtFromScreen (issue #3434).
-TempStr ImageRenderEdgesResultTemp(Str path, int zoomPercent, int clipKind, int* exitCodeOut) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
+// clipKind values of ImageRenderEdgesResultTemp
+constexpr int kClipSelection = 1;
+constexpr int kClipRightHalfTile = 2;
 
+TempStr ImageRenderEdgesResultTemp(Str path, int zoomPercent, int clipKind, int* exitCodeOut) {
     str::Builder out;
     auto fail = [&out, exitCodeOut](Str msg) {
         if (exitCodeOut) {
@@ -1726,10 +1693,18 @@ TempStr ImageRenderEdgesResultTemp(Str path, int zoomPercent, int clipKind, int*
     float zoom = (float)zoomPercent / 100.f;
     RectF clip;
     RectF* pageRect = nullptr;
-    if (clipKind != 0) {
+    if (clipKind == kClipSelection) {
         // same half-pixel pull-back CvtFromScreen applies to a pixel-aligned
         // selection of the whole image
         clip = RectF(-0.499f, -0.499f, box.dx, box.dy);
+        pageRect = &clip;
+    }
+    if (clipKind == kClipRightHalfTile) {
+        // full render first so mupdf caches the whole decoded image, then a
+        // tile of the right half (#6229)
+        RenderPageArgs full(1, zoom, 0, nullptr, RenderTarget::Export);
+        FreePixmap(engine->RenderPage(full));
+        clip = RectF(box.dx / 2, 0, box.dx / 2, box.dy);
         pageRect = &clip;
     }
     RenderPageArgs args(1, zoom, 0, pageRect, RenderTarget::Export);
@@ -1782,9 +1757,6 @@ TempStr ImageRenderEdgesResultTemp(Str path, int zoomPercent, int clipKind, int*
 // pixels the render shows. The fixture image is solid red so a successful
 // stamp lights up a block of red.
 TempStr ImageInsertResultTemp(Str pdfPath, Str imagePath, int* exitCodeOut) {
-    ScopedGdiPlus gdiPlus;
-    EnsureTestSettings();
-
     str::Builder out;
     auto fail = [&out, exitCodeOut](Str msg) {
         if (exitCodeOut) {
@@ -1891,8 +1863,6 @@ TempStr ImageInsertResultTemp(Str pdfPath, Str imagePath, int* exitCodeOut) {
 // red-ish / non-white pixels it has. Used to check that a WebP inside an
 // EPUB actually paints (issue #3415) instead of the IMAGE placeholder.
 TempStr PageRenderColorsResultTemp(Str path, int* exitCodeOut, int pageNo) {
-    EnsureTestSettings();
-
     str::Builder out;
     auto fail = [&out, exitCodeOut](Str msg) {
         if (exitCodeOut) {
@@ -2053,8 +2023,6 @@ static int CountNonWhitePixels(Pixmap* bmp) {
 // View vs Print non-white pixel counts. Print-only OCG content (PrintState ON,
 // off on screen) must still paint when rendering for print (issue #6101).
 TempStr PageRenderViewPrintResultTemp(Str path, int* exitCodeOut) {
-    EnsureTestSettings();
-
     str::Builder out;
     auto fail = [&out, exitCodeOut](Str msg) {
         if (exitCodeOut) {
@@ -2139,8 +2107,6 @@ TempStr ListSigningCertsResultTemp(int* exitCodeOut) {
 // copy of the source so the signature can be saved incrementally.
 TempStr SignDocumentResultTemp(Str pdfPath, Str destPath, Str thumbprint, Str certPath, Str certPassword, Str imagePath,
                                int appearanceFlags, int* exitCodeOut) {
-    EnsureTestSettings();
-
     str::Builder out;
     auto fail = [&out, exitCodeOut](Str msg) {
         if (exitCodeOut) {
@@ -2264,7 +2230,6 @@ static u16 TiffPhotometric(Str tiff) {
 // JPEG must stay CMYK with Adobe invert so it is not a negative; TIFF must
 // stay CMYK (not RGB).
 TempStr CmykImageSaveResultTemp(Str jpegPath, Str tiffPath, int* exitCodeOut) {
-    EnsureTestSettings();
     str::Builder out;
     auto fail = [&](Str msg) -> TempStr {
         if (exitCodeOut) {
@@ -2387,6 +2352,108 @@ TempStr CmykImageSaveResultTemp(Str jpegPath, Str tiffPath, int* exitCodeOut) {
     return ToStrTemp(out);
 }
 
+static TempStr PixmapRgbHexTemp(Pixmap* px, int x, int y) {
+    int bpp = PixmapBytesPerPixel(px->format);
+    u8* p = px->data + ((size_t)y * (size_t)px->stride) + ((size_t)x * (size_t)bpp);
+    // BGR order in memory
+    return fmt("%02x%02x%02x", (int)p[2], (int)p[1], (int)p[0]);
+}
+
+// Extracts the first image of a page the way Copy Image / Save Image do and
+// reports its size and corner colors, so a test can check it is oriented the
+// way it is drawn on the page (issue #6214).
+// writes px as a 24-bit BMP, for eyeballing the extracted image
+static void SavePixmapAsBmp(Pixmap* px, Str bmpPath) {
+    int w = px->width;
+    int h = px->height;
+    int bpp = PixmapBytesPerPixel(px->format);
+    int rowBytes = ((w * 3) + 3) & ~3;
+    int dataSize = rowBytes * h;
+    BITMAPFILEHEADER bfh{};
+    BITMAPINFOHEADER bih{};
+    bfh.bfType = 0x4d42; // "BM"
+    bfh.bfOffBits = sizeof(bfh) + sizeof(bih);
+    bfh.bfSize = bfh.bfOffBits + dataSize;
+    bih.biSize = sizeof(bih);
+    bih.biWidth = w;
+    bih.biHeight = h; // bottom-up
+    bih.biPlanes = 1;
+    bih.biBitCount = 24;
+    bih.biSizeImage = dataSize;
+    str::Builder out;
+    out.Append(Str((char*)&bfh, sizeof(bfh)));
+    out.Append(Str((char*)&bih, sizeof(bih)));
+    Vec<u8> row;
+    u8* rowData = VecAppendBlanks(row, rowBytes);
+    for (int y = h - 1; y >= 0; y--) {
+        const u8* sp = px->data + ((size_t)y * (size_t)px->stride);
+        u8* dp = rowData;
+        for (int x = 0; x < w; x++) {
+            dp[0] = sp[0];
+            dp[1] = sp[1];
+            dp[2] = sp[2];
+            sp += bpp;
+            dp += 3;
+        }
+        out.Append(Str((char*)rowData, rowBytes));
+    }
+    file::WriteFile(bmpPath, ToStrTemp(out));
+}
+
+TempStr ImageOrientationResultTemp(Str pdfPath, int pageNo, Str bmpPath, int* exitCodeOut) {
+    str::Builder out;
+    auto fail = [&](Str msg) -> TempStr {
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        out.Append(msg);
+        out.AppendChar('\n');
+        return ToStrTemp(out);
+    };
+    EngineBase* engine = CreateEngineFromFile(pdfPath, nullptr, false);
+    if (!engine) {
+        return fail(StrL("ERROR engine-create-failed"));
+    }
+    if (!engine->BenchLoadPage(pageNo)) {
+        SafeEngineRelease(&engine);
+        return fail(StrL("ERROR page-load-failed"));
+    }
+    IPageElement* imgEl = nullptr;
+    Vec<IPageElement*> els = engine->GetElements(pageNo);
+    for (IPageElement* el : els) {
+        if (el && el->Is(kindPageElementImage)) {
+            imgEl = el;
+            break;
+        }
+    }
+    if (!imgEl) {
+        SafeEngineRelease(&engine);
+        return fail(StrL("ERROR no-image-element"));
+    }
+    RenderedBitmap* bmp = engine->GetImageForPageElement(imgEl);
+    SafeEngineRelease(&engine);
+    if (!bmp) {
+        return fail(StrL("ERROR no-image"));
+    }
+    Pixmap* px = PixmapToBgra(PixmapFromRenderedBitmap(bmp)); // takes ownership of bmp
+    if (!px || !px->data) {
+        FreePixmap(px);
+        return fail(StrL("ERROR no-pixmap"));
+    }
+    int w = px->width;
+    int h = px->height;
+    out.Append(fmt("w=%d h=%d tl=%s tr=%s bl=%s br=%s\n", w, h, PixmapRgbHexTemp(px, 0, 0),
+                   PixmapRgbHexTemp(px, w - 1, 0), PixmapRgbHexTemp(px, 0, h - 1), PixmapRgbHexTemp(px, w - 1, h - 1)));
+    if (len(bmpPath) > 0) {
+        SavePixmapAsBmp(px, bmpPath);
+    }
+    FreePixmap(px);
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    return ToStrTemp(out);
+}
+
 // Current chapter/page and chapter table state of the front window's doc.
 // Used by tests/ad-hoc-chapters.ts.
 TempStr ChapterInfoResultTemp(int* exitCodeOut) {
@@ -2410,9 +2477,17 @@ TempStr ChapterInfoResultTemp(int* exitCodeOut) {
     DocController* ctrl = win->ctrl;
     Location cur = ctrl->CurrentLocation();
     bool hasChapters = ctrl->HasChapters();
-    out.Append(fmt("OK chapter=%d page=%d chapterCount=%d chapterPageCount=%d pageCount=%d hasChapters=%d\n",
-                   cur.chapter, cur.page, ctrl->ChapterCount(), ctrl->ChapterPageCount(cur.chapter), ctrl->PageCount(),
-                   hasChapters ? 1 : 0));
+    int laidOut = 0;
+    DisplayModel* dm = ctrl->AsFixed();
+    if (dm && dm->GetEngine()) {
+        laidOut = dm->GetEngine()->ChaptersLaidOut();
+    }
+    bool chapterUi = ShowChapterUi(ctrl);
+    out.Append(
+        fmt("OK chapter=%d page=%d chapterCount=%d chapterPageCount=%d pageCount=%d hasChapters=%d "
+            "laidOut=%d chapterUi=%d\n",
+            cur.chapter, cur.page, ctrl->ChapterCount(), ctrl->ChapterPageCount(cur.chapter), ctrl->PageCount(),
+            hasChapters ? 1 : 0, laidOut, chapterUi ? 1 : 0));
     if (exitCodeOut) {
         *exitCodeOut = 0;
     }
@@ -2498,6 +2573,121 @@ TempStr HiddenTabGoToPageResultTemp(int* exitCodeOut) {
 // nothing. Only a quad selection reaches DisplayModel::CvtToScreen unguarded,
 // which is where crash 2026-09-12-09-59-1328 reported.
 // Used by tests/epub-relayout-stale-page.ts.
+void DiscardUnsavedChangesInAllTabs() {
+    for (MainWindow* win : gWindows) {
+        for (WindowTab* tab : win->Tabs()) {
+            ResolveUnsavedChanges(tab, UnsavedChangesAction::Discard);
+        }
+    }
+}
+
+// action: "discard" | "save" (every tab) | "save-as" <path> (current tab).
+TempStr ResolveUnsavedChangesResultTemp(Str action, Str path, int* exitCodeOut) {
+    str::Builder out;
+    auto fail = [&](Str msg, int code = 1) -> TempStr {
+        out.Append(msg);
+        out.AppendChar('\n');
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        return ToStrTemp(out);
+    };
+
+    if (len(gWindows) == 0) {
+        return fail(StrL("NOTREADY no-window"), 2);
+    }
+    if (str::Eq(action, StrL("save-as"))) {
+        WindowTab* tab = gWindows[0]->CurrentTab();
+        if (len(path) == 0 || !tab) {
+            return fail(StrL("ERROR save-as needs a path and a document"));
+        }
+        if (!ResolveUnsavedChanges(tab, UnsavedChangesAction::SaveNew, path)) {
+            return fail(fmt("ERROR save-as '%s' failed", path));
+        }
+        if (exitCodeOut) {
+            *exitCodeOut = 0;
+        }
+        out.Append(StrL("OK tabs=1\n"));
+        return ToStrTemp(out);
+    }
+
+    UnsavedChangesAction act;
+    if (str::Eq(action, StrL("discard"))) {
+        act = UnsavedChangesAction::Discard;
+    } else if (str::Eq(action, StrL("save"))) {
+        act = UnsavedChangesAction::SaveExisting;
+    } else {
+        return fail(fmt("ERROR unknown action '%s'", action));
+    }
+    int nTabs = 0;
+    for (MainWindow* win : gWindows) {
+        for (WindowTab* tab : win->Tabs()) {
+            if (!ResolveUnsavedChanges(tab, act)) {
+                return fail(fmt("ERROR save of '%s' failed", tab->filePath));
+            }
+            nTabs++;
+        }
+    }
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    out.Append(fmt("OK tabs=%d\n", nTabs));
+    return ToStrTemp(out);
+}
+
+// Toggle the idx-th (0-based) checkbox / radio widget on pageNo, as a click
+// on it would. Reports the field value before and after.
+TempStr ToggleFormButtonResultTemp(int pageNo, int idx, int* exitCodeOut) {
+    str::Builder out;
+    auto fail = [&](Str msg, int code = 1) -> TempStr {
+        out.Append(msg);
+        out.AppendChar('\n');
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        return ToStrTemp(out);
+    };
+
+    if (len(gWindows) == 0) {
+        return fail(StrL("NOTREADY no-window"), 2);
+    }
+    MainWindow* win = gWindows[0];
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    if (!dm) {
+        return fail(StrL("NOTREADY no-doc"), 2);
+    }
+    if (!dm->ValidPageNo(pageNo)) {
+        return fail(fmt("ERROR invalid-page pageNo=%d pageCount=%d", pageNo, dm->PageCount()));
+    }
+
+    Vec<Annotation*> widgets;
+    EngineMupdfGetPageWidgets(dm->GetEngine(), pageNo, widgets);
+    Annotation* button = nullptr;
+    int nButtons = 0;
+    for (Annotation* w : widgets) {
+        int wt = GetWidgetType(w);
+        if (wt != PDF_WIDGET_TYPE_CHECKBOX && wt != PDF_WIDGET_TYPE_RADIOBUTTON) {
+            continue;
+        }
+        if (nButtons == idx) {
+            button = w;
+        }
+        nButtons++;
+    }
+    if (!button) {
+        return fail(fmt("ERROR no-button idx=%d buttons=%d", idx, nButtons));
+    }
+
+    TempStr before = str::DupTemp(GetWidgetValue(button));
+    bool toggled = ToggleFormButton(button);
+    TempStr after = str::DupTemp(GetWidgetValue(button));
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    out.Append(fmt("OK toggled=%d before='%s' after='%s' buttons=%d\n", (int)toggled, before, after, nButtons));
+    return ToStrTemp(out);
+}
+
 TempStr SeedTextSelectionResultTemp(int pageNo, int* exitCodeOut) {
     str::Builder out;
     auto fail = [&](Str msg, int code = 1) -> TempStr {
@@ -2555,4 +2745,56 @@ TempStr SeedTextSelectionResultTemp(int pageNo, int* exitCodeOut) {
         *exitCodeOut = 0;
     }
     return ToStrTemp(out);
+}
+
+// Renders a blank strip of pages 1 and 2 as one selection image and counts
+// its white pixels. Used by tests/render-selections-8bpp.ts.
+TempStr RenderSelectionsResultTemp(int* exitCodeOut) {
+    str::Builder out;
+    auto fail = [&](Str msg, int code = 1) -> TempStr {
+        out.Append(msg);
+        out.AppendChar('\n');
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        return ToStrTemp(out);
+    };
+
+    if (len(gWindows) == 0) {
+        return fail(StrL("NOTREADY no-window"), 2);
+    }
+    MainWindow* win = gWindows[0];
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    if (!dm || dm->PageCount() < 2) {
+        return fail(StrL("NOTREADY need-two-pages"), 2);
+    }
+
+    Vec<SelectionOnPage> sels;
+    RectF r(72, 300, 200, 40);
+    VecAppend(sels, SelectionOnPage(1, &r, nullptr));
+    VecAppend(sels, SelectionOnPage(2, &r, nullptr));
+    RenderedBitmap* rb = RenderSelectionsAsRenderedBitmap(dm, sels);
+    Pixmap* px = PixmapFromRenderedBitmap(rb);
+    if (!px || !px->data) {
+        FreePixmap(px);
+        return fail(StrL("ERROR no-bitmap"));
+    }
+    int white = 0;
+    int total = px->width * px->height;
+    if (px->format == PixmapFormat::BGRA8) {
+        for (int y = 0; y < px->height; y++) {
+            const u32* row = (const u32*)(px->data + ((size_t)y * px->stride));
+            for (int x = 0; x < px->width; x++) {
+                if ((row[x] & 0xffffff) == 0xffffff) {
+                    white++;
+                }
+            }
+        }
+    }
+    TempStr res = fmt("OK w=%d h=%d format=%d white=%d total=%d", px->width, px->height, (int)px->format, white, total);
+    FreePixmap(px);
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    return res;
 }

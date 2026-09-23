@@ -179,13 +179,23 @@ static ACCEL gBuiltInAccelerators[] = {
 static ACCEL* gAccels = nullptr;
 static int gAccelsCount = 0;
 
+// Custom Shortcuts clone a unique command id, so the accelerator is stored
+// under that id. Treat it as the original command when looking up bindings.
+static bool AccelIsForCmd(const ACCEL& a, int cmdId) {
+    if (a.cmd == (WORD)cmdId) {
+        return true;
+    }
+    CustomCommand* cmd = FindCustomCommand(a.cmd);
+    return cmd && cmd->origId == cmdId;
+}
+
 // the key cmdId is bound to, appended to a menu string. Parsing shortcut
 // strings lives in ShortcutParse.h.
 TempStr AppendAccelKeyToMenuStringTemp(TempStr menuStr, int cmdId) {
     ACCEL a;
     for (int i = 0; i < gAccelsCount; i++) {
         a = gAccels[i];
-        if (a.cmd == (WORD)cmdId) {
+        if (AccelIsForCmd(a, cmdId)) {
             TempStr res = AppendAccelKeyToMenuStringTemp(menuStr, a);
             return res;
         }
@@ -203,7 +213,7 @@ TempStr ShortcutsForCmdTemp(int cmdId, int maxCount) {
     int n = 0;
     for (int i = 0; i < gAccelsCount && n < maxCount; i++) {
         ACCEL a = gAccels[i];
-        if (a.cmd != (WORD)cmdId) {
+        if (!AccelIsForCmd(a, cmdId)) {
             continue;
         }
         TempStr withTab = AppendAccelKeyToMenuStringTemp(StrL(""), a);
@@ -332,6 +342,7 @@ static bool isSafeOutsideEditAccel(const ACCEL& a) {
 
 // keys the tree uses to move / activate; those stay with the control even
 // when a command is bound to them. Ctrl/Alt chords are still accelerators.
+// PageUp / PageDown are not here: they scroll the document (issue #1841)
 static bool isTreeNavKey(WORD k) {
     switch (k) {
         case VK_LEFT:
@@ -340,8 +351,6 @@ static bool isTreeNavKey(WORD k) {
         case VK_DOWN:
         case VK_HOME:
         case VK_END:
-        case VK_PRIOR:
-        case VK_NEXT:
         case VK_SPACE:
         case VK_RETURN:
         case VK_TAB:
@@ -584,7 +593,8 @@ bool Accelerators_UnitTestTreeTakesLetters() {
     pgDn.fVirt = FVIRTKEY;
     pgDn.key = VK_NEXT;
     pgDn.cmd = (WORD)CmdScrollDownPage;
-    if (isSafeTreeAccel(pgDn)) {
+    // PageDown scrolls the document even from the tree (issue #1841)
+    if (!isSafeTreeAccel(pgDn)) {
         return false;
     }
     ACCEL enter{};
@@ -637,6 +647,24 @@ bool Accelerators_UnitTestCreateAnnotEdit() {
         }
     }
     return plainA && shiftA && plainU && shiftU;
+}
+
+// Shortcuts entries clone a unique command id; help/menus must still list
+// that key on the original command.
+bool Accelerators_UnitTestCustomShortcutShown() {
+    GetAcceleratorTables();
+    auto* base = CreateCommandFromDefinition(StrL("CmdOpenFile"));
+    if (!base) {
+        return false;
+    }
+    auto* cmd = CloneCustomCommand(base, {}, StrL("Ctrl + Shift + F24"));
+    if (!cmd || cmd->id == CmdOpenFile) {
+        return false;
+    }
+    FreeAcceleratorTables();
+    CreateSumatraAcceleratorTable();
+    TempStr keys = ShortcutsForCmdTemp(CmdOpenFile, 8);
+    return str::Contains(keys, StrL("Ctrl + Shift + F24"));
 }
 #endif
 

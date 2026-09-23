@@ -1117,8 +1117,8 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\src\PerfLog.h" />
-    <ClInclude Include="..\src\base\AppendStore.h" />
     <ClInclude Include="..\src\base\Archive.h" />
+    <ClInclude Include="..\src\base\AutoWin.h" />
     <ClInclude Include="..\src\base\Base.h" />
     <ClInclude Include="..\src\base\ByteReaderWriter.h" />
     <ClInclude Include="..\src\base\CmdLineArgs.h" />
@@ -1138,7 +1138,6 @@
     <ClInclude Include="..\src\base\Log.h" />
     <ClInclude Include="..\src\base\LzmaSimpleArchive.h" />
     <ClInclude Include="..\src\base\Pixmap.h" />
-    <ClInclude Include="..\src\base\ScopedWin.h" />
     <ClInclude Include="..\src\base\SettingsUtil.h" />
     <ClInclude Include="..\src\base\SquareTreeParser.h" />
     <ClInclude Include="..\src\base\StrQueue.h" />
@@ -1160,9 +1159,7 @@
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\src\PerfLog.cpp" />
-    <ClCompile Include="..\src\base\AppendStore.cpp" />
     <ClCompile Include="..\src\base\Archive.cpp" />
-    <ClCompile Include="..\src\base\Arena.cpp" />
     <ClCompile Include="..\src\base\Base.cpp" />
     <ClCompile Include="..\src\base\ByteReaderWriter.cpp" />
     <ClCompile Include="..\src\base\CmdLineArgs.cpp" />

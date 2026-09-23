@@ -3,7 +3,7 @@
 
 #include "base/Base.h"
 #include "base/Pixmap.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
 #include "base/Win.h"
@@ -1705,7 +1705,7 @@ static bool CopyEditedImageToClipboard(ImageEditWindow* ew) {
     if (status != Ok || !tmp) {
         return false;
     }
-    ScopedGdiObj<HBITMAP> hbmp(tmp);
+    AutoDeleteGdiObj<HBITMAP> hbmp(tmp);
     return CopyImageToClipboard(tmp, false);
 }
 

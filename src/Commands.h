@@ -128,7 +128,6 @@ enum {
     CmdSaveAttachment = 319,
     CmdOpenAttachment = 320,
     CmdOptions = 321,
-    CmdAdvancedOptions = 322,
     CmdAdvancedSettings = 323,
     CmdChangeLanguage = 324,
     CmdCheckUpdate = 325,
@@ -221,7 +220,7 @@ enum {
     CmdDocumentExtractText = 414,
     CmdDocumentShowOutline = 415,
     CmdSetScreenshotHotkey = 416,
-    CmdReadAloud = 417,
+    CmdToggleReadAloud = 417,
     CmdPauseReadAloud = 418,
     CmdContinueReadAloud = 419,
     CmdStopReadAloud = 420,
@@ -317,12 +316,22 @@ enum {
     CmdAutomaticallyScrollSlower = 510,
     CmdToggleReadingBar = 511,
     CmdToggleReadingBarInvert = 512,
-    CmdRefHoverPushToJabRef = 513,
-    CmdNone = 514,
-    CmdFileHistory = 515,
-    CmdFavorite = 516,
+    CmdGoToHomePage = 513,
+    CmdToggleFreePan = 514,
+    CmdNone = 515,
+    CmdFileHistory = 516,
+    CmdFavorite = 517,
+    CmdReadAloudFromCursorPosition = 518,
+    CmdToggleGrayscale = 519,
+    CmdPrintSelection = 520,
+    CmdAutoGenerateTOC = 521,
+    CmdOpenSettingsFile = 522,
+    CmdOpenFileWithSumatraFilePicker = 523,
+    CmdSelectCurrentPage = 524,
+    CmdZoomFitVisible = 525,
+    CmdRefHoverPushToJabRef = 526,
 
-    CmdLast = 516,
+    CmdLast = 526,
     CmdFirstCustom = CmdLast + 100,
 
     // aliases, at the end to not mess ordering
@@ -411,6 +420,9 @@ void FreeCustomCommand(CustomCommand* cmd);
 
 extern CustomCommand* gFirstCustomCommand;
 extern SeqStrings gCommandDescriptions;
+// alternate command palette texts, parallel to gCommandAltDescIds
+extern SeqStrings gCommandAltDescs;
+extern i32 gCommandAltDescIds[];
 
 int GetCommandIdByName(Str);
 int GetCommandIdByDesc(Str);

@@ -10,7 +10,6 @@ end
 
 function makelzsa_files()
   files_in_dir("src/base", {
-    "Arena.cpp",
     "Base.h",
     "Base.cpp",
     "ByteReaderWriter.*",
@@ -426,8 +425,6 @@ function sumatrapdf_files()
     "*.cpp",
     "UtAssert.h",
   })
-  -- linux-only, like the FileWatcher_linux.cpp it tests
-  removefiles { "src/base/tests/FileWatcher_linux_ut.cpp" }
   files_in_dir("src/base", {
     "Archive.*",
   })
@@ -465,11 +462,8 @@ end
 
 function base_files()
   files_in_dir("src/base", {
-    "AppendStore.h",
-    "AppendStore.cpp",
     "ApiHook.*",
     "Archive.*",
-    "Arena.cpp",
     "Base.h",
     "Base.cpp",
     "ByteReaderWriter.*",
@@ -499,7 +493,7 @@ function base_files()
     "LzmaSimpleArchive.*",
     "Pixmap.*",
     "RegistryPaths.*",
-    "ScopedWin.h",
+    "AutoWin.h",
     "SettingsUtil.*",
     "SquareTreeParser.*",
     "StrQueue.*",
@@ -921,8 +915,6 @@ function efi_files()
     "CrashHandlerNoOp.cpp",
     "src/base/Base.h",
     "src/base/Base.cpp",
-    "src/base/Arena.cpp",
-    "src/base/BitManip.h",
     "src/base/Dict*",
     "src/tools/efi/*.cpp",
     "src/tools/efi/*.h",
@@ -1116,7 +1108,6 @@ function pdf_preview2_files()
     "RegistryPreview.*",
     "SumatraConfig.*",
     "base/Base.*",
-    "base/Arena.cpp",
     "gui/Dpi.h",
     "gui/Dpi.cpp",
     "base/File.h",
@@ -1141,7 +1132,6 @@ function search_filter2_files()
     "RegistrySearchFilter.*",
     "SumatraConfig.*",
     "base/Base.*",
-    "base/Arena.cpp",
     "gui/Dpi.h",
     "gui/Dpi.cpp",
     "base/File.h",

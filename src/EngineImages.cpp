@@ -14,10 +14,8 @@
 #include "base/Timer.h"
 #include "base/DirScan.h"
 
-#if OS_WIN
 #include "base/Win.h"
 #include "base/GdiPlusUtil.h"
-#endif
 
 extern "C" {
 #include <mupdf/fitz.h>
@@ -191,7 +189,7 @@ EngineImages::EngineImages() {
 fz_context* EngineImages::Ctx() {
     ThreadId tid = GetCurrentThreadId();
     {
-        ScopedMutex scope(&threadCtxsLock);
+        AutoUnlockMutex scope(&threadCtxsLock);
         for (auto& tc : threadCtxs) {
             if (tc.threadID == tid) {
                 return tc.ctx;
@@ -205,7 +203,7 @@ fz_context* EngineImages::Ctx() {
         return fz_ctx; // last-resort fallback; caller will serialize on the root
     }
     {
-        ScopedMutex scope(&threadCtxsLock);
+        AutoUnlockMutex scope(&threadCtxsLock);
         VecAppend(threadCtxs, {tid, newCtx});
     }
     return newCtx;
@@ -565,6 +563,37 @@ static void GetPixmapPixelBgraKeepAlpha(const Pixmap* pixmap, int x, int y, u8* 
     bgra[3] = pixmap->format == PixmapFormat::BGR8 ? 255 : src[3];
 }
 
+// mupdf may answer a subarea request with a different area: its cached full
+// decode, or the subarea grown to the subsampling grid. The returned ctm maps
+// the pixmap into the full page at reqW x reqH, so scale it into screen space
+// and cut out the tile (discussion #6229). Returns nullptr if the tile isn't
+// covered.
+static fz_pixmap* ScaleDecodedToTile(fz_context* ctx, fz_pixmap* decoded, fz_matrix ctm, int reqW, int reqH,
+                                     Rect mediaScreen, Rect screen) {
+    float kx = (float)mediaScreen.dx / (float)reqW;
+    float ky = (float)mediaScreen.dy / (float)reqH;
+    // whole pixels: a fractional dest makes fz_scale_pixmap add alpha and
+    // feather the edges, which shows as seams between tiles
+    int x0 = (int)floorf(ctm.e * kx + 0.5f);
+    int y0 = (int)floorf(ctm.f * ky + 0.5f);
+    int x1 = (int)floorf((ctm.e + ctm.a) * kx + 0.5f);
+    int y1 = (int)floorf((ctm.f + ctm.d) * ky + 0.5f);
+    fz_irect tile;
+    tile.x0 = screen.x - mediaScreen.x;
+    tile.y0 = screen.y - mediaScreen.y;
+    tile.x1 = tile.x0 + screen.dx;
+    tile.y1 = tile.y0 + screen.dy;
+    if (tile.x0 < x0 || tile.y0 < y0 || tile.x1 > x1 || tile.y1 > y1) {
+        return nullptr;
+    }
+    fz_pixmap* res = fz_scale_pixmap(ctx, decoded, (float)x0, (float)y0, (float)(x1 - x0), (float)(y1 - y0), &tile);
+    if (res && (res->w != screen.dx || res->h != screen.dy)) {
+        fz_drop_pixmap(ctx, res);
+        return nullptr;
+    }
+    return res;
+}
+
 Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
     auto pageNo = args.pageNo;
     auto* pageRect = args.pageRect;
@@ -660,12 +689,20 @@ Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
         fz_try(ctx) {
             int dw = 0, dh = 0;
             decoded = fz_get_pixmap_from_image(ctx, page->img, subPtr, &ctm, &dw, &dh);
-            if (decoded && (decoded->w != screen.dx || decoded->h != screen.dy)) {
+            if (decoded && !subPtr && (decoded->w != screen.dx || decoded->h != screen.dy)) {
                 scaled = fz_scale_pixmap(ctx, decoded, 0, 0, (float)screen.dx, (float)screen.dy, nullptr);
+            }
+            if (decoded && subPtr) {
+                scaled = ScaleDecodedToTile(ctx, decoded, ctm, reqW, reqH, mediaScreen, screen);
             }
         }
         fz_catch(ctx) {
             fz_report_error(ctx);
+        }
+        if (subPtr && !scaled) {
+            // decoded area doesn't cover the tile; use the Pixmap path below
+            fz_drop_pixmap(ctx, decoded);
+            decoded = nullptr;
         }
         fz_pixmap* final = scaled ? scaled : decoded;
         if (final) {
@@ -696,7 +733,7 @@ Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
     // mupdf), lazy-load/decode the Pixmap on demand for this rare path
     // (rotation, or mupdf decode/scale failure on a small image).
     if (!page->pixmap && !page->failedToLoad) {
-        ScopedMutex scope(&page->drawLock);
+        AutoUnlockMutex scope(&page->drawLock);
         if (!page->pixmap) {
             bool ownPixmap = true;
             page->pixmap = LoadPixmapForPage(pageNo, ownPixmap);
@@ -719,7 +756,6 @@ Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
         return nullptr;
     }
 
-#if OS_WIN
     // read before DropPage() below, which can free page->pixmap, i.e. src
     bool srcHasAlpha = src->format == PixmapFormat::BGRA8;
 
@@ -767,7 +803,6 @@ Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
             }
         }
     }
-#endif
 
     // Fallback: nearest-neighbor (rotation, non-Windows, or GDI+ failure).
     Pixmap* result = AllocPixmap(screen.dx, screen.dy, PixmapFormat::BGRA8, true);
@@ -880,10 +915,6 @@ IPageElement* EngineImages::GetElementAtPos(int pageNo, PointF pt) {
 }
 
 RenderedBitmap* EngineImages::GetImageForPageElement(IPageElement* pel) {
-#if !OS_WIN
-    (void)pel;
-    return nullptr;
-#else
     ReportIf(pel->GetKind() != kindPageElementImage);
     auto* ipel = (PageElementImage*)pel;
     int pageNo = ipel->pageNo;
@@ -896,7 +927,7 @@ RenderedBitmap* EngineImages::GetImageForPageElement(IPageElement* pel) {
     }
 
     if (!page->pixmap && !page->failedToLoad) {
-        ScopedMutex scope(&page->drawLock);
+        AutoUnlockMutex scope(&page->drawLock);
         if (!page->pixmap) {
             bool ownPixmap = true;
             page->pixmap = LoadPixmapForPage(pageNo, ownPixmap);
@@ -915,7 +946,6 @@ RenderedBitmap* EngineImages::GetImageForPageElement(IPageElement* pel) {
     Pixmap* pixmap = ClonePixmap(page->pixmap);
     DropPage(page, false);
     return RenderedBitmapFromPixmap(pixmap);
-#endif
 }
 
 Str EngineImages::GetImageDataForPageElement(IPageElement* pel) {
@@ -977,7 +1007,7 @@ ImagePage* EngineImages::GetPage(int pageNo, bool tryOnly) {
     bool waitForLoad = false;
 
     {
-        ScopedRecursiveMutex scope(&cacheLock);
+        AutoUnlockRecursiveMutex scope(&cacheLock);
 
         for (int i = 0; i < len(pageCache); i++) {
             if (pageCache[i]->pageNo == pageNo) {
@@ -1027,7 +1057,7 @@ ImagePage* EngineImages::GetPage(int pageNo, bool tryOnly) {
             pixmap = LoadPixmapForPage(pageNo, ownPixmap);
         }
         {
-            ScopedRecursiveMutex scope(&cacheLock);
+            AutoUnlockRecursiveMutex scope(&cacheLock);
             result->img = img;
             result->pixmap = pixmap;
             result->ownPixmap = ownPixmap;
@@ -1047,13 +1077,13 @@ ImagePage* EngineImages::GetPage(int pageNo, bool tryOnly) {
             DidAllocateCachedObject(&o);
         }
         {
-            ScopedMutex scope(&result->loadLock);
+            AutoUnlockMutex scope(&result->loadLock);
             result->loading = false;
             result->loaded.WakeAll();
         }
     } else if (waitForLoad) {
         // Another thread is decoding this same page; wait for it to finish.
-        ScopedMutex scope(&result->loadLock);
+        AutoUnlockMutex scope(&result->loadLock);
         while (result->loading) {
             result->loaded.Wait(&result->loadLock);
         }
@@ -1073,7 +1103,7 @@ void EngineImages::DropPage(ImagePage* page, bool forceRemove) {
     }
 
     {
-        ScopedRecursiveMutex scope(&cacheLock);
+        AutoUnlockRecursiveMutex scope(&cacheLock);
         // pageCache.Remove is a no-op if the page was already evicted earlier
         VecRemove(pageCache, page);
     }
@@ -1103,7 +1133,7 @@ RectF EngineImages::PageContentBox(int pageNo, RenderTarget /*target*/) {
     };
 
     if (!page->pixmap && !page->failedToLoad) {
-        ScopedMutex scope(&page->drawLock);
+        AutoUnlockMutex scope(&page->drawLock);
         if (!page->pixmap) {
             bool ownPixmap = true;
             page->pixmap = LoadPixmapForPage(pageNo, ownPixmap);
@@ -1773,7 +1803,7 @@ Pixmap* EngineImage::LoadPixmapForPage(int pageNo, bool& deleteAfterUse) {
 }
 
 Str EngineImage::GetImageData(int /*pageNo*/) {
-    ScopedRecursiveMutex scope(&cacheLock);
+    AutoUnlockRecursiveMutex scope(&cacheLock);
     auto* pi = pageInfos[0];
     if (len(pi->rawData) == 0) {
         Str path = FilePath();
@@ -1822,9 +1852,7 @@ EngineBase* EngineImage::CreateFromFile(Str path) {
     bool ok = engine->LoadSingleFile(path);
     // decoding might run a 3rd-party WIC codec (e.g. CopyTrans HEIC) that
     // unmasks fp exceptions on this thread, which would crash later float math
-#if OS_WIN
     MaskFpExceptions();
-#endif
     if (!ok) {
         SafeEngineRelease(&engine);
         return nullptr;
@@ -1835,9 +1863,7 @@ EngineBase* EngineImage::CreateFromFile(Str path) {
 EngineBase* EngineImage::CreateFromData(Str data) {
     EngineImage* engine = new EngineImage();
     bool ok = engine->LoadFromData(data);
-#if OS_WIN
     MaskFpExceptions();
-#endif
     if (!ok) {
         SafeEngineRelease(&engine);
         return nullptr;
@@ -2045,7 +2071,7 @@ Pixmap* EngineImageDir::LoadPixmapForPage(int pageNo, bool& deleteAfterUse) {
 }
 
 Str EngineImageDir::GetImageData(int pageNo) {
-    ScopedRecursiveMutex scope(&cacheLock);
+    AutoUnlockRecursiveMutex scope(&cacheLock);
     auto* pi = pageInfos[pageNo - 1];
     if (len(pi->rawData) == 0) {
         Str path = pageFileNames[pageNo - 1];

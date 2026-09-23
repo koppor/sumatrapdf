@@ -73,7 +73,7 @@ static Str CrashInfoTake() {
 // (tests/control.ts) treat it as "assertion fired", so keep the value in sync
 constexpr UINT kDebugReportTestExitCode = 105;
 
-// Note: intentionally not using ScopedMem<> to avoid
+// Note: intentionally not using AutoFree<> to avoid
 // static initializers/destructors, which are bad
 static Str gSystemInfo;
 static HANDLE gDumpEvent = nullptr;
@@ -392,16 +392,9 @@ static DWORD WINAPI CrashDumpThread(LPVOID /*data*/) {
 // This is needed to intercept memory corruption reports from windows heap manager
 // https://peteronprogramming.wordpress.com/2017/07/30/crashes-you-cant-handle-easily-3-status_heap_corruption-on-windows/
 // https://phabricator.services.mozilla.com/D83753
-static LONG WINAPI CrashDumpVectoredExceptionHandler(EXCEPTION_POINTERS* exceptionInfo) {
-    if (exceptionInfo->ExceptionRecord->ExceptionCode != STATUS_HEAP_CORRUPTION) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    if (!TryStartCrashHandling(StrL("CrashDumpVectoredExceptionHandler"))) {
-        return EXCEPTION_CONTINUE_SEARCH; // Note: or should TerminateProcess()?
-    }
-
-    log(StrL("CrashDumpVectoredExceptionHandler\n"));
+// writes the dump on the dump thread, shows the crash message and exits
+static LONG HandleCrash(EXCEPTION_POINTERS* exceptionInfo, Str who) {
+    logf("%s\n", who);
     gCrashed = true;
 
     gMei.ThreadId = GetCurrentThreadId();
@@ -416,8 +409,19 @@ static LONG WINAPI CrashDumpVectoredExceptionHandler(EXCEPTION_POINTERS* excepti
         CallCb(gCfg.showCrashMessage);
     }
     TerminateProcess(GetCurrentProcess(), 1);
-
     return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static LONG WINAPI CrashDumpVectoredExceptionHandler(EXCEPTION_POINTERS* exceptionInfo) {
+    if (exceptionInfo->ExceptionRecord->ExceptionCode != STATUS_HEAP_CORRUPTION) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    if (!TryStartCrashHandling(StrL("CrashDumpVectoredExceptionHandler"))) {
+        return EXCEPTION_CONTINUE_SEARCH; // Note: or should TerminateProcess()?
+    }
+
+    return HandleCrash(exceptionInfo, StrL("CrashDumpVectoredExceptionHandler"));
 }
 
 // there is no documented Win32 API for a thread's start address
@@ -503,23 +507,7 @@ static LONG WINAPI CrashDumpExceptionHandler(EXCEPTION_POINTERS* exceptionInfo) 
         return EXCEPTION_CONTINUE_SEARCH; // Note: or should TerminateProcess()?
     }
 
-    log(StrL("CrashDumpExceptionHandler\n"));
-    gCrashed = true;
-
-    gMei.ThreadId = GetCurrentThreadId();
-    gMei.ExceptionPointers = exceptionInfo;
-    // per msdn (which is backed by my experience), MiniDumpWriteDump() doesn't
-    // write callstack for the calling thread correctly. We use msdn-recommended
-    // work-around of spinning a thread to do the writing
-    SetEvent(gDumpEvent);
-    WaitForSingleObject(gDumpThread, INFINITE);
-
-    if (!gCfg.localOnly) {
-        CallCb(gCfg.showCrashMessage);
-    }
-    TerminateProcess(GetCurrentProcess(), 1);
-
-    return EXCEPTION_CONTINUE_SEARCH;
+    return HandleCrash(exceptionInfo, StrL("CrashDumpExceptionHandler"));
 }
 
 static void GetOsVersion() {
@@ -538,14 +526,11 @@ static void GetOsVersion() {
     if (IsProcess32()) {
         arch = IsRunningInWow64() ? "Wow64" : "32-bit";
     }
-    if (0 == servicePackMajor) {
-        CrashInfoAppend(fmt("OS: Windows %s build %d %s\n", os, buildNumber, Str(arch)));
-    } else if (0 == servicePackMinor) {
-        CrashInfoAppend(fmt("OS: Windows %s SP%d build %d %s\n", os, servicePackMajor, buildNumber, Str(arch)));
-    } else {
-        CrashInfoAppend(
-            fmt("OS: Windows %s %d.%d build %d %s\n", os, servicePackMajor, servicePackMinor, buildNumber, Str(arch)));
+    TempStr sp = StrL("");
+    if (servicePackMajor != 0) {
+        sp = servicePackMinor == 0 ? fmt(" SP%d", servicePackMajor) : fmt(" %d.%d", servicePackMajor, servicePackMinor);
     }
+    CrashInfoAppend(fmt("OS: Windows %s%s build %d %s\n", os, sp, buildNumber, Str(arch)));
 }
 
 static void GetProcessorName() {
@@ -636,46 +621,7 @@ static void GetSystemInfo() {
         CrashInfoAppend(fmt("Lang: %s %s\n", Str(lang), Str(country)));
     }
     GetGraphicsDriverInfo();
-    {
-        auto cpu = CpuID();
-        CrashInfoAppend(StrL("CPU: "));
-        if (cpu & kCpuMMX) {
-            CrashInfoAppend(StrL("MMX "));
-        }
-        if (cpu & kCpuSSE) {
-            CrashInfoAppend(StrL("SSE "));
-        }
-        if (cpu & kCpuSSE2) {
-            CrashInfoAppend(StrL("SSE2 "));
-        }
-        if (cpu & kCpuSSE3) {
-            CrashInfoAppend(StrL("SSE3 "));
-        }
-        if (cpu & kCpuSSE41) {
-            CrashInfoAppend(StrL("SSE41 "));
-        }
-        if (cpu & kCpuSSE42) {
-            CrashInfoAppend(StrL("SSE42 "));
-        }
-        if (cpu & kCpuAVX) {
-            CrashInfoAppend(StrL("AVX "));
-        }
-        if (cpu & kCpuAVX2) {
-            CrashInfoAppend(StrL("AVX2 "));
-        }
-        if (cpu & kCpuNEON) {
-            CrashInfoAppend(StrL("NEON "));
-        }
-        if (cpu & kCpuArmCrypto) {
-            CrashInfoAppend(StrL("Crypto "));
-        }
-        if (cpu & kCpuArmAtomics) {
-            CrashInfoAppend(StrL("Atomics "));
-        }
-        if (cpu & kCpuArmDotProd) {
-            CrashInfoAppend(StrL("DotProd "));
-        }
-    }
+    CrashInfoAppend(fmt("CPU: %s\n", CpuFeaturesTemp()));
 }
 
 static void BuildSystemInfo() {
@@ -719,10 +665,6 @@ static void __cdecl onInvalidParameter(const wchar_t*, const wchar_t*, const wch
 static int __cdecl onNewFailed(size_t) {
     CrashMe();
     return 0;
-}
-
-__unused static void onUnexpected() {
-    CrashMe();
 }
 
 // shadow crt's _purecall() so that we're called instead of CRT.
@@ -807,8 +749,6 @@ void InstallCrashHandler(const CrashHandlerConfig& cfg) {
     // ever sees
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
     std::set_terminate(onTerminate);
-    // set_unexpected() is unavailable with MSVC 17.3+ (_HAS_CXX17 / P0003R5).
-    //::set_unexpected(onUnexpected);
 #endif
 }
 
@@ -847,7 +787,3 @@ void UninstallCrashHandler() {
     gDumpThreadId = 0;
     AtomicBoolSet(&gCrashHandlerStarted, false);
 }
-
-// Tests that various ways to crash will generate crash report.
-// Commented-out because they are ad-hoc. Left in code because
-// I don't want to write them again if I ever need to test crash reporting

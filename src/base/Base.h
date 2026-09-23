@@ -1,26 +1,6 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: Simplified BSD (see COPYING.BSD) */
 
-/* OS_DARWIN - Any Darwin-based OS, including Mac OS X and iPhone OS */
-#ifdef __APPLE__
-#define OS_DARWIN 1
-#else
-#define OS_DARWIN 0
-#endif
-
-/* OS_LINUX - Linux */
-#ifdef __linux__
-#define OS_LINUX 1
-#else
-#define OS_LINUX 0
-#endif
-
-#ifdef _WIN32
-#define OS_WIN 1
-#else
-#define OS_WIN 0
-#endif
-
 // https://learn.microsoft.com/en-us/cpp/preprocessor/predefined-macros
 #if defined(_M_IX86) || defined(__i386__)
 #define IS_INTEL_32 1
@@ -36,13 +16,6 @@
 #define IS_ARM_64 1
 #else
 #error "unsupported arch"
-#endif
-
-/* OS_POSIX - Any POSIX-like system */
-#if OS_DARWIN || OS_LINUX || defined(unix) || defined(__unix) || defined(__unix__)
-#define OS_POSIX 1
-#else
-#define OS_POSIX 0
 #endif
 
 #ifdef _MSC_VER
@@ -120,19 +93,11 @@
 #include <new>       // for placement new
 #include <algorithm> // for std::min, std::max
 #include <utility>   // for std::forward
-#if OS_POSIX
-// pthread.h first: glibc mutex structs have a field named __unused
-#include <pthread.h>
-#include <strings.h>
-#endif
-
-// after system headers so we don't rewrite pthread's __unused field
 #define __unused [[maybe_unused]]
 
 #define _USE_MATH_DEFINES
 #include <math.h>
 
-#if OS_WIN
 #define NOMINMAX
 #include <winsock2.h> // must include before <windows.h>
 #include <windows.h>
@@ -171,58 +136,6 @@
 #undef min
 #undef max
 
-#else
-using BYTE = uint8_t;
-using WORD = uint16_t;
-using DWORD = uint32_t;
-using DWORD64 = uint64_t;
-using UINT = unsigned int;
-using UINT_PTR = uintptr_t;
-using LONG = int32_t;
-using BOOL = int;
-using WCHAR = wchar_t;
-using WPARAM = uintptr_t;
-using LPARAM = intptr_t;
-using LRESULT = intptr_t;
-using LCID = uint32_t;
-
-struct HWND__;
-using HWND = HWND__*;
-struct HDC__;
-using HDC = HDC__*;
-struct HFONT__;
-using HFONT = HFONT__*;
-struct HIMAGELIST__;
-using HIMAGELIST = HIMAGELIST__*;
-struct HTREEITEM__;
-using HTREEITEM = HTREEITEM__*;
-struct HBITMAP__;
-using HBITMAP = HBITMAP__*;
-struct HBRUSH__;
-using HBRUSH = HBRUSH__*;
-using LPWSTR = WCHAR*;
-
-struct EXCEPTION_POINTERS;
-struct MINIDUMP_EXCEPTION_INFORMATION;
-
-struct FILETIME {
-    DWORD dwLowDateTime;
-    DWORD dwHighDateTime;
-};
-
-constexpr UINT CP_ACP = 0;
-constexpr UINT CP_UTF8 = 65001;
-constexpr LCID LOCALE_USER_DEFAULT = 0;
-constexpr LCID LOCALE_INVARIANT = 0;
-#define __TEXT(s) L##s
-#define TEXT(s) __TEXT(s)
-constexpr int MAX_PATH = 4096;
-constexpr int URLZONE_INVALID = -1;
-constexpr int URLZONE_INTERNET = 3;
-
-#define ZeroMemory(Destination, Length) memset((Destination), 0, (Length))
-#endif
-
 using i8 = int8_t;
 using u8 = uint8_t;
 using i16 = int16_t;
@@ -233,17 +146,9 @@ using i64 = int64_t;
 using u64 = uint64_t;
 using uint = unsigned int;
 
-#if OS_WIN
 using AtomicBool = volatile LONG;
 using AtomicInt = volatile LONG;
-using AtomicRefCount = volatile LONG;
 using AtomicPtr = void* volatile;
-#else
-using AtomicBool = volatile int;
-using AtomicInt = volatile int;
-using AtomicRefCount = volatile int;
-using AtomicPtr = void* volatile;
-#endif
 
 bool AtomicBoolGet(AtomicBool* p);
 void AtomicBoolSet(AtomicBool* p, bool v);
@@ -254,17 +159,7 @@ void AtomicIntSet(AtomicInt* p, int v);
 int AtomicIntAdd(AtomicInt* p, int v);
 int AtomicIntInc(AtomicInt* p);
 int AtomicIntDec(AtomicInt* p);
-int AtomicRefCountAdd(AtomicRefCount* v);
-int AtomicRefCountDec(AtomicRefCount* v);
-void* AtomicPtrGet(AtomicPtr* p);
-void AtomicPtrSet(AtomicPtr* p, void* v);
 void* AtomicPtrExchange(AtomicPtr* p, void* v);
-
-#if !OS_WIN
-u64 GetTickCount64();
-#endif
-
-i64 UnixTimeMsNow();
 
 struct Arena;
 
@@ -341,12 +236,6 @@ inline int len(const wchar_t* s) {
     return n;
 }
 
-struct VecStr {
-    int len;
-    int cap;
-    Str* els;
-};
-
 #if COMPILER_MSVC
 #define NO_INLINE __declspec(noinline)
 #define FORCEINLINE __forceinline
@@ -355,8 +244,6 @@ struct VecStr {
 #define NO_INLINE __attribute__((noinline))
 #define FORCEINLINE inline __attribute__((always_inline))
 #endif
-
-#define NoOp() ((void)0)
 
 template <typename T, size_t N>
 char (&DimofSizeHelper(T (&array)[N]))[N];
@@ -369,12 +256,6 @@ char (&DimofSizeHelper(T (&array)[N]))[N];
 // enable msvc equivalent of -Wundef gcc option, warns when doing "#if FOO" and FOO is not defined
 // can't be turned on globally because windows headers have those
 #pragma warning(default : 4668)
-#endif
-
-#if COMPILER_MSVC
-#define IS_UNUSED
-#else
-#define IS_UNUSED __attribute__((unused))
 #endif
 
 // __analysis_assume is defined by msvc for prefast analysis
@@ -467,15 +348,31 @@ inline void ZeroStruct(T* s) {
     ZeroMemory((void*)s, sizeof(T));
 }
 
+namespace bit {
 template <typename T>
-inline void ZeroArray(T& a) {
-    size_t size = sizeof(a);
-    ZeroMemory((void*)&a, size);
+bool IsSet(T v, int bitNo) {
+    return (v & ((T)1 << bitNo)) != 0;
 }
+template <typename T, typename M>
+bool IsMaskSet(T v, M mask) {
+    return (v & (T)mask) != 0;
+}
+} // namespace bit
 
-int limitValue(int val, int min, int max);
-DWORD limitValue(DWORD val, DWORD min, DWORD max);
-float limitValue(float val, float min, float max);
+// base for RAII guards: no copies, no moves
+struct NonCopyable {
+    NonCopyable() = default;
+    NonCopyable(const NonCopyable&) = delete;
+    NonCopyable& operator=(const NonCopyable&) = delete;
+};
+
+template <typename T>
+T limitValue(T val, T min, T max) {
+    if (min > max) {
+        std::swap(min, max);
+    }
+    return val < min ? min : (val > max ? max : val);
+}
 
 // return true if adding n to val overflows. Only valid for n > 0
 template <typename T>
@@ -489,49 +386,12 @@ inline bool addOverflows(T val, T n) {
     return val > res;
 }
 
-// return false if adding n to val overflows. Only valid for n > 0
-template <typename T>
-inline bool addSafe(T* valInOut, T n) {
-    if (n == 0 || *valInOut == 0) {
-        valInOut = 0;
-        return true;
-    }
-    ReportIf(n < 0);
-    ReportIf(*valInOut < 0);
-    T res = *valInOut + n;
-    if (res < *valInOut) {
-        return false;
-    }
-    *valInOut = res;
-    return true;
-}
-
-// return false if multiplying val by n overflows. Only valid for n > 0
-template <typename T>
-inline bool mulSafe(T* valInOut, T n) {
-    if (n == 0 || *valInOut == 0) {
-        *valInOut = 0;
-        return true;
-    }
-    ReportIf(n < 0);
-    ReportIf(*valInOut < 0);
-    T res = *valInOut * n;
-    if (res < *valInOut || res < n) {
-        // multiplication overflowed
-        return false;
-    }
-    *valInOut = res;
-    return true;
-}
-
 bool MemEq(const void* s1, const void* s2, int n);
 
 int RoundToPowerOf2(int size);
 u32 MurmurHash2(const void* key, int n);
 u32 MurmurHash2(Str s);
 u32 MurmurHash2(WStr s);
-u32 MurmurHashWStrI(WStr str);
-u32 MurmurHashStrI(Str s);
 
 int RoundUp(int n, int rounding);
 void* RoundUp(void* d, int rounding);
@@ -817,14 +677,6 @@ Func1<T2> MkFunc1Void(void (*fn)(T2)) {
     return res;
 }
 
-template <typename T1, typename T2>
-Func1<T2>* NewFunc1(void (*fn)(T1*, T2), T1* d) {
-    auto res = new Func1<T2>{};
-    res->fn = (void*)fn;
-    res->SetData((void*)d, false);
-    return res;
-}
-
 // Func1 with an intrusive next pointer, so several callbacks can share one slot.
 // Embed a node in the client and Register() it onto a list head.
 template <typename T>
@@ -876,31 +728,24 @@ extern u64 (*gFreeCachedObjects)();
 
 //--- Geom.h ------------------------------------------------------------------
 
-struct Point {
-    int x = 0;
-    int y = 0;
+// int and float geometry share one template each: Point/PointF, Size/SizeF,
+// Rect/RectF. Bodies with logic live in Base.cpp (explicitly instantiated).
 
-    Point() = default;
-    Point(int x, int y);
+template <typename T>
+struct PointG {
+    T x = 0;
+    T y = 0;
 
-    bool IsEmpty() const;
-    bool Eq(int x, int y) const;
-    bool operator==(const Point& other) const;
-    bool operator!=(const Point& other) const;
+    PointG() = default;
+    PointG(T x, T y) : x(x), y(y) {}
+
+    bool IsEmpty() const { return x == 0 && y == 0; }
+    bool Eq(T ox, T oy) const { return x == ox && y == oy; }
+    bool operator==(const PointG& o) const { return x == o.x && y == o.y; }
+    bool operator!=(const PointG& o) const { return !(*this == o); }
 };
-
-struct PointF {
-    float x = 0;
-    float y = 0;
-
-    PointF() = default;
-
-    PointF(float x, float y);
-
-    bool IsEmpty() const;
-    bool operator==(const PointF& other) const;
-    bool operator!=(const PointF& other) const;
-};
+using Point = PointG<int>;
+using PointF = PointG<float>;
 
 // Four corners of a (possibly rotated) glyph box. Order matches MuPDF fz_quad.
 struct QuadF {
@@ -915,113 +760,84 @@ struct QuadF {
     PointF Center() const;
 };
 
-struct Size {
-    int dx = 0;
-    int dy = 0;
+template <typename T>
+struct SizeG {
+    T dx = 0;
+    T dy = 0;
 
-    Size() = default;
-    Size(int dx, int dy);
+    SizeG() = default;
+    SizeG(T dx, T dy) : dx(dx), dy(dy) {}
 
-    bool IsEmpty() const;
-
-    bool Equals(const Size& other) const;
-    bool operator==(const Size& other) const;
-    bool operator!=(const Size& other) const;
+    bool IsEmpty() const { return dx == 0 || dy == 0; }
+    bool operator==(const SizeG& o) const { return dx == o.dx && dy == o.dy; }
+    bool operator!=(const SizeG& o) const { return !(*this == o); }
 };
+using Size = SizeG<int>;
+using SizeF = SizeG<float>;
 
-struct SizeF {
-    float dx = 0;
-    float dy = 0;
+template <typename T>
+struct RectG {
+    T x = 0;
+    T y = 0;
+    T dx = 0;
+    T dy = 0;
 
-    SizeF() = default;
-    SizeF(float dx, float dy);
+    RectG() = default;
+    // implicit for Rect, explicit for RectF, as before
+    explicit(!std::is_same_v<T, int>) RectG(RECT r)
+        : x((T)r.left), y((T)r.top), dx((T)(r.right - r.left)), dy((T)(r.bottom - r.top)) {}
+    RectG(Gdiplus::RectF r) : x((T)r.X), y((T)r.Y), dx((T)r.Width), dy((T)r.Height) {} // NOLINT
+    RectG(T x, T y, T dx, T dy) : x(x), y(y), dx(dx), dy(dy) {}
+    RectG(PointG<T> pt, SizeG<T> sz) : x(pt.x), y(pt.y), dx(sz.dx), dy(sz.dy) {}
+    RectG(PointG<T> min, PointG<T> max) : x(min.x), y(min.y), dx(max.x - min.x), dy(max.y - min.y) {}
 
-    bool IsEmpty() const;
-
-    bool operator==(const SizeF& other) const;
-    bool operator!=(const SizeF& other) const;
+    T Right() const { return x + dx; }
+    T Bottom() const { return y + dy; }
+    static RectG FromXY(T xs, T ys, T xe, T ye);
+    static RectG FromXY(PointG<T> tl, PointG<T> br) { return FromXY(tl.x, tl.y, br.x, br.y); }
+    RectG<int> Round() const;
+    bool IsZero() const { return x == 0 && y == 0 && dx == 0 && dy == 0; }
+    bool IsEmpty() const { return dx == 0 || dy == 0; }
+    bool Contains(T px, T py) const;
+    bool Contains(PointG<T> pt) const { return Contains(pt.x, pt.y); }
+    RectG Intersect(RectG other) const;
+    RectG Union(RectG other) const;
+    void Offset(T ox, T oy) {
+        x += ox;
+        y += oy;
+    }
+    void Inflate(T ix, T iy) {
+        x -= ix;
+        dx += 2 * ix;
+        y -= iy;
+        dy += 2 * iy;
+    }
+    void SubTB(T t, T b) {
+        y += t;
+        dy -= t + b;
+    }
+    void SubLR(T l, T r) {
+        x += l;
+        dx -= l + r;
+    }
+    PointG<T> TL() const { return {x, y}; }
+    PointG<T> BR() const { return {x + dx, y + dy}; }
+    SizeG<T> Size() const { return {dx, dy}; }
+    void SetSize(const SizeG<T>& sz) {
+        dx = sz.dx;
+        dy = sz.dy;
+    }
+    void SetPos(const PointG<T>& p) {
+        x = p.x;
+        y = p.y;
+    }
+    bool operator==(const RectG& o) const { return x == o.x && y == o.y && dx == o.dx && dy == o.dy; }
+    bool operator!=(const RectG& o) const { return !(*this == o); }
 };
+using Rect = RectG<int>;
+using RectF = RectG<float>;
 
-struct Rect {
-    int x = 0;
-    int y = 0;
-    int dx = 0;
-    int dy = 0;
-
-    Rect() = default;
-#if OS_WIN
-    Rect(RECT r);           // NOLINT
-    Rect(Gdiplus::RectF r); // NOLINT
-#endif
-    Rect(int x, int y, int dx, int dy);
-    Rect(const Point pt, const Size sz) : x(pt.x), y(pt.y), dx(sz.dx), dy(sz.dy) {}
-    Rect(Point min, Point max);
-
-    bool EqSize(int otherDx, int otherDy) const;
-    int Right() const;
-    int Bottom() const;
-    static Rect FromXY(int xs, int ys, int xe, int ye);
-    static Rect FromXY(Point TL, Point BR);
-    bool IsZero() const;
-    bool IsEmpty() const;
-    bool Contains(int x, int y) const;
-    bool Contains(Point pt) const;
-    Rect Intersect(Rect other) const;
-    Rect Union(Rect other) const;
-    void Offset(int _x, int _y);
-    void Inflate(int _x, int _y);
-    void SubTB(int t, int b);
-    void SubLR(int l, int r);
-    Point TL() const;
-    Point BR() const;
-    struct Size Size() const;
-    void SetSize(const struct Size&);
-    void SetPos(const Point&);
-    bool Equals(const Rect& other) const;
-    bool operator==(const Rect& other) const;
-    bool operator!=(const Rect& other) const;
-};
-
-struct RectF {
-    float x = 0;
-    float y = 0;
-    float dx = 0;
-    float dy = 0;
-
-    RectF() = default;
-
-#if OS_WIN
-    explicit RectF(RECT r);
-    RectF(Gdiplus::RectF r); // NOLINT
-#endif
-    RectF(float x, float y, float dx, float dy);
-    RectF(PointF pt, SizeF size);
-    RectF(PointF min, PointF max);
-
-    bool EqSize(float otherDx, float otherDy) const;
-    float Right() const;
-    float Bottom() const;
-    static RectF FromXY(float xs, float ys, float xe, float ye);
-    static RectF FromXY(PointF TL, PointF BR);
-    Rect Round() const;
-    bool IsEmpty() const;
-    bool Contains(PointF pt) const;
-    RectF Intersect(RectF other) const;
-    RectF Union(RectF other);
-    void Offset(float _x, float _y);
-    void Inflate(float _x, float _y);
-    PointF TL() const;
-    PointF BR() const;
-    SizeF Size() const;
-    bool operator==(const RectF& other) const;
-    bool operator!=(const RectF& other) const;
-};
-
-PointF ToPointFl(Point p);
 Point ToPoint(PointF p);
-
-SizeF ToSizeFl(Size s);
-Size ToSize(SizeF s);
 
 RectF ToRectF(const Rect& r);
 Rect ToRect(const RectF& r);
@@ -1029,7 +845,6 @@ Rect ToRect(const RectF& r);
 // conversions to and from the Win32 / GDI+ geometry types. Those types only
 // exist on Windows, so the whole group is Windows-only; portable code uses the
 // types above
-#if OS_WIN
 int RectDx(const RECT& r);
 int RectDy(const RECT& r);
 
@@ -1045,13 +860,11 @@ Gdiplus::RectF ToGdipRectF(const Rect& r);
 
 Gdiplus::Rect ToGdipRect(const RectF& r);
 Gdiplus::RectF ToGdipRectF(const RectF& r);
-#endif
 
 int NormalizeRotation(int rotation);
 
 //--- Thread.h ------------------------------------------------------------------
 
-#if OS_WIN
 using ThreadId = DWORD;
 using ThreadHandle = HANDLE;
 
@@ -1087,66 +900,19 @@ struct RecursiveMutex {
     void Unlock() { LeaveCriticalSection(&lock); }
     bool TryLock() { return TryEnterCriticalSection(&lock); }
 };
-#else
-using ThreadId = u64;
 
-struct ThreadHandlePosix;
-using ThreadHandle = ThreadHandlePosix*;
-
-struct Mutex {
-    pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-
-    Mutex() = default;
-    ~Mutex() = default;
-
-    void Lock() { pthread_mutex_lock(&lock); }
-    void Unlock() { pthread_mutex_unlock(&lock); }
-    bool TryLock() { return pthread_mutex_trylock(&lock) == 0; }
-};
-
-struct ConditionVariable {
-    pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
-
-    ConditionVariable() = default;
-    ~ConditionVariable() { pthread_cond_destroy(&cond); }
-
-    void Wait(Mutex* mutex) { pthread_cond_wait(&cond, &mutex->lock); }
-    void Wake() { pthread_cond_signal(&cond); }
-    void WakeAll() { pthread_cond_broadcast(&cond); }
-};
-
-struct RecursiveMutex {
-    pthread_mutex_t lock;
-
-    RecursiveMutex() {
-        pthread_mutexattr_t attr;
-        pthread_mutexattr_init(&attr);
-        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-        pthread_mutex_init(&lock, &attr);
-        pthread_mutexattr_destroy(&attr);
-    }
-    ~RecursiveMutex() { pthread_mutex_destroy(&lock); }
-
-    void Lock() { pthread_mutex_lock(&lock); }
-    void Unlock() { pthread_mutex_unlock(&lock); }
-    bool TryLock() { return pthread_mutex_trylock(&lock) == 0; }
-};
-
-ThreadId GetCurrentThreadId();
-#endif
-
-struct ScopedMutex {
+struct AutoUnlockMutex {
     Mutex* mutex;
 
-    explicit ScopedMutex(Mutex* mutex) : mutex(mutex) { mutex->Lock(); }
-    ~ScopedMutex() { mutex->Unlock(); }
+    explicit AutoUnlockMutex(Mutex* mutex) : mutex(mutex) { mutex->Lock(); }
+    ~AutoUnlockMutex() { mutex->Unlock(); }
 };
 
-struct ScopedRecursiveMutex {
+struct AutoUnlockRecursiveMutex {
     RecursiveMutex* mutex;
 
-    explicit ScopedRecursiveMutex(RecursiveMutex* mutex) : mutex(mutex) { mutex->Lock(); }
-    ~ScopedRecursiveMutex() { mutex->Unlock(); }
+    explicit AutoUnlockRecursiveMutex(RecursiveMutex* mutex) : mutex(mutex) { mutex->Lock(); }
+    ~AutoUnlockRecursiveMutex() { mutex->Unlock(); }
 };
 
 void SetThreadName(Str threadName, ThreadId threadId = 0);
@@ -1154,7 +920,6 @@ void SleepInMs(int ms);
 
 void RunAsync(const Func0&, Str threadName = {});
 ThreadHandle StartThread(const Func0&, Str threadName = {});
-#if OS_WIN
 inline bool SafeCloseThreadHandle(ThreadHandle* hPtr) {
     ThreadHandle h = *hPtr;
     if (!h || h == INVALID_HANDLE_VALUE) {
@@ -1165,60 +930,31 @@ inline bool SafeCloseThreadHandle(ThreadHandle* hPtr) {
     *hPtr = nullptr;
     return !!ok;
 }
-#else
-bool SafeCloseThreadHandle(ThreadHandle*);
-#endif
 
 extern AtomicInt gDangerousThreadCount;
 bool AreDangerousThreadsPending();
 
 //--- Arena.h ------------------------------------------------------------------
 
-// Reserve/commit arena allocator (implemented in Arena.cpp).
-// Not self-sufficient: include after the part of utils/Base.h that defines
-// u64 and pulls in <windows.h> / <utility>. Base.h includes this header.
-
-// Standalone reserve/commit arena
+// Reserve/commit arena: a chain of VirtualAlloc'ed blocks, each with this
+// header at its start. The head block carries the chain and the stats.
 // 256 (not 128) to leave room in the header for the allocation stats below
 static const u64 kArenaHeaderSize = 256;
 
-typedef u64 ArenaFlags;
-enum : ArenaFlags {
-    ArenaFlagNoChain = 1ull << 0,
-    ArenaFlagLargePages = 1ull << 1,
-};
-
 struct ArenaParams {
-    ArenaFlags flags = 0;
     u64 reserveSize = 0;
     u64 commitSize = 0;
-    void* optionalBackingBuffer = nullptr;
-    const char* allocationSiteFile = nullptr;
-    int allocationSiteLine = 0;
-    const char* name = nullptr;
-};
-
-struct Arena;
-
-struct ArenaSavepoint {
-    Arena* arena;
-    u64 pos;
 };
 
 struct Arena {
     Arena* prev;    // Previous arena in chain
     Arena* current; // Current arena in chain
-    ArenaFlags flags;
     u64 commitChunkSize;
     u64 reserveChunkSize;
     u64 basePos;
     u64 pos;
     u64 committed;
     u64 reserved;
-    const char* allocationSiteFile;
-    int allocationSiteLine;
-    const char* name;
-    bool usesExternalBuffer;
     Mutex lock;
 
     // allocation statistics, updated after every successful allocation
@@ -1230,14 +966,11 @@ struct Arena {
     u64 peakBytesSinceReset; // largest total size reached since the last Reset()
 
     void* Alloc(int size);
-    void Free(void* ptr);
     void Reset();
     void* Push(u64 size, u64 align = 8, bool zero = true);
     u64 Pos();
     void PopTo(u64 pos);
     void Pop(u64 amt);
-    void* GetAvailableSpace(int* bufSizeOut);
-    void* CommitReserved(void* mem, int size);
 
     Arena() = delete;  // use ArenaNew()
     ~Arena() = delete; // use ArenaDelete()
@@ -1245,16 +978,9 @@ struct Arena {
 
 static_assert(sizeof(Arena) <= kArenaHeaderSize, "Arena header must fit in reserved header bytes");
 
-extern u64 gArenaDefaultReserveSize;
-extern u64 gArenaDefaultCommitSize;
-extern ArenaFlags gArenaDefaultFlags;
-
 ArenaParams ArenaDefaultParams();
 Arena* ArenaNew(const ArenaParams& params = ArenaDefaultParams());
 void ArenaDelete(Arena* arena);
-
-ArenaSavepoint GetArenaSavepoint(Arena* arena);
-void RestoreArenaSavepoint(ArenaSavepoint temp);
 
 u32 ArenaPtrCompress(Arena* arena, void* ptr);
 void* ArenaPtrUncompress(Arena* arena, u32 compressed);
@@ -1273,16 +999,16 @@ void DestroyTempArena();
 // RAII scratch scope for an arena (the temp arena unless told otherwise):
 // rewinds it to the entry position on scope exit, so code that allocates
 // scratch in a loop or on a hot path doesn't grow the arena unbounded.
-struct AutoArenaSavepoint {
-    ArenaSavepoint sp;
-    AutoArenaSavepoint(Arena* a = GetTempArena()) { // NOLINT
-        sp = GetArenaSavepoint(a);
+struct AutoArenaSavepoint : NonCopyable {
+    Arena* arena;
+    u64 pos;
+    AutoArenaSavepoint(Arena* a = GetTempArena()) : arena(a), pos(a ? a->Pos() : 0) { // NOLINT
     }
-    AutoArenaSavepoint(AutoArenaSavepoint& other) = delete;
-    AutoArenaSavepoint(AutoArenaSavepoint&& other) = delete;
-    AutoArenaSavepoint(const AutoArenaSavepoint& other) = delete;
-    AutoArenaSavepoint(const AutoArenaSavepoint&& other) = delete;
-    ~AutoArenaSavepoint() { RestoreArenaSavepoint(sp); }
+    ~AutoArenaSavepoint() {
+        if (arena) {
+            arena->PopTo(pos);
+        }
+    }
 };
 
 // Arena for allocations that live for the whole lifetime of the program (i.e.
@@ -1291,26 +1017,6 @@ struct AutoArenaSavepoint {
 extern Arena* gPermArena;
 Arena* GetPermArena();
 void DestroyPermArena();
-
-template <typename T>
-inline T* PushArrayNoZeroAligned(Arena* arena, u64 count, u64 align) {
-    return (T*)arena->Push(sizeof(T) * count, align, false);
-}
-
-template <typename T>
-inline T* PushArrayAligned(Arena* arena, u64 count, u64 align) {
-    return (T*)arena->Push(sizeof(T) * count, align, true);
-}
-
-template <typename T>
-inline T* PushArrayNoZero(Arena* arena, u64 count) {
-    return PushArrayNoZeroAligned<T>(arena, count, (alignof(T) > 8) ? alignof(T) : 8);
-}
-
-template <typename T>
-inline T* PushArray(Arena* arena, u64 count) {
-    return PushArrayAligned<T>(arena, count, (alignof(T) > 8) ? alignof(T) : 8);
-}
 
 void* Alloc(struct Arena* arena, int size);
 void Free(struct Arena* arena, void* mem);
@@ -1368,7 +1074,7 @@ struct VecIdentity {
 template <typename T>
 using VecIdentityT = typename VecIdentity<T>::type;
 
-//--- the type-erased layer: bodies in Arena.cpp, compiled once ---------------
+//--- the type-erased layer: bodies in Base.cpp, compiled once ----------------
 
 // Vec<T> with the element type erased. Vec<T>'s layout does not depend on T,
 // so VecNT() is a cast rather than a copy and the shims below cost nothing
@@ -1433,10 +1139,6 @@ void VecClear(Vec<T>& v);
 template <typename T>
 void VecReset(Vec<T>& v);
 
-// free() every element, then reset. Only for a vec of pointers.
-template <typename T>
-void VecFreeMembers(Vec<T>& v);
-
 // Perf hack for using a vec as a buffer: hand the storage to the caller
 // without a second allocation. Since a vec over-allocates this is likely to
 // use more memory than strictly necessary, which usually doesn't matter.
@@ -1467,10 +1169,6 @@ T* VecAppendBlanks(Vec<T>& v, int count);
 // Insert el at idx, moving the rest up.
 template <typename T>
 bool VecInsertAt(Vec<T>& v, int idx, const VecIdentityT<T>& el);
-
-// Append to any vec-shaped struct, from an arena or the heap.
-template <typename T, typename E>
-bool VecPush(Arena* arena, T& v, E el);
 
 //--- removing ---------------------------------------------------------------
 
@@ -1658,14 +1356,6 @@ void VecReset(Vec<T>& v) {
 }
 
 template <typename T>
-void VecFreeMembers(Vec<T>& v) {
-    for (int i = 0; i < v.len; i++) {
-        free(v.els[i]);
-    }
-    VecReset(v);
-}
-
-template <typename T>
 T* VecTake(Vec<T>& v) {
     return (T*)VecTakeNT(VecNT(v), (int)sizeof(T));
 }
@@ -1731,16 +1421,6 @@ bool VecInsertAt(Vec<T>& v, int idx, const VecIdentityT<T>& el) {
         return false;
     }
     p[0] = el;
-    return true;
-}
-
-template <typename T, typename E>
-bool VecPush(Arena* arena, T& v, E el) {
-    if (!VecGrow(arena, v, 1)) {
-        return false;
-    }
-    v.els[v.len] = el;
-    v.len++;
     return true;
 }
 
@@ -1854,37 +1534,11 @@ void VecReverse(Vec<T>& v) {
     }
 }
 
-// Iterator wrapper for range-based for loops over Vec types (structs with len/els)
-template <typename Vec>
-class VecIterator {
-    Vec* vec;
-
-  public:
-    VecIterator(Vec* v) : vec(v) {}
-    auto begin() { return vec ? vec->els : nullptr; }
-    auto end() { return vec && vec->els ? vec->els + vec->len : nullptr; }
-};
-
-// Helper functions for type deduction (works with both Vec& and Vec*)
-template <typename Vec>
-VecIterator<Vec> VecIter(Vec& v) {
-    return VecIterator<Vec>(&v);
-}
-template <typename Vec>
-VecIterator<Vec> VecIter(Vec* v) {
-    return VecIterator<Vec>(v);
-}
-
 //--- Str.h ------------------------------------------------------------------
 
 #define kUtf8Bom "\xEF\xBB\xBF"
 #define kUtf16Bom "\xFF\xFE"
 #define kUtf16BeBom "\xFE\xFF"
-
-using StrArena = u32;
-StrArena StrArenaAlloc(Arena* a, int size);
-StrArena StrArenaDupStr(Arena* a, Str s);
-Str StrArenaToStr(Arena* a, StrArena sa);
 
 // Singly-linked string node; AllocStrNode places the string bytes immediately
 // after the node in one allocation (s.s points into that block).
@@ -1964,8 +1618,6 @@ bool EqNIx(Str s, int n, Str s2);
 
 Str ToLowerInPlace(Str s);
 
-Str ToLower(Str s);
-
 Str ToUpperInPlace(Str s);
 
 bool IsDigit(char c);
@@ -1988,7 +1640,6 @@ bool ContainsI(Str s, Str sub);
 bool ContainsChar(Str s, char c);
 bool ContainsCharAny(Str s, Str chars);
 
-int TrimSuffix(Str& s, Str suffix);
 int LastIndexOfChar(Str s, char c);
 int TrimSuffixWhitespace(Str& s);
 
@@ -2027,8 +1678,6 @@ int BufSet(WCHAR* dst, int dstCchSize, Str src);
 WStr CastStrToWStr(Str s);
 } // namespace str
 
-void SplitStrByWhitespace(Arena* arena, const Str& s, VecStr& vecOut);
-
 namespace wstr {
 
 void Free(WStr s);
@@ -2055,7 +1704,6 @@ bool StartsWith(WStr str, WStr prefix);
 bool StartsWithI(WStr str, WStr prefix);
 bool EndsWith(WStr txt, WStr end);
 bool EndsWithI(WStr txt, WStr end);
-WStr ToLower(WStr s);
 WStr ToLowerInPlace(WStr s);
 int BufSet(WStr dst, WStr src);
 int NormalizeWSInPlace(WStr str);
@@ -2089,6 +1737,7 @@ using SeqStrings = const char*;
 Str SeqStrFirst(SeqStrings strs);
 Str SeqStrNext(Str s);
 int SeqStrIndex(SeqStrings strs, Str toFind);
+int SeqStrIndexI(SeqStrings strs, Str toFind);
 int SeqStrIndexIS(SeqStrings strs, Str toFind);
 TempStr SeqStrByIndex(SeqStrings strs, int idx);
 
@@ -2113,63 +1762,58 @@ int SeqStrNumIndexIS(SeqStrNum strs, Str toFind, i64* numOut);
 TempStr SeqStrNumByIndex(SeqStrNum strs, int idx, i64* numOut);
 TempStr SeqStrNumStrByNumber(SeqStrNum strs, i64 num);
 
-namespace str {
-// A Vec<char> that always keeps a NUL after the last char, so the storage is
+// A Vec<C> that always keeps a NUL after the last char, so the storage is
 // also a C string. Vec supplies the fields, operator[], begin/end and the
 // destructor; only what needs the terminator or an arena is left here.
-struct Builder : Vec<char> {
+// str::Builder is BuilderT<char>, wstr::Builder is BuilderT<WCHAR>.
+template <typename C>
+struct StrOf;
+template <>
+struct StrOf<char> {
+    using type = Str;
+};
+template <>
+struct StrOf<WCHAR> {
+    using type = WStr;
+};
+
+template <typename C>
+struct BuilderT : Vec<C> {
+    using S = typename StrOf<C>::type;
     // growth allocator; null means the heap. Arena storage is never freed by
     // the Builder (the arena owns it).
     Arena* a = nullptr;
 
-    Builder() = default;
-    explicit Builder(Arena* arena) : a(arena) {}
+    BuilderT() = default;
+    explicit BuilderT(Arena* arena) : a(arena) {}
 
-    void Reset(Str s = {});
+    void Reset(S s = {});
     bool Reserve(int cap);
-    bool AppendChar(char c);
-    bool Append(Str src);
-    bool AppendNonEmpty(Str src);
-    char RemoveAt(int idx, int count = 1);
-    char RemoveLast();
-    Str TakeStr();
-    char LastChar() const;
+    bool AppendChar(C c);
+    bool Append(S src);
+    bool AppendNonEmpty(S src);
+    C RemoveAt(int idx, int count = 1);
+    C RemoveLast();
+    S TakeStr();
+    C LastChar() const;
+    // Lend a buffer to start in, instead of the first allocation, the way
+    // VecUseExternalBuffer() does. Must be empty with no storage yet. Appends
+    // go into buf until it is full; the append past that allocates and copies.
+    // Nothing frees buf, so it must outlive the builder.
+    void UseExternalBuffer(S buf);
 };
 
+namespace str {
+using Builder = BuilderT<char>;
 bool Contains(const Builder& b, Str sub);
-
-// Lend b a buffer to start in, instead of its first allocation, the way
-// VecUseExternalBuffer() does. b must be empty and have no storage yet. It
-// appends into buf until buf is full; the append past that allocates and
-// copies, leaving buf alone. Nothing frees buf, so it must outlive b.
-void BuilderUseExternalBuffer(Builder& b, Str buf);
-
-bool BuilderReserve(Builder& b, int cap);
-bool BuilderAppendChar(Builder& b, char c);
-bool BuilderAppend(Builder& b, Str s);
-Str BuilderTakeStr(Builder& b);
 } // namespace str
+
+namespace wstr {
+using Builder = BuilderT<WCHAR>;
+}
 
 void SeqStrNumAppend(str::Builder* b, Str s, i64 num);
 void SeqStrNumFinish(str::Builder* b);
-
-namespace wstr {
-// see str::Builder: a Vec<WCHAR> that always keeps a NUL after the last char
-struct Builder : Vec<WCHAR> {
-    bool AppendChar(WCHAR);
-    bool Append(WStr src);
-    WCHAR RemoveLast();
-    WCHAR LastChar() const;
-    WStr TakeWStr();
-};
-
-// see str::BuilderUseExternalBuffer()
-void BuilderUseExternalBuffer(Builder& b, WStr buf);
-
-// see str::BuilderReserve()
-bool BuilderReserve(Builder& b, int cap);
-
-} // namespace wstr
 
 int ParseInt(Str s);
 i64 ParseInt64(Str s);
@@ -2193,15 +1837,12 @@ int FoldCaseRune(int c);
 bool IsCombiningMark(int c);
 int FoldDiacriticsRune(int c);
 int WStrFindSubstr(WStr str, WStr substr);
-int WStrCmpNoCase(WStr a, WStr b);
 
 // human readable size, e.g. "1.23 GB", "456 KB", "17 B"
 TempStr FormatFileSizeTemp(u64 size);
 
 //--- StrUtf8.h ------------------------------------------------------------------
 
-bool isLegalUTF8Sequence(const u8* source, const u8* sourceEnd);
-bool isLegalUTF8String(const u8** source, const u8* sourceEnd);
 int utf8StrLen(const u8* s);
 int utf8RuneLen(const u8* s);
 
@@ -2210,7 +1851,6 @@ void Utf8Encode(char* buf, int& off, int c);
 int VsnprintfUtf8(Str buf, const char* fmt, va_list args);
 } // namespace str
 
-bool Utf8IsContinuationByte(char c);
 int Utf8CodepointCount(Str s);
 int Utf8CodepointAtByte(Str s, int byteIdx, int* bytesOut = nullptr);
 // byteIdx may point into the middle of a sequence, unlike in the functions above
@@ -2219,14 +1859,12 @@ int Utf8CodepointContaining(Str s, int byteIdx);
 int Utf8CodepointNext(Str s, int& byteIdx);
 int Utf8CodepointPrev(Str s, int& byteIdx);
 int Utf8CodepointToByteIndex(Str s, int codepointIdx);
-int Utf8AdvanceCodepoints(Str s, int byteIdx, int nCodepoints);
 Str Utf8SliceByCodepoints(Str s, int startCodepoint, int nCodepoints);
 
 TempStr ShortenStringUtf8Temp(Str s, int maxRunes);
 TempStr ShortenStringUtf8InTheMiddleTemp(Str s, int maxRunes);
 
 WStr ToWStrTemp(Str s);
-Str ToUtf8(Arena* arena, WStr wide);
 Str ToUtf8Temp(WStr wide);
 WCHAR* CWStrTemp(Str s);
 WCHAR* CWStrTemp(Str s, int& cch);
@@ -2310,23 +1948,6 @@ struct FmtArg {
     FmtArg(const wchar_t*) = delete;
 };
 
-TempStr FormatTempArgs(const char* fmt, const FmtArg** args, int nArgs);
-
-inline TempStr FormatTemp(const char* fmt) {
-    return FormatTempArgs(fmt, nullptr, 0);
-}
-
-template <typename... TArgs>
-TempStr FormatTemp(const char* fmt, const TArgs&... args) {
-    const FmtArg argv[] = {FmtArg(args)...};
-    const FmtArg* argp[sizeof...(TArgs)];
-    int n = (int)sizeof...(TArgs);
-    for (int i = 0; i < n; i++) {
-        argp[i] = &argv[i];
-    }
-    return FormatTempArgs(fmt, argp, n);
-}
-
 Str FormatArgs(Arena* a, const char* fmt, const FmtArg** args, int nArgs);
 
 inline Str Format(Arena* a, const char* fmt) {
@@ -2342,6 +1963,11 @@ Str Format(Arena* a, const char* fmt, const TArgs&... args) {
         argp[i] = &argv[i];
     }
     return FormatArgs(a, fmt, argp, n);
+}
+
+template <typename... TArgs>
+TempStr FormatTemp(const char* fmt, const TArgs&... args) {
+    return Format(GetTempArena(), fmt, args...);
 }
 
 // Type-safe scanf-style parsing (analogous to str::Format). Each output arg
@@ -2408,6 +2034,8 @@ bool StrLessNoCase(Str s1, Str s2);
 bool StrLessNatural(Str s1, Str s2);
 
 struct StrVecPage;
+StrVecPage* StrVecPageNext(StrVecPage*);
+int StrVecPageSize(StrVecPage*);
 
 struct StrVec {
     StrVecPage* first = nullptr;
@@ -2495,7 +2123,6 @@ struct StrVecWithData : StrVec {
 int AppendIfNotExists(StrVec* v, Str s);
 
 void Sort(StrVec* v, StrLessFunc lessFn = StrLess);
-void SortIndex(StrVec* v, StrLessFunc lessFn = StrLess);
 void SortNoCase(StrVec*);
 void SortNatural(StrVec*);
 
@@ -2503,16 +2130,11 @@ int Split(StrVec* v, Str s, Str separator, bool collapse = false, int max = -1);
 Str Join(StrVec* v, Str sep = {});
 TempStr JoinTemp(StrVec* v, Str sep);
 
-StrVecPage* StrVecPageNext(StrVecPage*);
-int StrVecPageSize(StrVecPage*);
-
 //--- Strconv.h ------------------------------------------------------------------
 
 namespace strconv {
 
-WStr Utf8ToWStr(Str s, Arena* a = nullptr);
-Str WStrToUtf8(WStr s, Arena* a = nullptr);
-
+WStr CodePageToWStr(uint codePage, Str s, Arena* a = nullptr);
 Str WStrToCodePage(uint codePage, WStr s, Arena* a = nullptr);
 TempStr ToMultiByteTemp(Str src, uint codePageSrc, uint codePageDest);
 WStr StrCPToWStr(Str src, uint codePage);
@@ -2520,9 +2142,6 @@ TempWStr StrCPToWStrTemp(Str src, uint codePage);
 TempStr StrToUtf8Temp(Str src, uint codePage);
 
 TempStr UnknownToUtf8Temp(Str s);
-
-Str WStrToAnsi(WStr src);
-Str Utf8ToAnsi(Str s);
 
 TempWStr AnsiToWStrTemp(Str src);
 Str AnsiToUtf8(Str src);
@@ -2538,13 +2157,13 @@ WStr ToWStr(Str s, Arena* a = nullptr);
 
 // auto-free memory for arbitrary malloc()ed memory of type T*
 template <typename T>
-class ScopedMem {
+class AutoFree {
   public:
     T* ptr = nullptr;
 
-    ScopedMem() = default;
-    explicit ScopedMem(T* ptr) : ptr(ptr) {}
-    ~ScopedMem() { free(ptr); }
+    AutoFree() = default;
+    explicit AutoFree(T* ptr) : ptr(ptr) {}
+    ~AutoFree() { free(ptr); }
     void Set(T* newPtr) {
         free(ptr);
         ptr = newPtr;
@@ -2562,18 +2181,11 @@ class ScopedMem {
 
 // deletes an object at the end of the scope
 template <typename T>
-struct AutoDelete {
+struct AutoDelete : NonCopyable {
     T* o = nullptr;
     AutoDelete() = default;
-    AutoDelete(T* p) { // NOLINT
-        o = p;
-    }
+    AutoDelete(T* p) : o(p) {} // NOLINT
     ~AutoDelete() { delete o; }
-
-    AutoDelete& operator=(AutoDelete& other) = delete;
-    AutoDelete& operator=(AutoDelete&& other) = delete;
-    AutoDelete& operator=(const AutoDelete& other) = delete;
-    AutoDelete& operator=(const AutoDelete&& other) = delete;
     operator T*() const { // NOLINT
         return o;
     }
@@ -2586,79 +2198,42 @@ template <typename Fn>
 struct AutoCall;
 
 template <typename Result>
-struct AutoCall<Result (*)()> {
-    using Fn = Result (*)();
-    Fn fn = nullptr;
+struct AutoCall<Result (*)()> : NonCopyable {
+    Result (*fn)() = nullptr;
     AutoCall() = default;
-    AutoCall(Fn fn) { this->fn = fn; } // NOLINT
-    AutoCall(AutoCall& other) = delete;
-    AutoCall(AutoCall&& other) = delete;
-    AutoCall(const AutoCall& other) = delete;
-    AutoCall(const AutoCall&& other) = delete;
+    AutoCall(Result (*fn)()) : fn(fn) {} // NOLINT
     ~AutoCall() {
         if (fn) {
             fn();
         }
     }
-
-    AutoCall& operator=(AutoCall& other) = delete;
-    AutoCall& operator=(AutoCall&& other) = delete;
-    AutoCall& operator=(const AutoCall& other) = delete;
-    AutoCall& operator=(const AutoCall&& other) = delete;
 };
 
 template <typename Result, typename Arg>
-struct AutoCall<Result (*)(Arg)> {
-    using Fn = Result (*)(Arg);
-    Fn fn = nullptr;
+struct AutoCall<Result (*)(Arg)> : NonCopyable {
+    Result (*fn)(Arg) = nullptr;
     Arg arg{};
     AutoCall() = default;
-    AutoCall(Fn fn, Arg arg) { // NOLINT
-        this->fn = fn;
-        this->arg = arg;
-    }
-    AutoCall(AutoCall& other) = delete;
-    AutoCall(AutoCall&& other) = delete;
-    AutoCall(const AutoCall& other) = delete;
-    AutoCall(const AutoCall&& other) = delete;
+    AutoCall(Result (*fn)(Arg), Arg arg) : fn(fn), arg(arg) {} // NOLINT
     ~AutoCall() {
         if (fn) {
             fn(arg);
         }
     }
-
-    AutoCall& operator=(AutoCall& other) = delete;
-    AutoCall& operator=(AutoCall&& other) = delete;
-    AutoCall& operator=(const AutoCall& other) = delete;
-    AutoCall& operator=(const AutoCall&& other) = delete;
 };
 
 template <typename Result, typename Arg1, typename Arg2>
-struct AutoCall<Result (*)(Arg1, Arg2)> {
-    using Fn = Result (*)(Arg1, Arg2);
-    Fn fn = nullptr;
+struct AutoCall<Result (*)(Arg1, Arg2)> : NonCopyable {
+    Result (*fn)(Arg1, Arg2) = nullptr;
     Arg1 arg1{};
     Arg2 arg2{};
     AutoCall() = default;
-    AutoCall(Fn fn, Arg1 arg1, Arg2 arg2) { // NOLINT
-        this->fn = fn;
-        this->arg1 = arg1;
-        this->arg2 = arg2;
-    }
-    AutoCall(AutoCall& other) = delete;
-    AutoCall(AutoCall&& other) = delete;
-    AutoCall(const AutoCall& other) = delete;
-    AutoCall(const AutoCall&& other) = delete;
+    AutoCall(Result (*fn)(Arg1, Arg2), Arg1 arg1, Arg2 arg2) : fn(fn), arg1(arg1), arg2(arg2) {} // NOLINT
     ~AutoCall() {
         if (fn) {
             fn(arg1, arg2);
         }
     }
-
-    AutoCall& operator=(AutoCall& other) = delete;
-    AutoCall& operator=(AutoCall&& other) = delete;
-    AutoCall& operator=(const AutoCall& other) = delete;
-    AutoCall& operator=(const AutoCall&& other) = delete;
 };
 
 template <typename Result>
@@ -2668,14 +2243,30 @@ AutoCall(Result (*)(Arg), Arg) -> AutoCall<Result (*)(Arg)>;
 template <typename Result, typename Arg1, typename Arg2>
 AutoCall(Result (*)(Arg1, Arg2), Arg1, Arg2) -> AutoCall<Result (*)(Arg1, Arg2)>;
 
+// on x86 Win32 API functions (CloseHandle etc.) are __stdcall, a distinct
+// pointer type; on x64 it is the same as __cdecl and would redefine the above
+#if defined(_M_IX86)
+template <typename Result, typename Arg>
+struct AutoCall<Result(__stdcall*)(Arg)> : NonCopyable {
+    Result(__stdcall* fn)(Arg) = nullptr;
+    Arg arg{};
+    AutoCall() = default;
+    AutoCall(Result(__stdcall* fn)(Arg), Arg arg) : fn(fn), arg(arg) {} // NOLINT
+    ~AutoCall() {
+        if (fn) {
+            fn(arg);
+        }
+    }
+};
+
+template <typename Result, typename Arg>
+AutoCall(Result(__stdcall*)(Arg), Arg) -> AutoCall<Result(__stdcall*)(Arg)>;
+#endif
+
 //--- Color.h ------------------------------------------------------------------
 
 // Win32 COLORREF layout (0x00bbggrr); typically no alpha
-#if OS_WIN
 using Color = COLORREF;
-#else
-using Color = uint32_t;
-#endif
 
 // a "unset" state for Color value. technically all colors are valid
 // this one is hopefully not used in practice
@@ -2716,7 +2307,6 @@ constexpr Color MkGray(u8 x) {
 constexpr Color kColWhite = MkRgb(0xff, 0xff, 0xff);
 constexpr Color kColBlack = MkRgb(0, 0, 0);
 constexpr Color kColRed = MkRgb(0xff, 0, 0);
-constexpr Color kColGreen = MkRgb(0, 0xff, 0);
 constexpr Color kColBlue = MkRgb(0, 0, 0xff);
 constexpr Color kColYellow = MkRgb(0xff, 0xff, 0);
 constexpr Color kColGray = MkGray(0xdd);
@@ -2739,7 +2329,6 @@ PdfColor MkPdfColor(u8 r, u8 g, u8 b, u8 a = 0xff); // 0xff is opaque
 void UnpackPdfColor(PdfColor, u8& r, u8& g, u8& b, u8& a);
 void SerializePdfColor(PdfColor c, str::Builder& out);
 
-Color AdjustLightness(Color c, float factor);
 Color AdjustLightness2(Color c, float units);
 float GetLightness(Color c);
 bool IsLightColor(Color c);
@@ -2749,11 +2338,7 @@ bool IsNearBlack(Color c);
 DWORD PremultiplyPixel(Color c, u8 alpha);
 
 // GDI+ only exists on Windows; portable code works with Color
-#if OS_WIN
-Gdiplus::Color Unblend(Color c, u8 alpha);
 Gdiplus::Color GdiRgbFromColor(Color c);
-Gdiplus::Color GdiRgbaFromColor(Color c);
-#endif
 
 constexpr Color RgbToColor(Color rgb) {
     return ((rgb & 0x0000FF) << 16) | (rgb & 0x00FF00) | ((rgb & 0xFF0000) >> 16);

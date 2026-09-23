@@ -5,7 +5,7 @@
 #include "base/File.h"
 #include "base/GuessFileType.h"
 #include "base/Pixmap.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/UITask.h"
 #include "base/Win.h"
 #include "gui/UIModels.h"
@@ -85,9 +85,23 @@ using OptionChangedHandler =
 // so they only have to be unique within the print task
 static const WCHAR* kOptCenterHorizontally = L"sumatraCenterHorizontally";
 static const WCHAR* kOptExtraRotation = L"sumatraExtraRotation";
+static const WCHAR* kOptPageScaling = L"sumatraPageScaling";
 
 // item ids of the rotation option, which is also how its value comes back
 static const WCHAR* kRotationItems[] = {L"0", L"90", L"180", L"270"};
+
+// the page scaling option's items, in the Advanced tab's order
+struct ScaleItem {
+    const WCHAR* id;
+    PrintScaleAdv scale;
+    const char* label; // Tr() key, shared with the Advanced tab
+};
+static const ScaleItem kScaleItems[] = {
+    {L"shrink", PrintScaleAdv::Shrink, "&Shrink pages to printable area"},
+    {L"fit", PrintScaleAdv::Fit, "&Fit pages to printable area"},
+    {L"stretch", PrintScaleAdv::Stretch, "S&tretch pages to fill paper"},
+    {L"none", PrintScaleAdv::None, "A&ctual size (1:1)"},
+};
 
 // The printer options the dialog offers, in the order it shows them. Unlike the
 // classic PrintDlgEx dialog, this one has no button that opens the driver's own
@@ -143,19 +157,19 @@ struct WinRtApi {
 static WinRtApi gWinRt;
 
 // an HSTRING that frees itself; the WinRT calls below need a lot of them
-struct ScopedHStr {
+struct AutoDeleteHStr {
     HSTRING h = nullptr;
 
-    ScopedHStr() = default;
-    explicit ScopedHStr(const WCHAR* s) {
+    AutoDeleteHStr() = default;
+    explicit AutoDeleteHStr(const WCHAR* s) {
         if (s) {
             gWinRt.windowsCreateString(s, (UINT32)wcslen(s), &h);
         }
     }
-    ScopedHStr(const ScopedHStr&) = delete;
-    ScopedHStr& operator=(const ScopedHStr&) = delete;
+    AutoDeleteHStr(const AutoDeleteHStr&) = delete;
+    AutoDeleteHStr& operator=(const AutoDeleteHStr&) = delete;
 
-    ~ScopedHStr() {
+    ~AutoDeleteHStr() {
         if (h) {
             gWinRt.windowsDeleteString(h);
         }
@@ -164,7 +178,7 @@ struct ScopedHStr {
 
 template <typename T>
 static HRESULT GetActivationFactory(const WCHAR* runtimeClass, ComPtr<T>& factory) {
-    ScopedHStr cls(runtimeClass);
+    AutoDeleteHStr cls(runtimeClass);
     if (!cls.h) {
         return E_OUTOFMEMORY;
     }
@@ -191,7 +205,7 @@ static HRESULT GetOptionValue(OptDetails::IPrintTaskOptionDetails* details, cons
     if (FAILED(hr)) {
         return hr;
     }
-    ScopedHStr key(optionId);
+    AutoDeleteHStr key(optionId);
     ComPtr<OptDetails::IPrintOptionDetails> option;
     hr = options->Lookup(key.h, &option);
     if (FAILED(hr)) {
@@ -221,7 +235,7 @@ static void SetOptionStr(OptDetails::IPrintOptionDetails* option, const WCHAR* v
     if (FAILED(GetActivationFactory(RuntimeClass_Windows_Foundation_PropertyValue, statics))) {
         return;
     }
-    ScopedHStr str(value);
+    AutoDeleteHStr str(value);
     ComPtr<IInspectable> boxed;
     if (SUCCEEDED(statics->CreateString(str.h, &boxed))) {
         SetOptionValue(option, boxed.Get());
@@ -240,26 +254,51 @@ static bool UnboxBool(IInspectable* value, bool defVal) {
     return res != 0;
 }
 
-// the rotation option's value is the item id, i.e. "0", "90", "180" or "270"
-static int UnboxRotation(IInspectable* value, int defVal) {
+// an item list option's value is the id of the picked item; returns its index
+// in ids, or defIdx when the value isn't one of them
+static int UnboxItemIndex(IInspectable* value, const WCHAR* const* ids, int nIds, int defIdx) {
     ComPtr<Foundation::IPropertyValue> prop;
     if (!value || FAILED(value->QueryInterface(IID_PPV_ARGS(&prop)))) {
-        return defVal;
+        return defIdx;
     }
     HSTRING hstr = nullptr;
     if (FAILED(prop->GetString(&hstr)) || !hstr) {
-        return defVal;
+        return defIdx;
     }
     const WCHAR* str = gWinRt.windowsGetStringRawBuffer(hstr, nullptr);
-    int res = defVal;
-    for (int i = 0; str && i < dimofi(kRotationItems); i++) {
-        if (wstr::Eq(str, kRotationItems[i])) {
-            res = i * 90;
+    int res = defIdx;
+    for (int i = 0; str && i < nIds; i++) {
+        if (wstr::Eq(str, ids[i])) {
+            res = i;
             break;
         }
     }
     gWinRt.windowsDeleteString(hstr);
     return res;
+}
+
+// the rotation option's value is the item id, i.e. "0", "90", "180" or "270"
+static int UnboxRotation(IInspectable* value, int defVal) {
+    int idx = UnboxItemIndex(value, kRotationItems, dimofi(kRotationItems), -1);
+    return idx < 0 ? defVal : idx * 90;
+}
+
+static int ScaleItemIndex(PrintScaleAdv scale) {
+    for (int i = 0; i < dimofi(kScaleItems); i++) {
+        if (kScaleItems[i].scale == scale) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+static PrintScaleAdv UnboxScale(IInspectable* value, PrintScaleAdv defVal) {
+    const WCHAR* ids[dimofi(kScaleItems)];
+    for (int i = 0; i < dimofi(kScaleItems); i++) {
+        ids[i] = kScaleItems[i].id;
+    }
+    int idx = UnboxItemIndex(value, ids, dimofi(kScaleItems), -1);
+    return idx < 0 ? defVal : kScaleItems[idx].scale;
 }
 
 // the Advanced page's labels carry an accelerator marker the print dialog has
@@ -430,52 +469,6 @@ class PrintGraphics {
     }
 };
 
-static Pixmap* ConvertToBgra(Pixmap* source) {
-    if (!source) {
-        return nullptr;
-    }
-    if (source->format == PixmapFormat::BGRA8 && source->data) {
-        return source;
-    }
-    if (source->hbmp) {
-        Pixmap* converted = PixmapCopyAs32bppDIB(source);
-        FreePixmap(source);
-        return converted;
-    }
-    if (!source->data) {
-        FreePixmap(source);
-        return nullptr;
-    }
-
-    Pixmap* converted = AllocPixmap(source->width, source->height, PixmapFormat::BGRA8);
-    if (!converted) {
-        FreePixmap(source);
-        return nullptr;
-    }
-    for (int y = 0; y < source->height; y++) {
-        const u8* src = source->data + ((size_t)y * source->stride);
-        u8* dst = converted->data + ((size_t)y * converted->stride);
-        for (int x = 0; x < source->width; x++) {
-            if (source->format == PixmapFormat::BGR8) {
-                dst[0] = src[0];
-                dst[1] = src[1];
-                dst[2] = src[2];
-                dst[3] = 255;
-                src += 3;
-            } else {
-                dst[0] = src[2];
-                dst[1] = src[1];
-                dst[2] = src[0];
-                dst[3] = src[3];
-                src += 4;
-            }
-            dst += 4;
-        }
-    }
-    FreePixmap(source);
-    return converted;
-}
-
 class PrintDocumentSource final
     : public RuntimeClass<RuntimeClassFlags<WinRtClassicComMix>, Printing::IPrintDocumentSource,
                           IPrintDocumentPageSource, IPrintPreviewPageCollection> {
@@ -556,6 +549,10 @@ class PrintDocumentSource final
         if (SUCCEEDED(GetOptionValue(details.Get(), kOptExtraRotation, value))) {
             advanced.extraRotation = UnboxRotation(value.Get(), advanced.extraRotation);
         }
+        value.Reset();
+        if (SUCCEEDED(GetOptionValue(details.Get(), kOptPageScaling, value))) {
+            advanced.scale = UnboxScale(value.Get(), advanced.scale);
+        }
     }
 
     void ReadPageRanges(IInspectable* options) {
@@ -632,7 +629,7 @@ class PrintDocumentSource final
             RectF devBand(devFull.x, devFull.y + (float)dy, devFull.dx, (float)h);
             RectF pageBand = engine->Transform(devBand, pageNo, layout.zoom, layout.rotation, /* inverse */ true);
             RenderPageArgs args(pageNo, layout.zoom, layout.rotation, &pageBand, RenderTarget::Print);
-            Pixmap* band = ConvertToBgra(engine->RenderPage(args));
+            Pixmap* band = PixmapToBgra(engine->RenderPage(args));
             if (!band || !band->data) {
                 FreePixmap(band);
                 // couldn't allocate even a band: try thinner ones before giving
@@ -711,7 +708,7 @@ class PrintDocumentSource final
     // a custom option changed: nothing re-paginates on its own, so ask for the
     // preview to be built again with the new value
     void InvalidatePreview() {
-        ScopedMutex lock(&mutex);
+        AutoUnlockMutex lock(&mutex);
         if (previewTarget) {
             previewTarget->InvalidatePreview();
         }
@@ -737,7 +734,7 @@ class PrintDocumentSource final
         if (!options || !previewTarget) {
             return E_INVALIDARG;
         }
-        ScopedMutex lock(&mutex);
+        AutoUnlockMutex lock(&mutex);
         ReadAdvancedOptions(options);
         ReadPageRanges(options);
         HRESULT hr = options->QueryInterface(IID_PPV_ARGS(&previewOptions));
@@ -755,7 +752,7 @@ class PrintDocumentSource final
         if (!previewTarget || width <= 0 || height <= 0) {
             return E_INVALIDARG;
         }
-        ScopedMutex lock(&mutex);
+        AutoUnlockMutex lock(&mutex);
         UINT32 jobPage = desiredJobPage == JOB_PAGE_APPLICATION_DEFINED ? FirstJobPage() : desiredJobPage;
         int pageNo = DocumentPage(jobPage);
         if (!pageNo || !previewOptions) {
@@ -798,7 +795,7 @@ class PrintDocumentSource final
         if (!options || !packageTarget) {
             return E_INVALIDARG;
         }
-        ScopedMutex lock(&mutex);
+        AutoUnlockMutex lock(&mutex);
         ReadAdvancedOptions(options);
         ReadPageRanges(options);
         ComPtr<Printing::IPrintTaskOptionsCore> optionCore;
@@ -908,8 +905,8 @@ class Win11PrintSession {
         hr = details.As(&details2);
         ComPtr<OptDetails::IPrintOptionDetails> centerOption;
         if (SUCCEEDED(hr)) {
-            ScopedHStr id(kOptCenterHorizontally);
-            ScopedHStr name(OptionLabelTemp(Tr("Center page hori&zontally on the paper")).s);
+            AutoDeleteHStr id(kOptCenterHorizontally);
+            AutoDeleteHStr name(OptionLabelTemp(Tr("Center page hori&zontally on the paper")).s);
             hr = details2->CreateToggleOption(id.h, name.h, &centerOption);
         }
         if (SUCCEEDED(hr)) {
@@ -918,23 +915,42 @@ class Win11PrintSession {
 
         ComPtr<OptDetails::IPrintOptionDetails> rotateOption;
         if (SUCCEEDED(hr)) {
-            ScopedHStr id(kOptExtraRotation);
-            ScopedHStr name(OptionLabelTemp(Tr("&Rotate printout:")).s);
+            AutoDeleteHStr id(kOptExtraRotation);
+            AutoDeleteHStr name(OptionLabelTemp(Tr("&Rotate printout:")).s);
             hr = details->CreateItemListOption(id.h, name.h, &rotateOption);
         }
         if (SUCCEEDED(hr)) {
             ComPtr<OptDetails::IPrintCustomItemListOptionDetails> items;
             hr = rotateOption.As(&items);
             for (int i = 0; SUCCEEDED(hr) && i < dimofi(kRotationItems); i++) {
-                ScopedHStr itemId(kRotationItems[i]);
+                AutoDeleteHStr itemId(kRotationItems[i]);
                 // "None", then the degrees, matching the Advanced page
-                ScopedHStr name(i == 0 ? ToWStrTemp(Tr("None")).s : ToWStrTemp(fmt("%d°", i * 90)).s);
+                AutoDeleteHStr name(i == 0 ? ToWStrTemp(Tr("None")).s : ToWStrTemp(fmt("%d°", i * 90)).s);
                 hr = items->AddItem(itemId.h, name.h);
             }
         }
         if (SUCCEEDED(hr)) {
             int idx = (advanced.extraRotation / 90) % dimofi(kRotationItems);
             SetOptionStr(rotateOption.Get(), kRotationItems[idx]);
+        }
+
+        ComPtr<OptDetails::IPrintOptionDetails> scaleOption;
+        if (SUCCEEDED(hr)) {
+            AutoDeleteHStr id(kOptPageScaling);
+            AutoDeleteHStr name(ToWStrTemp(Tr("Page scaling")).s);
+            hr = details->CreateItemListOption(id.h, name.h, &scaleOption);
+        }
+        if (SUCCEEDED(hr)) {
+            ComPtr<OptDetails::IPrintCustomItemListOptionDetails> items;
+            hr = scaleOption.As(&items);
+            for (int i = 0; SUCCEEDED(hr) && i < dimofi(kScaleItems); i++) {
+                AutoDeleteHStr itemId(kScaleItems[i].id);
+                AutoDeleteHStr name(OptionLabelTemp(Tr(kScaleItems[i].label)).s);
+                hr = items->AddItem(itemId.h, name.h);
+            }
+        }
+        if (SUCCEEDED(hr)) {
+            SetOptionStr(scaleOption.Get(), kScaleItems[ScaleItemIndex(advanced.scale)].id);
         }
         if (FAILED(hr)) {
             return hr;
@@ -995,10 +1011,12 @@ class Win11PrintSession {
                 }
             }
         }
-        ScopedHStr center(kOptCenterHorizontally);
+        AutoDeleteHStr center(kOptCenterHorizontally);
         displayed->Append(center.h);
-        ScopedHStr rotate(kOptExtraRotation);
+        AutoDeleteHStr rotate(kOptExtraRotation);
         displayed->Append(rotate.h);
+        AutoDeleteHStr scale(kOptPageScaling);
+        displayed->Append(scale.h);
         return S_OK;
     }
 

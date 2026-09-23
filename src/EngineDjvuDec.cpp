@@ -171,11 +171,11 @@ class EngineDjvuDec : public EngineBase {
     bool Load(Str fileName);
     bool LoadFromData(Str data);
 
-    struct ScopedRenderSlot {
+    struct AutoReleaseRenderSlot {
         EngineDjvuDec* eng;
         bool acquired = false;
 
-        ScopedRenderSlot(EngineDjvuDec* e, const djvu_abort* ab) : eng(e) {
+        AutoReleaseRenderSlot(EngineDjvuDec* e, const djvu_abort* ab) : eng(e) {
             for (;;) {
                 eng->renderSlotsLock.Lock();
                 if (eng->activeRenders < kMaxConcurrentDjvuRenders) {
@@ -191,7 +191,7 @@ class EngineDjvuDec : public EngineBase {
                 SleepInMs(10);
             }
         }
-        ~ScopedRenderSlot() {
+        ~AutoReleaseRenderSlot() {
             if (!acquired) {
                 return;
             }
@@ -640,7 +640,7 @@ Pixmap* EngineDjvuDec::RenderPage(RenderPageArgs& args) {
         *args.cookie_out = cookie;
         ab = &cookie->ab;
     }
-    ScopedRenderSlot renderSlot(this, ab);
+    AutoReleaseRenderSlot renderSlot(this, ab);
     if (!renderSlot.acquired || (ab && ab->requested)) {
         return nullptr;
     }
@@ -720,29 +720,30 @@ bool EngineDjvuDec::SaveFileAs(Str dstPath) {
     return SaveFileOrData(FilePath(), fileData, dstPath);
 }
 
-// recursively collect word-level text + coords from the zone tree.
-// zone coords are top-down full-resolution page pixels; dpiF scales them to
-// mediabox (fileDPI) units.
-static void CollectZonesUtf8(djvu_text_zone* z, float dpiF, str::Builder& sb, Vec<Rect>& coords) {
+// recursively collect word-level text from the zone tree, with the rect of
+// each byte's glyph in byteCoords. Zone coords are top-down full-resolution
+// page pixels; dpiF scales them to mediabox (fileDPI) units.
+static void CollectZonesUtf8(djvu_text_zone* z, float dpiF, str::Builder& sb, Vec<Rect>& byteCoords) {
     if (!z) {
         return;
     }
     if (z->nchildren > 0) {
         for (int i = 0; i < z->nchildren; i++) {
             djvu_text_zone* c = &z->children[i];
-            CollectZonesUtf8(c, dpiF, sb, coords);
+            CollectZonesUtf8(c, dpiF, sb, byteCoords);
             if (c->type == DJVU_ZONE_WORD) {
-                VecAppend(coords, Rect((int)((float)(c->x + c->w) * dpiF), (int)((float)c->y * dpiF), 2,
-                                       (int)((float)c->h * dpiF)));
+                VecAppend(byteCoords, Rect((int)((float)(c->x + c->w) * dpiF), (int)((float)c->y * dpiF), 2,
+                                           (int)((float)c->h * dpiF)));
                 sb.AppendChar(' ');
             } else if (c->type == DJVU_ZONE_LINE) {
-                VecAppend(coords, Rect());
+                VecAppend(byteCoords, Rect());
                 sb.AppendChar('\n');
             }
         }
         return;
     }
-    if (len(z->text) == 0) {
+    Str text(z->text);
+    if (len(text) == 0) {
         return;
     }
     Rect r((int)((float)z->x * dpiF), (int)((float)z->y * dpiF), (int)((float)z->w * dpiF), (int)((float)z->h * dpiF));
@@ -750,13 +751,18 @@ static void CollectZonesUtf8(djvu_text_zone* z, float dpiF, str::Builder& sb, Ve
     // evenly splitting the box horizontally (computed from endpoints so slices
     // tile exactly); this makes partial-word search hits and selections
     // highlight roughly just the matched characters
-    int n = Utf8CodepointCount(Str(z->text));
-    for (int i = 0; i < n; i++) {
+    int n = Utf8CodepointCount(text);
+    int i = 0;
+    for (int byteIdx = 0; byteIdx < len(text); i++) {
         int xStart = r.x + ((i * r.dx) / n);
         int xEnd = r.x + (((i + 1) * r.dx) / n);
-        VecAppend(coords, Rect(xStart, r.y, xEnd - xStart, r.dy));
+        int byteStart = byteIdx;
+        Utf8CodepointNext(text, byteIdx);
+        for (int b = byteStart; b < byteIdx; b++) {
+            VecAppend(byteCoords, Rect(xStart, r.y, xEnd - xStart, r.dy));
+        }
     }
-    sb.Append(Str(z->text));
+    sb.Append(text);
 }
 
 PageText EngineDjvuDec::ExtractPageText(int pageNo) {
@@ -768,19 +774,33 @@ PageText EngineDjvuDec::ExtractPageText(int pageNo) {
         return {};
     }
     float dpiF = GetFileDPI() / (float)pages[pageNo - 1]->dpi;
-    str::Builder sb;
-    Vec<Rect> coords;
-    CollectZonesUtf8(z->root, dpiF, sb, coords);
+    PageText res = DjvuZonesToPageText(z->root, dpiF);
     djvu_text_zones_destroy(ctx, z);
+    return res;
+}
+
+// zone text is cut out of the page text by byte offsets, so a multi-byte
+// character can be split across zones and count as two codepoints there but
+// one in the page text; taking the rects per codepoint of the page text keeps
+// coords and text in step
+PageText DjvuZonesToPageText(djvu_text_zone* root, float dpiF) {
+    str::Builder sb;
+    Vec<Rect> byteCoords;
+    CollectZonesUtf8(root, dpiF, sb, byteCoords);
 
     if (len(sb) == 0) {
         return {};
     }
-    int nCodepoints = Utf8CodepointCount(ToStr(sb));
-    ReportIf(nCodepoints != len(coords));
+    Str text = ToStr(sb);
+    ReportIf(len(byteCoords) != len(text));
+    Vec<Rect> coords;
+    for (int byteIdx = 0; byteIdx < len(text);) {
+        VecAppend(coords, byteCoords[byteIdx]);
+        Utf8CodepointNext(text, byteIdx);
+    }
     PageText res;
-    res.len = len(sb);
-    res.nCodepoints = nCodepoints;
+    res.len = len(text);
+    res.nCodepoints = len(coords);
     res.text = sb.TakeStr();
     res.coords = VecTake(coords);
     return res;
@@ -804,7 +824,7 @@ Vec<IPageElement*> EngineDjvuDec::GetElements(int pageNo) {
     if (pi->gotElements) {
         return pi->allElements;
     }
-    ScopedMutex scope(&cacheLock);
+    AutoUnlockMutex scope(&cacheLock);
     if (pi->gotElements) {
         return pi->allElements;
     }
@@ -925,7 +945,7 @@ TocTree* EngineDjvuDec::GetToc() {
     if (tocTree) {
         return tocTree;
     }
-    ScopedMutex scope(&cacheLock);
+    AutoUnlockMutex scope(&cacheLock);
     if (tocTree) {
         return tocTree;
     }
@@ -952,7 +972,7 @@ void EngineDjvuDec::NotePageCacheAfterRender(int page0) {
     // Reorder LRU under cacheLock. Size queries and drops re-enter djvuCacheLock
     // via the decoder callbacks — never hold djvuCacheLock here.
     {
-        ScopedMutex scope(&cacheLock);
+        AutoUnlockMutex scope(&cacheLock);
         for (int i = 0; i < len(pageCacheLru); i++) {
             if (pageCacheLru[i] == page0) {
                 VecRemoveAt(pageCacheLru, i);
@@ -967,7 +987,7 @@ void EngineDjvuDec::NotePageCacheAfterRender(int page0) {
         int n = 0;
         int dropPage = -1;
         {
-            ScopedMutex scope(&cacheLock);
+            AutoUnlockMutex scope(&cacheLock);
             n = len(pageCacheLru);
             if (n <= 1) {
                 return;

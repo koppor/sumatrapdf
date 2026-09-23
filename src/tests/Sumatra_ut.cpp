@@ -31,7 +31,6 @@
 #include "base/tests/UtAssert.h"
 
 // in src/base/tests/
-void AppendStoreTest();
 void BaseUtilTest();
 void ByteOrderTests();
 void ClipboardImageTest();
@@ -65,6 +64,7 @@ void SimpleLogTest();
 
 void CommandPaletteModel_UnitTests();
 void TextSelection_UnitTests();
+void EngineDjvuDec_UnitTests();
 void Layout_UnitTests();
 void VirtCtrl_UnitTests();
 bool TableOfContents_UnitTestSnapshotNamedDest();
@@ -83,11 +83,11 @@ bool EngineMupdf_UnitTestPageLabels();
 bool Accelerators_UnitTestFolderNavIsSafe();
 bool Accelerators_UnitTestTreeTakesLetters();
 bool Accelerators_UnitTestCreateAnnotEdit();
+bool Accelerators_UnitTestCustomShortcutShown();
 bool ShortcutParse_UnitTestShiftedPunct();
 bool AnnotSearch_UnitTests();
 void ReadAloudHighlight_UnitTests();
 
-#if OS_WIN
 static void ParseCommandLineTest() {
     {
         Flags i;
@@ -199,7 +199,6 @@ static void ParseCommandLineTest() {
         utassert(0 == len(i.fileNames));
     }
 }
-#endif
 
 static void BenchRangeTest() {
     utassert(IsBenchPagesInfo(StrL("1")));
@@ -393,9 +392,7 @@ static void SumatraPDF_UnitTests() {
     parseCommandsTest();
     colorTest();
     BenchRangeTest();
-#if OS_WIN
     ParseCommandLineTest();
-#endif
     versioncheck_test();
     hexstrTest();
 }
@@ -567,7 +564,6 @@ int RunAppUnitTests(bool forAi) {
     }
     printf("Running unit tests\n");
 
-    AppendStoreTest();
     BaseUtilTest();
     ByteOrderTests();
     ClipboardImageTest();
@@ -601,10 +597,9 @@ int RunAppUnitTests(bool forAi) {
     SvgTextIcon_UnitTests();
 #if IS_DEBUG
     TextSelection_UnitTests();
+    EngineDjvuDec_UnitTests();
     Layout_UnitTests();
-#if OS_WIN
     LayoutWin_UnitTests();
-#endif
     VirtCtrl_UnitTests();
     utassert(TableOfContents_UnitTestSnapshotNamedDest());
     utassert(MarkdownModel_UnitTestBrowserNavigationUrl());
@@ -622,6 +617,7 @@ int RunAppUnitTests(bool forAi) {
     utassert(Accelerators_UnitTestFolderNavIsSafe());
     utassert(Accelerators_UnitTestTreeTakesLetters());
     utassert(Accelerators_UnitTestCreateAnnotEdit());
+    utassert(Accelerators_UnitTestCustomShortcutShown());
     utassert(ShortcutParse_UnitTestShiftedPunct());
     utassert(AnnotSearch_UnitTests());
     ReadAloudHighlight_UnitTests();

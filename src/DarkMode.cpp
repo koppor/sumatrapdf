@@ -8,7 +8,6 @@
 
 #include "base/Base.h"
 
-#if OS_WIN
 #include <commdlg.h>
 #include "gui/Dpi.h"
 
@@ -30,7 +29,7 @@
 #include "Theme.h"
 #include "gui/win/TabsCtrl.h"
 
-#include "DarkModeSubclass.h"
+#include "DarkModeSubclass.h" // IWYU pragma: keep
 #include "DarkMode.h"
 
 // darkmodelib only supports the architectures we still ship it for; older
@@ -231,5 +230,3 @@ void DarkModeApplyToFrameAfterThemeChange(MainWindow* win) {
     DarkMode::setWindowMenuBarSubclass(win->hwndFrame);
     ApplyToInfotip(win);
 }
-
-#endif

@@ -119,7 +119,7 @@ function chipNames(dump: string): string[] {
 
 // clicks the named chip, which opens its color drop-down, and returns the
 // screen rects of the swatches in it
-async function openChipDropdown(client: ControlClient, pid: number, kind: string): Promise<Rect[]> {
+export async function openChipDropdown(client: ControlClient, pid: number, kind: string): Promise<Rect[]> {
   const dump = await toolbarDump(client);
   if (!chipNames(dump).includes(kind)) {
     throw new Error(`annot-color-dropdown: no ${kind} chip: ${dump}`);
@@ -200,7 +200,7 @@ async function checkEditColors(pid: number, frame: number, swatches: Rect[]): Pr
 }
 
 // picks one of the swatches of the open drop-down
-async function pickSwatch(client: ControlClient, pid: number, swatches: Rect[], idx: number): Promise<void> {
+export async function pickSwatch(client: ControlClient, pid: number, swatches: Rect[], idx: number): Promise<void> {
   const popup = findTopWindow(pid, POPUP_CLASS);
   const r = getWindowRect(popup);
   const sw = swatches[idx]!;
@@ -422,10 +422,9 @@ function rightClickToolbar(toolbar: number, x: number, y: number): void {
   sendMessage(toolbar, WM_RBUTTONUP, 0, lp);
 }
 
-// take the cursor off the toolbar and wait for the drop-down to go away
+// Esc dismisses a right-click drop-down; moving the mouse away does not
 async function closeHoverMenu(pid: number, frame: number): Promise<void> {
-  const r = getWindowRect(frame);
-  setCursorPos(r.left + 5, r.bottom - 5);
+  await pressEscape(frame);
   for (let i = 0; i < 30; i++) {
     const h = findTopWindow(pid, HOVER_MENU_CLASS);
     if (!h || !isWindowVisible(h)) {

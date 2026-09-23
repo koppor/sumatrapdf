@@ -90,6 +90,10 @@ struct Favorites;
 struct FileHistory;
 struct MainWindow;
 extern Func1<MainWindow*> gAfterLayout;
+extern Func0 gOnSessionRestored;
+void NotifySessionRestoreFinished();
+bool IsSessionRestoreFinished();
+bool HasPendingDocumentLoads();
 // tells the frame's virtual tree which splitters exist (they are created
 // with their panes)
 void FrameSyncSplitters(MainWindow*);
@@ -141,6 +145,12 @@ bool OpenFileExternally(Str path);
 void CloseCurrentTab(MainWindow* win, bool quitIfLast);
 void CloseTab(WindowTab* tab, bool quitIfLast);
 bool MaybeSaveAnnotations(WindowTab* tab);
+enum class UnsavedChangesAction {
+    Discard,
+    SaveExisting,
+    SaveNew
+};
+bool ResolveUnsavedChanges(WindowTab* tab, UnsavedChangesAction action, Str newPath = {});
 void DeleteFileFromDiskAndHistory(Str path);
 WindowTab* FindTabByFilePath(Str path);
 // the tab that currently owns this controller, null if it is no longer shown
@@ -265,6 +275,7 @@ struct LoadArgs {
     bool noSavePrefs = false;
 
     bool lazyLoad = false;
+    bool deferTabUpdate = false;
     bool async = false;
     bool activateExisting = false;
     // do not add to File History / Windows Recent (CmdOpenFileNoHistory)
@@ -282,6 +293,9 @@ struct LoadArgs {
     FileArgs* fileArgs = nullptr;
 
     TabState* tabState = nullptr;
+    // Clone() deep-copies tabState so an async or parked load never reads a
+    // session snapshot that SaveSettings() has since rebuilt
+    bool ownsTabState = false;
     WindowTab* targetTab = nullptr;
 
     // if set, called on the UI thread when the load finishes,
@@ -323,6 +337,8 @@ struct SettingsApplyState {
     bool chmUseFixedPageUI = false;
     bool markdownUseFixedPageUI = false;
     bool explorerQuickLook = false;
+    // owned copy of the ebook layout inputs; ApplyChangedSettingsAndRelayout frees it
+    Str ebookLayout;
 };
 SettingsApplyState GetSettingsApplyState();
 void ApplyChangedSettingsAndRelayout(const SettingsApplyState& before);
@@ -334,6 +350,7 @@ void MainWindowRerender(MainWindow* win, bool includeNonClientArea = false);
 
 TempStr PageInfoOverlayResultTemp(Str pathTwoPages, Str pathOnePage, int* exitCodeOut = nullptr);
 TempStr WindowStateDuringLoadResultTemp(int* exitCodeOut = nullptr);
+TempStr SaveFileAsResultTemp(Str dstPath, int* exitCodeOut);
 bool DocIsSupportedFileType(FileType);
 void ShowErrorLoadingNotification(MainWindow* win, Str path, bool noSavePrefs, bool showWin = true);
 void ShowFileInFolder(MainWindow* win, Str path);

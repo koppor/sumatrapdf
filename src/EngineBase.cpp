@@ -487,12 +487,12 @@ struct PageTextCache {
 };
 
 int EngineBase::AddRef() {
-    return AtomicRefCountAdd(&refCount);
+    return AtomicIntInc(&refCount);
 }
 
 // return true if deleted the object
 bool EngineBase::Release() {
-    int rc = AtomicRefCountDec(&refCount);
+    int rc = AtomicIntDec(&refCount);
     if (rc == 0) {
         delete this;
         return true;
@@ -520,11 +520,24 @@ void EngineBase::EnsureChapterTable() {
     }
 }
 
+// background chapter layout must not resync the view after every chapter: a
+// long book would relayout hundreds of times. the thread bumps this and the
+// one SetPageCountFromChapters() after the loop notifies
+static thread_local int gChapterLayoutQuiet = 0;
+
+struct ChapterLayoutQuiet {
+    ChapterLayoutQuiet() { gChapterLayoutQuiet++; }
+    ~ChapterLayoutQuiet() { gChapterLayoutQuiet--; }
+};
+
 // keeps the flat pageCount total in sync with the chapter table and notifies
 // onLayoutChanged (if set) when the generation actually moved, so a
 // DisplayModel resyncs even when the layout happened on a render thread
 void EngineBase::SetPageCountFromChapters() {
     pageCount = chapters.TotalPages();
+    if (gChapterLayoutQuiet > 0) {
+        return;
+    }
     int gen = chapters.Generation();
     if (gen == notifiedGeneration) {
         return;
@@ -636,6 +649,116 @@ void EngineBase::EnsureAllChaptersLaidOut() {
     }
 }
 
+int EngineBase::ChaptersLaidOut() {
+    EnsureChapterTable();
+    int n = ChapterCount();
+    int laid = 0;
+    for (int c = 1; c <= n; c++) {
+        if (IsChapterLaidOut(c)) {
+            laid++;
+        }
+    }
+    return laid;
+}
+
+struct ChapterLayoutJob {
+    EngineBase* engine = nullptr;
+    int job = 0;
+};
+
+bool EngineBase::LayoutJobCurrent(int id) {
+    return AtomicIntGet(&layoutJob) == id;
+}
+
+void EngineBase::FlushPageCount() {
+    SetPageCountFromChapters();
+}
+
+void EngineBase::ReportLayoutProgress(int done, int total, bool finished) {
+    if (!onChapterLayoutProgress.IsValid()) {
+        return;
+    }
+    ChapterLayoutProgress prog;
+    prog.done = done;
+    prog.total = total;
+    prog.finished = finished;
+    onChapterLayoutProgress.Call(&prog);
+}
+
+// one chapter at a time, then a single page-count notification. stops when a
+// newer job starts (the document closed, or a restyle reset the chapters)
+static void ChapterLayoutThread(ChapterLayoutJob* job) {
+    EngineBase* engine = job->engine;
+    int id = job->job;
+    delete job;
+
+    int total = engine->ChapterCount();
+    int done = 0;
+    bool cancelled = false;
+    {
+        ChapterLayoutQuiet quiet;
+        for (int c = 1; c <= total; c++) {
+            if (!engine->LayoutJobCurrent(id)) {
+                cancelled = true;
+                break;
+            }
+            if (!engine->IsChapterLaidOut(c)) {
+                // count only. publishing here shifts flat page numbers under
+                // whatever the UI thread is doing with them (GoToPage, render)
+                engine->WarmChapter(c);
+            }
+            if (!engine->LayoutJobCurrent(id)) {
+                cancelled = true;
+                break;
+            }
+            done++;
+            engine->ReportLayoutProgress(done, total, false);
+        }
+    }
+    if (!cancelled && engine->LayoutJobCurrent(id)) {
+        // the UI thread publishes the counts (LayOutChapter is cheap once
+        // WarmChapter has paginated) and then resyncs the page total
+        engine->ReportLayoutProgress(done, total, true);
+    }
+    engine->Release();
+}
+
+// the open path lays out the chapter being read first; this counts the rest
+// so the flat page total can update without blocking open
+void EngineBase::StartBackgroundChapterLayout() {
+    if (!HasChapters()) {
+        return;
+    }
+    int total = ChapterCount();
+    if (ChaptersLaidOut() >= total) {
+        return;
+    }
+    int id = AtomicIntInc(&layoutJob);
+    AddRef();
+    auto* job = new ChapterLayoutJob();
+    job->engine = this;
+    job->job = id;
+    RunAsync(MkFunc0(ChapterLayoutThread, job), StrL("ChapterLayout"));
+}
+
+void EngineBase::CancelBackgroundChapterLayout() {
+    AtomicIntInc(&layoutJob);
+}
+
+// default: do the full layout. MuPDF overrides this with a count that does
+// not publish, so a background thread can't shift flat page numbers
+void EngineBase::WarmChapter(int chapter) {
+    LayOutChapter(chapter);
+}
+
+void EngineBase::PublishWarmedChapters() {
+    {
+        ChapterLayoutQuiet quiet;
+        EnsureAllChaptersLaidOut();
+    }
+    FlushPageCount();
+}
+
 // default: single-chapter (or already laid-out) engines have nothing to do
 int EngineBase::LayOutChapter(int chapter) {
     int n = chapters.PageCount(chapter);
@@ -685,19 +808,19 @@ Location EngineBase::ResolveDest(IPageDestination* dest) {
 
 // document errors (mupdf warnings/errors may arrive from render threads)
 void EngineBase::AppendError(Str msg) {
-    ScopedMutex scope(&errorsLock);
+    AutoUnlockMutex scope(&errorsLock);
     errors.Append(msg);
 }
 
 bool EngineBase::HasErrors() {
-    ScopedMutex scope(&errorsLock);
+    AutoUnlockMutex scope(&errorsLock);
     return len(errors) > 0;
 }
 
 // internal builder buffer (no copy); valid until next AppendError or engine
 // destruction — do not free or keep beyond the current frame
 TempStr EngineBase::GetErrorsTextTemp() {
-    ScopedMutex scope(&errorsLock);
+    AutoUnlockMutex scope(&errorsLock);
     return ToStr(errors);
 }
 
@@ -737,7 +860,7 @@ bool EngineBase::HasTextForPage(int pageNo) {
     if (!loc.IsValid()) {
         return false;
     }
-    ScopedMutex scope(&textCacheLock);
+    AutoUnlockMutex scope(&textCacheLock);
     ChapterTextCache* ct = pageTextCache->Peek(loc.chapter);
     if (!ct || loc.page > len(ct->text)) {
         return false;
@@ -754,7 +877,7 @@ TextExtractionState EngineBase::GetTextExtractionState(int pageNo) {
     if (!loc.IsValid()) {
         return TextExtractionState::NotExtracted;
     }
-    ScopedMutex scope(&textCacheLock);
+    AutoUnlockMutex scope(&textCacheLock);
     ChapterTextCache* ct = pageTextCache->Peek(loc.chapter);
     if (!ct || loc.page > len(ct->state)) {
         return TextExtractionState::NotExtracted;
@@ -774,7 +897,7 @@ void EngineBase::RequestTextExtraction(int pageNo) {
     int count = ChapterPageCount(loc.chapter);
 
     {
-        ScopedMutex scope(&textCacheLock);
+        AutoUnlockMutex scope(&textCacheLock);
         ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
         if (!ct || loc.page > len(ct->text)) {
             return;
@@ -800,7 +923,7 @@ void EngineBase::RequestTextExtraction(int pageNo) {
     }
 
     {
-        ScopedMutex scope(&textCacheLock);
+        AutoUnlockMutex scope(&textCacheLock);
         ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
         if (ct && loc.page <= len(ct->text) && len(ct->text[loc.page - 1].text) == 0) {
             ct->state[loc.page - 1] = TextExtractionState::NotExtracted;
@@ -879,7 +1002,7 @@ bool EngineBase::TryGetTextForPage(int pageNo, int* lenOut, Rect** coordsOut, Qu
 
     bool extract = false;
     {
-        ScopedMutex scope(&textCacheLock);
+        AutoUnlockMutex scope(&textCacheLock);
         ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
         if (ct->state[loc.page - 1] != TextExtractionState::Finished) {
             extract = true;
@@ -902,7 +1025,7 @@ bool EngineBase::TryGetTextForPage(int pageNo, int* lenOut, Rect** coordsOut, Qu
         }
         EnsurePageText(&extracted);
 
-        ScopedMutex scope(&textCacheLock);
+        AutoUnlockMutex scope(&textCacheLock);
         ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
         PageText* pt = &ct->text[loc.page - 1];
         if (ct->state[loc.page - 1] != TextExtractionState::Finished) {
@@ -914,7 +1037,7 @@ bool EngineBase::TryGetTextForPage(int pageNo, int* lenOut, Rect** coordsOut, Qu
         FreePageText(&extracted);
     }
 
-    ScopedMutex scope(&textCacheLock);
+    AutoUnlockMutex scope(&textCacheLock);
     ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
     PageText* pt = &ct->text[loc.page - 1];
     ReturnCachedPageText(pt, lenOut, coordsOut, quadsOut);
@@ -952,7 +1075,7 @@ Str EngineBase::GetTextForPage(int pageNo, int* lenOut, Rect** coordsOut, QuadF*
 
     bool extract = false;
     {
-        ScopedMutex scope(&textCacheLock);
+        AutoUnlockMutex scope(&textCacheLock);
         ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
         // Finished covers textless pages too (the page's text can stay empty). Pending
         // means a background thread was started by RequestTextExtraction but
@@ -967,7 +1090,7 @@ Str EngineBase::GetTextForPage(int pageNo, int* lenOut, Rect** coordsOut, QuadF*
         PageText extracted = ExtractPageText(pageNo);
         EnsurePageText(&extracted);
 
-        ScopedMutex scope(&textCacheLock);
+        AutoUnlockMutex scope(&textCacheLock);
         ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
         PageText* pt = &ct->text[loc.page - 1];
         if (ct->state[loc.page - 1] != TextExtractionState::Finished) {
@@ -979,7 +1102,7 @@ Str EngineBase::GetTextForPage(int pageNo, int* lenOut, Rect** coordsOut, QuadF*
         FreePageText(&extracted);
     }
 
-    ScopedMutex scope(&textCacheLock);
+    AutoUnlockMutex scope(&textCacheLock);
     ChapterTextCache* ct = pageTextCache->Ensure(loc.chapter, count);
     PageText* pt = &ct->text[loc.page - 1];
     return ReturnCachedPageText(pt, lenOut, coordsOut, quadsOut);
@@ -993,7 +1116,7 @@ void EngineBase::InvalidateTextForPage(int pageNo) {
     if (!loc.IsValid()) {
         return;
     }
-    ScopedMutex scope(&textCacheLock);
+    AutoUnlockMutex scope(&textCacheLock);
     ChapterTextCache* ct = pageTextCache->Peek(loc.chapter);
     if (!ct || loc.page > len(ct->text)) {
         return;

@@ -4,8 +4,8 @@ EPUB, MOBI, FB2, and similar formats use SumatraPDF's **eBook UI** (HTML-based l
 
 ## The eBook Settings dialog (**ver 3.7+**)
 
-With an ebook open, run **Change eBook Settings** (`CmdChangeEbookSettings`) from
-the [command palette](Command-Palette.md) (`Ctrl + K`). It has the font, size,
+With an ebook open, use `Ctrl + K`, `Change eBook Settings` command in
+[Command Palette](Command-Palette.md) (`CmdChangeEbookSettings`). It has the font, size,
 margin and line spacing, and shows the CSS those values produce in a read-only
 box, so you can see exactly what is applied. **Margin** is a single field, but it
 takes the same one, two or four values as the setting. Tick **Custom CSS** and the box becomes
@@ -29,7 +29,7 @@ there is no font or CSS to change.
 
 ## What you can customize
 
-The same settings, and a few more, are in **Settings → Advanced Options...**,
+The same settings, and a few more, are in **Settings → Advanced Settings...**,
 in the `EBookUI` section:
 
 ```
@@ -57,7 +57,7 @@ EBookUI [
 | `CustomCSS`             | Extra CSS rules. A declaration marked `!important` beats the document's own CSS and its inline styles, so `IgnoreDocumentCSS` is rarely needed                                                                                                                                                                          |
 | `WindowBgCol`           | Canvas background around the reflowed text (**ver 3.7+**)                                                                                                                                                                                                                                                               |
 
-Full field reference: [Advanced options / settings](Advanced-options-settings.md).
+Full field reference: [Advanced settings](Advanced-options-settings.md).
 
 ## Settings for a single document (**ver 3.7+**)
 
@@ -132,4 +132,4 @@ CHM uses a separate `ChmUI` section. Set `ChmUI.UseFixedPageUI = true` to render
 
 - [Supported document formats](Supported-document-formats.md)
 - [FAQ](FAQ.md) — dark mode / invert questions
-- [Advanced options / settings](Advanced-options-settings.md)
+- [Advanced settings](Advanced-options-settings.md)

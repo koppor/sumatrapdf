@@ -65,7 +65,6 @@ static u32 zip_compress(void* dst, u32 dstlen, const void* src, u32 srclen) {
 }
 
 static u32 FileTimeToDosDateTime(FILETIME ft) {
-#if OS_WIN
     FILETIME ftLocal;
     WORD dosDate = 0;
     WORD dosTime = 0;
@@ -73,21 +72,6 @@ static u32 FileTimeToDosDateTime(FILETIME ft) {
         return 0;
     }
     return MAKELONG(dosTime, dosDate);
-#else
-    u64 ns = ((u64)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
-    time_t seconds = (time_t)(ns / 1000000000ULL);
-    struct tm local{};
-    if (!localtime_r(&seconds, &local)) {
-        return 0;
-    }
-    int year = local.tm_year + 1900;
-    if (year < 1980 || year > 2107) {
-        return 0;
-    }
-    u16 dosDate = (u16)(((year - 1980) << 9) | ((local.tm_mon + 1) << 5) | local.tm_mday);
-    u16 dosTime = (u16)((local.tm_hour << 11) | (local.tm_min << 5) | (local.tm_sec / 2));
-    return ((u32)dosDate << 16) | dosTime;
-#endif
 }
 
 bool ZipCreator::AddFileData(Str name, Str data, u32 dosdate) {
@@ -118,18 +102,24 @@ bool ZipCreator::AddFileData(Str name, Str data, u32 dosdate) {
         compressedSize = (u32)size;
     }
 
+    // version needed, flags, method, time, crc, sizes, name and extra lengths:
+    // the same in the local header and the central directory entry
+    auto writeCommon = [&](ByteWriterLE& w) {
+        w.Write16(20); // version needed to extract
+        w.Write16(flags);
+        w.Write16(method);
+        w.Write32(dosdate);
+        w.Write32(crc);
+        w.Write32(compressedSize);
+        w.Write32((u32)size);
+        w.Write16((u16)namelen);
+        w.Write16(0); // extra field length
+    };
+
     constexpr int kHdrSize = 30;
     ByteWriterLE local(kHdrSize);
     local.Write32(0x04034B50); // signature
-    local.Write16(20);         // version needed to extract
-    local.Write16(flags);
-    local.Write16(method);
-    local.Write32(dosdate);
-    local.Write32(crc);
-    local.Write32(compressedSize);
-    local.Write32((u32)size);
-    local.Write16((u16)namelen);
-    local.Write16(0); // extra field length
+    writeCommon(local);
     ReportIf(len(local.d) != kHdrSize);
 
     Str localHeader = ToStr(local.d);
@@ -141,15 +131,7 @@ bool ZipCreator::AddFileData(Str name, Str data, u32 dosdate) {
     ByteWriterLE central(kCentralSize);
     central.Write32(0x02014B50); // signature
     central.Write16(20);         // version made by
-    central.Write16(20);         // version needed to extract
-    central.Write16(flags);
-    central.Write16(method);
-    central.Write32(dosdate);
-    central.Write32(crc);
-    central.Write32(compressedSize);
-    central.Write32((u32)size);
-    central.Write16((u16)namelen);
-    central.Write16(0); // extra field length
+    writeCommon(central);
     central.Write16(0); // file comment length
     central.Write16(0); // disk number
     central.Write16(0); // internal file attributes

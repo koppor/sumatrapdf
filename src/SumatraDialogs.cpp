@@ -37,7 +37,8 @@ struct DLGTEMPLATEEX {
 };
 #pragma pack(pop)
 
-static DLGTEMPLATE* DupTemplate(int dlgId) {
+// allocated in arena, or with malloc() if arena is nullptr
+static DLGTEMPLATE* DupTemplate(int dlgId, Arena* arena = nullptr) {
     HRSRC dialogRC = FindResourceW(nullptr, MAKEINTRESOURCE(dlgId), RT_DIALOG);
     ReportIf(!dialogRC);
     HGLOBAL dlgTemplate = LoadResource(nullptr, dialogRC);
@@ -45,7 +46,7 @@ static DLGTEMPLATE* DupTemplate(int dlgId) {
     void* orig = LockResource(dlgTemplate);
     int size = (int)SizeofResource(nullptr, dialogRC);
     ReportIf(size <= 0);
-    DLGTEMPLATE* ret = (DLGTEMPLATE*)MemDup(nullptr, orig, (size_t)size);
+    DLGTEMPLATE* ret = (DLGTEMPLATE*)MemDup(arena, orig, (size_t)size);
     UnlockResource(orig);
     return ret;
 }
@@ -136,8 +137,8 @@ static void SetDlgTemplateExFont(DLGTEMPLATE* tmp, bool isRtl, int fontSize) {
     *wd = (WORD)fontSize;
 }
 
-static DLGTEMPLATE* GetRtLDlgTemplate(int dlgId) {
-    DLGTEMPLATE* tpl = DupTemplate(dlgId);
+static DLGTEMPLATE* GetRtLDlgTemplateTemp(int dlgId) {
+    DLGTEMPLATE* tpl = DupTemplate(dlgId, GetTempArena());
     SetDlgTemplateRtl(tpl);
     return tpl;
 }
@@ -181,10 +182,10 @@ static INT_PTR CALLBACK Sheet_Print_Advanced_Proc(HWND hDlg, UINT msg, WPARAM wp
             HwndSetDlgItemText(hDlg, IDC_PRINT_RANGE_EVEN, Tr("&Even pages only"));
             HwndSetDlgItemText(hDlg, IDC_PRINT_RANGE_ODD, Tr("&Odd pages only"));
             HwndSetDlgItemText(hDlg, IDC_SECTION_PRINT_SCALE, Tr("Page scaling"));
-            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_SHRINK, Tr("&Shrink pages to printable area (if necessary)"));
+            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_SHRINK, Tr("&Shrink pages to printable area"));
             HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_FIT, Tr("&Fit pages to printable area"));
-            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_STRETCH, Tr("S&tretch pages to fill paper (ignore aspect ratio)"));
-            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_NONE, Tr("&Use original page sizes"));
+            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_STRETCH, Tr("S&tretch pages to fill paper"));
+            HwndSetDlgItemText(hDlg, IDC_PRINT_SCALE_NONE, Tr("A&ctual size (1:1)"));
             HwndSetDlgItemText(hDlg, IDC_PRINT_CENTER_HORIZONTALLY, Tr("Center page hori&zontally on the paper"));
             HwndSetDlgItemText(hDlg, IDC_PRINT_PAPER_SOURCE_BY_SIZE, Tr("Choose &paper source by document page size"));
             HwndSetDlgItemText(hDlg, IDC_PRINT_PER_PAGE_PAPER_SIZE,
@@ -283,7 +284,9 @@ static INT_PTR CALLBACK Sheet_Print_Advanced_Proc(HWND hDlg, UINT msg, WPARAM wp
     return FALSE;
 }
 
-HPROPSHEETPAGE CreatePrintAdvancedPropSheet(Print_Advanced_Data* data, ScopedMem<DLGTEMPLATE>& dlgTemplate) {
+// the RTL dialog template is allocated in the temp arena so the returned page
+// must be used before the temp arena is reset (e.g. inside PrintDlgEx())
+HPROPSHEETPAGE CreatePrintAdvancedPropSheet(Print_Advanced_Data* data) {
     PROPSHEETPAGE psp{};
 
     psp.dwSize = sizeof(PROPSHEETPAGE);
@@ -295,8 +298,7 @@ HPROPSHEETPAGE CreatePrintAdvancedPropSheet(Print_Advanced_Data* data, ScopedMem
     psp.pszTitle = CWStrTemp(s);
 
     if (IsUIRtl()) {
-        dlgTemplate.Set(GetRtLDlgTemplate(IDD_PROPSHEET_PRINT_ADVANCED));
-        psp.pResource = dlgTemplate.Get();
+        psp.pResource = GetRtLDlgTemplateTemp(IDD_PROPSHEET_PRINT_ADVANCED);
         psp.dwFlags |= PSP_DLGINDIRECT;
     }
 

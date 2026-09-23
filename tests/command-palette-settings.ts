@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { ControlClient, ControlCommand } from "./control.ts";
 import { cmdId, runStandalone, tmpPath } from "./util.ts";
 import { killAndWait, launchControlled, sendCommand } from "./win-automation.ts";
-import { WM_KEYDOWN, VK_RETURN, getFocusedHwnd, postMessage, sendText, sleep } from "./winapi.ts";
+import { WM_KEYDOWN, VK_ESCAPE, VK_RETURN, getFocusedHwnd, postMessage, sendText, sleep } from "./winapi.ts";
 
 const SETTINGS = `UiLanguage = en
 Theme = Light
@@ -20,19 +20,20 @@ CheckForUpdates = false
 RestoreSession = false
 `;
 
-type Palette = { open: boolean; items: number; queryLen: number };
+type Palette = { open: boolean; items: number; queryLen: number; sel: number; selText: string };
 
 async function paletteState(client: ControlClient): Promise<Palette> {
   const res = await client.request(ControlCommand.TestCommandPalette, []);
   const out = String(res[1] ?? "").trim();
   if (res[0] === 2) {
-    return { open: false, items: 0, queryLen: 0 };
+    return { open: false, items: 0, queryLen: 0, sel: -1, selText: "" };
   }
-  const m = /items=(\d+) querySel=-?\d+,-?\d+ queryLen=(\d+)/.exec(out);
+  const m = /sel=(-?\d+) items=(\d+) querySel=-?\d+,-?\d+ queryLen=(\d+)/.exec(out);
   if (res[0] !== 0 || !m) {
     throw new Error(`command-palette-settings: TestCommandPalette failed: ${out}`);
   }
-  return { open: true, items: +m[1]!, queryLen: +m[2]! };
+  const selText = /selText=(.*)$/.exec(out)?.[1] ?? "";
+  return { open: true, items: +m[2]!, queryLen: +m[3]!, sel: +m[1]!, selText };
 }
 
 // the palette re-filters its list asynchronously, so every step waits for the
@@ -75,15 +76,27 @@ async function typeQuery(client: ControlClient, frame: number, query: string, wa
   );
 }
 
-async function enter(client: ControlClient, frame: number, what: string, pred: (p: Palette) => boolean) {
+async function pressKey(client: ControlClient, frame: number, vk: number, what: string, pred: (p: Palette) => boolean) {
   const edit = await openPalette(client, frame);
-  postMessage(edit, WM_KEYDOWN, VK_RETURN, 0);
+  postMessage(edit, WM_KEYDOWN, vk, 0);
   return waitFor(client, what, pred);
 }
 
+async function enter(client: ControlClient, frame: number, what: string, pred: (p: Palette) => boolean) {
+  return pressKey(client, frame, VK_RETURN, what, pred);
+}
+
+async function escape(client: ControlClient, frame: number, what: string, pred: (p: Palette) => boolean) {
+  return pressKey(client, frame, VK_ESCAPE, what, pred);
+}
+
+// the palette is back in the setting-picking stage: query is "=" and the list
+// holds every setting again
+const backToSettings = (p: Palette) => p.open && p.queryLen === 1 && p.items > 1;
+
 // "name=value" for every setting that differs from its default
 async function nonDefaultSettings(client: ControlClient, frame: number): Promise<Map<string, string>> {
-  sendCommand(frame, cmdId("CmdAdvancedOptions"));
+  sendCommand(frame, cmdId("CmdAdvancedSettings"));
   const deadline = Date.now() + 10_000;
   for (;;) {
     const res = await client.request(ControlCommand.TestAdvSettingsRows, ["nondefault", 0]);
@@ -128,21 +141,39 @@ export async function testit(): Promise<void> {
       (p) => p.open && p.queryLen > name.length,
     );
 
+    // Esc from the value stage returns to the settings with that setting still
+    // selected. It is not the first row: the changed settings come first
+    const back = await escape(client, frame, "Esc after Enter did not return to the settings", backToSettings);
+    if (back.selText !== "ZoomIncrement" || back.sel === 0) {
+      throw new Error(
+        `command-palette-settings: after Esc row ${back.sel} '${back.selText}' is selected, not ZoomIncrement`,
+      );
+    }
+
     // an enum offers its allowed values: "show", "hide" and "overlay" for Toolbar
     await typeQuery(client, frame, "=Toolbar =", 3);
     await typeQuery(client, frame, "=Toolbar = over", 1);
 
-    // apply one of each kind; a leaf name resolves to its full dotted path
-    for (const q of [
-      "=ZoomIncrement = 25",
-      "=ToolbarPosition = bottom",
-      "=Units = cm",
-      "=FixedPageUI.TextColor = #112233",
-      "=SmoothScroll",
+    // Esc in the value stage goes back to the settings, not out of the palette
+    await escape(client, frame, "Esc in the value stage did not return to the settings", backToSettings);
+
+    // apply one of each kind; a leaf name resolves to its full dotted path.
+    // The palette stays open, showing the settings again with the changed
+    // setting selected
+    for (const [q, path] of [
+      ["=ZoomIncrement = 25", "ZoomIncrement"],
+      ["=ToolbarPosition = bottom", "ToolbarPosition"],
+      ["=Units = cm", "FixedPageUI.PageGrid.Units"],
+      ["=FixedPageUI.TextColor = #112233", "FixedPageUI.TextColor"],
+      ["=SmoothScroll", "SmoothScroll"],
     ]) {
       await typeQuery(client, frame, q, 1);
-      await enter(client, frame, `'${q}' did not close the palette`, (p) => !p.open);
+      const p = await enter(client, frame, `'${q}' did not return to the settings`, backToSettings);
+      if (p.selText !== path) {
+        throw new Error(`command-palette-settings: after '${q}' row ${p.sel} '${p.selText}' is selected, not ${path}`);
+      }
     }
+    await escape(client, frame, "Esc in the settings stage did not close the palette", (p) => !p.open);
 
     const want: Record<string, string> = {
       ZoomIncrement: "25",

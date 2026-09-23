@@ -27,10 +27,6 @@ void InitGraphicsMode(Graphics* g) {
     g->SetPageUnit(Gdiplus::UnitPixel);
 }
 
-Gdiplus::RectF RectToRectF(const Gdiplus::Rect r) {
-    return {(float)r.X, (float)r.Y, (float)r.Width, (float)r.Height};
-}
-
 // note: gdi+ seems to under-report the width, the longer the text, the
 // bigger the difference. I'm trying to correct for that with those magic values
 constexpr float kPerCharDxAdjust = .2f;
@@ -53,12 +49,7 @@ RectF MeasureTextAccurate(Graphics* g, Font* f, WStr s) {
     Region r;
     Status status = g->MeasureCharacterRanges(s.s, n, f, layoutRect, &sf, 1, &r);
     if (status != Ok) {
-        // TODO: remove whem we figure out why we crash
-        WStr logW = s ? s : WStr(L"<null>");
-        TempStr s2 = ToUtf8Temp(logW);
-        Str logStr = s2.len > 256 ? Str(s2.s, 256) : s2;
-        logf("MeasureTextAccurate: status: %d, font: %p, len: %d, s: '%s'\n", (int)status, f, n, logStr);
-        // ReportIf(status != Ok);
+        logf("MeasureTextAccurate: status: %d, font: %p, len: %d\n", (int)status, f, n);
     }
     Gdiplus::RectF bbox;
     r.GetBounds(&bbox, g);
@@ -133,90 +124,16 @@ RectF MeasureText(Graphics* g, Font* f, WStr s, TextMeasureAlgorithm algo) {
     return MeasureTextAccurate(g, f, s);
 }
 
-// returns number of characters of string s that fits in a given width dx
-// note: could be speed up a bit because in our use case we already know
-// the width of the whole string so we could supply it to the function, but
-// this shouldn't happen often, so that's fine. It's also possible that
-// a smarter approach is possible, but this usually only does 3 MeasureText
-// calls, so it's not that bad
-int StringLenForWidth(Graphics* g, Font* f, WStr s, float dx, TextMeasureAlgorithm algo) {
-    int sLen = s.len;
-    auto r = MeasureText(g, f, s, algo);
-    if (r.dx <= dx) {
-        return sLen;
-    }
-    // make the best guess of the length that fits
-    int n = (int)((dx / r.dx) * (float)sLen);
-    ReportIf(n > sLen);
-    if (n == 0) {
-        // nothing fits in the remaining space; caller flushes the line and
-        // re-lays the run at full width. Don't Measure an empty string.
-        return 0;
-    }
-    r = MeasureText(g, f, WStr(s.s, n), algo);
-    // find the length len of s that fits within dx iff width of len+1 exceeds dx
-    int dir = 1; // increasing length
-    if (r.dx > dx) {
-        dir = -1; // decreasing length
-    }
-    for (;;) {
-        n += dir;
-        r = MeasureText(g, f, WStr(s.s, n), algo);
-        if (1 == dir) {
-            // if advancing length, we know that previous string did fit, so if
-            // the new one doesn't fit, the previous length was the right one
-            if (r.dx > dx) {
-                return n - 1;
-            }
-        } else {
-            // if decreasing length, we know that previous string didn't fit, so if
-            // the one one fits, it's of the correct length
-            if (r.dx < dx) {
-                return n;
-            }
-        }
-    }
-}
-
-// TODO: not quite sure why spaceDx1 != spaceDx2, using spaceDx2 because
-// is smaller and looks as better spacing to me
-float GetSpaceDx(Graphics* g, Font* f, TextMeasureAlgorithm algo) {
-    RectF bbox;
-#if 0
-    bbox = MeasureText(g, f, L" ", 1, algo);
-    float spaceDx1 = bbox.dx;
-    return spaceDx1;
-#else
-    // this method seems to return (much) smaller size that measuring
-    // the space itself
-    bbox = MeasureText(g, f, WStr(L"wa", 2), algo);
-    float l1 = bbox.dx;
-    bbox = MeasureText(g, f, WStr(L"w a", 3), algo);
-    float l2 = bbox.dx;
-    float spaceDx2 = l2 - l1;
-    return spaceDx2;
-#endif
-}
-
-// float     GetSpaceDx(Graphics *g, Font *f, TextMeasureAlgorithm algo=nullptr);
-// int   StringLenForWidth(Graphics *g, Font *f, const WCHAR *s, size_t len, float dx, TextMeasureAlgorithm
-// algo=nullptr);
 void GetBaseTransform(Matrix& m, Gdiplus::RectF pageRect, float zoom, int rotation) {
     rotation = rotation % 360;
     if (rotation < 0) {
         rotation = rotation + 360;
     }
-    if (90 == rotation) {
-        m.Translate(0, -pageRect.Height, MatrixOrderAppend);
-    } else if (180 == rotation) {
-        m.Translate(-pageRect.Width, -pageRect.Height, MatrixOrderAppend);
-    } else if (270 == rotation) {
-        m.Translate(-pageRect.Width, 0, MatrixOrderAppend);
-    } else if (0 == rotation) {
-        m.Translate(0, 0, MatrixOrderAppend);
-    } else {
-        ReportIf(true);
-    }
+    // move the rotated page back to the origin
+    ReportIf(rotation % 90 != 0);
+    float dx = (rotation == 180 || rotation == 270) ? -pageRect.Width : 0;
+    float dy = (rotation == 90 || rotation == 180) ? -pageRect.Height : 0;
+    m.Translate(dx, dy, MatrixOrderAppend);
 
     m.Scale(zoom, zoom, MatrixOrderAppend);
     m.Rotate((float)rotation, MatrixOrderAppend);

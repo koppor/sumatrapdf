@@ -5,7 +5,7 @@
 #include "base/File.h"
 #include "base/GdiPlusUtil.h"
 #include "base/Pixmap.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/UITask.h"
 #include "base/Win.h"
 
@@ -30,7 +30,7 @@
 #include "WindowTab.h"
 #include "GoogleLens.h"
 
-constexpr i64 kMaxGoogleLensPngBytes = 32 * 1024 * 1024;
+constexpr i64 kMaxGoogleLensPngBytes = 32LL * 1024 * 1024;
 
 static void GoogleLensNotify(WindowTab* tab, Str message) {
     if (!tab || !tab->win) {

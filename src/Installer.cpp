@@ -52,6 +52,7 @@ static InstallerWnd* gWnd = nullptr;
 static lzma::SimpleArchive* gArchive = nullptr;
 static bool gInstallStarted = false; // a bit of a hack
 static bool gInstallFailed = false;
+static bool gInstallAborted = false; // the user gave up in the move-aside dialog
 
 static PreviousInstallationInfo gPrevInstall;
 static Flags gCliNew;
@@ -805,6 +806,7 @@ static bool MoveAsideInstallFile(Str installDir, Str fileName, bool silent) {
     // Interactive: blocking dialog that retries every 3s until success or abort.
     if (!ShowMoveAsideBlockedDialog(path, copyPath, fileName)) {
         logf("MoveAsideInstallFile: user aborted for '%s'\n", path);
+        gInstallAborted = true;
         NotifyMoveAsideFailed(fileName, path, true);
         return false;
     }
@@ -974,8 +976,7 @@ static bool ExtractInstallerFiles(lzma::SimpleArchive* archive, Str destDir) {
 
         if (!uncompressed) {
             logf("  GetFileDataByIdx failed for '%s'\n", fi->name);
-            NotifyFailed(
-                Tr("The installer has been corrupted. Please download it again.\nSorry for the inconvenience!"));
+            NotifyFailed(Tr("The installer has been corrupted. Please download it again."));
             return false;
         }
         TempStr filePath = path::JoinTemp(destDir, fi->name);
@@ -1288,7 +1289,8 @@ Exit:
     StartWindowsSearchService();
     // Pre-release debug report (no symbols download) so we learn about failed
     // upgrades (e.g. locked libsumatrapdf.dll) with the install log attached.
-    if (gInstallFailed) {
+    // Not when the user aborted: that is their machine blocking us, not a bug
+    if (gInstallFailed && !gInstallAborted) {
         TempStr cond = fmt("Installation failed: %s", gFirstError ? gFirstError : StrL("(no details)"));
         logf("InstallerThread: upload debug report: %s\n", cond);
         _uploadDebugReport(cond, StrL(FILE_LINE), false);
@@ -1502,9 +1504,7 @@ static HRESULT CALLBACK InstallationFailedDialogCallback(HWND /*hwnd*/, UINT msg
 static void ShowInstallationFailedUi(HWND hwndParent) {
     log(StrL("ShowInstallationFailedUi\n"));
     Str firstErr = gFirstError ? gFirstError : StrL("(no details)");
-    TempStr content =
-        fmt("%s\n\n%s\n\n%s", firstErr, Tr("Installation could not be completed."),
-            Tr("If a previous version is running or Windows Explorer is previewing a PDF, close it and try again."));
+    TempStr content = fmt("%s\n\n%s", firstErr, Tr("Installation could not be completed."));
 
     TASKDIALOG_BUTTON buttons[2];
     buttons[0].nButtonID = kBtnIdShowInstallLog;

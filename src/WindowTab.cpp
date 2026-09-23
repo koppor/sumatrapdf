@@ -237,6 +237,9 @@ float WindowTab::NextToggleZoom() const {
         return kZoomFitContent;
     }
     if (kZoomFitContent == currZoom) {
+        return kZoomFitVisible;
+    }
+    if (kZoomFitVisible == currZoom) {
         return kZoomShrinkToFit;
     }
     return kZoomFitPage;

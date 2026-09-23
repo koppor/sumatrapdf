@@ -415,7 +415,7 @@ static void UpdateCrashHandlerSettings() {
     str::Free(d);
 }
 
-static TabState* CloneTabState(const TabState* src) {
+TabState* CloneTabState(const TabState* src) {
     TabState* dst = (TabState*)AllocStruct<TabState>();
     str::ReplaceWithCopy(&dst->filePath, src->filePath);
     str::ReplaceWithCopy(&dst->displayMode, src->displayMode);
@@ -720,6 +720,7 @@ bool LoadSettings() {
     // takes effect for PDFs loaded after this (startup, and on settings reload)
     EngineMupdfSetDisableJavaScript(gSettings->disableJavaScript);
     EngineMupdfSetAllowExternalImages(gSettings->allowExternalImages);
+    EngineMupdfSetAutoHeadingToc(gSettings->autoGenerateTOC);
     auto authorVisibility =
         gSettings->showAnnotationAuthorInTooltip ? AnnotAuthorVisibility::Show : AnnotAuthorVisibility::Hide;
     EngineMupdfSetAnnotAuthorInTooltip(authorVisibility);
@@ -1177,6 +1178,9 @@ TempStr ZoomLevelStr(float zoom) {
     if (zoom == kZoomFitContent) {
         return Tr("Fit Content");
     }
+    if (zoom == kZoomFitVisible) {
+        return Tr("Fit Visible");
+    }
     if (zoom == kZoomShrinkToFit) {
         return Tr("Shrink To Fit");
     }
@@ -1206,6 +1210,7 @@ static float gZoomLevels[] = {
     kZoomFitHeight,
     kZoomFitByOrientation,
     kZoomFitContent,
+    kZoomFitVisible,
     kZoomShrinkToFit,
     6400.0,
     3200.0,
@@ -1296,6 +1301,62 @@ void CollectZoomLevels(Vec<float>& out, bool forChm) {
 
 Settings* gSettings = nullptr;
 
+// leaves a user can edit by path: the scalar types and compact structs.
+// Arrays, pointer sub-structs and internal fields are skipped
+static void CollectSettingFieldsInStruct(Vec<SettingField>& out, const StructInfo* info, int baseOffset, Str prefix) {
+    const char* fieldName = info->fieldNames;
+    const char* fieldComment = info->fieldComments; // parallel to fieldNames
+    for (u16 i = 0; i < info->fieldCount; i++) {
+        const FieldInfo& field = info->fields[i];
+        Str fname(fieldName);
+        fieldName += len(fname) + 1;
+        Str comment;
+        if (fieldComment) {
+            comment = Str(fieldComment);
+            fieldComment += len(comment) + 1;
+        }
+        if (field.internal || field.type == SettingType::Comment || field.offset == (size_t)-1) {
+            continue;
+        }
+        int offset = baseOffset + (int)field.offset;
+        TempStr path = len(prefix) > 0 ? fmt("%s.%s", prefix, fname) : str::DupTemp(fname);
+        switch (field.type) {
+            case SettingType::Struct:
+                CollectSettingFieldsInStruct(out, (const StructInfo*)field.value, offset, path);
+                break;
+            case SettingType::Bool:
+            case SettingType::Int:
+            case SettingType::Float:
+            case SettingType::String:
+            case SettingType::Color:
+            case SettingType::Compact: {
+                SettingField sf;
+                sf.path = path;
+                sf.comment = comment;
+                sf.field = &field;
+                sf.offset = offset;
+                VecAppend(out, sf);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+
+void CollectSettingFields(Vec<SettingField>& out) {
+    if (!gSettings) {
+        return;
+    }
+    CollectSettingFieldsInStruct(out, &gSettingsInfo, 0, {});
+}
+
+// the layout is fixed at compile time, so an offset stays valid across the
+// reload that replaces gSettings
+u8* SettingFieldPtr(int offset) {
+    return (u8*)gSettings + offset;
+}
+
 // Walk setting metadata for a Bool field matching name (case-insensitive leaf
 // or full dotted path). Returns a pointer into gSettings, or nullptr.
 static bool* FindBoolSettingInStruct(const StructInfo* info, u8* base, Str pathPrefix, Str name) {
@@ -1371,6 +1432,7 @@ static const char* gEnumPrinterUI[] = {"", "auto", "modern", "classic", nullptr}
 static const char* gEnumPrintScale[] = {"shrink", "fit", "none", nullptr};
 static const char* gEnumCollate[] = {"default", "collate", "nocollate", nullptr};
 static const char* gEnumFreeTextAlignment[] = {"left", "center", "right", nullptr};
+static const char* gEnumHelpTheme[] = {"app", "light", "dark", nullptr};
 
 struct EnumSettingDef {
     const char* name; // full path or leaf name (last dotted segment)
@@ -1392,6 +1454,7 @@ static const EnumSettingDef gEnumSettings[] = {
     {"PrintScale", gEnumPrintScale},
     {"Collate", gEnumCollate},
     {"FreeTextAlignment", gEnumFreeTextAlignment},
+    {"HelpTheme", gEnumHelpTheme},
 };
 // clang-format on
 

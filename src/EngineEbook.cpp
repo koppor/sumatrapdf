@@ -26,16 +26,13 @@
 #include "HtmlFormatter.h"
 #include "EbookFormatter.h"
 
-#if OS_WIN
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/GdiPlusUtil.h"
 #include "base/Win.h"
 #include "base/Zip.h"
-#endif
 
 #include "EngineAll.h"
 
-#if OS_WIN
 using Gdiplus::ARGB;
 using Gdiplus::Bitmap;
 using Gdiplus::FontFamily;
@@ -45,7 +42,6 @@ using Gdiplus::MatrixOrderAppend;
 using Gdiplus::Ok;
 using Gdiplus::SolidBrush;
 using Gdiplus::Status;
-#endif
 
 Kind kindEngineEpub = "engineEpub";
 Kind kindEngineFb2 = "engineFb2";
@@ -175,9 +171,7 @@ class EngineEbook : public EngineBase {
     RectF pageRect;
     float pageBorder;
 
-#if OS_WIN
     void GetTransform(Matrix& m, float zoom, int rotation);
-#endif
     PointF TransformPoint(PointF pt, int pageNo, float zoom, int rotation, bool inverse);
     bool ExtractPageAnchors();
     TempStr ExtractFontListTemp();
@@ -287,11 +281,9 @@ bool EngineEbook::BenchLoadPage(int) {
     return true;
 }
 
-#if OS_WIN
 void EngineEbook::GetTransform(Matrix& m, float zoom, int rotation) {
     GetBaseTransform(m, ToGdipRectF(pageRect), zoom, rotation);
 }
-#endif
 
 Vec<DrawInstr>* EngineEbook::GetHtmlPage(int pageNo) {
     return GetHtmlPage(LocationFromPageNo(pageNo));
@@ -317,7 +309,7 @@ HtmlPage* EngineEbook::GetHtmlPage2(Location loc) {
 }
 
 bool EngineEbook::ExtractPageAnchors() {
-    ScopedRecursiveMutex scope(&pagesAccess);
+    AutoUnlockRecursiveMutex scope(&pagesAccess);
 
     DrawInstr* baseAnchor = nullptr;
     for (int pageNo = 1; pageNo <= pageCount; pageNo++) {
@@ -395,31 +387,6 @@ Pixmap* EngineEbook::RenderPage(RenderPageArgs& args) {
     Point screenTL = screen.TL();
     screen.Offset(-screen.x, -screen.y);
 
-#if !OS_WIN
-    EbookAbortCookie* cookie = nullptr;
-    if (args.cookie_out) {
-        cookie = new EbookAbortCookie();
-        *args.cookie_out = cookie;
-    }
-    if (cookie && cookie->abort) {
-        return nullptr;
-    }
-    Pixmap* pixmap = AllocPixmap(screen.dx, screen.dy);
-    if (!pixmap) {
-        return nullptr;
-    }
-    for (int y = 0; y < pixmap->height; y++) {
-        u8* dst = pixmap->data + (size_t)y * pixmap->stride;
-        for (int x = 0; x < pixmap->width; x++) {
-            dst[0] = 0xff;
-            dst[1] = 0xff;
-            dst[2] = 0xff;
-            dst[3] = 0xff;
-            dst += 4;
-        }
-    }
-    return pixmap;
-#else
     HANDLE hMap = nullptr;
     HBITMAP hbmp = CreateMemoryBitmap(screen.Size(), &hMap);
     HDC hDC = CreateCompatibleDC(nullptr);
@@ -445,7 +412,7 @@ Pixmap* EngineEbook::RenderPage(RenderPageArgs& args) {
         *args.cookie_out = cookie;
     }
 
-    ScopedRecursiveMutex scope(&pagesAccess);
+    AutoUnlockRecursiveMutex scope(&pagesAccess);
 
     PlatformTextRender* textDraw = CreateGdiplusTextRender(&g);
     DrawHtmlPage(&g, textDraw, GetHtmlPage(loc), pageBorder, pageBorder, false, kColBlack,
@@ -460,7 +427,6 @@ Pixmap* EngineEbook::RenderPage(RenderPageArgs& args) {
     }
 
     return PixmapFromHBITMAP(hbmp, screen.Size(), hMap);
-#endif
 }
 
 static Rect GetInstrBbox(DrawInstr& instr, float pageBorder) {
@@ -471,7 +437,7 @@ static Rect GetInstrBbox(DrawInstr& instr, float pageBorder) {
 
 PageText EngineEbook::ExtractPageText(int pageNo) {
     const Str lineSep = StrL("\n");
-    ScopedRecursiveMutex scope(&pagesAccess);
+    AutoUnlockRecursiveMutex scope(&pagesAccess);
 
     AtomicIntInc(&gAllowAllocFailure);
     AutoCall decAllowAlloc(AtomicIntDec, &gAllowAllocFailure);
@@ -616,7 +582,6 @@ Vec<IPageElement*> EngineEbook::GetElements(int pageNo) {
     return els;
 }
 
-#if OS_WIN
 static RenderedBitmap* getImageFromData(Str imageData) {
     HBITMAP hbmp = nullptr;
     Bitmap* bmp = NewGdiplusBitmapFromPixmap(PixmapFromData(imageData));
@@ -628,13 +593,8 @@ static RenderedBitmap* getImageFromData(Str imageData) {
     delete bmp;
     return new RenderedBitmap(hbmp, size);
 }
-#endif
 
 RenderedBitmap* EngineEbook::GetImageForPageElement(IPageElement* iel) {
-#if !OS_WIN
-    (void)iel;
-    return nullptr;
-#else
     ReportIf(iel->GetKind() != kindPageElementImage);
     PageElementImage* el = (PageElementImage*)iel;
     int idx = el->imageID;
@@ -642,7 +602,6 @@ RenderedBitmap* EngineEbook::GetImageForPageElement(IPageElement* iel) {
     auto&& i = (*pageInstrs)[idx];
     ReportIf(i.type != DrawInstrType::Image);
     return getImageFromData(i.GetImage());
-#endif
 }
 
 Str EngineEbook::GetImageDataForPageElement(IPageElement* iel) {
@@ -727,7 +686,7 @@ IPageDestination* EngineEbook::GetNamedDest(Str name) {
 }
 
 TempStr EngineEbook::ExtractFontListTemp() {
-    ScopedRecursiveMutex scope(&pagesAccess);
+    AutoUnlockRecursiveMutex scope(&pagesAccess);
 
     Vec<PlatformFont*> seenFonts;
     StrVec fonts;
@@ -766,7 +725,6 @@ void EngineEbook::ExtractFontListFromPage(Location loc, Vec<PlatformFont*>& seen
         }
         VecAppend(seenFonts, i.font);
 
-#if OS_WIN
         PlatformFont* font = i.font;
         FontFamily family;
         if (!font || !font->gdiFont) {
@@ -785,9 +743,6 @@ void EngineEbook::ExtractFontListFromPage(Location loc, Vec<PlatformFont*>& seen
         }
         TempStr fontName = ToUtf8Temp(fontNameW);
         AppendIfNotExists(&fonts, fontName);
-#else
-        AppendIfNotExists(&fonts, i.font->GetName());
-#endif
     }
 }
 
@@ -920,7 +875,6 @@ EngineBase* EngineEpub::Clone() {
 
 bool EngineEpub::Load(Str fileName) {
     SetFilePath(fileName);
-#if OS_WIN
     if (dir::Exists(fileName)) {
         // load uncompressed documents as recompressed ZIP data
         Str data = ZipDirToData(fileName, true);
@@ -931,7 +885,6 @@ bool EngineEpub::Load(Str fileName) {
         str::Free(data);
         return ok;
     }
-#endif
     doc = EpubDoc::CreateFromFile(fileName);
     return FinishLoading();
 }
@@ -1246,7 +1199,7 @@ static void FindMobiChapterStarts(Str html, Vec<int>& starts) {
 EngineMobi::~EngineMobi() {
     DestroyTocTree(tocTree);
     delete doc;
-    ScopedRecursiveMutex scope(&pagesAccess);
+    AutoUnlockRecursiveMutex scope(&pagesAccess);
     for (Vec<HtmlPage*>* v : chapterPages) {
         if (!v) {
             continue;
@@ -1271,9 +1224,9 @@ bool EngineMobi::LoadFromData(Str data) {
     return FinishLoading();
 }
 
-// formats only chapter 1 when the book has chapter markers, so opening a
-// long, many-chapter mobi (e.g. one page per <mbp:pagebreak>) stays fast;
-// other chapters are formatted on demand by LayOutChapter()
+// chapter markers: don't format any chapter here, so opening a long mobi
+// stays fast. the open path formats the chapter being read; the rest run
+// on a background thread. a book with no markers is still formatted whole
 bool EngineMobi::FinishLoading() {
     if (!doc || PdbDocType::Mobipocket != doc->GetDocType()) {
         return false;
@@ -1308,13 +1261,14 @@ bool EngineMobi::FinishLoading() {
         chapterPages[i] = nullptr;
     }
 
-    int n1 = LayOutChapter(1);
+    // placeholders only. the open path lays out the chapter being read;
+    // the rest are counted on a background thread
     SetPageCountFromChapters();
     // load already runs off the UI thread; build ToC now so HasToc()/GetToc()
     // from the menu/toolbar/sidebar do not gumbo-parse the book on the UI thread
     GetToc();
-    logf("EngineMobi::FinishLoading: %d chapters, chapter 1 has %d pages\n", nCh, n1);
-    return n1 > 0;
+    logf("EngineMobi::FinishLoading: %d chapters, layout deferred\n", nCh);
+    return pageCount > 0;
 }
 
 // formats one chapter's html slice; called lazily (from the render thread
@@ -1328,7 +1282,7 @@ int EngineMobi::LayOutChapter(int chapter) {
     if (chapter < 1 || chapter > len(chapterStart)) {
         return 1;
     }
-    ScopedRecursiveMutex scope(&pagesAccess);
+    AutoUnlockRecursiveMutex scope(&pagesAccess);
     if (chapterPages[chapter - 1] != nullptr) {
         return chapters.PageCount(chapter);
     }
@@ -1369,7 +1323,7 @@ HtmlPage* EngineMobi::GetHtmlPage2(Location loc) {
     if (!loc.IsValid()) {
         return nullptr;
     }
-    ScopedRecursiveMutex scope(&pagesAccess);
+    AutoUnlockRecursiveMutex scope(&pagesAccess);
     if (!IsChapterLaidOut(loc.chapter)) {
         LayOutChapter(loc.chapter);
     }
@@ -1424,7 +1378,7 @@ IPageDestination* EngineMobi::GetNamedDest(Str name) {
         return nullptr;
     }
 
-    ScopedRecursiveMutex scope(&pagesAccess);
+    AutoUnlockRecursiveMutex scope(&pagesAccess);
     int chapter = HasChapters() ? ChapterForFilePos(filePos) : 1;
     ChapterPageCount(chapter); // lay it out if needed
     ReportIf(chapter < 1 || chapter > len(chapterPages) || !chapterPages[chapter - 1]);
@@ -1513,7 +1467,7 @@ Location EngineMobi::LookupBookmark(Str s) {
 
     int ch = ChapterForFilePos(reparseIdx);
     ChapterPageCount(ch);
-    ScopedRecursiveMutex scope(&pagesAccess);
+    AutoUnlockRecursiveMutex scope(&pagesAccess);
     Vec<HtmlPage*>* v = chapterPages[ch - 1];
     int pg = PageForFilePosInChapter(v, reparseIdx);
     return ClampLocation({ch, pg});

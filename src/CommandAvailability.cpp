@@ -36,6 +36,7 @@ static UINT_PTR gNoDocWhitelist[] = {
     CmdOpenFile,
     CmdOpenFileNoHistory,
     CmdOpenFileWithOSFilePicker,
+    CmdOpenFileWithSumatraFilePicker,
     CmdToggleFilePicker,
     CmdToggleBoolSetting,
     CmdNavigateFilesInFolder,
@@ -44,8 +45,8 @@ static UINT_PTR gNoDocWhitelist[] = {
     CmdContributeTranslation,
     CmdOptions,
     CmdSetInverseSearch,
-    CmdAdvancedOptions,
     CmdAdvancedSettings,
+    CmdOpenSettingsFile,
     CmdChangeLanguage,
     CmdChangeTheme,
     CmdCheckUpdate,
@@ -78,8 +79,10 @@ static UINT_PTR gNoDocWhitelist[] = {
     CmdToggleWindowsPreviewer,
     CmdToggleWindowsSearchFilter,
     CmdInvertColors,
+    CmdToggleGrayscale,
     CmdFavoriteToggle,
     CmdFavoriteShowInTab,
+    CmdGoToHomePage,
     CmdShowLog,
     CmdClearHistory,
     CmdRemoveDeletedFilesFromHistory,
@@ -152,7 +155,8 @@ static UINT_PTR removeIfNoFullscreenPerms[] = {
 static UINT_PTR removeIfNoPrefsPerms[] = {
     CmdOptions,
     CmdSetInverseSearch,
-    CmdAdvancedOptions,
+    CmdAdvancedSettings,
+    CmdOpenSettingsFile,
     CmdPinSelectedDocument,
     CmdForgetSelectedDocument,
     CmdFavoriteAdd,
@@ -174,6 +178,7 @@ static UINT_PTR removeIfNoCopyPerms[] = {
     CmdSearchSelectionWithWikipedia,
     CmdSearchSelectionWithGoogleScholar,
     CmdSelectAll,
+    CmdSelectCurrentPage,
     CmdCopySelection,
     CmdCopyLinkTarget,
     CmdCopyComment,
@@ -194,6 +199,7 @@ static UINT_PTR removeIfNoDiskAccessPerm[] = {
     CmdOpenFile,
     CmdOpenFileNoHistory,
     CmdOpenFileWithOSFilePicker,
+    CmdOpenFileWithSumatraFilePicker,
     CmdToggleFilePicker,
     CmdOpenNextFileInFolder,
     CmdOpenPrevFileInFolder,
@@ -207,8 +213,8 @@ static UINT_PTR removeIfNoDiskAccessPerm[] = {
     CmdDeleteFileAndOpenNext,
     CmdSendByEmail,
     CmdContributeTranslation,
-    CmdAdvancedOptions,
     CmdAdvancedSettings,
+    CmdOpenSettingsFile,
     CmdFavoriteAdd,
     CmdFavoriteDel,
     CmdFavoriteToggle,
@@ -267,6 +273,7 @@ static UINT_PTR removeIfChm[] = {
     CmdZoomFitWidth,
     CmdZoomFitHeight,
     CmdZoomFitContent,
+    CmdZoomFitVisible,
     CmdDebugShowFitContentArea,
     CmdZoomShrinkToFit,
     CmdZoom6400,
@@ -562,6 +569,9 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         bool enabled = ctx.tab && ctx.tab->win && HasOpenedDocuments(ctx.tab->win);
         return enabled ? CommandVisibility::Show : CommandVisibility::Disable;
     }
+    if (cmdId == CmdGoToHomePage) {
+        return SettingsUseTabs() ? CommandVisibility::Show : CommandVisibility::Hide;
+    }
     if (cmdId == CmdNextTab || cmdId == CmdPrevTab || cmdId == CmdNextTabSmart || cmdId == CmdPrevTabSmart ||
         cmdId == CmdMoveTabLeft || cmdId == CmdMoveTabRight) {
         return ctx.nTabs >= 2 ? CommandVisibility::Show : CommandVisibility::Hide;
@@ -691,6 +701,13 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return CommandVisibility::Hide;
     }
 
+    if (cmdId == CmdAutoGenerateTOC) {
+        EngineBase* engine = ctx.tab ? ctx.tab->GetEngine() : nullptr;
+        if (!engine || !IsOfKind(engine, kindEngineMupdf)) {
+            return CommandVisibility::Hide;
+        }
+    }
+
     if (cmdId == CmdShowErrors) {
         EngineBase* engine = ctx.tab ? ctx.tab->GetEngine() : nullptr;
         if (!engine || !engine->HasErrors()) {
@@ -745,6 +762,10 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     }
 
     if (cmdId == CmdToggleTrimEmptyMargins && !ctx.isFixedPage) {
+        return CommandVisibility::Hide;
+    }
+
+    if (cmdId == CmdToggleFreePan && !ctx.isFixedPage) {
         return CommandVisibility::Hide;
     }
 
@@ -836,7 +857,7 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     if (!HasPermission(Perm::SavePreferences) && CmdIdInList(cmdId, removeIfNoPrefsPerms)) {
         return CommandVisibility::Hide;
     }
-    if (!HasPermission(Perm::PrinterAccess) && cmdId == CmdPrint) {
+    if (!HasPermission(Perm::PrinterAccess) && (cmdId == CmdPrint || cmdId == CmdPrintSelection)) {
         return CommandVisibility::Hide;
     }
     if (!CanAccessDisk()) {
@@ -863,7 +884,7 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     if (!ctx.cursorOnImage && cmdId == CmdCopyImage) {
         return CommandVisibility::Hide;
     }
-    if (cmdId == CmdCopySelectionAsImage || cmdId == CmdSaveSelectionAsImage) {
+    if (cmdId == CmdCopySelectionAsImage || cmdId == CmdSaveSelectionAsImage || cmdId == CmdPrintSelection) {
         bool isRect = ctx.hasSelection && !ctx.hasTextSelection;
         return isRect ? CommandVisibility::Show : CommandVisibility::Hide;
     }
@@ -886,8 +907,8 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     }
 
     // No extractable text on comics, image folders, or single images.
-    if (cmdId == CmdReadAloud || cmdId == CmdReadAloudFromTopPage || cmdId == CmdReadAloudSelection ||
-        cmdId == CmdPauseReadAloud || cmdId == CmdContinueReadAloud) {
+    if (cmdId == CmdToggleReadAloud || cmdId == CmdReadAloudFromTopPage || cmdId == CmdReadAloudSelection ||
+        cmdId == CmdReadAloudFromCursorPosition || cmdId == CmdPauseReadAloud || cmdId == CmdContinueReadAloud) {
         Kind k = ctx.engineKind;
         bool isImage =
             k == kindEngineImage || k == kindEngineImageDir || k == kindEngineComicBooks || ctx.isImageCollection;

@@ -6,8 +6,8 @@ You can add new keyboard shortcuts or reassign an existing shortcut to a differe
 
 To customize keyboard shortcuts:
 
-- use the `Settings` / `Advanced Options...` menu (or open the Command Palette with `Ctrl + K`, type `adv` to narrow the results, and select the `Advanced Options...` command)
-- this opens the advanced settings file in Notepad
+- use the `Settings` / `Open Advanced Settings File...` menu (or `Ctrl + K`, `Open Advanced Settings File...` command in [Command Palette](Command-Palette.md))
+- this opens the advanced settings file in your default text editor
 - find the `Shortcuts` array and add new shortcut definitions
 
 An example of customization:

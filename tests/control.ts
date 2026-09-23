@@ -1,6 +1,6 @@
 import { Socket, createConnection } from "node:net";
 import { ensureModifierKeysUp, killAndWait, testWindowPos } from "./winapi.ts";
-import { SLOW_BUILD_FACTOR } from "./util.ts";
+import { drainProcStderr, SLOW_BUILD_FACTOR } from "./util.ts";
 
 export enum ControlCommand {
   Ping = 1,
@@ -97,6 +97,14 @@ export enum ControlCommand {
   TestTtsEngineCrash = 100,
   StartPerfLog = 101,
   StopPerfLog = 102,
+  WaitSessionRestored = 103,
+  TestNavFiles = 104,
+  TestSaveFileAs = 105,
+  TestImageOrientation = 106,
+  TestTtsPumpOnSpeak = 107,
+  TestRenderSelections = 108,
+  TestToggleFormButton = 109,
+  ResolveUnsavedChanges = 110,
 }
 
 export type ControlArg = number | string | Uint8Array | ControlArg[];
@@ -113,6 +121,8 @@ export type HomeSelection = {
   path: string;
   listView: boolean;
   listIcon: number[];
+  thumbsArea: number[];
+  lastCaption: number[];
   raw: string;
 };
 
@@ -123,6 +133,8 @@ export type ChapterInfo = {
   chapterPageCount: number;
   pageCount: number;
   hasChapters: boolean;
+  laidOut: number;
+  chapterUi: boolean;
 };
 
 export type LayoutRect = { x: number; y: number; dx: number; dy: number };
@@ -331,6 +343,9 @@ function waitForReadable(socket: Socket): Promise<void> {
   });
 }
 
+// EventEmitter requires a listener or Bun prints EPIPE when the app closes the pipe
+function swallowSocketError(_e: Error): void {}
+
 function connectSocket(path: string): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
@@ -340,6 +355,7 @@ function connectSocket(path: string): Promise<Socket> {
     };
     const onConnect = () => {
       cleanup();
+      socket.on("error", swallowSocketError);
       resolve(socket);
     };
     const onError = (err: Error) => {
@@ -368,7 +384,9 @@ function cleanEnv(env: Record<string, string | undefined> | undefined): Record<s
 export class ControlClient {
   private nextId = 1;
 
-  constructor(readonly socket: Socket) {}
+  constructor(readonly socket: Socket) {
+    socket.on("error", swallowSocketError);
+  }
 
   static async connect(pipeName: string, timeoutMs = 10000 * SLOW_BUILD_FACTOR): Promise<ControlClient> {
     const path = pipePath(pipeName);
@@ -420,8 +438,28 @@ export class ControlClient {
     }
   }
 
+  // Discards unsaved changes in every tab first, so quitting never waits on
+  // the "Unsaved changes" prompt. Call resolveUnsavedChanges("save") before
+  // to keep them.
   async quit(): Promise<void> {
-    await this.request(ControlCommand.Quit);
+    try {
+      await this.request(ControlCommand.Quit);
+    } finally {
+      this.close();
+    }
+  }
+
+  // Answers the "Unsaved changes" prompt up front, so a later tab close, file
+  // switch or quit does not show it: "discard" / "save" apply to every tab,
+  // "save-as" writes the current tab's document to `path`.
+  async resolveUnsavedChanges(action: "discard" | "save" | "save-as", path?: string): Promise<void> {
+    const args: ControlArg[] = action === "save-as" ? [action, path ?? ""] : [action];
+    const res = await this.request(ControlCommand.ResolveUnsavedChanges, args);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const raw = String(res[1] ?? "").trim();
+    if (code !== 0) {
+      throw new Error(`ResolveUnsavedChanges failed: ${raw || code}`);
+    }
   }
 
   // Fire-and-forget: the process dies in the crash handler, so there is no reply.
@@ -440,6 +478,16 @@ export class ControlClient {
     const info = String(res[1] ?? "");
     if (code !== 0) {
       throw new Error(`WaitRenderIdle failed: ${info || code}`);
+    }
+    return info;
+  }
+
+  async waitForSessionRestored(timeoutMs = 15000): Promise<string> {
+    const res = await this.request(ControlCommand.WaitSessionRestored, [timeoutMs * SLOW_BUILD_FACTOR]);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const info = String(res[1] ?? "");
+    if (code !== 0) {
+      throw new Error(`WaitSessionRestored failed: ${info || code}`);
     }
     return info;
   }
@@ -464,11 +512,13 @@ export class ControlClient {
         path: "",
         listView: false,
         listIcon: [0, 0, 0, 0],
+        thumbsArea: [0, 0, 0, 0],
+        lastCaption: [0, 0, 0, 0],
         raw,
       };
     }
     const m =
-      /OK sel=(-?\d+) entries=(\d+) searchFocus=(\d) searchBox=(\d) search=(-?\d+),(-?\d+),(-?\d+),(-?\d+) outline=(-?\d+),(-?\d+),(-?\d+),(-?\d+) outlineFull=(-?\d+),(-?\d+),(-?\d+),(-?\d+) path=(.*) listView=(\d) listIcon=(-?\d+),(-?\d+),(-?\d+),(-?\d+)$/.exec(
+      /OK sel=(-?\d+) entries=(\d+) searchFocus=(\d) searchBox=(\d) search=(-?\d+),(-?\d+),(-?\d+),(-?\d+) outline=(-?\d+),(-?\d+),(-?\d+),(-?\d+) outlineFull=(-?\d+),(-?\d+),(-?\d+),(-?\d+) path=(.*) listView=(\d) listIcon=(-?\d+),(-?\d+),(-?\d+),(-?\d+) thumbsArea=(-?\d+),(-?\d+),(-?\d+),(-?\d+) lastCaption=(-?\d+),(-?\d+),(-?\d+),(-?\d+)$/.exec(
         raw,
       );
     if (!m) {
@@ -486,6 +536,8 @@ export class ControlClient {
       path: m[17].trim(),
       listView: m[18] === "1",
       listIcon: [parseInt(m[19], 10), parseInt(m[20], 10), parseInt(m[21], 10), parseInt(m[22], 10)],
+      thumbsArea: [parseInt(m[23], 10), parseInt(m[24], 10), parseInt(m[25], 10), parseInt(m[26], 10)],
+      lastCaption: [parseInt(m[27], 10), parseInt(m[28], 10), parseInt(m[29], 10), parseInt(m[30], 10)],
       raw,
     };
   }
@@ -553,7 +605,7 @@ export class ControlClient {
       throw new Error(`TestChapterInfo failed: ${raw || code}`);
     }
     const m =
-      /^OK chapter=(\d+) page=(\d+) chapterCount=(\d+) chapterPageCount=(\d+) pageCount=(\d+) hasChapters=(\d)$/.exec(
+      /^OK chapter=(\d+) page=(\d+) chapterCount=(\d+) chapterPageCount=(\d+) pageCount=(\d+) hasChapters=(\d+) laidOut=(\d+) chapterUi=(\d+)$/.exec(
         raw,
       );
     if (!m) {
@@ -566,6 +618,8 @@ export class ControlClient {
       chapterPageCount: parseInt(m[4], 10),
       pageCount: parseInt(m[5], 10),
       hasChapters: m[6] === "1",
+      laidOut: parseInt(m[7], 10),
+      chapterUi: m[8] === "1",
     };
   }
 
@@ -623,6 +677,22 @@ export class ControlClient {
     return { survived: false, pageNo: -1, textSurvived };
   }
 
+  // Toggles the idx-th (0-based) checkbox / radio widget on pageNo of the
+  // current tab, as a click on it would.
+  async toggleFormButton(pageNo: number, idx: number): Promise<{ toggled: boolean; before: string; after: string }> {
+    const res = await this.request(ControlCommand.TestToggleFormButton, [pageNo, idx]);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const raw = String(res[1] ?? "").trim();
+    if (code !== 0) {
+      throw new Error(`TestToggleFormButton failed: ${raw || code}`);
+    }
+    const m = /^OK toggled=(\d) before='(.*)' after='(.*)' buttons=\d+$/.exec(raw);
+    if (!m) {
+      throw new Error(`toggleFormButton: could not parse '${raw}'`);
+    }
+    return { toggled: m[1] === "1", before: m[2]!, after: m[3]! };
+  }
+
   // Seeds a glyph-level (quad) text selection on `pageNo` of the current tab
   // and reports the flat page numbers it holds. A rectangle selection is
   // null-guarded when painted; only a quad one reaches CvtToScreen unguarded.
@@ -646,7 +716,10 @@ export class ControlClient {
   }
 
   close(): void {
-    this.socket.end();
+    if (this.socket.destroyed) {
+      return;
+    }
+    this.socket.destroy();
   }
 }
 
@@ -692,7 +765,7 @@ export async function withControlledSumatra<T>(
     cwd: options.cwd,
     env: cleanEnv(options.env),
   });
-  const stderrPromise: Promise<string> = proc.stderr ? new Response(proc.stderr).text() : Promise.resolve("");
+  const stderrPromise = drainProcStderr(proc.stderr);
   let client: ControlClient | undefined;
   let killed = false;
   let result: T | undefined;

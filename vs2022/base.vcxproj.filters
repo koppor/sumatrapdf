@@ -24,10 +24,10 @@
     <ClInclude Include="..\src\PerfLog.h">
       <Filter>src</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\base\AppendStore.h">
+    <ClInclude Include="..\src\base\Archive.h">
       <Filter>src\base</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\base\Archive.h">
+    <ClInclude Include="..\src\base\AutoWin.h">
       <Filter>src\base</Filter>
     </ClInclude>
     <ClInclude Include="..\src\base\Base.h">
@@ -87,9 +87,6 @@
     <ClInclude Include="..\src\base\Pixmap.h">
       <Filter>src\base</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\base\ScopedWin.h">
-      <Filter>src\base</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\base\SettingsUtil.h">
       <Filter>src\base</Filter>
     </ClInclude>
@@ -131,13 +128,7 @@
     <ClCompile Include="..\src\PerfLog.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\base\AppendStore.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\base\Archive.cpp">
-      <Filter>src\base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\Arena.cpp">
       <Filter>src\base</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\Base.cpp">

@@ -2,9 +2,8 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#include "base/BitManip.h"
 #include "base/Dict.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 
 #include "Dia2Subset.h"
 // #include <Dia2.h>
@@ -591,7 +590,7 @@ InvalidCmdLine:
 }
 
 int main(int argc, char** argv) {
-    ScopedCom comInitializer;
+    AutoCoUninitialize comInitializer;
     if (!ParseCommandLine(argc - 1, &argv[1])) return 1;
     ProcessPdbFile(g_fileName);
     return 0;

@@ -5,7 +5,7 @@
 #include "base/Pixmap.h"
 #include <uiautomationcore.h>
 #include "gui/Dpi.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/Win.h"
 
 #include "gui/UIModels.h"
@@ -469,7 +469,7 @@ static void PaintTransparentQuads(Gfx* gfx, Rect screenRc, Vec<Point>& pts, Colo
     screenRc.Inflate(1, 1);
     Vec<Point> painted;
     for (int i = 0; i < nQuads; i++) {
-        Point* q = pts.els + (i * 4);
+        Point* q = pts.els + ((ptrdiff_t)i * 4);
         if (QuadScreenBounds(q).Intersect(screenRc).IsEmpty()) {
             continue;
         }
@@ -705,7 +705,7 @@ RenderedBitmap* RenderSelectionsAsRenderedBitmap(DisplayModel* dm, const Vec<Sel
         return nullptr;
     }
 
-    constexpr i64 kMaxPixels = 24 * 1000 * 1000;
+    constexpr i64 kMaxPixels = 24LL * 1000 * 1000;
     Vec<Pixmap*> pixmaps;
     i64 totalHeight = 0;
     int maxWidth = 0;
@@ -717,15 +717,7 @@ RenderedBitmap* RenderSelectionsAsRenderedBitmap(DisplayModel* dm, const Vec<Sel
         float zoom = dm->GetZoomReal(selection.pageNo);
         RectF rect = selection.rect;
         RenderPageArgs args(selection.pageNo, zoom, dm->GetRotation(), &rect, RenderTarget::Export);
-        Pixmap* pixmap = dm->GetEngine()->RenderPage(args);
-        if (!pixmap) {
-            continue;
-        }
-        RenderedBitmap* rendered = RenderedBitmapFromPixmap(pixmap);
-        if (!rendered) {
-            continue;
-        }
-        Pixmap* dib = PixmapFromRenderedBitmap(rendered);
+        Pixmap* dib = PixmapToBgra(dm->GetEngine()->RenderPage(args));
         if (!dib) {
             continue;
         }
@@ -895,6 +887,26 @@ void OnSelectAll(MainWindow* win, bool textOnly) {
     }
 
     win->showSelection = win->CurrentTab()->selectionOnPage != nullptr;
+    ScheduleRepaint(win, 0);
+}
+
+// like Select All, but only the text of the current page
+void OnSelectCurrentPage(MainWindow* win) {
+    if (!HasPermission(Perm::CopySelection)) {
+        return;
+    }
+    DisplayModel* dm = win->AsFixed();
+    if (!dm) {
+        return;
+    }
+    int pageNo = dm->CurrentPageNo();
+    if (!win->ctrl->ValidPageNo(pageNo)) {
+        return;
+    }
+    dm->textSelection->StartAt(pageNo, 0);
+    dm->textSelection->SelectUpTo(pageNo, -1);
+    win->selectionRect = Rect::FromXY(INT_MIN / 2, INT_MIN / 2, INT_MAX, INT_MAX);
+    UpdateTextSelection(win, false);
     ScheduleRepaint(win, 0);
 }
 
@@ -1080,6 +1092,6 @@ void OnSelectionStop(MainWindow* win, int x, int y, bool aborted) {
     // show the floating selection toolbar for a finished text selection
     // (self-guards: needs a non-empty on-screen text selection)
     if (!aborted || editingRect) {
-        ShowSelectionToolbar(win);
+        ShowSelectionToolbar(win, SelToolbarShow::Now);
     }
 }

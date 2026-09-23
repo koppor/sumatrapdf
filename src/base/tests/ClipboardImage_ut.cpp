@@ -2,7 +2,7 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/Win.h"
 #include "base/Pixmap.h"
 #include "base/GdiPlusUtil.h"
@@ -174,7 +174,7 @@ static void ClipboardStampRoundTripTest() {
 }
 
 void ClipboardImageTest() {
-    ScopedGdiPlus gdiPlus;
+    AutoGdiPlusShutdown gdiPlus;
     TransparentImageTest();
     OpaqueImageTest();
     RoundTripThroughRenderedBitmapTest();

@@ -11,7 +11,7 @@ Read document text using Windows text-to-speech. You can start from a text selec
    - **Toolbar** — Read Aloud button (click to start / pause / continue; the icon shows a speaker when idle or paused, and a pause symbol while speaking). Use the dropdown arrow for explicit start scopes and **Voice**.
    - **Main menu** — **Read Aloud (TTS)** (after Selection)
    - **Context menu** — **Read Aloud (TTS)** (after Document)
-   - **Command palette** (`Ctrl + K`) — **Read Aloud**, **Start Reading From Top**, **Start Reading Selection**, **Pause Reading**, **Continue Reading**, **Stop Reading** (transport commands appear only when they apply)
+   - `Ctrl + K`, `Read Aloud` command in [Command Palette](Command-Palette.md); also **Start Reading From Top**, **Start Reading Selection**, **Pause Reading**, **Continue Reading**, **Stop Reading** (transport commands appear only when they apply)
 3. While a session is active (speaking or paused), a **playback bar** at the bottom of the canvas shows the document name, **page X of Y**, start scope, and **Pause** / **Resume** and **Stop** buttons on the left. The spoken sentence is underlined, and the current word is underlined in a different color. **Stop Reading** is always in the Read Aloud menus (main menu, context menu, toolbar dropdown), even if the playback bar is not visible; it is disabled when nothing is being read. **Pause Reading**, **Continue Reading**, and **Stop Reading** appear in the command palette when they apply.
 
 **Pause** stops speech and remembers your position so you can **Continue Reading** later. **Stop** ends the session and clears the resume position.
@@ -36,7 +36,7 @@ Scope labels on the playback bar: **Smart start**, **From top**, **From cursor**
 
 ## Voice
 
-Open **Voice** in any Read Aloud menu to pick **System default** or an installed Windows voice (WinRT OneCore voices and SAPI voices, including those from [NaturalVoiceSAPIAdapter](https://github.com/gexgd0419/NaturalVoiceSAPIAdapter)). Your choice is remembered in `ReadAloudVoiceId` in [Advanced options](Advanced-options-settings.md) (`SumatraPDF-settings.txt`). Leave it empty for the system default.
+Open **Voice** in any Read Aloud menu to pick **System default** or an installed Windows voice (WinRT OneCore voices and SAPI voices, including those from [NaturalVoiceSAPIAdapter](https://github.com/gexgd0419/NaturalVoiceSAPIAdapter)). Your choice is remembered in `ReadAloudVoiceId` in [Advanced settings](Advanced-options-settings.md) (`SumatraPDF-settings.txt`). Leave it empty for the system default.
 
 ## Limitations
 
@@ -49,6 +49,6 @@ Open **Voice** in any Read Aloud menu to pick **System default** or an installed
 ## See also
 
 - [Commands](Commands.md) — Read Aloud commands
-- [Advanced options](Advanced-options-settings.md) — `ReadAloudVoiceId`
+- [Advanced settings](Advanced-options-settings.md) — `ReadAloudVoiceId`
 - [Version history](Version-history.md) — 3.7 Read Aloud entry
 - [Accessibility](Accessibility.md) — screen readers and other accessibility features

@@ -2,7 +2,7 @@
    License: GPLv3 */
 
 #include "base/Base.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/Archive.h"
 #include "base/HtmlTags.h"
 #include "base/Win.h"
@@ -78,7 +78,7 @@ static WStr ExtractHtmlText(EpubDoc* doc) {
     int dataLen = d.len;
 
     str::Builder text;
-    str::BuilderReserve(text, dataLen / 2);
+    text.Reserve(dataLen / 2);
     GumboHtmlParser p(d);
     HtmlToken* t;
     Vec<HtmlTag> tagNesting;

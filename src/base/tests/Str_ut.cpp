@@ -167,12 +167,6 @@ static void StrIsDigitTest() {
     Str nonDigits = StrL("/:.bz{}");
     Str digits = StrL("0123456789");
     for (int i = 0; i < len(nonDigits); i++) {
-#if 0
-        if (str::IsDigit(nonDigits[i])) {
-            char c = nonDigits[i];
-            printf("%c is incorrectly determined as a digit\n", c);
-        }
-#endif
         utassert(!str::IsDigit(nonDigits.s[i]));
     }
     for (int i = 0; i < len(digits); i++) {
@@ -291,7 +285,7 @@ static void StrBuilderRunTwice(void (*fn)(str::Builder&)) {
         char stack[128];
         int n = 1 + (rand() % 128); // 1..128
         str::Builder b;
-        str::BuilderUseExternalBuffer(b, Str(stack, n));
+        b.UseExternalBuffer(Str(stack, n));
         fn(b);
     }
 }
@@ -374,7 +368,7 @@ static void StrBuilderTakeStr(str::Builder& str) {
 // reallocates
 static void StrBuilderReserve() {
     str::Builder str;
-    str::BuilderReserve(str, 1024);
+    str.Reserve(1024);
     uintptr_t heap = (uintptr_t)str.begin();
     utassert(heap != 0);
     for (int i = 0; i < 50; i++) {
@@ -386,8 +380,8 @@ static void StrBuilderReserve() {
     // reserving less than an external buf already holds keeps the buf
     char stack[64];
     str::Builder str2;
-    str::BuilderUseExternalBuffer(str2, Str(stack, sizeofi(stack)));
-    str::BuilderReserve(str2, 16);
+    str2.UseExternalBuffer(Str(stack, sizeofi(stack)));
+    str2.Reserve(16);
     utassert(UsesExternalBuf(str2));
     utassert((uintptr_t)str2.begin() == (uintptr_t)stack);
 }
@@ -413,14 +407,14 @@ void strStrTest() {
     StrBuilderArena();
 }
 
-// --- wstr::Builder: only AppendChar/Append/RemoveLast/LastChar/TakeWStr and
+// --- wstr::Builder: AppendChar/Append/RemoveLast/LastChar/TakeStr and
 // the lent buffer are left, so that is all there is to cover ---
 
 static void wstrBuilderTest() {
     // grows out of the lent buffer and keeps the content
     WCHAR stack[8];
     wstr::Builder b;
-    wstr::BuilderUseExternalBuffer(b, WStr(stack, dimofi(stack)));
+    b.UseExternalBuffer(WStr(stack, dimofi(stack)));
     utassert(b.els == stack);
     for (int i = 0; i < 100; i++) {
         b.AppendChar((WCHAR)(L'a' + (i % 26)));
@@ -437,19 +431,19 @@ static void wstrBuilderTest() {
     utassert(len(b) == 102);
     utassert(wstr::EndsWith(ToWStr(b), L"xyz"));
 
-    // TakeWStr hands the heap block over and leaves the Builder empty
-    WStr taken = b.TakeWStr();
+    // TakeStr hands the heap block over and leaves the Builder empty
+    WStr taken = b.TakeStr();
     utassert(len(taken) == 102);
     utassert(wstr::EndsWith(taken, L"xyz"));
     wstr::Free(taken);
     utassert(len(b) == 0);
 
-    // content that still fits the lent buffer stays in it, and TakeWStr copies
+    // content that still fits the lent buffer stays in it, and TakeStr copies
     wstr::Builder b2;
-    wstr::BuilderUseExternalBuffer(b2, WStr(stack, dimofi(stack)));
+    b2.UseExternalBuffer(WStr(stack, dimofi(stack)));
     b2.Append(L"abc");
     utassert(b2.els == stack);
-    WStr taken2 = b2.TakeWStr();
+    WStr taken2 = b2.TakeStr();
     utassert(wstr::Eq(taken2, L"abc"));
     utassert(taken2.s != stack);
     wstr::Free(taken2);
@@ -588,10 +582,6 @@ static void StrTrimWsTest() {
     trimmed = {};
     utassert(str::TrimWsBoth(trimmed) == 0 && str::IsNull(trimmed));
 
-    trimmed = StrL("name.ext");
-    utassert(str::TrimSuffix(trimmed, StrL(".ext")) == 4 && str::Eq(trimmed, StrL("name")));
-    utassert(str::TrimSuffix(trimmed, StrL(".ext")) == 0 && str::Eq(trimmed, StrL("name")));
-
     trimmed = StrL("---name");
     utassert(str::TrimChar(trimmed, '-') == 3 && str::Eq(trimmed, StrL("name")));
 
@@ -692,63 +682,6 @@ static void StrStartsWithTest() {
     utassert(str::Eq(t4, StrL("PageDown")));
 }
 
-static void StrArenaTest() {
-    Arena* a = ArenaNew();
-    utassert(a != nullptr);
-
-    utassert(StrArenaToStr(a, 0).s == nullptr);
-    utassert(len(StrArenaToStr(a, 0)) == 0);
-
-    StrArena empty = StrArenaDupStr(a, StrL(""));
-    utassert(empty != 0);
-    Str emptyS = StrArenaToStr(a, empty);
-    utassert(len(emptyS) == 0);
-    utassert(emptyS.s != nullptr);
-    utassert(emptyS.s[0] == 0);
-
-    StrArena sa = StrArenaDupStr(a, StrL("hello"));
-    utassert(sa != 0);
-    Str s = StrArenaToStr(a, sa);
-    utassert(str::Eq(s, StrL("hello")));
-    utassert(s.s[5] == 0); // C terminator after payload
-
-    // multi-byte LEB128 length: 200 > 127
-    StrArena big = StrArenaAlloc(a, 200);
-    utassert(big != 0);
-    Str bigS = StrArenaToStr(a, big);
-    utassert(bigS.len == 200);
-    utassert(bigS.s != nullptr);
-    memset(bigS.s, 'x', 200);
-    utassert(bigS.s[200] == 0);
-    utassert(str::Eq(StrArenaToStr(a, big), Str(bigS.s, 200)));
-
-    // multi-block arena: force a second chain block, then store a string there
-    {
-        ArenaParams params = ArenaDefaultParams();
-        params.reserveSize = 4 * 1024;
-        params.commitSize = 4 * 1024;
-        Arena* a2 = ArenaNew(params);
-        utassert(a2 != nullptr);
-        // ArenaNew rounds the reserve up to a page, and a page is 16K on arm64
-        // macOS, not 4K - so size the pushes from the block we actually got
-        u64 half = a2->reserved / 2;
-        void* filler = a2->Push(half, 8, true);
-        utassert(filler != nullptr);
-        // second large push forces a chained block (two halves + the header
-        // don't fit in one)
-        void* filler2 = a2->Push(half, 8, true);
-        utassert(filler2 != nullptr);
-        utassert(a2->current != a2);
-        StrArena sa2 = StrArenaDupStr(a2, StrL("second-block"));
-        utassert(sa2 != 0);
-        utassert(sa2 >= (u32)a2->reserved); // compressed offset past first block
-        utassert(str::Eq(StrArenaToStr(a2, sa2), StrL("second-block")));
-        ArenaDelete(a2);
-    }
-
-    ArenaDelete(a);
-}
-
 // nothing to allocate is an empty Str, not an allocation of nothing - and a
 // negative length asks for close to 2^64 bytes once it is widened, so it is
 // the same answer rather than a terminator written at a negative offset
@@ -765,7 +698,6 @@ static void AllocStrTempTest() {
 }
 
 void StrTest() {
-    StrArenaTest();
     AllocStrTempTest();
 
     char buf[32];
@@ -826,12 +758,6 @@ void StrTest() {
     str = str::Join({}, StrL("ab"));
     utassert(str::Eq(str, StrL("ab")));
     str::Free(str);
-
-#if 0
-    str = str::Join("\uFDEF", StrL("\uFFFF"));
-    utassert(str::Eq(str, StrL("\uFDEF\uFFFF")));
-    str::Free(str);
-#endif
 
     str::BufSet(Str(buf, dimof(buf)), StrL("abc\1efg\1"));
     Str bufStr(buf, 9);
@@ -997,24 +923,8 @@ void StrTest() {
                  f[5] == -20);
     }
 
-    {
-// the test string should only contain ASCII characters,
-// as all others might not be available in all code pages
-#define kTestString "aBc"
-        char* strA = strconv::WStrToAnsi(TEXT(kTestString)).s;
-        AutoCall freeStrA(free, (void*)strA);
-        utassert(str::Eq(Str(strA), StrL(kTestString)));
-        auto res = strconv::AnsiToWStrTemp(Str(strA));
-        utassert(wstr::Eq(res, TEXT(kTestString)));
-#undef kTestString
-    }
-
     utassert(str::IsDigit('0') && str::IsDigit(TEXT('5')) && str::IsDigit(L'9'));
-#if OS_WIN
     utassert(iswdigit(L'\u0660') && !str::IsDigit(L'\xB2'));
-#else
-    utassert(!str::IsDigit(L'\xB2'));
-#endif
 
     utassert(str::CmpNatural(StrL(".hg"), StrL("2.pdf")) < 0);
     utassert(str::CmpNatural(StrL("100.pdf"), StrL("2.pdf")) > 0);

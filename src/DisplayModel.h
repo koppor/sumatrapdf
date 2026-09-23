@@ -89,6 +89,8 @@ struct Synchronizer;
    You can think of it as a model in the MVC pardigm.
    All the display changes should be done through changing this model via
    API and re-displaying things based on new display information */
+enum class HeadingTocStart;
+
 struct DisplayModel : DocController {
     DisplayModel(EngineBase* engine, DocControllerCallback* cb);
     DisplayModel(DisplayModel const&) = delete;
@@ -171,7 +173,9 @@ struct DisplayModel : DocController {
     RectF PageMediaBoxForLayout(int pageNo) const;
     void UpdateEstimatedMediaBox();
     bool EnsureMediaBoxesForVisiblePages();
+    void EnsureMediaBoxForRender(int pageNo);
     void RelayoutKeepingView();
+    void StartHeadingToc(HeadingTocStart start);
 
     int GetRotation() const;
     float GetZoomReal(int pageNo) const;
@@ -226,7 +230,12 @@ struct DisplayModel : DocController {
     bool ScrollScreenToRect(int pageNo, Rect rec);
 
     ScrollState GetScrollState();
-    void SetScrollState(const ScrollState& state);
+    // how SetScrollState() treats a view panned past the page edges (free pan)
+    enum class RestorePan {
+        Exact,
+        WithinPages
+    };
+    void SetScrollState(const ScrollState& state, RestorePan pan = RestorePan::Exact);
 
     void CopyNavHistory(DisplayModel& orig);
 
@@ -238,6 +247,9 @@ struct DisplayModel : DocController {
     bool GetUniformPageWidth() const;
     void SetTrimEmptyMargins(bool enable);
     bool GetTrimEmptyMargins() const;
+    void SetFreePan(bool enable);
+    bool GetFreePan() const;
+    Size PanSlack() const;
     bool EnsureTrimEmptyMarginsForVisiblePages();
     bool GoToPageHorizontal(bool toRight);
 
@@ -252,7 +264,7 @@ struct DisplayModel : DocController {
 
     void BuildPagesInfo();
     float ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) const;
-    SizeF PageSizeAfterRotation(int pageNo, bool fitToContent = false) const;
+    SizeF PageSizeAfterRotation(int pageNo, bool fitToContent = false, float contentPad = 0) const;
     bool ShouldTreatLandscapeAsSpread() const;
     void EnsureSpreadFlags() const;
     int FirstPageInRow(int pageNo) const;
@@ -262,7 +274,7 @@ struct DisplayModel : DocController {
     void RecalcVisibleParts() const;
     void RenderVisibleParts();
     void AddNavPoint(bool rememberZoom = false);
-    RectF GetContentBox(int pageNo) const;
+    RectF GetContentBox(int pageNo, float pad = 0) const;
     void CalcZoomReal(float zoomVirtual);
     void GoToPage(int pageNo, int scrollY, bool addNavPt = false, int scrollX = -1);
     bool GoToNextPage(bool keepViewOffset);
@@ -360,6 +372,10 @@ struct DisplayModel : DocController {
     bool uniformPageWidth = false;
     bool trimEmptyMargins = false;
     bool inTrimMarginsUpdate = false;
+    bool freePan = false;
+    // set while SetScrollState() restores a view exactly: GoToPage() may then
+    // land in free pan's slack past the page edges
+    bool restoringExactPan = false;
 
     /* landscape image pages that occupy a full facing/book row
        (ComicBookUI / ImageUI LandscapeAsSpread; issues #1324, #872) */
@@ -377,6 +393,17 @@ struct DisplayModel : DocController {
     bool pendingRelayout = false;
     bool hasPendingScroll = false;
     ScrollState pendingScroll;
+
+    // the view SetScrollState() last restored and where that put the viewport.
+    // A relayout that finds the viewport still there restores it again from
+    // these page units instead of from the pixel they truncated to (#6220)
+    bool hasExactScroll = false;
+    ScrollState exactScroll;
+    RestorePan exactScrollPan = RestorePan::Exact;
+    int exactScrollPageNo = 0;
+    Point exactScrollOffset;
+    void RememberExactScroll(const ScrollState& state, RestorePan pan, int pageNo);
+    bool AtExactScroll() const;
 
     void RenderFinished(PageRenderRequest* req);
     void RenderFinishedAsync(PageRenderRequest* req);

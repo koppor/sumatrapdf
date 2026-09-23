@@ -4,7 +4,7 @@
 #include "base/Base.h"
 #include "base/Archive.h"
 #include "base/Pixmap.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/GdiPlusUtil.h"
 #include "base/Win.h"
 #include "gui/PlatformFont.h"
@@ -31,7 +31,7 @@ constexpr float kPreviewZoomMax = 16.f;
 constexpr float kPreviewZoomStep = 1.2f;
 // Render the whole page when it stays under this many pixels (~32 MB at 32bpp).
 // Past that, only the visible region plus a pan slop is rendered.
-constexpr i64 kPreviewMaxFullPagePixels = 8 * 1024 * 1024;
+constexpr i64 kPreviewMaxFullPagePixels = 8LL * 1024 * 1024;
 constexpr int kPreviewPanPad = 256;
 
 static bool SameZoom(float a, float b) {
@@ -53,8 +53,9 @@ FileEBookUI* GetFileEBookUI(Str) {
 // Copy a rendered page into the 32bpp DIB the shell gets, rather than going
 // through GetDIBits(bmp->hbmp): only the mupdf engines render into a DIB
 // section, so for DjVu and the image engines hbmp is null and GetDIBits failed,
-// which is why those never had a thumbnail (issue #1530). Pixmap::data is
-// always there.
+// which is why those never had a thumbnail (issue #1530). The caller makes
+// the pixels BGRA8 first: mupdf renders a page with few colors to an 8-bit
+// palette DIB, whose bytes are indices, not colors.
 // Rows are written bottom-up (the DIB has a positive biHeight) and anything
 // translucent is composited over white, the same paper the preview window
 // paints behind a page. Alpha ends up opaque, matching WTSAT_RGB:
@@ -110,7 +111,7 @@ IFACEMETHODIMP PdfPreview::GetThumbnail(uint cx, HBITMAP* phbmp, WTS_ALPHATYPE* 
 
     page = engine->Transform(ToRectF(thumb), 1, zoom, 0, true);
     RenderPageArgs args(1, zoom, 0, &page);
-    Pixmap* bmp = engine->RenderPage(args);
+    Pixmap* bmp = PixmapToBgra(engine->RenderPage(args));
     if (!bmp || !bmp->data) {
         log(StrL("PdfPreview::GetThumbnail: RenderPage() failed\n"));
         FreePixmap(bmp);
@@ -260,14 +261,14 @@ class PageRenderer {
 
     static DWORD WINAPI RenderThread(LPVOID data) {
         log(StrL("PageRenderer::RenderThread started\n"));
-        ScopedCom comScope; // because the engine reads data from a COM IStream
+        AutoCoUninitialize comScope; // because the engine reads data from a COM IStream
 
         PageRenderer* pr = (PageRenderer*)data;
         RenderPageArgs args(pr->reqPage, pr->reqZoom, 0, pr->reqUseClip ? &pr->reqPageRect : nullptr,
                             RenderTarget::View, &pr->abortCookie);
         Pixmap* bmp = pr->engine->RenderPage(args);
 
-        ScopedMutex scope(&pr->currAccess);
+        AutoUnlockMutex scope(&pr->currAccess);
 
         if (bmp && !pr->reqAbort) {
             FreePixmap(pr->currBmp);
@@ -313,7 +314,7 @@ void PageRenderer::Render(HDC hdc, const PreviewLayout& lo, int pageNo) {
         wantClip = wantClip.Intersect(pageRectPx);
     }
 
-    ScopedMutex scope(&currAccess);
+    AutoUnlockMutex scope(&currAccess);
 
     if (currBmp && ClipCovers(currPage, currZoom, currClip, pageNo, lo.zoom, visInPage)) {
         BlitCached(hdc, currBmp, currClip, visInPage, lo.onScreen);
@@ -744,7 +745,7 @@ PdfPreview::PdfPreview(AtomicInt* plRefCount, PreviewType type) {
     m_plModuleRef = plRefCount;
     AtomicIntInc(m_plModuleRef);
     if (NeedsGdiPlus(type)) {
-        m_gdiScope = new ScopedGdiPlus();
+        m_gdiScope = new AutoGdiPlusShutdown();
     }
 }
 

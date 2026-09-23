@@ -3,12 +3,10 @@
 
 #include "base/Base.h"
 
-#if OS_WIN
 #include "base/GdiPlusUtil.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "base/Win.h"
 #include "gui/Dpi.h"
-#endif
 
 #include "gui/PlatformFont.h"
 
@@ -80,7 +78,6 @@ void PlatformFontShutdown() {
     PlatformFontShutdownNative();
 }
 
-#if OS_WIN
 PlatformFont* GetPlatformFontForNative(Str name, float sizePt, PlatformFontStyle style, uintptr_t nativeId) {
     return GetPlatformFontInternal(name, sizePt, style, nativeId);
 }
@@ -88,8 +85,6 @@ PlatformFont* GetPlatformFontForNative(Str name, float sizePt, PlatformFontStyle
 using Gdiplus::Font;
 using Gdiplus::Ok;
 using Gdiplus::Status;
-
-PlatformFont* GetPlatformFontForNative(Str name, float sizePt, PlatformFontStyle style, uintptr_t nativeId);
 
 // the Graphics used for font metrics doesn't draw anything, so its bitmap can
 // be tiny
@@ -439,10 +434,8 @@ Size PlatformFontMeasureText(PlatformFont* font, Str s, int maxDx) {
 int PlatformFontLineHeight(PlatformFont* font) {
     HFONT hf = font ? font->GetHFont() : nullptr;
     AutoReleaseDC dc(nullptr);
-    ScopedSelectFont prev(dc, hf);
+    AutoRestoreFont prev(dc, hf);
     TEXTMETRICW tm{};
     GetTextMetricsW(dc, &tm);
     return (int)(tm.tmHeight + tm.tmExternalLeading);
 }
-
-#endif

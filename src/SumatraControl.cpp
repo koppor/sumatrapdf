@@ -2,6 +2,7 @@
    License: GPLv3 */
 
 #include "base/Base.h"
+#include "base/AutoWin.h"
 #include "base/UITask.h"
 #include "base/Win.h"
 #include "gui/Dpi.h"
@@ -63,6 +64,7 @@
 #include "ReadAloud.h"
 #include "ReadingAutoScroll.h"
 #include "ReadingBar.h"
+#include "NavFilesInFolder.h"
 #include "PerfLog.h"
 #include "SumatraControl.h"
 
@@ -260,6 +262,9 @@ static TempStr DisplayModeResultTemp(Str action, int* exitCodeOut) {
     }
 
     bool reportR2L = str::EqI(action, StrL("r2l"));
+    if (str::EqI(action, StrL("zoom-real"))) {
+        return finish(fmt("OK zoomReal=%g", win->ctrl->GetZoomVirtual(true)), 0);
+    }
     if (len(action) == 0 || str::EqI(action, StrL("get")) || reportR2L) {
         // report only
     } else if (str::EqI(action, StrL("presentation"))) {
@@ -739,9 +744,7 @@ static TempStr DocumentSignaturesResultTemp(int* exitCodeOut) {
     if (!engine) {
         return finish(StrL("NOTREADY no-fixed-document"), 2);
     }
-#if OS_WIN
     EutlRegisterLookup();
-#endif
     Props props;
     engine->GetProperties(props);
     Str sigs = GetPropValueTemp(props, DocProp::Signatures);
@@ -903,6 +906,14 @@ enum class ControlCmd : u16 {
     TestTtsEngineCrash = 100,
     StartPerfLog = 101,
     StopPerfLog = 102,
+    WaitSessionRestored = 103,
+    TestNavFiles = 104,
+    TestSaveFileAs = 105,
+    TestImageOrientation = 106,
+    TestTtsPumpOnSpeak = 107,
+    TestRenderSelections = 108,
+    TestToggleFormButton = 109,
+    ResolveUnsavedChanges = 110,
 };
 
 enum class ControlArgType : u16 {
@@ -1150,17 +1161,33 @@ static void AppendTestResult(ControlRequest* req, int exitCode, Str result) {
 }
 
 static void ExecuteControlRequest(ControlRequest* req) {
+    // test commands create engines, which need GDI+ and a few gSettings fields
+    AutoGdiPlusShutdown gdiPlus;
+    EnsureTestSettings();
+
     switch ((ControlCmd)req->cmd) {
         case ControlCmd::Ping:
             AppendArgString(req->results, StrL("pong"));
             AppendArgEnd(req->results);
             break;
 
+        // Quit never waits on the "Unsaved changes" prompt: a test that wants
+        // its changes kept saves them first (ResolveUnsavedChanges).
         case ControlCmd::Quit:
+            DiscardUnsavedChangesInAllTabs();
             AppendArgInt(req->results, 0);
             AppendArgEnd(req->results);
             PostAppExit();
             break;
+
+        case ControlCmd::ResolveUnsavedChanges: {
+            Str action = StringArg(req, 0);
+            Str path = StringArg(req, 1);
+            int exitCode = 0;
+            Str res = ResolveUnsavedChangesResultTemp(action, path, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
 
         // A notification covers part of the document for a couple of seconds,
         // so a test that reads pixels either waits it out or turns them off.
@@ -1918,6 +1945,42 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestNavFiles: {
+            Str action = StringArg(req, 0);
+            i32 idx = -1;
+            IntArg(req, 1, idx);
+            int exitCode = 0;
+            Str res = NavFilesInFolderStateTemp(action, idx, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestSaveFileAs: {
+            Str dstPath = StringArg(req, 0);
+            if (len(dstPath) == 0) {
+                AppendError(req, StrL("TestSaveFileAs expects string dstPath"));
+                break;
+            }
+            int exitCode = 0;
+            Str res = SaveFileAsResultTemp(dstPath, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestImageOrientation: {
+            Str pdfPath = StringArg(req, 0);
+            i32 pageNo = 0;
+            if (len(pdfPath) == 0 || !IntArg(req, 1, pageNo) || pageNo < 1) {
+                AppendError(req, StrL("TestImageOrientation expects string pdfPath, int pageNo"));
+                break;
+            }
+            Str bmpPath = StringArg(req, 2); // optional
+            int exitCode = 0;
+            Str res = ImageOrientationResultTemp(pdfPath, pageNo, bmpPath, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestCommandVisibility: {
             Str name = StringArg(req, 0);
             int cmdId = GetCommandIdByName(name);
@@ -2001,6 +2064,12 @@ static void ExecuteControlRequest(ControlRequest* req) {
             }
             TempStr state = fmt("crashed=%d voice='%s'", (int)TtsEngineCrashed(), gSettings->readAloudVoiceId);
             AppendTestResult(req, 0, state);
+            break;
+        }
+
+        case ControlCmd::TestTtsPumpOnSpeak: {
+            TtsTestPumpOnNextSpeak();
+            AppendTestResult(req, 0, StrL("OK"));
             break;
         }
 
@@ -2179,6 +2248,26 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestRenderSelections: {
+            int exitCode = 0;
+            Str res = RenderSelectionsResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestToggleFormButton: {
+            i32 pageNo = 1;
+            i32 idx = 0;
+            if (!IntArg(req, 0, pageNo) || !IntArg(req, 1, idx)) {
+                AppendError(req, StrL("TestToggleFormButton expects int pageNo (1-based), int idx (0-based)"));
+                break;
+            }
+            int exitCode = 0;
+            Str res = ToggleFormButtonResultTemp(pageNo, idx, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestSeedTextSelection: {
             i32 pageNo = 1;
             if (!IntArg(req, 0, pageNo)) {
@@ -2334,6 +2423,52 @@ static void RunWaitRenderIdle(ControlRequest* req) {
     }
 }
 
+static void SnapshotSessionRestore(ControlRequest* req) {
+    req->idleState = RenderIdleState::NotReady;
+    req->idleInfo[0] = 0;
+    if (!IsSessionRestoreFinished() || gIsStartup) {
+        str::BufSet(Str(req->idleInfo, dimof(req->idleInfo)), StrL("startup"));
+        SetEvent(req->done);
+        return;
+    }
+    if (HasPendingDocumentLoads()) {
+        str::BufSet(Str(req->idleInfo, dimof(req->idleInfo)), StrL("loading"));
+        SetEvent(req->done);
+        return;
+    }
+    if (len(gWindows) > 0 && gWindows[0] && gWindows[0]->uiState.updatePending) {
+        str::BufSet(Str(req->idleInfo, dimof(req->idleInfo)), StrL("ui-pending"));
+        SetEvent(req->done);
+        return;
+    }
+    req->idleState = RenderIdleState::Idle;
+    str::BufSet(Str(req->idleInfo, dimof(req->idleInfo)), StrL("restored"));
+    SetEvent(req->done);
+}
+
+static void RunWaitSessionRestored(ControlRequest* req) {
+    i32 timeoutMs = 15000;
+    IntArg(req, 0, timeoutMs);
+    if (timeoutMs < 1) {
+        timeoutMs = 1;
+    }
+    u64 deadline = GetTickCount64() + (u64)timeoutMs;
+    for (;;) {
+        ResetEvent(req->done);
+        uitask::Post(MkFunc0<ControlRequest>(SnapshotSessionRestore, req), "WaitSessionRestored");
+        WaitForSingleObject(req->done, INFINITE);
+        if (req->idleState == RenderIdleState::Idle) {
+            AppendTestResult(req, 0, req->idleInfo[0] ? Str(req->idleInfo) : StrL("restored"));
+            return;
+        }
+        if (GetTickCount64() >= deadline) {
+            AppendTestResult(req, 1, req->idleInfo[0] ? fmt("timeout %s", Str(req->idleInfo)) : StrL("timeout"));
+            return;
+        }
+        Sleep(20);
+    }
+}
+
 static bool ReadExact(HANDLE h, void* data, DWORD n) {
     u8* d = (u8*)data;
     DWORD total = 0;
@@ -2414,6 +2549,8 @@ static bool ProcessControlConnection(HANDLE h) {
         // paint (and thereby request the tiles we are waiting for)
         if ((ControlCmd)req->cmd == ControlCmd::WaitRenderIdle) {
             RunWaitRenderIdle(req);
+        } else if ((ControlCmd)req->cmd == ControlCmd::WaitSessionRestored) {
+            RunWaitSessionRestored(req);
         } else {
             uitask::Post(MkFunc0<ControlRequest>(ExecuteControlRequest, req), "SumatraControl");
             WaitForSingleObject(req->done, INFINITE);

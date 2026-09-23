@@ -23,6 +23,7 @@ constexpr float kZoomFitContent = -3.F;
 constexpr float kZoomShrinkToFit = -4.F;
 constexpr float kZoomFitByOrientation = -5.F;
 constexpr float kZoomFitHeight = -6.F;
+constexpr float kZoomFitVisible = -7.F;
 constexpr float kZoomActualSize = 100.0F;
 constexpr float kZoomMaxDefault = 6400.F;    /* max zoom in %, unless ZoomLevels raises it */
 constexpr float kZoomMaxAllowed = 1000000.F; /* the highest ZoomLevels can raise it to */
@@ -241,7 +242,8 @@ struct FileEBookUI {
     Str customCSS;
 };
 
-// information about opened files (in most recently used order)
+// history of opened files, most recently used first. A closed file
+// stays here until it drops off the list or the history is cleared
 struct FileState {
     // pages of this document bookmarked in the Favorites menu
     Vec<Favorite*>* favorites;
@@ -271,7 +273,7 @@ struct FileState {
     // deserialization and written back before serialization
     Str displayMode;
     // zoom (in %) or one of those values: fit page, fit width, fit height,
-    // fit content
+    // fit content, fit visible
     Str zoom;
     // if given, overrides the background color for this document
     ParsedColor bgCol;
@@ -323,6 +325,9 @@ struct FileState {
     bool uniformPageWidth;
     // if true, empty margins around page content are trimmed from display
     bool trimEmptyMargins;
+    // if true, the view can be panned past the page edges, so any part of
+    // a page can be brought to the center of the window
+    bool freePan;
 };
 
 // a subset of FileState required for restoring the state of a single
@@ -338,7 +343,7 @@ struct TabState {
     // chapters (see PagePosition.cpp)
     Str pageNo;
     // zoom (in %) or one of those values: fit page, fit width, fit height,
-    // fit content
+    // fit content, fit visible
     Str zoom;
     // how far pages have been rotated as a multiple of 90 degrees
     int rotation;
@@ -352,7 +357,8 @@ struct TabState {
     Vec<int>* tocState;
 };
 
-// state of the last session, usage depends on RestoreSession
+// windows and tabs still open when SumatraPDF was last closed; reopened
+// at startup if RestoreSession is true
 struct SessionData {
     // a subset of FileState required for restoring the state of a single
     // tab (required for handling documents being opened twice)
@@ -389,6 +395,10 @@ struct PrinterDefaults {
     // default value for collate in the print dialog (default, collate,
     // nocollate)
     Str collate;
+    // resolution to assume for the document when printing at original size
+    // (e.g. 300 for a 300 dpi scan whose file doesn't say); 0 uses the
+    // resolution recorded in the file
+    float printDpi;
 };
 
 // customization options for how forward search results are shown (used
@@ -433,7 +443,7 @@ struct ImageUI {
     // if given, sets the canvas background color for image files
     ParsedColor windowBgCol;
     // default zoom for image files. valid values: fit page, fit width, fit
-    // height, fit content, shrink to fit or percent like 100%
+    // height, fit content, fit visible, shrink to fit or percent like 100%
     Str defaultZoom;
     // value of DefaultZoom for internal usage
     float defaultZoomFloat;
@@ -500,7 +510,7 @@ struct CodexBuild {
 
 // settings for the Antigravity chat sidebar
 struct AntiGravity {
-    // Antigravity model ID for --model (e.g. gemini-3.6-flash)
+    // Antigravity model ID for --model (e.g. gemini-3.8-flash-medium)
     Str model;
     // extra Antigravity model IDs for the dropdown, comma-separated
     Str models;
@@ -603,8 +613,8 @@ struct ComicBookUI {
     // book view, continuous, continuous facing, continuous book view
     Str defaultDisplayMode;
     // default zoom for comic books; empty uses fit page. valid values: fit
-    // page, fit width, fit height, fit content, shrink to fit or percent
-    // like 100%
+    // page, fit width, fit height, fit content, fit visible, shrink to fit
+    // or percent like 100%
     Str defaultZoom;
     // value of DefaultZoom for internal usage
     float defaultZoomFloat;
@@ -640,6 +650,9 @@ struct PageGrid {
 
 // customization options for PDF, XPS, DjVu and PostScript UI
 struct FixedPageUI {
+    // if true, render document pages in grayscale. Toggle with
+    // CmdToggleGrayscale
+    bool grayscale;
     // color used instead of black for the document's text
     ParsedColor textColor;
     // color used instead of white for the document's page background
@@ -782,6 +795,10 @@ struct HtmlUI {
 
 // Preferences are persisted in SumatraPDF-settings.txt
 struct Settings {
+    // if true, a PDF without an outline gets a table of contents built
+    // from numbered headings in its text (Generate Table Of Contents
+    // command does it on demand)
+    bool autoGenerateTOC;
     // list of handlers for selected text, shown in context menu when text
     // selection is active. See [docs for more
     // information](https://www.sumatrapdfreader.org/docs/Customize-search-translation-services)
@@ -805,9 +822,11 @@ struct Settings {
     Vec<TabGroup*>* tabGroups;
     // passwords to try when opening a password protected document
     Vec<Str>* defaultPasswords;
-    // information about opened files (in most recently used order)
+    // history of opened files, most recently used first. A closed file
+    // stays here until it drops off the list or the history is cleared
     Vec<FileState*>* fileStates;
-    // state of the last session, usage depends on RestoreSession
+    // windows and tabs still open when SumatraPDF was last closed;
+    // reopened at startup if RestoreSession is true
     Vec<SessionData*>* sessionData;
     // a list of paths for files to be reopened at the next start or the
     // string "SessionData" if this data is saved in SessionData (needed
@@ -818,7 +837,7 @@ struct Settings {
     // written back before serialization
     Str defaultDisplayMode;
     // default zoom. valid values: fit page, fit width, fit height, fit
-    // content or percent like 100%
+    // content, fit visible or percent like 100%
     Str defaultZoom;
     // pattern used to launch the LaTeX editor when doing inverse search
     Str inverseSearchCmdLine;
@@ -859,6 +878,10 @@ struct Settings {
     Str lastLightTheme;
     // the dark theme the light/dark toggle and the System theme switch to
     Str lastDarkTheme;
+    // color theme of the in-app manual (F1): app (follow the app's theme),
+    // light or dark. The switch in the manual's top-right corner changes
+    // it
+    Str helpTheme;
     // how MuPDF-rendered documents (PDF, XPS, DjVu, EPUB, MOBI, FB2, CBZ,
     // images, etc.) use UI / FixedPageUI colors for the page. Values: off
     // (document's own colors; default); smart (recolor text and page
@@ -1043,14 +1066,15 @@ struct Settings {
     // if true, a document will be reloaded automatically whenever it's
     // changed (currently doesn't work for documents shown in the ebook UI)
     bool reloadModifiedDocuments;
-    // if true, remember which documents were opened and their display
-    // settings
+    // if true, keep a history of opened documents and their display
+    // settings (FileStates); closing a document doesn't remove it from the
+    // history. Also required for saving SessionData
     bool rememberOpenedFiles;
     // if true, store display settings for each document separately (i.e.
     // everything after UseDefaultState in FileStates)
     bool rememberStatePerDocument;
-    // if true and SessionData isn't empty, that session will be restored
-    // at startup
+    // if true, documents that were still open when the last window was
+    // closed (SessionData) are reopened at startup
     bool restoreSession;
     // if true, open documents in the already running SumatraPDF instead of
     // starting a new one
@@ -1067,6 +1091,12 @@ struct Settings {
     // if true, show reading progress (n/N, or chapter:page for ebooks) on
     // home page thumbnails and list rows
     bool showHomePageReadingProgress;
+    // if true, a document with chapters (EPUB, MOBI) shows the current
+    // place as a chapter and a page within that chapter, in the toolbar,
+    // Go to Page and the page-info tip. if false, those show one page
+    // number for the whole document. the saved position stays a chapter
+    // bookmark either way, and next / previous page still cross chapters
+    bool showChaptersInEbooks;
     // legacy bool for toolbar; if Toolbar is empty, derived as show/hide
     // (internal; use Toolbar instead)
     bool showToolbar;
@@ -1283,6 +1313,7 @@ static const StructInfo gPageGridInfo = {
     false};
 
 static const FieldInfo gFixedPageUIFields[] = {
+    {offsetof(FixedPageUI, grayscale), SettingType::Bool, false},
     {offsetof(FixedPageUI, textColor), SettingType::Color, (intptr_t)"#000000"},
     {offsetof(FixedPageUI, backgroundColor), SettingType::Color, (intptr_t)"#ffffff"},
     {offsetof(FixedPageUI, selectionColor), SettingType::Color, (intptr_t)"#ffff00"},
@@ -1294,19 +1325,20 @@ static const FieldInfo gFixedPageUIFields[] = {
 };
 static const StructInfo gFixedPageUIInfo = {
     sizeof(FixedPageUI),
-    8,
+    9,
     gFixedPageUIFields,
-    "TextColor\0BackgroundColor\0SelectionColor\0WindowMargin\0PageSpacing\0GradientColors\0WindowBgCol\0PageGrid",
-    "color used instead of black for the document's text\0color used instead of white for the document's page "
-    "background\0color value for the text selection rectangle (also used to highlight found text). Use an #aarrggbb "
-    "value to control opacity: a smaller alpha (e.g. #40ffff00) makes the selection more transparent so the selected "
-    "text stays crisp; #rrggbb uses the default opacity\0top, right, bottom and left margin (in that order) between "
-    "window and document\0horizontal and vertical gap between pages (between columns in facing/book view, between rows "
-    "in continuous view)\0experimental: instead of a single background color, fade through these colors from the top "
-    "of the document to the bottom (stops are spread evenly, at most 3 colors). The shifting background is meant to "
-    "give a subconscious sense of reading progress. Suggested values: #2828aa #28aa28 #aa2828\0if given, sets the "
-    "canvas background color for PDF files\0measurement grid overlay (View > Page Grid). Spacing and style are saved; "
-    "showing the grid is session-only",
+    "Grayscale\0TextColor\0BackgroundColor\0SelectionColor\0WindowMargin\0PageSpacing\0GradientColors\0WindowBgCol\0Pag"
+    "eGrid",
+    "if true, render document pages in grayscale. Toggle with CmdToggleGrayscale\0color used instead of black for the "
+    "document's text\0color used instead of white for the document's page background\0color value for the text "
+    "selection rectangle (also used to highlight found text). Use an #aarrggbb value to control opacity: a smaller "
+    "alpha (e.g. #40ffff00) makes the selection more transparent so the selected text stays crisp; #rrggbb uses the "
+    "default opacity\0top, right, bottom and left margin (in that order) between window and document\0horizontal and "
+    "vertical gap between pages (between columns in facing/book view, between rows in continuous view)\0experimental: "
+    "instead of a single background color, fade through these colors from the top of the document to the bottom (stops "
+    "are spread evenly, at most 3 colors). The shifting background is meant to give a subconscious sense of reading "
+    "progress. Suggested values: #2828aa #28aa28 #aa2828\0if given, sets the canvas background color for PDF "
+    "files\0measurement grid overlay (View > Page Grid). Spacing and style are saved; showing the grid is session-only",
     false};
 
 static const FieldInfo gEBookUIFields[] = {
@@ -1400,9 +1432,9 @@ static const StructInfo gComicBookUIInfo = {
     "(each page is capped at Fit Height)\0default page layout for comic books; empty uses the global "
     "DefaultDisplayMode. valid values: automatic, single page, facing, book view, continuous, continuous facing, "
     "continuous book view\0default zoom for comic books; empty uses fit page. valid values: fit page, fit width, fit "
-    "height, fit content, shrink to fit or percent like 100%\0if true, in facing and book view a landscape page (wider "
-    "than tall) occupies the whole two-page row instead of pairing with the next page. For comics that store "
-    "double-page spreads as one image (issues #1324, #872)",
+    "height, fit content, fit visible, shrink to fit or percent like 100%\0if true, in facing and book view a "
+    "landscape page (wider than tall) occupies the whole two-page row instead of pairing with the next page. For "
+    "comics that store double-page spreads as one image (issues #1324, #872)",
     false};
 
 static const FieldInfo gImageUIFields[] = {
@@ -1418,10 +1450,10 @@ static const StructInfo gImageUIInfo = {
     gImageUIFields,
     "WindowBgCol\0DefaultZoom\0LimitToWindowWidth\0LimitToWindowHeight\0LandscapeAsSpread",
     "if given, sets the canvas background color for image files\0default zoom for image files. valid values: fit page, "
-    "fit width, fit height, fit content, shrink to fit or percent like 100%\0if true, absolute zoom never makes a page "
-    "wider than the window (each page is capped at Fit Width). Useful for image folders with mixed aspect ratios "
-    "(issue #2197)\0if true, absolute zoom never makes a page taller than the window (each page is capped at Fit "
-    "Height)\0if true, in facing and book view a landscape page (wider than tall) occupies the whole two-page row "
+    "fit width, fit height, fit content, fit visible, shrink to fit or percent like 100%\0if true, absolute zoom never "
+    "makes a page wider than the window (each page is capped at Fit Width). Useful for image folders with mixed aspect "
+    "ratios (issue #2197)\0if true, absolute zoom never makes a page taller than the window (each page is capped at "
+    "Fit Height)\0if true, in facing and book view a landscape page (wider than tall) occupies the whole two-page row "
     "instead of pairing with the next page (issues #1324, #872)",
     false};
 
@@ -1515,7 +1547,7 @@ static const StructInfo gCodexBuildInfo = {
     false};
 
 static const FieldInfo gAntiGravityFields[] = {
-    {offsetof(AntiGravity, model), SettingType::String, (intptr_t)"gemini-3.6-flash"},
+    {offsetof(AntiGravity, model), SettingType::String, (intptr_t)"gemini-3.8-flash-medium"},
     {offsetof(AntiGravity, models), SettingType::String, (intptr_t)""},
     {offsetof(AntiGravity, effort), SettingType::Int, 1},
     {offsetof(AntiGravity, autoApprove), SettingType::Bool, true},
@@ -1526,7 +1558,7 @@ static const StructInfo gAntiGravityInfo = {
     5,
     gAntiGravityFields,
     "Model\0Models\0Effort\0AutoApprove\0BgColor",
-    "Antigravity model ID for --model (e.g. gemini-3.6-flash)\0extra Antigravity model IDs for the dropdown, "
+    "Antigravity model ID for --model (e.g. gemini-3.8-flash-medium)\0extra Antigravity model IDs for the dropdown, "
     "comma-separated\0Antigravity effort level: 0=Low, 1=Medium, 2=High, 3=Max\0if true, pass "
     "--dangerously-skip-permissions to Antigravity CLI so it can read the current file etc. in headless print mode "
     "(agy cannot prompt for permissions with -p)\0background color of the Antigravity chat panel",
@@ -1638,14 +1670,17 @@ static const StructInfo gForwardSearchInfo = {
 static const FieldInfo gPrinterDefaultsFields[] = {
     {offsetof(PrinterDefaults, printScale), SettingType::String, (intptr_t)"shrink"},
     {offsetof(PrinterDefaults, collate), SettingType::String, (intptr_t)"default"},
+    {offsetof(PrinterDefaults, printDpi), SettingType::Float, (intptr_t)"0"},
 };
-static const StructInfo gPrinterDefaultsInfo = {sizeof(PrinterDefaults),
-                                                2,
-                                                gPrinterDefaultsFields,
-                                                "PrintScale\0Collate",
-                                                "default value for scaling (shrink, fit, none)\0default value for "
-                                                "collate in the print dialog (default, collate, nocollate)",
-                                                false};
+static const StructInfo gPrinterDefaultsInfo = {
+    sizeof(PrinterDefaults),
+    3,
+    gPrinterDefaultsFields,
+    "PrintScale\0Collate\0PrintDpi",
+    "default value for scaling (shrink, fit, none)\0default value for collate in the print dialog (default, collate, "
+    "nocollate)\0resolution to assume for the document when printing at original size (e.g. 300 for a 300 dpi scan "
+    "whose file doesn't say); 0 uses the resolution recorded in the file",
+    false};
 
 static const FieldInfo gFullscreenFields[] = {
     {offsetof(Fullscreen, showToolbar), SettingType::Bool, false, true},
@@ -1935,33 +1970,35 @@ static const FieldInfo gFileStateFields[] = {
     {offsetof(FileState, displayR2L), SettingType::Bool, false},
     {offsetof(FileState, uniformPageWidth), SettingType::Bool, false},
     {offsetof(FileState, trimEmptyMargins), SettingType::Bool, false},
+    {offsetof(FileState, freePan), SettingType::Bool, false},
 };
 static StructInfo gFileStateInfo = {
     sizeof(FileState),
-    24,
+    25,
     gFileStateFields,
     "Favorites\0EBookUI\0TocState\0FilePath\0DecryptionKey\0DisplayMode\0Zoom\0BgCol\0TabCol\0OpenCount\0PageNo\0PageCo"
     "unt\0Rotation\0WindowState\0SidebarDx\0ScrollPos\0WindowPos\0IsPinned\0IsMissing\0UseDefaultState\0ShowToc\0Displa"
-    "yR2L\0UniformPageWidth\0TrimEmptyMargins",
+    "yR2L\0UniformPageWidth\0TrimEmptyMargins\0FreePan",
     "pages of this document bookmarked in the Favorites menu\0reflowable (ebook) settings for just this document. The "
     "block is absent until you add it; a field left empty or 0 uses the global EBookUI value. The global section's "
     "WindowBgCol and DefaultDisplayMode are already per-document as BgCol and DisplayMode below\0data required to "
     "determine which parts of the table of contents have been expanded\0path of the document\0data required to open a "
     "password protected document without having to ask for the password again\0layout of pages. valid values: "
     "automatic, single page, facing, book view, continuous, continuous facing, continuous book view\0zoom (in %) or "
-    "one of those values: fit page, fit width, fit height, fit content\0if given, overrides the background color for "
-    "this document\0if given, overrides the tab color for this document\0number of times this document has been opened "
-    "recently\0number of the last read page, or `bm:<bookmark>` for documents with chapters (folds in ReparseIdx; see "
-    "PagePosition.cpp)\0number of pages in the document when it was last open; 0 if unknown. Used to show reading "
-    "progress on the home page\0how far pages have been rotated as a multiple of 90 degrees\0state of the window. 1 is "
-    "normal, 2 is maximized, 3 is fullscreen, 4 is minimized\0width of the bookmarks / favorites sidebar in screen "
-    "pixels, as last resized\0how far this document has been scrolled (in x and y direction)\0default position (can be "
-    "on any monitor)\0if true, the document is \"pinned\" to the Frequently Read list, so that recently opened "
-    "documents don't displace it\0if true, the file is considered missing and won't be shown in any list\0if true, "
-    "this document opens with the global defaults instead of the values below\0if true, show the table of contents "
-    "(Bookmarks) sidebar when the document has one\0if true, the document is displayed right-to-left in facing and "
-    "book view modes\0if true, percentage zoom scales every page to the width page 1 has at that zoom level\0if true, "
-    "empty margins around page content are trimmed from display",
+    "one of those values: fit page, fit width, fit height, fit content, fit visible\0if given, overrides the "
+    "background color for this document\0if given, overrides the tab color for this document\0number of times this "
+    "document has been opened recently\0number of the last read page, or `bm:<bookmark>` for documents with chapters "
+    "(folds in ReparseIdx; see PagePosition.cpp)\0number of pages in the document when it was last open; 0 if unknown. "
+    "Used to show reading progress on the home page\0how far pages have been rotated as a multiple of 90 "
+    "degrees\0state of the window. 1 is normal, 2 is maximized, 3 is fullscreen, 4 is minimized\0width of the "
+    "bookmarks / favorites sidebar in screen pixels, as last resized\0how far this document has been scrolled (in x "
+    "and y direction)\0default position (can be on any monitor)\0if true, the document is \"pinned\" to the Frequently "
+    "Read list, so that recently opened documents don't displace it\0if true, the file is considered missing and won't "
+    "be shown in any list\0if true, this document opens with the global defaults instead of the values below\0if true, "
+    "show the table of contents (Bookmarks) sidebar when the document has one\0if true, the document is displayed "
+    "right-to-left in facing and book view modes\0if true, percentage zoom scales every page to the width page 1 has "
+    "at that zoom level\0if true, empty margins around page content are trimmed from display\0if true, the view can be "
+    "panned past the page edges, so any part of a page can be brought to the center of the window",
     false};
 
 static const FieldInfo gPointF_2_Fields[] = {
@@ -1994,9 +2031,9 @@ static const StructInfo gTabStateInfo = {
     "path of the document\0layout of pages in this tab. valid values: automatic, single page, facing, book view, "
     "continuous, continuous facing, continuous book view\0number of the last read page, or `bm:<bookmark>` for "
     "documents with chapters (see PagePosition.cpp)\0zoom (in %) or one of those values: fit page, fit width, fit "
-    "height, fit content\0how far pages have been rotated as a multiple of 90 degrees\0how far this document has been "
-    "scrolled (in x and y direction)\0if true, the table of contents was shown when the document was closed\0which "
-    "table of contents items were expanded (see FileStates -> TocState)",
+    "height, fit content, fit visible\0how far pages have been rotated as a multiple of 90 degrees\0how far this "
+    "document has been scrolled (in x and y direction)\0if true, the table of contents was shown when the document was "
+    "closed\0which table of contents items were expanded (see FileStates -> TocState)",
     false};
 
 static const FieldInfo gRect_4_Fields[] = {
@@ -2077,6 +2114,7 @@ static const FieldInfo gSettingsFields[] = {
     {offsetof(Settings, showMenubarWithTabs), SettingType::Bool, false},
     {offsetof(Settings, showPageNumberInTabs), SettingType::Bool, false},
     {offsetof(Settings, showHomePageReadingProgress), SettingType::Bool, true},
+    {offsetof(Settings, showChaptersInEbooks), SettingType::Bool, false},
     {offsetof(Settings, showTips), SettingType::Bool, true},
     {offsetof(Settings, customColors), SettingType::String, 0, true},
     {offsetof(Settings, showToolbar), SettingType::Bool, true, true},
@@ -2101,6 +2139,7 @@ static const FieldInfo gSettingsFields[] = {
     {offsetof(Settings, showFileNavigateHint), SettingType::Bool, true},
     {offsetof(Settings, showAnnotationAuthorInTooltip), SettingType::Bool, false},
     {offsetof(Settings, showTocPageNumbers), SettingType::Bool, true},
+    {offsetof(Settings, autoGenerateTOC), SettingType::Bool, false},
     {offsetof(Settings, showStartPage), SettingType::Bool, true},
     {offsetof(Settings, sidebarDx), SettingType::Int, 0, true},
     {offsetof(Settings, scrollbars), SettingType::String, (intptr_t)"windows"},
@@ -2120,6 +2159,7 @@ static const FieldInfo gSettingsFields[] = {
     {offsetof(Settings, preventSleepInFullscreen), SettingType::Bool, true},
     {offsetof(Settings, tabWidth), SettingType::Int, 300},
     {offsetof(Settings, theme), SettingType::String, (intptr_t)"Light"},
+    {offsetof(Settings, helpTheme), SettingType::String, (intptr_t)"app"},
     {offsetof(Settings, lastLightTheme), SettingType::String, (intptr_t)"", true},
     {offsetof(Settings, lastDarkTheme), SettingType::String, (intptr_t)"", true},
     {offsetof(Settings, documentColorsFollowTheme), SettingType::String, (intptr_t)"off"},
@@ -2210,146 +2250,154 @@ static const FieldInfo gSettingsFields[] = {
 };
 static const StructInfo gSettingsInfo = {
     sizeof(Settings),
-    156,
+    159,
     gSettingsFields,
     "\0\0DefaultDisplayMode\0DefaultZoom\0DisableJavaScript\0AllowExternalImages\0EnableTeXEnhancements\0EscToExit\0Ful"
     "lPathInTitle\0InverseSearchCmdLine\0LazyLoading\0MainWindowBackground\0NoHomeTab\0HomePageSortByFrequentlyRead\0Ho"
     "mePageViewMode\0FilePicker\0PrinterUI\0ReloadModifiedDocuments\0RememberOpenedFiles\0RememberStatePerDocument\0Res"
     "toreSession\0ReuseInstance\0ShowMenubar\0ShowMenubarWithTabs\0ShowPageNumberInTabs\0ShowHomePageReadingProgress\0S"
-    "howTips\0CustomColors\0ShowToolbar\0Toolbar\0ToolbarPosition\0SearchUIFloating\0ShowFavorites\0SortFavoritesByName"
-    "\0ShowToc\0SidebarOnRight\0SidebarWindowSize\0ShowLinks\0HighlightFormFields\0ClickEdgeToTurnPage\0DisableLinks\0E"
-    "xplorerQuickLook\0RememberViewOffsetOnPageTurn\0MouseWheelTurnsPage\0ScrollEdgeTurnsPage\0ShowDocumentFocusIndicat"
-    "or\0ShowAnnotationNotification\0ShowFileNavigateHint\0ShowAnnotationAuthorInTooltip\0ShowTocPageNumbers\0ShowStart"
-    "Page\0SidebarDx\0Scrollbars\0ScrollbarInSinglePage\0SmoothScroll\0ScrollLineAmount\0SaveMemory\0PaddingAfterLastPa"
-    "ge\0IgnoreDestinationZoom\0HighlightLinkDestination\0CitationHoverDelay\0ReadAloudVoiceId\0ReadAloudSpeed\0Reading"
-    "AutoScrollSpeed\0ReadingBar\0FastScrollOverScrollbar\0PreventSleepInFullscreen\0TabWidth\0Theme\0LastLightTheme\0L"
-    "astDarkTheme\0DocumentColorsFollowTheme\0TocDy\0ToolbarCustomLayout\0ToolbarShowReadAloud\0ToolbarSize\0TreeFontNa"
-    "me\0TreeFontSize\0UIFontSize\0DisableAntiAlias\0EngineeringDrawingEnhance\0DisableAutoLinks\0UseSysColors\0UseTabs"
-    "\0SelectionToolbar\0SelectionToolbarLayout\0TabsMru\0CtrlTabSimple\0ZoomLevels\0ZoomIncrement\0\0FixedPageUI\0\0EB"
-    "ookUI\0\0ComicBookUI\0\0ImageUI\0\0ChmUI\0\0MarkdownUI\0\0HtmlUI\0\0ClaudeCode\0\0GrokBuild\0\0CodexBuild\0\0AntiG"
-    "ravity\0\0AIChatSidebarDx\0\0TranslateToLang\0TranslateFromLang\0TranslateEngine\0\0Annotations\0\0ExternalViewers"
-    "\0\0ForwardSearch\0\0PrinterDefaults\0\0Fullscreen\0\0SelectionHandlers\0\0Shortcuts\0\0Themes\0\0TabGroups\0\0Cus"
-    "tomScreenDPI\0\0\0DefaultPasswords\0UiLanguage\0VersionToSkip\0WindowState\0WindowPos\0SearchUIWindowPos\0HelpWind"
-    "owPos\0FileStates\0SessionData\0ReopenOnce\0TimeOfLastUpdateCheck\0OpenCountWeek\0PropWinPos\0CheckForUpdates\0\0",
+    "howChaptersInEbooks\0ShowTips\0CustomColors\0ShowToolbar\0Toolbar\0ToolbarPosition\0SearchUIFloating\0ShowFavorite"
+    "s\0SortFavoritesByName\0ShowToc\0SidebarOnRight\0SidebarWindowSize\0ShowLinks\0HighlightFormFields\0ClickEdgeToTur"
+    "nPage\0DisableLinks\0ExplorerQuickLook\0RememberViewOffsetOnPageTurn\0MouseWheelTurnsPage\0ScrollEdgeTurnsPage\0Sh"
+    "owDocumentFocusIndicator\0ShowAnnotationNotification\0ShowFileNavigateHint\0ShowAnnotationAuthorInTooltip\0ShowToc"
+    "PageNumbers\0AutoGenerateTOC\0ShowStartPage\0SidebarDx\0Scrollbars\0ScrollbarInSinglePage\0SmoothScroll\0ScrollLin"
+    "eAmount\0SaveMemory\0PaddingAfterLastPage\0IgnoreDestinationZoom\0HighlightLinkDestination\0CitationHoverDelay\0Re"
+    "adAloudVoiceId\0ReadAloudSpeed\0ReadingAutoScrollSpeed\0ReadingBar\0FastScrollOverScrollbar\0PreventSleepInFullscr"
+    "een\0TabWidth\0Theme\0HelpTheme\0LastLightTheme\0LastDarkTheme\0DocumentColorsFollowTheme\0TocDy\0ToolbarCustomLay"
+    "out\0ToolbarShowReadAloud\0ToolbarSize\0TreeFontName\0TreeFontSize\0UIFontSize\0DisableAntiAlias\0EngineeringDrawi"
+    "ngEnhance\0DisableAutoLinks\0UseSysColors\0UseTabs\0SelectionToolbar\0SelectionToolbarLayout\0TabsMru\0CtrlTabSimp"
+    "le\0ZoomLevels\0ZoomIncrement\0\0FixedPageUI\0\0EBookUI\0\0ComicBookUI\0\0ImageUI\0\0ChmUI\0\0MarkdownUI\0\0HtmlUI"
+    "\0\0ClaudeCode\0\0GrokBuild\0\0CodexBuild\0\0AntiGravity\0\0AIChatSidebarDx\0\0TranslateToLang\0TranslateFromLang"
+    "\0TranslateEngine\0\0Annotations\0\0ExternalViewers\0\0ForwardSearch\0\0PrinterDefaults\0\0Fullscreen\0\0Selection"
+    "Handlers\0\0Shortcuts\0\0Themes\0\0TabGroups\0\0CustomScreenDPI\0\0\0DefaultPasswords\0UiLanguage\0VersionToSkip\0"
+    "WindowState\0WindowPos\0SearchUIWindowPos\0HelpWindowPos\0FileStates\0SessionData\0ReopenOnce\0TimeOfLastUpdateChe"
+    "ck\0OpenCountWeek\0PropWinPos\0CheckForUpdates\0\0",
     "\0\0default layout of pages. valid values: automatic, single page, facing, book view, continuous, continuous "
     "facing, continuous book view, page aspect. page aspect (3.7+): first open of a PDF, XPS, DjVu or PostScript file "
     "uses page 1 — taller than wide is continuous + fit width, wider than tall is single page + fit page; a remembered "
-    "FileState still wins\0default zoom. valid values: fit page, fit width, fit height, fit content or percent like "
-    "100%\0if true, JavaScript in PDF documents is disabled (e.g. form-field calculations won't run)\0if true, a PDF "
-    "may load an image stored in a separate file referenced by name (an external image stream); the file must sit next "
-    "to the PDF. Off by default for security (matches Acrobat)\0if true, show the SyncTeX inverse search command line "
-    "in Settings -> Options, so a double-click in the document can jump to the matching line in a LaTeX editor\0if "
-    "true, Esc key closes SumatraPDF\0if true, show the full path to the document in the title bar\0pattern used to "
-    "launch the LaTeX editor when doing inverse search\0if true, restoring a session delays loading each document "
-    "until its tab is selected\0background color of the area around the document, traditionally yellow. Only applies "
-    "to the Light theme; the default #80fff200 is a marker meaning \"use the theme's color\", so setting any other "
-    "value also colorizes the toolbar and sidebars\0if true, doesn't open Home tab\0if true, the home page lists "
+    "FileState still wins\0default zoom. valid values: fit page, fit width, fit height, fit content, fit visible or "
+    "percent like 100%\0if true, JavaScript in PDF documents is disabled (e.g. form-field calculations won't run)\0if "
+    "true, a PDF may load an image stored in a separate file referenced by name (an external image stream); the file "
+    "must sit next to the PDF. Off by default for security (matches Acrobat)\0if true, show the SyncTeX inverse search "
+    "command line in Settings -> Options, so a double-click in the document can jump to the matching line in a LaTeX "
+    "editor\0if true, Esc key closes SumatraPDF\0if true, show the full path to the document in the title bar\0pattern "
+    "used to launch the LaTeX editor when doing inverse search\0if true, restoring a session delays loading each "
+    "document until its tab is selected\0background color of the area around the document, traditionally yellow. Only "
+    "applies to the Light theme; the default #80fff200 is a marker meaning \"use the theme's color\", so setting any "
+    "other value also colorizes the toolbar and sidebars\0if true, doesn't open Home tab\0if true, the home page lists "
     "documents by how often they've been opened (the pre-3.6 behavior); if false, the most recently opened come "
     "first\0valid values: thumbnails, list\0valid values: (empty), os, sumatrapdf\0valid values: (empty), auto, "
     "modern, classic\0if true, a document will be reloaded automatically whenever it's changed (currently doesn't work "
-    "for documents shown in the ebook UI)\0if true, remember which documents were opened and their display "
-    "settings\0if true, store display settings for each document separately (i.e. everything after UseDefaultState in "
-    "FileStates)\0if true and SessionData isn't empty, that session will be restored at startup\0if true, open "
-    "documents in the already running SumatraPDF instead of starting a new one\0if true, show the menu bar (F9 toggles "
-    "it; the choice is remembered across sessions)\0if true, show the menu bar when using tabs (useTabs = true)\0if "
-    "true, show the current page as n/N after the file name on tabs\0if true, show reading progress (n/N, or "
-    "chapter:page for ebooks) on home page thumbnails and list rows\0if true, show tips on the home page\0up to 13 "
-    "custom colors for the background color picker, separated by space (e.g. '#ff0000 #00ff00 #0000ff')\0legacy bool "
-    "for toolbar; if Toolbar is empty, derived as show/hide (internal; use Toolbar instead)\0toolbar mode: show "
-    "(pinned), hide (no toolbar), overlay (toolbar floats over the page, sized to its natural width and centered, only "
-    "shown when the mouse is near it). if empty, derived from ShowToolbar\0where the toolbar is placed: top or bottom "
-    "(applies to both show and overlay modes)\0if true, the find UI is a floating, movable window with a results list "
-    "instead of the compact toolbar overlay\0if true, show the Favorites sidebar\0if true, favorites within each file "
-    "are sorted alphabetically by name (or page label); if false (the default), they are sorted by page number\0if "
-    "true, show the table of contents (Bookmarks) sidebar when the document has one\0if true, put the bookmarks / "
-    "favorites sidebar on the right of the window (left is the default; right-to-left UI languages already put it on "
-    "the right)\0valid values: (empty), keep, grow\0if true, draw a blue border around links in the document\0if true, "
-    "highlight empty fillable PDF form fields in pale blue so they are easy to find\0if true, a click (not a drag) on "
-    "the left fifth of the page area goes to the previous page and a click on the right fifth goes to the next page "
-    "(reversed in manga / right-to-left mode). Links, annotations and presentation-mode clicks are unchanged\0if true, "
-    "document links are ignored so you can select and read (useful for drawings with many links); if false, clicking a "
-    "link follows it\0if true, Space in File Explorer (or on the desktop) previews the selected file in a popup "
-    "window, like macOS Quick Look. Esc or Space closes it; Left / Right open the previous / next file in the folder. "
-    "Starts a small background helper at logon so it works even when SumatraPDF is not open\0if true, next/previous "
-    "page keeps the same view position on the page instead of jumping to the top (useful when zoomed in on similarly "
-    "sized pages)\0if true, one mouse-wheel notch goes to the next / previous page instead of scrolling; combine with "
-    "RememberViewOffsetOnPageTurn to read zoomed-in pages without touching the keyboard. Alt + wheel still scrolls, "
-    "Shift + wheel scrolls horizontally and Ctrl + wheel zooms\0if true, in single page / facing / book view, "
-    "scrolling past the top or bottom of a zoomed-in page goes to the previous / next page; if false, scrolling stops "
-    "at the edge and the page is changed only by the keyboard, toolbar or scrollbar. A page that fits the window has "
-    "nothing to scroll, so a wheel notch turns it either way\0if true, draw a focus ring around the document when it "
-    "has keyboard focus (Tab to the page area)\0if true, show a tip when hovering an annotation (e.g. \"Highlight "
-    "annotation. Ctrl+click to edit.\")\0if true, at the end of a document show a hint to open the next file in the "
-    "folder. Closing the hint sets it to false\0if true, show the author at the bottom of an annotation tooltip as "
-    "\"Author: <author>\"\0if true, show page numbers (labels) right-aligned on bookmark / table-of-contents "
-    "entries\0if true, show a list of frequently read documents when no document is loaded\0width of the favorites / "
-    "bookmarks sidebar in screen pixels, as last resized (0 means the default)\0scrollbar mode: windows (standard "
-    "Windows scrollbar), smart (overlay scrollbar with auto-hide), overlay (always visible overlay scrollbar), hidden "
-    "(no scrollbars)\0if true, show a scrollbar in single page mode as well\0if true, smooth mouse-wheel and arrow-key "
-    "scrolling (exponential chase of the target; continuous input stays fluid)\0distance, in screen pixels at 96 DPI, "
-    "scrolled by an arrow-key press or one mouse-wheel line; values below 1 use 16\0how hard to free unused page and "
-    "image caches to save RAM (0 to 100). 0 keeps them until an allocation fails; 100 drops them as soon as a page is "
-    "off-screen\0if true, continuous view has extra scroll room after the last page so you can scroll the end of the "
-    "document to the top of the window\0if true, going to a destination (clicking a bookmark or a link inside the "
-    "document) keeps the current zoom instead of applying the zoom the destination asks for; it still goes to the page "
-    "and the position. Same as Adobe Reader's 'forbid the change of the current zoom factor during execution of Go to "
-    "Destination actions'\0if true, following an internal link or bookmark flashes a highlight at the destination so "
-    "you can see where you landed (a bibliography entry, figure, or named destination). The color and fade match "
-    "ForwardSearch. Off when the destination is only a page with no position\0how long an internal-document link has "
-    "to be hovered, in milliseconds, before a popup rendering the destination region (citation entry, figure, "
-    "footnote) appears. -1 (the default) disables the popup; set a positive value like 300 to enable it\0voice id for "
-    "Read Aloud text-to-speech; empty or unset means system default. Voice ids match those used internally by the Read "
-    "Aloud Voice menu (WinRT voice id or SAPI token id)\0playback speed multiplier for Read Aloud text-to-speech (0.5 "
-    ".. 3.0), 1 is normal speed; can also be changed from the Read Aloud playback bar\0pixels per second for "
+    "for documents shown in the ebook UI)\0if true, keep a history of opened documents and their display settings "
+    "(FileStates); closing a document doesn't remove it from the history. Also required for saving SessionData\0if "
+    "true, store display settings for each document separately (i.e. everything after UseDefaultState in "
+    "FileStates)\0if true, documents that were still open when the last window was closed (SessionData) are reopened "
+    "at startup\0if true, open documents in the already running SumatraPDF instead of starting a new one\0if true, "
+    "show the menu bar (F9 toggles it; the choice is remembered across sessions)\0if true, show the menu bar when "
+    "using tabs (useTabs = true)\0if true, show the current page as n/N after the file name on tabs\0if true, show "
+    "reading progress (n/N, or chapter:page for ebooks) on home page thumbnails and list rows\0if true, a document "
+    "with chapters (EPUB, MOBI) shows the current place as a chapter and a page within that chapter, in the toolbar, "
+    "Go to Page and the page-info tip. if false, those show one page number for the whole document. the saved position "
+    "stays a chapter bookmark either way, and next / previous page still cross chapters\0if true, show tips on the "
+    "home page\0up to 13 custom colors for the background color picker, separated by space (e.g. '#ff0000 #00ff00 "
+    "#0000ff')\0legacy bool for toolbar; if Toolbar is empty, derived as show/hide (internal; use Toolbar "
+    "instead)\0toolbar mode: show (pinned), hide (no toolbar), overlay (toolbar floats over the page, sized to its "
+    "natural width and centered, only shown when the mouse is near it). if empty, derived from ShowToolbar\0where the "
+    "toolbar is placed: top or bottom (applies to both show and overlay modes)\0if true, the find UI is a floating, "
+    "movable window with a results list instead of the compact toolbar overlay\0if true, show the Favorites "
+    "sidebar\0if true, favorites within each file are sorted alphabetically by name (or page label); if false (the "
+    "default), they are sorted by page number\0if true, show the table of contents (Bookmarks) sidebar when the "
+    "document has one\0if true, put the bookmarks / favorites sidebar on the right of the window (left is the default; "
+    "right-to-left UI languages already put it on the right)\0valid values: (empty), keep, grow\0if true, draw a blue "
+    "border around links in the document\0if true, highlight empty fillable PDF form fields in pale blue so they are "
+    "easy to find\0if true, a click (not a drag) on the left fifth of the page area goes to the previous page and a "
+    "click on the right fifth goes to the next page (reversed in manga / right-to-left mode). Links, annotations and "
+    "presentation-mode clicks are unchanged\0if true, document links are ignored so you can select and read (useful "
+    "for drawings with many links); if false, clicking a link follows it\0if true, Space in File Explorer (or on the "
+    "desktop) previews the selected file in a popup window, like macOS Quick Look. Esc or Space closes it; Left / "
+    "Right open the previous / next file in the folder. Starts a small background helper at logon so it works even "
+    "when SumatraPDF is not open\0if true, next/previous page keeps the same view position on the page instead of "
+    "jumping to the top (useful when zoomed in on similarly sized pages)\0if true, one mouse-wheel notch goes to the "
+    "next / previous page instead of scrolling; combine with RememberViewOffsetOnPageTurn to read zoomed-in pages "
+    "without touching the keyboard. Alt + wheel still scrolls, Shift + wheel scrolls horizontally and Ctrl + wheel "
+    "zooms\0if true, in single page / facing / book view, scrolling past the top or bottom of a zoomed-in page goes to "
+    "the previous / next page; if false, scrolling stops at the edge and the page is changed only by the keyboard, "
+    "toolbar or scrollbar. A page that fits the window has nothing to scroll, so a wheel notch turns it either way\0if "
+    "true, draw a focus ring around the document when it has keyboard focus (Tab to the page area)\0if true, show a "
+    "tip when hovering an annotation (e.g. \"Highlight annotation. Ctrl+click to edit.\")\0if true, at the end of a "
+    "document show a hint to open the next file in the folder. Closing the hint sets it to false\0if true, show the "
+    "author at the bottom of an annotation tooltip as \"Author: <author>\"\0if true, show page numbers (labels) "
+    "right-aligned on bookmark / table-of-contents entries\0if true, a PDF without an outline gets a table of contents "
+    "built from numbered headings in its text (Generate Table Of Contents command does it on demand)\0if true, show a "
+    "list of frequently read documents when no document is loaded\0width of the favorites / bookmarks sidebar in "
+    "screen pixels, as last resized (0 means the default)\0scrollbar mode: windows (standard Windows scrollbar), smart "
+    "(overlay scrollbar with auto-hide), overlay (always visible overlay scrollbar), hidden (no scrollbars)\0if true, "
+    "show a scrollbar in single page mode as well\0if true, smooth mouse-wheel and arrow-key scrolling (exponential "
+    "chase of the target; continuous input stays fluid)\0distance, in screen pixels at 96 DPI, scrolled by an "
+    "arrow-key press or one mouse-wheel line; values below 1 use 16\0how hard to free unused page and image caches to "
+    "save RAM (0 to 100). 0 keeps them until an allocation fails; 100 drops them as soon as a page is off-screen\0if "
+    "true, continuous view has extra scroll room after the last page so you can scroll the end of the document to the "
+    "top of the window\0if true, going to a destination (clicking a bookmark or a link inside the document) keeps the "
+    "current zoom instead of applying the zoom the destination asks for; it still goes to the page and the position. "
+    "Same as Adobe Reader's 'forbid the change of the current zoom factor during execution of Go to Destination "
+    "actions'\0if true, following an internal link or bookmark flashes a highlight at the destination so you can see "
+    "where you landed (a bibliography entry, figure, or named destination). The color and fade match ForwardSearch. "
+    "Off when the destination is only a page with no position\0how long an internal-document link has to be hovered, "
+    "in milliseconds, before a popup rendering the destination region (citation entry, figure, footnote) appears. -1 "
+    "(the default) disables the popup; set a positive value like 300 to enable it\0voice id for Read Aloud "
+    "text-to-speech; empty or unset means system default. Voice ids match those used internally by the Read Aloud "
+    "Voice menu (WinRT voice id or SAPI token id)\0playback speed multiplier for Read Aloud text-to-speech (0.5 .. "
+    "3.0), 1 is normal speed; can also be changed from the Read Aloud playback bar\0pixels per second for "
     "Automatically Scroll (View menu / Ctrl+Shift+H). 8 to 320; also changed from the auto-scroll bar and the arrow "
     "keys while scrolling\0reading bar (View menu): a horizontal band on the page to keep your place. Highlight fills "
     "the band; Invert dims everything else\0if true, mouse wheel scrolling is faster when mouse is over a "
     "scrollbar\0if true, prevents the screen from turning off when in fullscreen or presentation mode\0maximum width "
     "of a single tab, in pixels at 100% display scaling (at least 60)\0valid themes: Light, Dark, Light Warm, Dark "
     "from 3.5, Charcoal, Solarized Light, Solarized Dark, Dracula, Nebula, Greeny, Choco, Purpy, One Dark, Monokai, "
-    "Nord, GitHub Dark, Catppuccin Mocha, Tokyo Night, Gruvbox, Night Owl, Ayu, Palenight, System\0the light theme the "
-    "light/dark toggle and the System theme switch to\0the dark theme the light/dark toggle and the System theme "
-    "switch to\0how MuPDF-rendered documents (PDF, XPS, DjVu, EPUB, MOBI, FB2, CBZ, images, etc.) use UI / FixedPageUI "
-    "colors for the page. Values: off (document's own colors; default); smart (recolor text and page background, keep "
-    "photos/images as-is — best for dark reading); legacy (also recolor images; pre-3.7 invert-style). Does not change "
-    "menus/toolbars — use Theme for UI chrome. Settings / Theme and the CmdSetDocumentColorsFollowTheme command set "
-    "all three values. Shift+I (Invert Colors) is separate: it swaps the page colors for the session whatever this is "
-    "set to\0if both the favorites and the bookmarks part of the sidebar are visible, this is the height of the "
-    "bookmarks (table of contents) part, in screen pixels\0the toolbar's built-in buttons, in the order you want them, "
-    "e.g. CmdOpenFile CmdPrint PageInfo | CmdFindFirst. Leave a button out to hide it. | is a separator and PageInfo "
-    "is the page number box. Empty (the default) means the standard layout. Buttons you added yourself (see Shortcuts) "
-    "still come last\0if true, the toolbar has a Read Aloud button (with a drop-down for voice, speed and what to "
-    "read). Read Aloud is still reachable from the Read Aloud menu when this is false\0size of the toolbar icons in "
-    "pixels at 100% display scaling (8-64); the toolbar itself is a few pixels taller\0font name for bookmarks and "
-    "favorites tree views. automatic means Windows default\0font size for bookmarks and favorites tree views, in "
-    "pixels; 0 means the Windows default. Not scaled by the display scaling\0overrides the font size used for menus, "
-    "toolbar and dialogs, in pixels; 0 means the Windows default. Not scaled by the display scaling\0if true, render "
-    "MuPDF-based documents (PDF, XPS, DjVu, EPUB etc.) without anti-aliasing, giving sharper but jagged "
-    "edges\0CAD/engineering PDF line rendering: off, auto (enhance if a CAD drawing is detected) or on\0if true, "
-    "disables auto-linking of URLs and email addresses found in PDF text\0if true, use the Windows system colors for "
-    "the document background and text. Overrides other color settings\0if true, documents are opened in tabs instead "
-    "of new windows\0if true, a small floating toolbar with selection actions (copy, read aloud, highlight etc.) pops "
-    "up after selecting text. Set to false to disable it\0which built-in buttons the selection toolbar has and in what "
-    "order, e.g. CmdCopySelection | CmdCreateAnnotHighlight. | or Separator inserts a separator. Leave a button out to "
-    "hide it. Empty (the default) is the standard set. SelectionHandlers with SelectToolbarNameOrSvg still come "
-    "last\0if true, Ctrl+Tab and Ctrl+Shift+Tab show the tab switcher in most recently used order instead of tab-strip "
-    "order\0if true, Ctrl+Tab and Ctrl+Shift+Tab immediately switch to the next / previous tab in tab-strip order (the "
-    "behavior before version 3.6) instead of showing the tab switcher\0sequence of zoom levels when zooming in/out; "
-    "values must lie between 8.33 and 1000000 (the largest one becomes the maximum zoom, which is 6400 by "
-    "default)\0how much a single zoom in / zoom out step changes the zoom, as a percentage of the current zoom level. "
-    "If 0 or negative, zooming steps through ZoomLevels instead\0\0customization options for PDF, XPS, DjVu and "
-    "PostScript UI\0\0customization options for the ebook UI (EPUB, MOBI, FB2, PDB and plain text)\0\0customization "
-    "options for Comic Book UI\0\0customization options for image files UI\0\0customization options for CHM UI. "
-    "UseFixedPageUI switches to the PDF-style view; FontName applies to that view\0\0customization options for "
-    "Markdown UI. If UseFixedPageUI is true, MuPDF is used; otherwise WebView2 browser view is used when "
-    "available\0\0customization options for HTML UI. If UseFixedPageUI is true, MuPDF is used; otherwise WebView2 "
-    "browser view is used when available\0\0settings for the Claude Code chat sidebar\0\0settings for the Grok Build "
-    "chat sidebar\0\0settings for the OpenAI Codex chat sidebar\0\0settings for the Antigravity chat sidebar\0\0width "
-    "of the AI chat sidebar (0 = use default); shared by Claude Code, Grok Build, and OpenAI Codex "
-    "(internal)\0\0remembered destination language for selection translation; empty uses OS UI language\0remembered "
-    "source language for selection translation; empty means Auto\0remembered engine for Translate Selection: Google, "
-    "DeepL, Grok Build, Claude Code, OpenAI Codex or Antigravity\0\0default values for annotations in PDF "
-    "documents\0\0list of additional external viewers for various file types. See [docs for more "
+    "Nord, GitHub Dark, Catppuccin Mocha, Tokyo Night, Gruvbox, Night Owl, Ayu, Palenight, System\0color theme of the "
+    "in-app manual (F1): app (follow the app's theme), light or dark. The switch in the manual's top-right corner "
+    "changes it\0the light theme the light/dark toggle and the System theme switch to\0the dark theme the light/dark "
+    "toggle and the System theme switch to\0how MuPDF-rendered documents (PDF, XPS, DjVu, EPUB, MOBI, FB2, CBZ, "
+    "images, etc.) use UI / FixedPageUI colors for the page. Values: off (document's own colors; default); smart "
+    "(recolor text and page background, keep photos/images as-is — best for dark reading); legacy (also recolor "
+    "images; pre-3.7 invert-style). Does not change menus/toolbars — use Theme for UI chrome. Settings / Theme and the "
+    "CmdSetDocumentColorsFollowTheme command set all three values. Shift+I (Invert Colors) is separate: it swaps the "
+    "page colors for the session whatever this is set to\0if both the favorites and the bookmarks part of the sidebar "
+    "are visible, this is the height of the bookmarks (table of contents) part, in screen pixels\0the toolbar's "
+    "built-in buttons, in the order you want them, e.g. CmdOpenFile CmdPrint PageInfo | CmdFindFirst. Leave a button "
+    "out to hide it. | is a separator and PageInfo is the page number box. Empty (the default) means the standard "
+    "layout. Buttons you added yourself (see Shortcuts) still come last\0if true, the toolbar has a Read Aloud button "
+    "(with a drop-down for voice, speed and what to read). Read Aloud is still reachable from the Read Aloud menu when "
+    "this is false\0size of the toolbar icons in pixels at 100% display scaling (8-64); the toolbar itself is a few "
+    "pixels taller\0font name for bookmarks and favorites tree views. automatic means Windows default\0font size for "
+    "bookmarks and favorites tree views, in pixels; 0 means the Windows default. Not scaled by the display "
+    "scaling\0overrides the font size used for menus, toolbar and dialogs, in pixels; 0 means the Windows default. Not "
+    "scaled by the display scaling\0if true, render MuPDF-based documents (PDF, XPS, DjVu, EPUB etc.) without "
+    "anti-aliasing, giving sharper but jagged edges\0CAD/engineering PDF line rendering: off, auto (enhance if a CAD "
+    "drawing is detected) or on\0if true, disables auto-linking of URLs and email addresses found in PDF text\0if "
+    "true, use the Windows system colors for the document background and text. Overrides other color settings\0if "
+    "true, documents are opened in tabs instead of new windows\0if true, a small floating toolbar with selection "
+    "actions (copy, read aloud, highlight etc.) pops up after selecting text. Set to false to disable it\0which "
+    "built-in buttons the selection toolbar has and in what order, e.g. CmdCopySelection | CmdCreateAnnotHighlight. | "
+    "or Separator inserts a separator. Leave a button out to hide it. Empty (the default) is the standard set. "
+    "SelectionHandlers with SelectToolbarNameOrSvg still come last\0if true, Ctrl+Tab and Ctrl+Shift+Tab show the tab "
+    "switcher in most recently used order instead of tab-strip order\0if true, Ctrl+Tab and Ctrl+Shift+Tab immediately "
+    "switch to the next / previous tab in tab-strip order (the behavior before version 3.6) instead of showing the tab "
+    "switcher\0sequence of zoom levels when zooming in/out; values must lie between 8.33 and 1000000 (the largest one "
+    "becomes the maximum zoom, which is 6400 by default)\0how much a single zoom in / zoom out step changes the zoom, "
+    "as a percentage of the current zoom level. If 0 or negative, zooming steps through ZoomLevels "
+    "instead\0\0customization options for PDF, XPS, DjVu and PostScript UI\0\0customization options for the ebook UI "
+    "(EPUB, MOBI, FB2, PDB and plain text)\0\0customization options for Comic Book UI\0\0customization options for "
+    "image files UI\0\0customization options for CHM UI. UseFixedPageUI switches to the PDF-style view; FontName "
+    "applies to that view\0\0customization options for Markdown UI. If UseFixedPageUI is true, MuPDF is used; "
+    "otherwise WebView2 browser view is used when available\0\0customization options for HTML UI. If UseFixedPageUI is "
+    "true, MuPDF is used; otherwise WebView2 browser view is used when available\0\0settings for the Claude Code chat "
+    "sidebar\0\0settings for the Grok Build chat sidebar\0\0settings for the OpenAI Codex chat sidebar\0\0settings for "
+    "the Antigravity chat sidebar\0\0width of the AI chat sidebar (0 = use default); shared by Claude Code, Grok "
+    "Build, and OpenAI Codex (internal)\0\0remembered destination language for selection translation; empty uses OS UI "
+    "language\0remembered source language for selection translation; empty means Auto\0remembered engine for Translate "
+    "Selection: Google, DeepL, Grok Build, Claude Code, OpenAI Codex or Antigravity\0\0default values for annotations "
+    "in PDF documents\0\0list of additional external viewers for various file types. See [docs for more "
     "information](https://www.sumatrapdfreader.org/docs/Customize-external-viewers)\0\0customization options for how "
     "forward search results are shown (used from LaTeX editors)\0\0these override the default settings in the Print "
     "dialog\0\0options for fullscreen mode\0\0list of handlers for selected text, shown in context menu when text "
@@ -2362,8 +2410,9 @@ static const StructInfo gSettingsInfo = {
     "language\0SumatraPDF won't offer to update to this version again\0default state of the window. 1 is normal, 2 is "
     "maximized, 3 is fullscreen, 4 is minimized\0default position (x, y) and size (width, height) of the "
     "window\0position/size of the floating find window (see SearchUIFloating)\0position/size of the in-app Help: "
-    "Manual window\0information about opened files (in most recently used order)\0state of the last session, usage "
-    "depends on RestoreSession\0data required for reloading documents after an auto-update\0data required to determine "
+    "Manual window\0history of opened files, most recently used first. A closed file stays here until it drops off the "
+    "list or the history is cleared\0windows and tabs still open when SumatraPDF was last closed; reopened at startup "
+    "if RestoreSession is true\0data required for reloading documents after an auto-update\0data required to determine "
     "when SumatraPDF last checked for updates\0value required to determine recency for the OpenCount value in "
     "FileStates\0position of the document properties window\0if true, check once a day whether an update is "
     "available\0\0Settings below are not recognized by the current version",

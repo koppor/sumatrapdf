@@ -133,7 +133,6 @@ static SeqStrings gCommandNames =
     "CmdSaveAttachment\0"
     "CmdOpenAttachment\0"
     "CmdOptions\0"
-    "CmdAdvancedOptions\0"
     "CmdAdvancedSettings\0"
     "CmdChangeLanguage\0"
     "CmdCheckUpdate\0"
@@ -226,7 +225,7 @@ static SeqStrings gCommandNames =
     "CmdDocumentExtractText\0"
     "CmdDocumentShowOutline\0"
     "CmdSetScreenshotHotkey\0"
-    "CmdReadAloud\0"
+    "CmdToggleReadAloud\0"
     "CmdPauseReadAloud\0"
     "CmdContinueReadAloud\0"
     "CmdStopReadAloud\0"
@@ -322,10 +321,20 @@ static SeqStrings gCommandNames =
     "CmdAutomaticallyScrollSlower\0"
     "CmdToggleReadingBar\0"
     "CmdToggleReadingBarInvert\0"
-    "CmdRefHoverPushToJabRef\0"
+    "CmdGoToHomePage\0"
+    "CmdToggleFreePan\0"
     "CmdNone\0"
     "CmdFileHistory\0"
     "CmdFavorite\0"
+    "CmdReadAloudFromCursorPosition\0"
+    "CmdToggleGrayscale\0"
+    "CmdPrintSelection\0"
+    "CmdAutoGenerateTOC\0"
+    "CmdOpenSettingsFile\0"
+    "CmdOpenFileWithSumatraFilePicker\0"
+    "CmdSelectCurrentPage\0"
+    "CmdZoomFitVisible\0"
+    "CmdRefHoverPushToJabRef\0"
     "\0";
 
 static i32 gCommandIds[] = {
@@ -448,7 +457,6 @@ static i32 gCommandIds[] = {
     CmdSaveAttachment,
     CmdOpenAttachment,
     CmdOptions,
-    CmdAdvancedOptions,
     CmdAdvancedSettings,
     CmdChangeLanguage,
     CmdCheckUpdate,
@@ -541,7 +549,7 @@ static i32 gCommandIds[] = {
     CmdDocumentExtractText,
     CmdDocumentShowOutline,
     CmdSetScreenshotHotkey,
-    CmdReadAloud,
+    CmdToggleReadAloud,
     CmdPauseReadAloud,
     CmdContinueReadAloud,
     CmdStopReadAloud,
@@ -637,10 +645,20 @@ static i32 gCommandIds[] = {
     CmdAutomaticallyScrollSlower,
     CmdToggleReadingBar,
     CmdToggleReadingBarInvert,
-    CmdRefHoverPushToJabRef,
+    CmdGoToHomePage,
+    CmdToggleFreePan,
     CmdNone,
     CmdFileHistory,
     CmdFavorite,
+    CmdReadAloudFromCursorPosition,
+    CmdToggleGrayscale,
+    CmdPrintSelection,
+    CmdAutoGenerateTOC,
+    CmdOpenSettingsFile,
+    CmdOpenFileWithSumatraFilePicker,
+    CmdSelectCurrentPage,
+    CmdZoomFitVisible,
+    CmdRefHoverPushToJabRef,
 };
 
 SeqStrings gCommandDescriptions =
@@ -762,8 +780,7 @@ SeqStrings gCommandDescriptions =
     "Open Embedded PDF\0"
     "Save Attachment...\0"
     "Open Attachment\0"
-    "Options...\0"
-    "Advanced Options...\0"
+    "Settings...\0"
     "Advanced Settings...\0"
     "Change Language...\0"
     "Check For Updates\0"
@@ -856,7 +873,7 @@ SeqStrings gCommandDescriptions =
     "Extract Text From Document...\0"
     "Show Document Bookmarks...\0"
     "Set Screenshot Hotkey...\0"
-    "Read Aloud\0"
+    "Toggle Read Aloud\0"
     "Pause Reading\0"
     "Continue Reading\0"
     "Stop Reading\0"
@@ -952,11 +969,31 @@ SeqStrings gCommandDescriptions =
     "Automatically Scroll Slower\0"
     "Reading Bar\0"
     "Reading Bar Invert\0"
-    "Push Reference to JabRef\0"
+    "Go To Home Page\0"
+    "Toggle Free Pan\0"
     "Do nothing\0"
     "Open Recent File\0"
     "Go to Favorite\0"
+    "Start Reading From Cursor Position\0"
+    "Toggle Grayscale\0"
+    "Print Selection...\0"
+    "Generate Table Of Contents\0"
+    "Open Advanced Settings File...\0"
+    "Open File With SumatraPDF File Picker...\0"
+    "Select Current Page\0"
+    "Zoom: Fit Visible\0"
+    "Push Reference to JabRef\0"
     "\0";
+
+SeqStrings gCommandAltDescs =
+    "Browse Files In Folder...\0"
+    "Advanced Options...\0"
+    "\0";
+
+i32 gCommandAltDescIds[] = {
+    CmdNavigateFilesInFolder,
+    CmdAdvancedSettings,
+};
 // clang-format on
 // @gen-end cmd-c
 
@@ -1072,6 +1109,12 @@ int GetCommandIdByName(Str cmdName) {
     if (str::EqI(cmdName, StrL("CmdTogglePdfAnnotationsToolbar"))) {
         return CmdToggleEditPDF;
     }
+    if (str::EqI(cmdName, StrL("CmdReadAloud"))) {
+        return CmdToggleReadAloud;
+    }
+    if (str::EqI(cmdName, StrL("CmdAdvancedOptions"))) {
+        return CmdAdvancedSettings;
+    }
     return -1;
 }
 
@@ -1080,6 +1123,10 @@ int GetCommandIdByDesc(Str cmdDesc) {
     int cmdId = GetCommandIdByNameOrDesc(gCommandDescriptions, cmdDesc);
     if (cmdId >= 0) {
         return cmdId;
+    }
+    int altIdx = SeqStrIndexIS(gCommandAltDescs, cmdDesc);
+    if (altIdx >= 0) {
+        return gCommandAltDescIds[altIdx];
     }
     auto* curr = gFirstCustomCommand;
     while (curr) {

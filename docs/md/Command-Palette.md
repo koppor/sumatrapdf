@@ -4,7 +4,7 @@
 
 ## Commands
 
-Use `Ctrl + K` to invoke the command palette, or click the command-palette button to the left of the **SumatraPDF** title on the home page:
+Press `Ctrl + K` to summon the command palette:
 
 ![Command Palette](img/command-palette-commands-423d.png)
 
@@ -18,7 +18,6 @@ The command palette is a fast and convenient way to:
 - `$` : jump to a favorite (current document's favorites first, then others)
 - `*` : jump to an annotation in the current PDF
 - `=` : change a setting
-- `:` : combined view (replicates behavior before ver 3.6)
 
 How to use it:
 
@@ -32,7 +31,7 @@ How to use it:
 - `Enter` executes the selected match (or double-click it with the mouse)
 - `Escape` closes the window (or click outside it)
 
-By default, it shows the available commands.
+By default, it shows the available commands. A command can be listed under more than one name so that a different wording finds it: **Navigate Files in Folder...** is also **Browse Files In Folder...**, and **Advanced Settings...** is also **Advanced Options...**.
 
 ## Switching between tabs
 
@@ -92,11 +91,13 @@ double-click selects the annotation and jumps to it.
 ## Settings
 
 Type `=` to change a setting without opening
-[Advanced Options](./Advanced-options-settings.md). Every setting holding a
+[Advanced Settings](./Advanced-options-settings.md). Every setting holding a
 single value is listed by its dotted name, with its current value on the right;
 a value that isn't the default is shown in bold, and those settings are listed
-first. Type to filter by name or by value. Settings holding a list, and the
-compact ones like `WindowMargin`, are only editable in Advanced Options.
+first. Type to filter by name or by value. The selected setting's description,
+the same as in Advanced Settings, is shown under the list. Compact settings like
+`WindowMargin` are only editable in Advanced Settings; settings holding a list
+only in the settings file (**Open Advanced Settings File...**).
 
 `Enter` on a `true` / `false` setting toggles it. Any other setting asks for a
 value: the query becomes `=<name> = <value>`, and
@@ -106,10 +107,13 @@ value: the query becomes `=<name> = <value>`, and
 - any other setting takes what you type, starting from the current value
 
 The change takes effect immediately, exactly as if it had been saved from
-Advanced Options - no restart. You can also type the whole thing at once, e.g.
-`=ZoomIncrement = 25`; the name can be the last part of a dotted setting
-(`Units` for `FixedPageUI.PageGrid.Units`) as long as only one setting ends
-with it.
+Advanced Settings - no restart. The palette stays open and shows the settings
+again with the same setting selected, so several can be changed in a row;
+`Esc` closes it. `Esc` while a value is being asked for goes back to the
+settings instead, also with that setting selected. You can also type the
+whole thing at once, e.g. `=ZoomIncrement = 25`; the name can be the last part
+of a dotted setting (`Units` for `FixedPageUI.PageGrid.Units`) as long as only
+one setting ends with it.
 
 ## Combined view
 

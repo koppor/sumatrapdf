@@ -8,9 +8,6 @@ struct MainWindow;
 struct WindowTab;
 struct TextSelection;
 struct ReadAloudPlaybackBar;
-namespace str {
-struct Builder;
-}
 
 // --- text-to-speech backend (WinRT speech synthesis, SAPI 5 fallback) ---
 
@@ -46,6 +43,7 @@ bool TtsOnEngineCrash(void* faultAddr);
 bool TtsTakeEngineCrash();
 bool TtsEngineCrashed();
 bool TtsTestEngineCrash();
+void TtsTestPumpOnNextSpeak();
 
 // --- highlight of the words being spoken ---
 
@@ -134,6 +132,7 @@ void ReadAloudInTab(WindowTab* tab);
 void ReadAloudContinueInTab(WindowTab* tab);
 void ReadAloudSelectionInTab(WindowTab* tab);
 void ReadAloudFromViewportTopInTab(WindowTab* tab);
+void ReadAloudFromCursorInTab(WindowTab* tab, Point screenPt);
 void ReadAloudStopRememberPos();
 void ResetReadAloudStateForTab(WindowTab* tab);
 void StopReadAloudIfSourceWindow(MainWindow* win);

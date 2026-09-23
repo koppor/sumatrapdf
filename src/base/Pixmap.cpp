@@ -2,23 +2,10 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
-#if OS_WIN
+#include "base/ByteReaderWriter.h"
 #include "base/Win.h"
-#endif
 
 #include "base/Pixmap.h"
-
-static void AppendLE16(str::Builder& data, u16 v) {
-    data.AppendChar((char)(v & 0xff));
-    data.AppendChar((char)((v >> 8) & 0xff));
-}
-
-static void AppendLE32(str::Builder& data, u32 v) {
-    data.AppendChar((char)(v & 0xff));
-    data.AppendChar((char)((v >> 8) & 0xff));
-    data.AppendChar((char)((v >> 16) & 0xff));
-    data.AppendChar((char)((v >> 24) & 0xff));
-}
 
 static void AppendPixmapPixelBGR(str::Builder& data, const Pixmap* pixmap, int x, int y) {
     const u8* src = pixmap->data + ((size_t)y * pixmap->stride) + ((size_t)x * PixmapBytesPerPixel(pixmap->format));
@@ -54,25 +41,25 @@ Str PixmapToBmpFormat(const Pixmap* pixmap) {
         return {};
     }
 
-    str::Builder bmpData;
-    str::BuilderReserve(bmpData, (int)bmpBytes);
-    AppendLE16(bmpData, 0x4d42); // "BM"
-    AppendLE32(bmpData, (u32)bmpBytes);
-    AppendLE16(bmpData, 0);
-    AppendLE16(bmpData, 0);
-    AppendLE32(bmpData, (u32)headerLen);
+    ByteWriterLE w2((int)bmpBytes);
+    str::Builder& bmpData = w2.d;
+    w2.Write16(0x4d42); // "BM"
+    w2.Write32((u32)bmpBytes);
+    w2.Write16(0);
+    w2.Write16(0);
+    w2.Write32((u32)headerLen);
 
-    AppendLE32(bmpData, 40); // BITMAPINFOHEADER size
-    AppendLE32(bmpData, (u32)w);
-    AppendLE32(bmpData, (u32)h);
-    AppendLE16(bmpData, 1);  // planes
-    AppendLE16(bmpData, 24); // bit count
-    AppendLE32(bmpData, 0);  // BI_RGB
-    AppendLE32(bmpData, (u32)(rowStride * h));
-    AppendLE32(bmpData, 0);
-    AppendLE32(bmpData, 0);
-    AppendLE32(bmpData, 0);
-    AppendLE32(bmpData, 0);
+    w2.Write32(40); // BITMAPINFOHEADER size
+    w2.Write32((u32)w);
+    w2.Write32((u32)h);
+    w2.Write16(1);  // planes
+    w2.Write16(24); // bit count
+    w2.Write32(0);  // BI_RGB
+    w2.Write32((u32)(rowStride * h));
+    w2.Write32(0);
+    w2.Write32(0);
+    w2.Write32(0);
+    w2.Write32(0);
 
     int padding = (int)rowStride - (pixmap->width * 3);
     for (int y = pixmap->height - 1; y >= 0; y--) {
@@ -86,8 +73,6 @@ Str PixmapToBmpFormat(const Pixmap* pixmap) {
 
     return bmpData.TakeStr();
 }
-
-#if OS_WIN
 
 Pixmap* AllocPixmapDIB(int w, int h) {
     if (w <= 0 || h <= 0) {
@@ -156,6 +141,16 @@ Pixmap* PixmapFromHBITMAP(HBITMAP hbmp, Size size, HANDLE hMap) {
     return p;
 }
 
+// alpha = 0xff on every pixel of a 32-bit pixmap
+static void SetOpaqueAlpha(Pixmap* p) {
+    for (int y = 0; y < p->height; y++) {
+        u8* d = p->data + ((size_t)y * p->stride);
+        for (int x = 0; x < p->width; x++, d += 4) {
+            d[3] = 0xff;
+        }
+    }
+}
+
 Pixmap* PixmapCopyAs32bppDIB(const Pixmap* p) {
     if (!p || !p->hbmp || p->width <= 0 || p->height <= 0) {
         return nullptr;
@@ -189,12 +184,7 @@ Pixmap* PixmapCopyAs32bppDIB(const Pixmap* p) {
     }
     // BitBlt leaves the alpha channel alone (i.e. at the zero CreateDIBSection
     // gave us), which would make the copy fully transparent
-    for (int y = 0; y < dst->height; y++) {
-        u8* d = dst->data + ((size_t)y * dst->stride);
-        for (int x = 0; x < dst->width; x++, d += 4) {
-            d[3] = 0xff;
-        }
-    }
+    SetOpaqueAlpha(dst);
     dst->xres = p->xres;
     dst->yres = p->yres;
     return dst;
@@ -224,6 +214,61 @@ static void UnpremultiplyBgra(u8* d) {
     d[2] = (u8)std::min<u32>(255, (((u32)d[2] * 255) + (a / 2)) / a);
 }
 
+// a 32bpp straight-alpha DIB copy of a heap-backed BGR8 / RGBA8 / BGRA8 pixmap
+static Pixmap* CopyHeapPixmapAsBgraDib(const Pixmap* px) {
+    if (!px->data || PixmapBytesPerPixel(px->format) == 0) {
+        return nullptr;
+    }
+    Pixmap* dib = AllocPixmapDIB(px->width, px->height);
+    if (!dib) {
+        return nullptr;
+    }
+    for (int y = 0; y < px->height; y++) {
+        const u8* src = px->data + ((size_t)y * px->stride);
+        u8* dst = dib->data + ((size_t)y * dib->stride);
+        for (int x = 0; x < px->width; x++) {
+            if (px->format == PixmapFormat::BGR8) {
+                dst[0] = src[0];
+                dst[1] = src[1];
+                dst[2] = src[2];
+                dst[3] = 0xff;
+                src += 3;
+            } else if (px->format == PixmapFormat::RGBA8) {
+                dst[0] = src[2];
+                dst[1] = src[1];
+                dst[2] = src[0];
+                dst[3] = src[3];
+                src += 4;
+            } else {
+                memcpy(dst, src, 4);
+                src += 4;
+            }
+            if (px->premultiplied) {
+                UnpremultiplyBgra(dst);
+            }
+            dst += 4;
+        }
+    }
+    dib->xres = px->xres;
+    dib->yres = px->yres;
+    return dib;
+}
+
+// Takes p. Returns it when its pixels already read as BGRA8; otherwise a
+// 32bpp DIB copy (the engine renders a page with few colors to an 8-bit
+// palette DIB, image engines decode to 24bpp) and p is freed.
+Pixmap* PixmapToBgra(Pixmap* p) {
+    if (!p) {
+        return nullptr;
+    }
+    if (p->format == PixmapFormat::BGRA8 && p->data) {
+        return p;
+    }
+    Pixmap* dib = p->hbmp ? PixmapCopyAs32bppDIB(p) : CopyHeapPixmapAsBgraDib(p);
+    FreePixmap(p);
+    return dib;
+}
+
 RenderedBitmap* RenderedBitmapFromPixmap(Pixmap* px) {
     if (!px) {
         return nullptr;
@@ -233,38 +278,11 @@ RenderedBitmap* RenderedBitmapFromPixmap(Pixmap* px) {
             FreePixmap(px);
             return nullptr;
         }
-        Pixmap* dib = AllocPixmapDIB(px->width, px->height);
+        Pixmap* dib = CopyHeapPixmapAsBgraDib(px);
+        FreePixmap(px);
         if (!dib) {
-            FreePixmap(px);
             return nullptr;
         }
-        for (int y = 0; y < px->height; y++) {
-            const u8* src = px->data + ((size_t)y * px->stride);
-            u8* dst = dib->data + ((size_t)y * dib->stride);
-            for (int x = 0; x < px->width; x++) {
-                if (px->format == PixmapFormat::BGR8) {
-                    dst[0] = src[0];
-                    dst[1] = src[1];
-                    dst[2] = src[2];
-                    dst[3] = 0xff;
-                    src += 3;
-                } else if (px->format == PixmapFormat::RGBA8) {
-                    dst[0] = src[2];
-                    dst[1] = src[1];
-                    dst[2] = src[0];
-                    dst[3] = src[3];
-                    src += 4;
-                } else {
-                    memcpy(dst, src, 4);
-                    src += 4;
-                }
-                if (px->premultiplied) {
-                    UnpremultiplyBgra(dst);
-                }
-                dst += 4;
-            }
-        }
-        FreePixmap(px);
         px = dib;
     }
     auto* rb = new RenderedBitmap(px->hbmp, Size(px->width, px->height), px->hMap);
@@ -385,6 +403,72 @@ Pixmap* PixmapFromHICON(HICON hicon) {
 
 static bool BlitPixmapRegionComposited(Pixmap* p, HDC hdc, Rect target, Rect source);
 
+static void SetBlitStretchMode(HDC hdc) {
+    if (IsPrinterDC(hdc)) {
+        SetStretchBltMode(hdc, COLORONCOLOR);
+        return;
+    }
+    SetStretchBltMode(hdc, HALFTONE);
+    SetBrushOrgEx(hdc, 0, 0, nullptr);
+}
+
+// Fills bmi's color table from a palette DIB section. Returns its bit depth,
+// 0 if hbmp isn't a <= 8bpp DIB.
+static int GetDibPalette(HBITMAP hbmp, BITMAPINFO* bmi) {
+    DIBSECTION ds{};
+    if (!hbmp || GetObject(hbmp, sizeof(ds), &ds) != sizeof(ds) || ds.dsBm.bmBitsPixel > 8) {
+        return 0;
+    }
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!dc) {
+        return 0;
+    }
+    HGDIOBJ old = SelectObject(dc, hbmp);
+    int n = 0;
+    if (old) {
+        n = (int)GetDIBColorTable(dc, 0, 1 << ds.dsBm.bmBitsPixel, bmi->bmiColors);
+        SelectObject(dc, old);
+    }
+    DeleteDC(dc);
+    if (n <= 0) {
+        return 0;
+    }
+    bmi->bmiHeader.biClrUsed = n;
+    return ds.dsBm.bmBitsPixel;
+}
+
+// A Native pixmap is a palette DIB (EngineMupdf renders low-color pages as
+// 8bpp): send it at its own depth, or GDI reads 4x past its bits.
+bool BlitPixmapDibBits(const Pixmap* p, HDC hdc, Rect target, Rect source) {
+    auto* bmi = (BITMAPINFO*)AllocArrayTemp<u8>(sizeofi(BITMAPINFO) + (255 * sizeofi(RGBQUAD)));
+    bmi->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi->bmiHeader.biWidth = p->width;
+    bmi->bmiHeader.biHeight = -source.dy;
+    bmi->bmiHeader.biPlanes = 1;
+    bmi->bmiHeader.biCompression = BI_RGB;
+    int bpp = p->format == PixmapFormat::BGR8 ? 24 : 32;
+    if (p->format == PixmapFormat::Native) {
+        bpp = GetDibPalette(p->hbmp, bmi);
+        if (bpp == 0) {
+            return false;
+        }
+    }
+    bmi->bmiHeader.biBitCount = (WORD)bpp;
+    const u8* rows = p->data + ((size_t)source.y * p->stride);
+    int n;
+    // StretchDIBits even at 1:1 is what Xerox PCL turns into white stripes
+    // (issue #919). SetDIBitsToDevice is a straight DIB transfer.
+    if (target.dx == source.dx && target.dy == source.dy) {
+        n = SetDIBitsToDevice(hdc, target.x, target.y, (DWORD)source.dx, (DWORD)source.dy, source.x, 0, 0,
+                              (UINT)source.dy, rows, bmi, DIB_RGB_COLORS);
+    } else {
+        SetBlitStretchMode(hdc);
+        n = StretchDIBits(hdc, target.x, target.y, target.dx, target.dy, source.x, 0, source.dx, source.dy, rows, bmi,
+                          DIB_RGB_COLORS, SRCCOPY);
+    }
+    return n != GDI_ERROR && n != 0;
+}
+
 bool BlitPixmapRegion(Pixmap* p, HDC hdc, Rect target, Rect source) {
     if (!p || !p->data || target.IsEmpty() || source.IsEmpty()) {
         return false;
@@ -396,17 +480,23 @@ bool BlitPixmapRegion(Pixmap* p, HDC hdc, Rect target, Rect source) {
     if (p->hasAlpha && p->format == PixmapFormat::BGRA8) {
         return BlitPixmapRegionComposited(p, hdc, target, source);
     }
-    SetStretchBltMode(hdc, HALFTONE);
-    if (p->hbmp) {
+    source = Rect(0, 0, p->width, p->height).Intersect(source);
+    if (source.IsEmpty()) {
+        return false;
+    }
+    bool sameSize = target.dx == source.dx && target.dy == source.dy;
+    // printer: send DIB bits, not StretchBlt. screen DIB: BitBlt is faster
+    if (p->hbmp && !(IsPrinterDC(hdc) && sameSize)) {
         HDC bmpDC = CreateCompatibleDC(hdc);
         if (!bmpDC) {
             return false;
         }
         HGDIOBJ oldBmp = SelectObject(bmpDC, p->hbmp);
         bool ok = false;
-        if (oldBmp && target.dx == source.dx && target.dy == source.dy) {
+        if (oldBmp && sameSize) {
             ok = BitBlt(hdc, target.x, target.y, target.dx, target.dy, bmpDC, source.x, source.y, SRCCOPY) != 0;
         } else if (oldBmp) {
+            SetBlitStretchMode(hdc);
             ok = StretchBlt(hdc, target.x, target.y, target.dx, target.dy, bmpDC, source.x, source.y, source.dx,
                             source.dy, SRCCOPY) != 0;
         }
@@ -416,29 +506,12 @@ bool BlitPixmapRegion(Pixmap* p, HDC hdc, Rect target, Rect source) {
         DeleteDC(bmpDC);
         return ok;
     }
-    source = Rect(0, 0, p->width, p->height).Intersect(source);
-    if (source.IsEmpty()) {
-        return false;
-    }
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = p->width;
-    bmi.bmiHeader.biHeight = -source.dy;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = p->format == PixmapFormat::BGR8 ? 24 : 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    const u8* rows = p->data + ((size_t)source.y * p->stride);
-    int n = StretchDIBits(hdc, target.x, target.y, target.dx, target.dy, source.x, 0, source.dx, source.dy, rows, &bmi,
-                          DIB_RGB_COLORS, SRCCOPY);
-    return n != GDI_ERROR && n != 0;
+    return BlitPixmapDibBits(p, hdc, target, source);
 }
 
 bool BlitPixmap(Pixmap* p, HDC hdc, Rect target) {
     if (!p || !p->data) {
         return false;
-    }
-    if (p->hbmp) {
-        return BlitHBITMAP(p->hbmp, hdc, target);
     }
     return BlitPixmapRegion(p, hdc, target, Rect(0, 0, p->width, p->height));
 }
@@ -459,6 +532,8 @@ static inline u8 BlendOver(u8 src, u8 dst, u32 srcAlpha, bool premultiplied) {
 // costs a BitBlt, which is nothing at icon sizes.
 //
 // Only 1:1 blits are composited; a scaling blit falls back to the opaque path.
+static bool BlitPixmapRegionComposited(Pixmap* p, HDC hdc, Rect target, Rect source);
+
 bool BlitPixmapAlpha(Pixmap* p, HDC hdc, Rect target) {
     if (!p || !p->data || target.IsEmpty()) {
         return false;
@@ -467,47 +542,7 @@ bool BlitPixmapAlpha(Pixmap* p, HDC hdc, Rect target) {
     if (p->format != PixmapFormat::BGRA8 || !sameSize) {
         return BlitPixmap(p, hdc, target);
     }
-    int dx = p->width;
-    int dy = p->height;
-    Pixmap* dst = AllocPixmapDIB(dx, dy);
-    if (!dst) {
-        return false;
-    }
-    bool ok = false;
-    HDC memDC = CreateCompatibleDC(hdc);
-    if (memDC) {
-        HGDIOBJ prev = SelectObject(memDC, dst->hbmp);
-        if (prev) {
-            // read the background, blend the source over it, put it back
-            BitBlt(memDC, 0, 0, dx, dy, hdc, target.x, target.y, SRCCOPY);
-            GdiFlush();
-            for (int y = 0; y < dy; y++) {
-                const u8* s = p->data + ((size_t)y * p->stride);
-                u8* d = dst->data + ((size_t)y * dst->stride);
-                for (int x = 0; x < dx; x++, s += 4, d += 4) {
-                    u32 a = s[3];
-                    if (a == 0) {
-                        continue;
-                    }
-                    if (a == 255) {
-                        d[0] = s[0];
-                        d[1] = s[1];
-                        d[2] = s[2];
-                        continue;
-                    }
-                    d[0] = BlendOver(s[0], d[0], a, p->premultiplied);
-                    d[1] = BlendOver(s[1], d[1], a, p->premultiplied);
-                    d[2] = BlendOver(s[2], d[2], a, p->premultiplied);
-                }
-            }
-            GdiFlush();
-            ok = BitBlt(hdc, target.x, target.y, dx, dy, memDC, 0, 0, SRCCOPY) != 0;
-            SelectObject(memDC, prev);
-        }
-        DeleteDC(memDC);
-    }
-    FreePixmap(dst);
-    return ok;
+    return BlitPixmapRegionComposited(p, hdc, target, Rect(0, 0, p->width, p->height));
 }
 
 // Draw a region of an alpha-carrying pixmap, blending over what's already on
@@ -586,31 +621,22 @@ static int Mul255(int a, int b) {
     return n >> 8;
 }
 
-void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor, Vec<Rect>* skipRects) {
-    if (!px) {
-        return;
-    }
-    if (px->hbmp) {
-        UpdateBitmapColors(px->hbmp, textColor, bgColor, linkColor, skipRects);
-        return;
-    }
-    if (!px->data || px->width <= 0 || px->height <= 0 || px->format == PixmapFormat::RGBA8) {
-        return;
-    }
-    if ((textColor & 0xffffff) == kColBlack && (bgColor & 0xffffff) == kColWhite && !linkColor && !skipRects) {
-        return;
-    }
+// Maps black-on-white pixels to textColor-on-bgColor (interpolating the rest),
+// turns blue-ish "link" pixels into linkColor, and leaves skipRects alone.
+// Pixel bytes are B,G,R[,A]; rows are stride bytes apart.
+static void RecolorPixels(u8* data, int w, int h, size_t stride, int bpp, Color textColor, Color bgColor,
+                          Color linkColor, Vec<Rect>* skipRects) {
     byte linkR = 0, linkG = 0, linkB = 0;
     UnpackColor(linkColor, linkR, linkG, linkB);
     byte textR, textG, textB, bgR, bgG, bgB;
     UnpackColor(textColor, textR, textG, textB);
     UnpackColor(bgColor, bgR, bgG, bgB);
-    const int base[3] = {textB, textG, textR};
-    const int diff[3] = {(int)bgB - textB, (int)bgG - textG, (int)bgR - textR};
-    int bpp = PixmapBytesPerPixel(px->format);
-    for (int y = 0; y < px->height; y++) {
-        u8* pixel = px->data + ((size_t)y * px->stride);
-        for (int x = 0; x < px->width; x++, pixel += bpp) {
+    const int base[4] = {textB, textG, textR, 0};
+    const int diff[4] = {(int)bgB - textB, (int)bgG - textG, (int)bgR - textR, 255};
+    int nChannels = std::min(bpp, 4);
+    for (int y = 0; y < h; y++) {
+        u8* pixel = data + ((size_t)y * stride);
+        for (int x = 0; x < w; x++, pixel += bpp) {
             if (SkipRecolorPixel(x, y, skipRects)) {
                 continue;
             }
@@ -623,11 +649,80 @@ void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor, 
                 pixel[2] = (u8)(linkR + Mul255(rg, (int)bgR - linkR));
                 continue;
             }
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < nChannels; i++) {
                 pixel[i] = (u8)(base[i] + Mul255(pixel[i], diff[i]));
             }
         }
     }
+}
+
+// same, for an HBITMAP: in place for mapped 24/32-bit DIBs, via the palette
+// for 8-bit ones, else through GetDIBits/SetDIBits
+static void RecolorHbitmap(HBITMAP hbmp, Color textColor, Color bgColor, Color linkColor, Vec<Rect>* skipRects) {
+    DIBSECTION info{};
+    int ret = GetObject(hbmp, sizeof(info), &info);
+    ReportIf(ret < sizeof(info.dsBm));
+    int w = info.dsBm.bmWidth;
+    int h = info.dsBm.bmHeight;
+    u8* bits = (u8*)info.dsBm.bmBits;
+    int bitsPixel = info.dsBm.bmBitsPixel;
+
+    if (ret >= sizeof(info.dsBm) && bits && (bitsPixel == 32 || bitsPixel == 24) &&
+        info.dsBm.bmWidthBytes >= w * bitsPixel / 8) {
+        RecolorPixels(bits, w, h, info.dsBm.bmWidthBytes, bitsPixel / 8, textColor, bgColor, linkColor, skipRects);
+        return;
+    }
+
+    if (sizeof(info) == ret && info.dsBmih.biBitCount && info.dsBmih.biBitCount <= 8) {
+        ReportIf(info.dsBmih.biBitCount != 8);
+        RGBQUAD palette[256];
+        HDC hDC = CreateCompatibleDC(nullptr);
+        DeleteObject(SelectObject(hDC, hbmp));
+        uint num = GetDIBColorTable(hDC, 0, dimof(palette), palette);
+        // RGBQUAD is B,G,R,reserved: the same layout a 32-bit pixel has
+        RecolorPixels((u8*)palette, (int)num, 1, sizeof(palette), 4, textColor, bgColor, linkColor, nullptr);
+        if (num > 0) {
+            SetDIBColorTable(hDC, 0, num, palette);
+        }
+        DeleteDC(hDC);
+        return;
+    }
+
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = h;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    HDC hDC = CreateCompatibleDC(nullptr);
+    size_t stride = (size_t)w * 4;
+    AutoFree<u8> bmpData((u8*)malloc(stride * h));
+    ReportIf(!bmpData);
+    if (GetDIBits(hDC, hbmp, 0, h, bmpData, &bmi, DIB_RGB_COLORS)) {
+        RecolorPixels(bmpData, w, h, stride, 4, textColor, bgColor, linkColor, skipRects);
+        SetDIBits(hDC, hbmp, 0, h, bmpData, &bmi, DIB_RGB_COLORS);
+    }
+    DeleteDC(hDC);
+}
+
+void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor, Vec<Rect>* skipRects) {
+    if (!px) {
+        return;
+    }
+    if ((textColor & 0xffffff) == kColBlack && (bgColor & 0xffffff) == kColWhite && !linkColor && !skipRects) {
+        return;
+    }
+    if (px->hbmp) {
+        RecolorHbitmap(px->hbmp, textColor, bgColor, linkColor, skipRects);
+        return;
+    }
+    if (!px->data || px->width <= 0 || px->height <= 0 || px->format == PixmapFormat::RGBA8) {
+        return;
+    }
+    RecolorPixels(px->data, px->width, px->height, px->stride, PixmapBytesPerPixel(px->format), textColor, bgColor,
+                  linkColor, skipRects);
 }
 
 static Size GetBitmapSize(HBITMAP hbmp) {
@@ -667,12 +762,7 @@ static Pixmap* PixmapFromHBITMAPPixels(HBITMAP hbmp) {
     }
     // CF_BITMAP has no alpha; GetDIBits leaves it 0, which would make a stamp
     // fully transparent.
-    for (int y = 0; y < pixmap->height; y++) {
-        u8* d = pixmap->data + ((size_t)y * pixmap->stride);
-        for (int x = 0; x < pixmap->width; x++, d += 4) {
-            d[3] = 0xff;
-        }
-    }
+    SetOpaqueAlpha(pixmap);
     return pixmap;
 }
 
@@ -692,5 +782,3 @@ Pixmap* GetClipboardImageAsPixmap() {
     CloseClipboard();
     return pixmap;
 }
-
-#endif

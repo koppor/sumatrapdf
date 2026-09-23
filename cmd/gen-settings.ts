@@ -378,6 +378,12 @@ const printerDefaults: Field[] = [
   field("Collate", Str, "default", "default value for collate in the print dialog (default, collate, nocollate)").ver(
     "3.7",
   ),
+  field(
+    "PrintDpi",
+    Float,
+    0,
+    "resolution to assume for the document when printing at original size (e.g. 300 for a 300 dpi scan whose file doesn't say); 0 uses the resolution recorded in the file",
+  ).ver("3.7"),
 ];
 
 // HighlightOffset / HighlightWidth are in document units (multiplied by the
@@ -441,6 +447,9 @@ const pageGrid: Field[] = [
 ];
 
 const fixedPageUI: Field[] = [
+  field("Grayscale", Bool, false, "if true, render document pages in grayscale. Toggle with CmdToggleGrayscale").ver(
+    "3.7",
+  ),
   field("TextColor", Color, rgb(0x00, 0x00, 0x00), "color used instead of black for the document's text"),
   field(
     "BackgroundColor",
@@ -527,7 +536,7 @@ const comicBookUI: Field[] = [
     Str,
     "",
     "default zoom for comic books; empty uses fit page. " +
-      "valid values: fit page, fit width, fit height, fit content, shrink to fit or percent like 100%",
+      "valid values: fit page, fit width, fit height, fit content, fit visible, shrink to fit or percent like 100%",
   ).ver("3.7"),
   field("DefaultZoomFloat", Float, 0, "value of DefaultZoom for internal usage").notSaved(),
   field(
@@ -546,7 +555,7 @@ const imageUI: Field[] = [
     "DefaultZoom",
     Str,
     "shrink to fit",
-    "default zoom for image files. valid values: fit page, fit width, fit height, fit content, shrink to fit or percent like 100%",
+    "default zoom for image files. valid values: fit page, fit width, fit height, fit content, fit visible, shrink to fit or percent like 100%",
   ).ver("3.7"),
   field("DefaultZoomFloat", Float, 0, "value of DefaultZoom for internal usage").notSaved(),
   field(
@@ -646,7 +655,7 @@ const claudeCode: Field[] = [
 ];
 
 const antiGravity: Field[] = [
-  field("Model", Str, "gemini-3.6-flash", "Antigravity model ID for --model (e.g. gemini-3.6-flash)"),
+  field("Model", Str, "gemini-3.8-flash-medium", "Antigravity model ID for --model (e.g. gemini-3.8-flash-medium)"),
   field("Models", Str, "", "extra Antigravity model IDs for the dropdown, comma-separated"),
   field("Effort", Int, 1, "Antigravity effort level: 0=Low, 1=Medium, 2=High, 3=Max"),
   field(
@@ -1083,7 +1092,12 @@ const fileState: Field[] = [
     0,
     "number of pages in the document when it was last open; 0 if unknown. Used to show reading progress on the home page",
   ).ver("3.7"),
-  field("Zoom", Str, "fit page", "zoom (in %) or one of those values: fit page, fit width, fit height, fit content"),
+  field(
+    "Zoom",
+    Str,
+    "fit page",
+    "zoom (in %) or one of those values: fit page, fit width, fit height, fit content, fit visible",
+  ),
   field("Rotation", Int, 0, "how far pages have been rotated as a multiple of 90 degrees"),
   field(
     "WindowState",
@@ -1104,6 +1118,12 @@ const fileState: Field[] = [
   field("TrimEmptyMargins", Bool, false, "if true, empty margins around page content are trimmed from display").ver(
     "3.7",
   ),
+  field(
+    "FreePan",
+    Bool,
+    false,
+    "if true, the view can be panned past the page edges, so any part of a page can be brought to the center of the window",
+  ).ver("3.7"),
   field("BgCol", Color, "", "if given, overrides the background color for this document").ver("3.7"),
   field("TabCol", Color, "", "if given, overrides the tab color for this document").ver("3.7"),
   compactArray(
@@ -1158,6 +1178,7 @@ const fileStateLayout = [
   "DisplayR2L",
   "UniformPageWidth",
   "TrimEmptyMargins",
+  "FreePan",
 ];
 fileState.sort((a, b) => fileStateLayout.indexOf(a.Name) - fileStateLayout.indexOf(b.Name));
 
@@ -1176,7 +1197,12 @@ const tabState: Field[] = [
     "1",
     "number of the last read page, or `bm:<bookmark>` for documents with chapters (see PagePosition.cpp)",
   ),
-  field("Zoom", Str, "fit page", "zoom (in %) or one of those values: fit page, fit width, fit height, fit content"),
+  field(
+    "Zoom",
+    Str,
+    "fit page",
+    "zoom (in %) or one of those values: fit page, fit width, fit height, fit content, fit visible",
+  ),
   field("Rotation", Int, 0, "how far pages have been rotated as a multiple of 90 degrees"),
   compactStruct("ScrollPos", scrollPos, "how far this document has been scrolled (in x and y direction)").structName(
     "PointF",
@@ -1220,7 +1246,7 @@ const globalPrefs: Field[] = [
     "DefaultZoom",
     Str,
     "fit page",
-    "default zoom. valid values: fit page, fit width, fit height, fit content or percent like 100%",
+    "default zoom. valid values: fit page, fit width, fit height, fit content, fit visible or percent like 100%",
   ),
   field(
     "DisableJavaScript",
@@ -1303,7 +1329,14 @@ const globalPrefs: Field[] = [
     "if true, a document will be reloaded automatically whenever it's changed " +
       "(currently doesn't work for documents shown in the ebook UI)",
   ).ver("2.5"),
-  field("RememberOpenedFiles", Bool, true, "if true, remember which documents were opened and their display settings"),
+  field(
+    "RememberOpenedFiles",
+    Bool,
+    true,
+    "if true, keep a history of opened documents and their display settings " +
+      "(FileStates); closing a document doesn't remove it from the history. " +
+      "Also required for saving SessionData",
+  ),
   field(
     "RememberStatePerDocument",
     Bool,
@@ -1311,7 +1344,13 @@ const globalPrefs: Field[] = [
     "if true, store display settings for each document separately (i.e. everything " +
       "after UseDefaultState in FileStates)",
   ),
-  field("RestoreSession", Bool, true, "if true and SessionData isn't empty, that session will be restored at startup"),
+  field(
+    "RestoreSession",
+    Bool,
+    true,
+    "if true, documents that were still open when the last window was closed " +
+      "(SessionData) are reopened at startup",
+  ),
   field(
     "ReuseInstance",
     Bool,
@@ -1333,6 +1372,15 @@ const globalPrefs: Field[] = [
     Bool,
     true,
     "if true, show reading progress (n/N, or chapter:page for ebooks) on home page thumbnails and list rows",
+  ).ver("3.7"),
+  field(
+    "ShowChaptersInEbooks",
+    Bool,
+    false,
+    "if true, a document with chapters (EPUB, MOBI) shows the current place as a chapter and a page " +
+      "within that chapter, in the toolbar, Go to Page and the page-info tip. if false, those show one " +
+      "page number for the whole document. the saved position stays a chapter bookmark either way, and " +
+      "next / previous page still cross chapters",
   ).ver("3.7"),
   field("ShowTips", Bool, true, "if true, show tips on the home page").ver("3.7"),
   field(
@@ -1482,6 +1530,12 @@ const globalPrefs: Field[] = [
     true,
     "if true, show page numbers (labels) right-aligned on bookmark / table-of-contents entries",
   ).ver("3.7"),
+  field(
+    "AutoGenerateTOC",
+    Bool,
+    false,
+    "if true, a PDF without an outline gets a table of contents built from numbered headings in its text (Generate Table Of Contents command does it on demand)",
+  ).ver("3.7"),
   field("ShowStartPage", Bool, true, "if true, show a list of frequently read documents when no document is loaded"),
   field(
     "SidebarDx",
@@ -1600,6 +1654,13 @@ const globalPrefs: Field[] = [
         "Solarized Dark, Dracula, Nebula, Greeny, Choco, Purpy, One Dark, Monokai, Nord, " +
         "GitHub Dark, Catppuccin Mocha, Tokyo Night, Gruvbox, Night Owl, Ayu, Palenight, System",
     ),
+  field(
+    "HelpTheme",
+    Str,
+    "app",
+    "color theme of the in-app manual (F1): app (follow the app's theme), light or dark. " +
+      "The switch in the manual's top-right corner changes it",
+  ).ver("3.7"),
   // remembered by the light/dark toggle and System theme; not user-facing knobs
   field("LastLightTheme", Str, "", "the light theme the light/dark toggle and the System theme switch to")
     .internal()
@@ -1880,8 +1941,17 @@ const globalPrefs: Field[] = [
     .ver("3.7")
     .internal(),
 
-  array("FileStates", fileState, "information about opened files (in most recently used order)"),
-  array("SessionData", sessionData, "state of the last session, usage depends on RestoreSession").ver("3.1"),
+  array(
+    "FileStates",
+    fileState,
+    "history of opened files, most recently used first. A closed file stays " +
+      "here until it drops off the list or the history is cleared",
+  ),
+  array(
+    "SessionData",
+    sessionData,
+    "windows and tabs still open when SumatraPDF was last closed; " + "reopened at startup if RestoreSession is true",
+  ).ver("3.1"),
 
   compactArray(
     "ReopenOnce",
@@ -1942,6 +2012,7 @@ const globalPrefsLayout = [
   "Theme",
   "LastLightTheme",
   "LastDarkTheme",
+  "HelpTheme",
   "DocumentColorsFollowTheme",
   "ToolbarCustomLayout",
   "TreeFontName",
@@ -2010,6 +2081,7 @@ const globalPrefsLayout = [
   "ShowTips",
   "ShowPageNumberInTabs",
   "ShowHomePageReadingProgress",
+  "ShowChaptersInEbooks",
   "ShowToolbar",
   "SearchUIFloating",
   "ShowFavorites",
@@ -2327,6 +2399,7 @@ constexpr float kZoomFitContent = -3.F;
 constexpr float kZoomShrinkToFit = -4.F;
 constexpr float kZoomFitByOrientation = -5.F;
 constexpr float kZoomFitHeight = -6.F;
+constexpr float kZoomFitVisible = -7.F;
 constexpr float kZoomActualSize = 100.0F;
 constexpr float kZoomMaxDefault = 6400.F;     /* max zoom in %, unless ZoomLevels raises it */
 constexpr float kZoomMaxAllowed = 1000000.F;  /* the highest ZoomLevels can raise it to */

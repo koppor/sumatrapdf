@@ -3,9 +3,8 @@
 
 #include "base/Base.h"
 
-#if OS_WIN
 #include "base/WinDynCalls.h"
-#include "base/ScopedWin.h"
+#include "base/AutoWin.h"
 #include "gui/Dpi.h"
 
 /* Info from https://code.msdn.microsoft.com/DPI-Tutorial-sample-64134744
@@ -149,7 +148,7 @@ static void DpiQueryForHwnd(HWND hwnd, int* outX, int* outY) {
         }
     }
 
-    ScopedGetDC dc(hwnd);
+    AutoReleaseDC dc(hwnd);
     x = GetDeviceCaps(dc, LOGPIXELSX);
     y = GetDeviceCaps(dc, LOGPIXELSY);
     if (gDpiOverrideLegacy) {
@@ -259,5 +258,3 @@ int DpiGetSystemMetrics(int index, int dpi) {
 int DpiGetSystemMetrics(int index) {
     return DpiGetSystemMetrics(index, DpiGet());
 }
-
-#endif
