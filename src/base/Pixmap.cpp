@@ -522,6 +522,58 @@ static inline u8 BlendOver(u8 src, u8 dst, u32 srcAlpha, bool premultiplied) {
     return (u8)std::min<u32>(255, s + ((((u32)dst * inv) + 127) / 255));
 }
 
+static bool IsPaletteDib(HBITMAP hbmp) {
+    DIBSECTION ds{};
+    return hbmp && GetObject(hbmp, sizeof(ds), &ds) == sizeof(ds) && ds.dsBm.bmBitsPixel <= 8;
+}
+
+// Takes p. Returns an opaque 24bpp BGR8 copy, transparency composited over white:
+// 3/4 the memory of 32bpp, for cached thumbnails. BGR8, and palette DIBs (smaller
+// still), are returned as is; so is p when the copy can't be allocated.
+Pixmap* PixmapToBgr(Pixmap* p) {
+    if (!p || p->format == PixmapFormat::BGR8) {
+        return p;
+    }
+    if (p->format == PixmapFormat::Native || !p->data) {
+        if (IsPaletteDib(p->hbmp)) {
+            return p;
+        }
+        Pixmap* bgra = PixmapCopyAs32bppDIB(p);
+        FreePixmap(p);
+        if (!bgra) {
+            return nullptr;
+        }
+        p = bgra;
+    }
+
+    Pixmap* res = AllocPixmap(p->width, p->height, PixmapFormat::BGR8);
+    if (!res) {
+        return p;
+    }
+    bool isRgba = p->format == PixmapFormat::RGBA8;
+    for (int y = 0; y < p->height; y++) {
+        const u8* s = p->data + ((size_t)y * p->stride);
+        u8* d = res->data + ((size_t)y * res->stride);
+        for (int x = 0; x < p->width; x++, s += 4, d += 3) {
+            u8 b = isRgba ? s[2] : s[0];
+            u8 g = s[1];
+            u8 r = isRgba ? s[0] : s[2];
+            if (p->hasAlpha) {
+                b = BlendOver(b, 255, s[3], p->premultiplied);
+                g = BlendOver(g, 255, s[3], p->premultiplied);
+                r = BlendOver(r, 255, s[3], p->premultiplied);
+            }
+            d[0] = b;
+            d[1] = g;
+            d[2] = r;
+        }
+    }
+    res->xres = p->xres;
+    res->yres = p->yres;
+    FreePixmap(p);
+    return res;
+}
+
 // Like BlitPixmap(), but honours the source alpha. BlitPixmap() is a straight
 // SRCCOPY, which paints the transparent parts of an icon black; anything drawn
 // over an arbitrary background (toolbar icons on the home page) needs this.
@@ -725,37 +777,35 @@ void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor, 
                   linkColor, skipRects);
 }
 
-static Size GetBitmapSize(HBITMAP hbmp) {
-    BITMAP bmpInfo;
-    GetObject(hbmp, sizeof(BITMAP), &bmpInfo);
-    return {bmpInfo.bmWidth, bmpInfo.bmHeight};
-}
-
 // Copy an HBITMAP into a top-down 32bpp BGRA pixmap. Reading the clipboard as
 // 24bpp GetDIBits sheared paste-as-stamp (issue #6059): area-copy puts a
 // 32-bpp CF_BITMAP on the clipboard, and converting that to DWORD-padded 24bpp
 // rows does not land on the stride the stamp path uses. 32bpp BI_RGB rows are
 // always width*4, the same as AllocPixmap(BGRA8).
 static Pixmap* PixmapFromHBITMAPPixels(HBITMAP hbmp) {
-    Size size = GetBitmapSize(hbmp);
-    if (size.dx <= 0 || size.dy <= 0) {
+    BITMAP bmp{};
+    if (!GetObject(hbmp, sizeof(bmp), &bmp) || bmp.bmWidth <= 0 || bmp.bmHeight <= 0) {
         return nullptr;
     }
-    Pixmap* pixmap = AllocPixmap(size.dx, size.dy, PixmapFormat::BGRA8);
+    int w = bmp.bmWidth;
+    int h = bmp.bmHeight;
+    Pixmap* pixmap = AllocPixmap(w, h, PixmapFormat::BGRA8);
     if (!pixmap) {
         return nullptr;
     }
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
-    bmi.bmiHeader.biWidth = size.dx;
-    bmi.bmiHeader.biHeight = -size.dy; // top-down
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h; // top-down
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
     HDC hdc = GetDC(nullptr);
-    int n = GetDIBits(hdc, hbmp, 0, (UINT)size.dy, pixmap->data, &bmi, DIB_RGB_COLORS);
-    ReleaseDC(nullptr, hdc);
+    int n = hdc ? GetDIBits(hdc, hbmp, 0, (UINT)h, pixmap->data, &bmi, DIB_RGB_COLORS) : 0;
+    if (hdc) {
+        ReleaseDC(nullptr, hdc);
+    }
     if (!n) {
         FreePixmap(pixmap);
         return nullptr;
@@ -767,18 +817,26 @@ static Pixmap* PixmapFromHBITMAPPixels(HBITMAP hbmp) {
 }
 
 // Returns a copy of the clipboard bitmap as a platform-independent Pixmap.
+// Clipboard history opens the clipboard the moment it changes, so a single
+// OpenClipboard after a copy often fails. Same pause as OpenClipboardForUpdate.
+// An open clipboard with no bitmap is a real miss and returns immediately.
 Pixmap* GetClipboardImageAsPixmap() {
-    if (!IsClipboardFormatAvailable(CF_BITMAP) || !OpenClipboard(nullptr)) {
-        return nullptr;
+    constexpr int kTries = 10;
+    constexpr int kPauseMs = 20;
+    for (int i = 0; i < kTries; i++) {
+        if (!OpenClipboard(nullptr)) {
+            Sleep(kPauseMs);
+            continue;
+        }
+        // CF_BITMAP is synthesized from CF_DIB and vice versa. The HBITMAP stays
+        // owned by the clipboard.
+        HBITMAP hbmp = (HBITMAP)GetClipboardData(CF_BITMAP);
+        Pixmap* pixmap = hbmp ? PixmapFromHBITMAPPixels(hbmp) : nullptr;
+        CloseClipboard();
+        if (pixmap || !hbmp) {
+            return pixmap;
+        }
+        Sleep(kPauseMs);
     }
-
-    Pixmap* pixmap = nullptr;
-    // CF_BITMAP is synthesized by Windows from CF_DIB and vice versa. The HBITMAP
-    // returned by GetClipboardData() remains owned by the clipboard.
-    HBITMAP hbmp = (HBITMAP)GetClipboardData(CF_BITMAP);
-    if (hbmp) {
-        pixmap = PixmapFromHBITMAPPixels(hbmp);
-    }
-    CloseClipboard();
-    return pixmap;
+    return nullptr;
 }

@@ -184,9 +184,11 @@ class EngineMupdf : public EngineBase {
     // (index [page - 1] within). An unlaid chapter has a single placeholder
     // entry; LayOutChapter() appends the rest once the real count is known.
     Vec<Vec<FzPageInfo*>*> chapterPages;
-    // every page of a reflowable doc shares this mediabox (set once in
-    // FinishNonPDFLoading); lets PageMediabox() skip pagesLock on the hot path
+    // Shared reflow page size so PageMediabox() can skip pagesLock.
+    // reflowPagesVary: laid-out chapters measured to different sizes.
     RectF reflowMediabox;
+    bool reflowPagesVary = false;
+    Vec<u8> chapterBoxMeasured; // 1 once that chapter's box came from fz_bound_page
     fz_outline* outline = nullptr;
     fz_outline* attachments = nullptr;
     pdf_obj* pdfInfo = nullptr;
@@ -223,6 +225,15 @@ class EngineMupdf : public EngineBase {
     int journalNesting = 0;
     // position in the undo history the file was last saved at
     int savedUndoPos = 0;
+
+    // The whole file, once the document reads from memory (a small file at
+    // load, a big one after its first change). Saving then never re-reads the
+    // file, which is slow on a network / cloud drive (discussion #6256)
+    fz_buffer* fileBytes = nullptr;
+    bool fileBytesLoadStarted = false;
+    // the file as loaded, to tell whether it changed on disk since
+    i64 fileSizeAtLoad = -1;
+    FILETIME fileTimeAtLoad{};
 
     // smart dark mode: engine-level image feature/processed caches
     DarkModeEngineCache* darkModeEngineCache = nullptr;

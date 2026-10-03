@@ -8,6 +8,17 @@ struct PushedCitation;
 struct LoadArgs;
 struct ReadAloudHighlightMap;
 
+// what a sidebar panel shows
+enum class SidebarView {
+    Bookmarks,
+    Thumbnails,
+    Favorites,
+};
+constexpr int kSidebarViewCount = 3;
+
+SidebarView SidebarViewFromStr(Str s, SidebarView def);
+Str SidebarViewToStr(SidebarView);
+
 struct AutoScroll {
     bool on = false;
     bool paused = false;
@@ -119,6 +130,8 @@ struct WindowTab {
     // state of the table of contents
     bool showToc = false;
     bool showTocPresentation = false;
+    // what the sidebar's top panel shows (showToc: whether it does)
+    SidebarView sidebarView = SidebarView::Bookmarks;
     // whether to auto-reload the document when the tab is selected
     bool reloadOnFocus = false;
     // opened via CmdOpenFileNoHistory: do not write File History / Windows Recent

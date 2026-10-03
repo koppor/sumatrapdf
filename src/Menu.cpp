@@ -11,8 +11,10 @@
 #include "base/GdiPlusUtil.h"
 
 #include "gui/UIModels.h"
+#include "gui/Layout.h"
 #include "gui/Gfx.h"
 #include "gui/PlatformFont.h"
+#include "gui/VirtCtrl.h"
 
 #include "Settings.h"
 #include "AppSettings.h"
@@ -49,6 +51,8 @@
 #include "ReadAloud.h"
 #include "ReadingAutoScroll.h"
 #include "ReadingBar.h"
+#include "TableOfContents.h"
+#include "SidebarPanel.h"
 #include "Menu.h"
 
 // value associated with menu item for owner-drawn purposes
@@ -314,6 +318,10 @@ static MenuDef menuDefView[] = {
     {
         TrN("Show Book&marks"),
         CmdToggleBookmarks,
+    },
+    {
+        TrN("Sho&w Thumbnails"),
+        CmdToggleThumbnails,
     },
     {
         TrN("Show Me&nu"),
@@ -1039,6 +1047,10 @@ static MenuDef menuDefCreateAnnotUnderCursor[] = {
         CmdInsertImage,
     },
     {
+        TrN("Si&gn With Image"),
+        CmdSignWithImage,
+    },
+    {
         TrN("&Caret"),
         CmdCreateAnnotCaret,
     },
@@ -1219,6 +1231,10 @@ static MenuDef menuDefDocumentOperations[] = {
         CmdPdfDeletePages,
     },
     {
+        TrN("Merge PDF..."),
+        CmdMergePDF,
+    },
+    {
         TrN("Extract Text From Document"),
         CmdDocumentExtractText,
     },
@@ -1245,6 +1261,10 @@ static MenuDef menuDefDocumentOperations[] = {
     {
         TrN("Insert Image..."),
         CmdInsertImage,
+    },
+    {
+        TrN("Sign With Image"),
+        CmdSignWithImage,
     },
     {
         TrN("Sign Document..."),
@@ -1315,6 +1335,10 @@ static MenuDef menuDefContext[] = {
     {
         TrN("Show &Bookmarks"),
         CmdToggleBookmarks,
+    },
+    {
+        TrN("Show &Thumbnails"),
+        CmdToggleThumbnails,
     },
     {
         TrN("Sh&ow Toolbar"),
@@ -1537,6 +1561,19 @@ static void AppendSelectionHandlersToMenu(HMENU m, bool isEnabled) {
     AppendCommandsToMenu(m, cmds, isEnabled);
 }
 
+// TextSnippets: one is an item of its own, several get a submenu
+static void AppendTextSnippetsToMenu(HMENU m) {
+    Vec<CustomCommand*> cmds;
+    GetCommandsWithOrigId(cmds, CmdInsertTextSnippet);
+    if (len(cmds) < 2) {
+        AppendCommandsToMenu(m, cmds, true);
+        return;
+    }
+    HMENU sub = CreatePopupMenu();
+    AppendCommandsToMenu(sub, cmds, true);
+    AppendMenuW(m, MF_POPUP | MF_ENABLED, (UINT_PTR)sub, ToWStrTemp(Tr("Insert Te&xt")).s);
+}
+
 static void AppendExternalViewersToMenu(HMENU menuFile, Str filePath) {
     if (!CanAccessDisk() || (filePath && !file::Exists(filePath))) {
         return;
@@ -1556,9 +1593,7 @@ static void AppendExternalViewersToMenu(HMENU menuFile, Str filePath) {
         if (str::IsEmptyOrWhiteSpace(cmd->name)) {
             if (str::IsEmptyOrWhiteSpace(name)) {
                 StrNode* args = ParseCmdLine(ToWStrTemp(commandLine));
-                defer {
-                    FreeStrNode(nullptr, args);
-                };
+                AutoFreeStrNode freeArgs(args);
                 StrNode* arg0 = args;
                 for (int i = 0; arg0 && i < 2; i++) {
                     arg0 = arg0->next;
@@ -1685,6 +1720,12 @@ HMENU BuildMenuFromDef(MenuDef* menuDef, HMENU menu, BuildMenuCtx* ctx) {
             addExternalViewersNext = true;
         }
 
+        // TextSnippets go right after Free Text
+        bool snippetsHere = menuDef == menuDefCreateAnnotUnderCursor && md.idOrSubmenu == CmdAnnotationHighlightBrush;
+        if (snippetsHere && ctx && ctx->supportsAnnots) {
+            AppendTextSnippetsToMenu(menu);
+        }
+
         // custom selection handlers go before the built-in translate / search submenus
         if (md.idOrSubmenu == (UINT_PTR)menuDefTranslateWith) {
             if (menuDef == menuDefMainSelection) {
@@ -1748,6 +1789,8 @@ HMENU BuildMenuFromDef(MenuDef* menuDef, HMENU menu, BuildMenuCtx* ctx) {
             }
         }
         removeMenu |= ((subMenuDef == menuDefDebug) && !ShowDebugMenu());
+        // without Annotations.SignatureImage it would just be Insert Image
+        removeMenu |= !isSubMenu && cmdId == CmdSignWithImage && len(gSettings->annotations.signatureImage) == 0;
         if (removeMenu) {
             continue;
         }
@@ -2072,10 +2115,13 @@ static void MenuUpdateStateForWindow(MainWindow* win) {
     MenuSetEnabled(win->menu, CmdToggleBookmarks, enabled);
 
     bool documentSpecific = win->IsDocLoaded();
-    bool checked = documentSpecific ? win->uiState.tocVisible : gSettings->showToc;
+    bool bookmarksShown = IsSidebarViewShown(win, SidebarView::Bookmarks);
+    bool checked = documentSpecific ? bookmarksShown : gSettings->showToc;
     MenuSetChecked(win->menu, CmdToggleBookmarks, checked);
+    MenuSetEnabled(win->menu, CmdToggleThumbnails, CanShowThumbnails(tab));
+    MenuSetChecked(win->menu, CmdToggleThumbnails, IsSidebarViewShown(win, SidebarView::Thumbnails));
 
-    MenuSetChecked(win->menu, CmdFavoriteToggle, gSettings->showFavorites);
+    MenuSetChecked(win->menu, CmdFavoriteToggle, IsSidebarViewShown(win, SidebarView::Favorites));
     MenuSetChecked(win->menu, CmdFavoriteShowInTab, FindFavoritesTab(win) != nullptr);
     {
         // checked when mode is not "hide" (show or overlay)
@@ -2387,10 +2433,12 @@ void OnWindowContextMenu(MainWindow* win, int x, int y) {
 
     MenuUpdatePrintItem(win, popup, true);
     MenuSetEnabled(popup, CmdToggleBookmarks, win->ctrl->HasToc());
-    MenuSetChecked(popup, CmdToggleBookmarks, win->uiState.tocVisible);
+    MenuSetChecked(popup, CmdToggleBookmarks, IsSidebarViewShown(win, SidebarView::Bookmarks));
+    MenuSetEnabled(popup, CmdToggleThumbnails, CanShowThumbnails(tab));
+    MenuSetChecked(popup, CmdToggleThumbnails, IsSidebarViewShown(win, SidebarView::Thumbnails));
 
     MenuSetEnabled(popup, CmdFavoriteToggle, HasFavorites());
-    MenuSetChecked(popup, CmdFavoriteToggle, gSettings->showFavorites);
+    MenuSetChecked(popup, CmdFavoriteToggle, IsSidebarViewShown(win, SidebarView::Favorites));
     MenuSetEnabled(popup, CmdFavoriteShowInTab, HasFavorites() && SettingsUseTabs());
     MenuSetChecked(popup, CmdFavoriteShowInTab, FindFavoritesTab(win) != nullptr);
 
@@ -2462,6 +2510,11 @@ void OnWindowContextMenu(MainWindow* win, int x, int y) {
     auto* cmd = FindCustomCommand(cmdId);
     if (cmd && cmd->origId == CmdSelectionHandler) {
         HwndSendCommand(win->hwndFrame, cmd->id);
+        return;
+    }
+    // a text snippet goes where the menu was opened
+    if (cmd && cmd->origId == CmdInsertTextSnippet) {
+        HwndSendCommand(win->hwndFrame, cmd->id, MAKELPARAM(x, y));
         return;
     }
 
@@ -2616,7 +2669,8 @@ bool CommandUsesContextMenuPoint(int cmdId) {
         return true;
     }
     return cmdId == CmdDeleteAnnotation || cmdId == CmdCreateAnnotImageFromClipboard || cmdId == CmdInsertImage ||
-           cmdId == CmdPasteAnnotation || cmdId == CmdCopyAnnotation || cmdId == CmdCutAnnotation;
+           cmdId == CmdSignWithImage || cmdId == CmdPasteAnnotation || cmdId == CmdCopyAnnotation ||
+           cmdId == CmdCutAnnotation;
 }
 
 // so that we can do free everything at exit

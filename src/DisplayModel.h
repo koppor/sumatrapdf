@@ -179,6 +179,7 @@ struct DisplayModel : DocController {
 
     int GetRotation() const;
     float GetZoomReal(int pageNo) const;
+    float ComputeZoomReal(int pageNo) const;
     float MaxZoomForDocument() const;
     void Relayout(float zoomVirtual, int rotation);
     bool ViewportReadyForRelayout() const;
@@ -258,6 +259,7 @@ struct DisplayModel : DocController {
     void SyncWithEngineLayout();
     // valid only during the PagesRenumbered callback
     int RemapPageNo(int oldPageNo);
+    int FindPageNoByLoc(Location loc) const;
     bool PageVisibleNearbyLocked(int pageNo) const;
 
     bool InPresentation() const;

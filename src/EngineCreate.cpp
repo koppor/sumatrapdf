@@ -244,6 +244,9 @@ bool IsSupportedFileType(FileType kind, bool enableEngineEbooks) {
     if (IsEnginePsSupportedFileType(kind)) {
         return true;
     }
+    if (IsEngineDviSupportedFileType(kind)) {
+        return true;
+    }
     if (kind == FileType::Lit) {
         return true;
     }
@@ -285,7 +288,7 @@ static EngineBase* CreateEngineForKind(FileType kind, FileType contentHintKind, 
     EngineBase* engine = nullptr;
     // markdown has no native SumatraPDF engine; always use mupdf (cmark-gfm),
     // regardless of gEnableEpubWithPdfEngine.
-    if (kind == FileType::PDF || kind == FileType::Xps || kind == FileType::Markdown) {
+    if (kind == FileType::PDF || kind == FileType::Xps || kind == FileType::Markdown || IsOfficeFileType(kind)) {
         engine = CreateEngineMupdfFromFile(path, kind, dpi, pwdUI);
         return engine;
     }
@@ -321,6 +324,10 @@ static EngineBase* CreateEngineForKind(FileType kind, FileType contentHintKind, 
     }
     if (IsEnginePsSupportedFileType(kind)) {
         engine = CreateEnginePsFromFile(path);
+        return engine;
+    }
+    if (IsEngineDviSupportedFileType(kind)) {
+        engine = CreateEngineDviFromFile(path);
         return engine;
     }
     if (kind == FileType::Lit) {

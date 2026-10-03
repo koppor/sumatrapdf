@@ -299,6 +299,16 @@ void SetRect(Annotation* annot, RectF r) {
                 if (nStrokes > 0) {
                     pdf_set_annot_ink_list(ctx, a, nStrokes, strokeCounts.els, pts.els);
                 }
+            } else if (r.dx == annot->bounds.dx && r.dy == annot->bounds.dy) {
+                // a move: shift /Rect itself. The bounds can be bigger than
+                // /Rect (a border), so setting them as /Rect grew the
+                // annotation on every move
+                fz_rect rect = pdf_annot_rect(ctx, a);
+                rect.x0 += dx;
+                rect.x1 += dx;
+                rect.y0 += dy;
+                rect.y1 += dy;
+                pdf_set_annot_rect(ctx, a, rect);
             } else {
                 pdf_set_annot_rect(ctx, a, ToFzRect(r));
             }
@@ -447,9 +457,7 @@ void SetQuadPointsAsRect(Annotation* annot, const Vec<RectF>& rects) {
         if (!quads) {
             return;
         }
-        defer {
-            free(quads);
-        };
+        AutoFree<fz_quad> freeQuads(quads);
         for (int i = 0; i < n; i++) {
             RectF rect = rects[i];
             fz_rect r = ToFzRect(rect);
@@ -1931,11 +1939,7 @@ static float PointSegmentDistSq(PointF p, PointF a, PointF b) {
     float t = 0.f;
     if (lengthSq > 0.f) {
         t = (((p.x - a.x) * dx) + ((p.y - a.y) * dy)) / lengthSq;
-        if (t < 0.f) {
-            t = 0.f;
-        } else if (t > 1.f) {
-            t = 1.f;
-        }
+        t = ClampF(t, 0.f, 1.f);
     }
     float px = a.x + (t * dx);
     float py = a.y + (t * dy);

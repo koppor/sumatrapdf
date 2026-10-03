@@ -595,9 +595,7 @@ VirtRoot::VirtRoot(HWND hwnd) {
 VirtRoot::~VirtRoot() {
     // `tops` belong to the layout tree and can outlive us; make sure they don't
     // report their destruction to a root that is gone
-    for (VirtCtrl* w : tops) {
-        w->SetRoot(nullptr);
-    }
+    ForgetTops();
     delete owned;
     delete tooltip;
     GfxDestroyDoubleBuffer(gfxBuf);
@@ -629,8 +627,19 @@ void VirtRoot::SetChild(VirtCtrl* c) {
     needsLayout = true;
 }
 
+// the tops let go of this root, unless another root took them since
+void VirtRoot::ForgetTops() {
+    for (VirtCtrl* w : tops) {
+        if (w->root == this) {
+            w->SetRoot(nullptr);
+        }
+    }
+}
+
 void VirtRoot::SetTops(const Vec<VirtCtrl*>& newTops) {
     ReportIf(owned);
+    // a dropped top can outlive this root (e.g. a view that moved elsewhere)
+    ForgetTops();
     VecReset(tops);
     hovered = nullptr;
     captured = nullptr;
@@ -962,6 +971,16 @@ void VirtRoot::TrackMouseLeaveIfNeeded() {
     }
 }
 
+// WS_EX_NOACTIVATE cannot take focus. SetFocus on it drops the foreground
+// window: the home-page About popup then closes on the Copy button's mouse-down.
+static bool HwndTakesFocus(HWND hwnd) {
+    if (!hwnd) {
+        return false;
+    }
+    DWORD ex = (DWORD)GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    return (ex & WS_EX_NOACTIVATE) == 0;
+}
+
 // press a virtual control (mouse down, or a DBLCLK that is really a second click)
 static bool BeginVirtPress(VirtRoot* root, VirtCtrl* target, Point ptWindow, Point ptLocal, int button, WPARAM wp = 0) {
     root->ClearPressed();
@@ -970,7 +989,7 @@ static bool BeginVirtPress(VirtRoot* root, VirtCtrl* target, Point ptWindow, Poi
         // virtual controls have no HWND. Keys go to whoever has Win32
         // focus, so a child Edit (Contents, filter) would keep them
         // after this click unless we take them back (issue #6033).
-        if (hwnd && ::GetFocus() != hwnd) {
+        if (hwnd && HwndTakesFocus(hwnd) && ::GetFocus() != hwnd) {
             ::SetFocus(hwnd);
         }
         root->SetFocus(target);
@@ -1254,7 +1273,7 @@ int VirtScroll::MaxScrollY() const {
 
 bool VirtScroll::ScrollTo(int y) {
     int maxY = MaxScrollY();
-    y = Clamp(y, 0, maxY);
+    y = ClampI(y, 0, maxY);
     if (y == scrollY) {
         return false;
     }
@@ -1451,7 +1470,7 @@ int ScrollBox::MaxScrollY() const {
 
 bool ScrollBox::ScrollTo(int y) {
     int maxY = MaxScrollY();
-    y = Clamp(y, 0, maxY);
+    y = ClampI(y, 0, maxY);
     if (y == scrollY) {
         UpdateScrollbar();
         return false;
@@ -1635,7 +1654,7 @@ Rect VirtListBox::ThumbRectLocal() {
     int visibleDy = UsableDy();
     int minDy = DpiScaleByDpi(GetDpi(), 20);
     int thumbDy = Scale(sb.dy, visibleDy, contentDy);
-    thumbDy = Clamp(thumbDy, std::min(minDy, sb.dy), sb.dy);
+    thumbDy = ClampI(thumbDy, std::min(minDy, sb.dy), sb.dy);
     int maxY = MaxScrollY();
     int y = (maxY > 0) ? Scale(sb.dy - thumbDy, scrollY, maxY) : 0;
     return {sb.x, sb.y + y, sb.dx, thumbDy};
@@ -1655,7 +1674,7 @@ Size VirtListBox::GetIdealSize() {
 void VirtListBox::SetBounds(Rect r) {
     VirtCtrl::SetBounds(r);
     // a taller viewport can make the current scroll position invalid
-    scrollY = Clamp(scrollY, 0, MaxScrollY());
+    scrollY = ClampI(scrollY, 0, MaxScrollY());
     if (pendingVisibleIdx >= 0) {
         int idx = pendingVisibleIdx;
         pendingVisibleIdx = -1;
@@ -1664,7 +1683,7 @@ void VirtListBox::SetBounds(Rect r) {
 }
 
 bool VirtListBox::ScrollTo(int y) {
-    y = Clamp(y, 0, MaxScrollY());
+    y = ClampI(y, 0, MaxScrollY());
     if (y == scrollY) {
         return false;
     }
@@ -1778,8 +1797,8 @@ void VirtListBox::SelectRange(int from, int to) {
     if (n == 0) {
         return;
     }
-    from = Clamp(from, 0, n - 1);
-    to = Clamp(to, 0, n - 1);
+    from = ClampI(from, 0, n - 1);
+    to = ClampI(to, 0, n - 1);
     if (!multiSelect) {
         SetCurrentSelection(to);
         return;
@@ -2138,7 +2157,7 @@ void VirtListBox::OnKeyDown(VirtKeyEvent* ev) {
         default:
             return;
     }
-    idx = Clamp(idx, 0, n - 1);
+    idx = ClampI(idx, 0, n - 1);
     ApplyNav(idx, ev->isCtrl, ev->isShift);
     ev->didHandle = true;
     return;
@@ -2927,19 +2946,28 @@ constexpr int kLabelPad = 2;
 constexpr int kCloseBtnDx = 16;
 constexpr int kCloseBtnGapDx = 8;
 
+// Scale a panel header's ✕ for this window's DPI.
+void ApplyCloseButtonDpi(VirtCloseButton* closeBtn, int dpi) {
+    if (!closeBtn || dpi <= 0) {
+        return;
+    }
+    int pad = DpiScaleByDpi(dpi, kLabelPad);
+    int btnDx = DpiScaleByDpi(dpi, kCloseBtnDx);
+    int gap = DpiScaleByDpi(dpi, kCloseBtnGapDx);
+    // the padding is part of the ideal size, so it enlarges the hit area
+    // without shrinking the ✕ itself
+    closeBtn->padding = Insets{0, pad, 0, gap};
+    closeBtn->idealSize = {btnDx + pad + gap, btnDx};
+}
+
 // Scale the header ✕ and label padding for this window's DPI.
 void ApplyLabelWithCloseDpi(VirtText* label, VirtCloseButton* closeBtn, int dpi) {
     if (!label || !closeBtn || dpi <= 0) {
         return;
     }
     int pad = DpiScaleByDpi(dpi, kLabelPad);
-    int btnDx = DpiScaleByDpi(dpi, kCloseBtnDx);
-    int gap = DpiScaleByDpi(dpi, kCloseBtnGapDx);
     label->padding = Insets{pad, pad, pad, pad};
-    // the padding is part of the ideal size, so it enlarges the hit area
-    // without shrinking the ✕ itself
-    closeBtn->padding = Insets{0, pad, 0, gap};
-    closeBtn->idealSize = {btnDx + pad + gap, btnDx};
+    ApplyCloseButtonDpi(closeBtn, dpi);
 }
 
 LabelWithClose NewLabelWithClose(HWND hwnd, PlatformFont* font, const VirtMouseHandler& onClose) {
@@ -3128,12 +3156,7 @@ int VirtSlider::ValueFromLocalX(int xLocal) {
     if (track.dx > 0) {
         t = (float)(x - track.x) / (float)track.dx;
     }
-    if (t < 0) {
-        t = 0;
-    }
-    if (t > 1) {
-        t = 1;
-    }
+    t = ClampF(t, 0, 1);
     int n = maxVal - minVal;
     return minVal + (int)lroundf(t * (float)n);
 }
@@ -3146,12 +3169,7 @@ void VirtSlider::SetValue(int v, bool notify) {
     if (maxVal < minVal) {
         maxVal = minVal;
     }
-    if (v < minVal) {
-        v = minVal;
-    }
-    if (v > maxVal) {
-        v = maxVal;
-    }
+    v = ClampI(v, minVal, maxVal);
     if (v == value) {
         if (!adjusting) {
             committed = v;

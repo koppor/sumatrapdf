@@ -22,6 +22,8 @@ extern "C" {
 }
 
 #include "ImageReader.h"
+#include "JxlReader.h"
+#include "WebpReader.h"
 #include "DocProperties.h"
 #include "DocController.h"
 #include "gui/UIModels.h"
@@ -237,6 +239,75 @@ EngineImages::~EngineImages() {
     str::Free(sourceData);
 }
 
+struct FzDecodeDst {
+    fz_context* ctx = nullptr;
+    fz_pixmap* pix = nullptr;
+};
+
+static u8* AllocFzDecodeDst(void* user, int dx, int dy, bool hasAlpha, int* stride) {
+    auto* d = (FzDecodeDst*)user;
+    fz_context* ctx = d->ctx;
+    // must not throw: we're called from inside the decoder
+    fz_try(ctx) {
+        d->pix = fz_new_pixmap(ctx, fz_device_rgb(ctx), dx, dy, nullptr, hasAlpha ? 1 : 0);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        return nullptr;
+    }
+    *stride = (int)d->pix->stride;
+    return d->pix->samples;
+}
+
+// fz_pixmap with alpha must be premultiplied; decoders give straight alpha
+static void PremultiplyRgba(fz_pixmap* pix) {
+    for (int y = 0; y < pix->h; y++) {
+        u8* p = pix->samples + ((size_t)y * pix->stride);
+        for (int x = 0; x < pix->w; x++, p += 4) {
+            int a = p[3];
+            if (a == 255) {
+                continue;
+            }
+            p[0] = (u8)(((p[0] * a) + 127) / 255);
+            p[1] = (u8)(((p[1] * a) + 127) / 255);
+            p[2] = (u8)(((p[2] * a) + 127) / 255);
+        }
+    }
+}
+
+typedef bool (*DecodeRgbIntoFn)(Str, DecodeDstAllocFn, void*);
+
+// LoadFzImageForPage decodes these itself, so EngineImage mustn't also decode
+// them on open (#6245)
+static bool DecodedByFzDecoder(FileType kind) {
+    return FileType::Jxl == kind || FileType::Webp == kind;
+}
+
+// For formats mupdf can't decode (JPEG XL, WebP): decode into an fz_pixmap so
+// the page takes the same render/scale path as JPEG/PNG pages.
+static fz_image* FzImageFromDecoder(fz_context* ctx, Str data, DecodeRgbIntoFn decode) {
+    FzDecodeDst dst;
+    dst.ctx = ctx;
+    fz_image* img = nullptr;
+    fz_var(img);
+    fz_try(ctx) {
+        if (decode(data, AllocFzDecodeDst, &dst)) {
+            if (dst.pix->alpha) {
+                PremultiplyRgba(dst.pix);
+            }
+            img = fz_new_image_from_pixmap(ctx, dst.pix, nullptr);
+        }
+    }
+    fz_always(ctx) {
+        fz_drop_pixmap(ctx, dst.pix);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        img = nullptr;
+    }
+    return img;
+}
+
 // Wrap the page's raw image bytes in an fz_image for lazy mupdf decoding.
 // The actual JPEG/PNG decode happens later in RenderPage at near-target
 // scale, much cheaper than decoding at full resolution up front.
@@ -248,11 +319,17 @@ fz_image* EngineImages::LoadFzImageForPage(fz_context* ctx, int pageNo) {
     }
     // Prefer PixmapFromData / LoadPixmapForPage over mupdf for formats where a
     // dedicated path is faster and we do not need mupdf's scaled JPEG decode:
-    //   WebP     → libwebp (bench_image: faster than WIC)
     //   HEIC/AVIF→ Debug: heicdec then WIC; Release: WIC then heicdec
     FileType kind = GuessFileTypeFromData(data);
-    if (FileType::Webp == kind || FileType::Heic == kind || FileType::Avif == kind || FileType::Ico == kind) {
+    if (FileType::Heic == kind || FileType::Avif == kind || FileType::Ico == kind) {
         return nullptr;
+    }
+    // nullptr (e.g. EXIF-rotated WebP) falls back to PixmapFromData
+    if (FileType::Jxl == kind) {
+        return FzImageFromDecoder(ctx, data, jxl::DecodeRgbInto);
+    }
+    if (FileType::Webp == kind) {
+        return FzImageFromDecoder(ctx, data, webp::DecodeRgbInto);
     }
     fz_image* img = nullptr;
     fz_buffer* buf = nullptr;
@@ -574,10 +651,10 @@ static fz_pixmap* ScaleDecodedToTile(fz_context* ctx, fz_pixmap* decoded, fz_mat
     float ky = (float)mediaScreen.dy / (float)reqH;
     // whole pixels: a fractional dest makes fz_scale_pixmap add alpha and
     // feather the edges, which shows as seams between tiles
-    int x0 = (int)floorf(ctm.e * kx + 0.5f);
-    int y0 = (int)floorf(ctm.f * ky + 0.5f);
-    int x1 = (int)floorf((ctm.e + ctm.a) * kx + 0.5f);
-    int y1 = (int)floorf((ctm.f + ctm.d) * ky + 0.5f);
+    int x0 = (int)floorf((ctm.e * kx) + 0.5f);
+    int y0 = (int)floorf((ctm.f * ky) + 0.5f);
+    int x1 = (int)floorf(((ctm.e + ctm.a) * kx) + 0.5f);
+    int y1 = (int)floorf(((ctm.f + ctm.d) * ky) + 0.5f);
     fz_irect tile;
     tile.x0 = screen.x - mediaScreen.x;
     tile.y0 = screen.y - mediaScreen.y;
@@ -632,7 +709,11 @@ Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
             pageRc.dy = -pageRc.dy;
         }
     }
-    Rect screen = Transform(pageRc, pageNo, zoom, rotation).Round();
+    // A tile's pageRect is its screen pixel box mapped back to page space: round to
+    // nearest to get that box back. Rounding the snapped pageRc outward came out 1px
+    // bigger than the tile at many zooms, which missed the mupdf path (#6245).
+    Rect screen = pageRect ? ToRect(Transform(*pageRect, pageNo, zoom, rotation))
+                           : Transform(pageRc, pageNo, zoom, rotation).Round();
     if (screen.IsEmpty()) {
         DropPage(page, false);
         return nullptr;
@@ -1315,9 +1396,10 @@ bool EngineImage::LoadSingleFile(Str path) {
     // Huge scans (e.g. 39137x22279 JPEG ≈ 3.5GB BGRA) must not be fully
     // decoded on open. 3.5.2 kept a GDI+ Bitmap and drew it at window size;
     // we keep the encoded bytes and let RenderPage decode at display scale.
-    if (!ImageDecodedPixmapWouldBeHuge(data)) {
+    bool isHuge = ImageDecodedPixmapWouldBeHuge(data);
+    if (!isHuge && !DecodedByFzDecoder(imageFormat)) {
         frames = PixmapsFromData(data);
-    } else {
+    } else if (isHuge) {
         logf("EngineImage::LoadSingleFile: skip eager decode of %dx%d '%s'\n", fallbackSize.dx, fallbackSize.dy, path);
     }
     bool ok = FinishLoading(fallbackSize);
@@ -1342,7 +1424,7 @@ bool EngineImage::LoadFromData(Str data) {
     SetDefaultExt(defaultExt, path::GetExtTemp(fileExt));
 
     Size fallbackSize = ImageSizeFromDataPortable(data);
-    if (!ImageDecodedPixmapWouldBeHuge(data)) {
+    if (!DecodedByFzDecoder(GuessFileTypeFromData(data)) && !ImageDecodedPixmapWouldBeHuge(data)) {
         frames = PixmapsFromData(data);
     }
     bool ok = FinishLoading(fallbackSize);
@@ -2347,6 +2429,9 @@ class EngineCbx : public EngineImages {
                                       Str realPath = {});
     static EngineBase* CreateFromData(Str data);
 
+    // tocTree comes from ComicInfo.xml, not synthesized from file / folder names
+    bool tocFromComicInfo = false;
+
   protected:
     Pixmap* LoadPixmapForPage(int pageNo, bool& deleteAfterUse) override;
     RectF LoadMediabox(int pageNo) override;
@@ -2659,7 +2744,7 @@ bool EngineCbx::FinishLoading() {
         auto* pi = new ImagePageInfo();
         VecAppend(pageInfos, pi);
     }
-    files = std::move(pageFiles);
+    files = pageFiles;
     pageCount = nFiles;
 
     TocItem* tocBuildRoot = nullptr;
@@ -2694,6 +2779,7 @@ bool EngineCbx::FinishLoading() {
             auto* realRoot = AllocTocItem(arena, {}, 0);
             realRoot->child = tocBuildRoot;
             tocTree = AllocTocTree(arena, realRoot);
+            tocFromComicInfo = true;
         }
     } else {
         TocItem* folderRoot = BuildCbxFolderToc(arena, files);
@@ -2971,6 +3057,15 @@ EngineBase* CreateEngineCbxFromFile(Str path, PasswordUI* pwdUI, FileType hintTy
 
 EngineBase* CreateEngineCbxFromData(Str data) {
     return EngineCbx::CreateFromData(data);
+}
+
+// Comic archive bookmarks are synthesized from file / folder names unless they
+// come from ComicInfo.xml; only those are worth showing the sidebar for (#6244).
+bool EngineCbxHasComicInfoToc(EngineBase* engine) {
+    if (!IsOfKind(engine, kindEngineComicBooks)) {
+        return false;
+    }
+    return ((EngineCbx*)engine)->tocFromComicInfo;
 }
 
 bool IsEngineImages(EngineBase* engine) {

@@ -462,10 +462,9 @@ static const char* NativeLongName(BenchFormat fmt) {
             return "libjpeg";
         case BenchFormat::Webp:
             return "libwebp";
-        case BenchFormat::Avif:
-            return "heicdec"; // AV1 via dav1d
-        case BenchFormat::Heif:
-            return "heicdec"; // HEVC pure-C
+        case BenchFormat::Avif: // AV1 via dav1d
+        case BenchFormat::Heif: // HEVC pure-C
+            return "heicdec";
         case BenchFormat::Jxl:
             return "jxldec";
     }
@@ -592,7 +591,7 @@ int main(int argc, char** argv) {
     Str root{};
 
     for (int i = 1; i < argc; i++) {
-        Str arg = argv[i];
+        Str arg(argv[i]);
         if (str::EqI(arg, StrL("-jpeg")) || str::EqI(arg, StrL("--jpeg"))) {
             fmt = BenchFormat::Jpeg;
             haveFmt = true;

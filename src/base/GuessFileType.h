@@ -47,8 +47,15 @@ enum class FileType : u8 {
     Directory = 37,
     Lit = 38,
     Ico = 39,
+
+    // Office Open XML, rendered by MuPDF. Only found by sniffing the content
+    Docx = 40,
+    Xlsx = 41,
+    Pptx = 42,
+
+    Dvi = 43,
 };
-constexpr int kFileTypeCount = (int)FileType::Ico + 1;
+constexpr int kFileTypeCount = (int)FileType::Dvi + 1;
 
 // embedded PDF files have paths like "c:/foo.pdf:${pdfStreamNo}"
 // or "c:/foo.pdf:${pdfStreamNo}:attachname=${hexUtf8Name}"
@@ -83,6 +90,7 @@ FileType GuessFileType(Str path, bool sniff);
 TempStr GfxFileExtFromDataTemp(Str);
 TempStr GfxFileExtFromTypeTemp(FileType);
 TempStr GetExtForFileTypeTemp(FileType);
+bool IsOfficeFileType(FileType);
 
 int FileTypeIndexOf(const FileType* types, int nTypes, FileType ft);
 

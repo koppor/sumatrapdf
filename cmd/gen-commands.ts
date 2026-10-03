@@ -336,6 +336,10 @@ const commandsRaw = [
     "CmdOpenFileWithSumatraFilePicker", "Open File With SumatraPDF File Picker...",
     "CmdSelectCurrentPage", "Select Current Page",
     "CmdZoomFitVisible", "Zoom: Fit Visible",
+    "CmdSignWithImage", "Sign With Image",
+    "CmdInsertTextSnippet", "Insert Text Snippet",
+    "CmdToggleThumbnails", "Toggle Thumbnails",
+    "CmdMergePDF", "Merge PDF...",
     "CmdRefHoverPushToJabRef", "Push Reference to JabRef",
 ];
 

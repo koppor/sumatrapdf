@@ -374,6 +374,36 @@ T limitValue(T val, T min, T max) {
     return val < min ? min : (val > max ? max : val);
 }
 
+inline int ClampI(int x, int min, int max) {
+    if (x < min) {
+        x = min;
+    }
+    if (x > max) {
+        x = max;
+    }
+    return x;
+}
+
+inline float ClampF(float x, float min, float max) {
+    if (x < min) {
+        x = min;
+    }
+    if (x > max) {
+        x = max;
+    }
+    return x;
+}
+
+inline double ClampD(double x, double min, double max) {
+    if (x < min) {
+        x = min;
+    }
+    if (x > max) {
+        x = max;
+    }
+    return x;
+}
+
 // return true if adding n to val overflows. Only valid for n > 0
 template <typename T>
 inline bool addOverflows(T val, T n) {
@@ -717,7 +747,7 @@ struct Func1List : Func1<T> {
 
 int setMinMax(int& v, int minVal, int maxVal);
 
-/* Usage: defer { instance->Release(); }; */
+/* Usage: defer { inLayout = false; }; */
 #define defer const auto& CONCAT(defer__, __LINE__) = ExitScopeHelp() + [&]()
 
 extern AtomicInt gAllowAllocFailure;
@@ -868,7 +898,7 @@ int NormalizeRotation(int rotation);
 using ThreadId = DWORD;
 using ThreadHandle = HANDLE;
 
-struct Mutex {
+struct Mutex : NonCopyable {
     SRWLOCK lock = SRWLOCK_INIT;
 
     Mutex() = default;
@@ -879,7 +909,7 @@ struct Mutex {
     bool TryLock() { return TryAcquireSRWLockExclusive(&lock); }
 };
 
-struct ConditionVariable {
+struct ConditionVariable : NonCopyable {
     CONDITION_VARIABLE cond = CONDITION_VARIABLE_INIT;
 
     ConditionVariable() = default;
@@ -890,7 +920,7 @@ struct ConditionVariable {
     void WakeAll() { WakeAllConditionVariable(&cond); }
 };
 
-struct RecursiveMutex {
+struct RecursiveMutex : NonCopyable {
     CRITICAL_SECTION lock;
 
     RecursiveMutex() { InitializeCriticalSection(&lock); }
@@ -901,14 +931,14 @@ struct RecursiveMutex {
     bool TryLock() { return TryEnterCriticalSection(&lock); }
 };
 
-struct AutoUnlockMutex {
+struct AutoUnlockMutex : NonCopyable {
     Mutex* mutex;
 
     explicit AutoUnlockMutex(Mutex* mutex) : mutex(mutex) { mutex->Lock(); }
     ~AutoUnlockMutex() { mutex->Unlock(); }
 };
 
-struct AutoUnlockRecursiveMutex {
+struct AutoUnlockRecursiveMutex : NonCopyable {
     RecursiveMutex* mutex;
 
     explicit AutoUnlockRecursiveMutex(RecursiveMutex* mutex) : mutex(mutex) { mutex->Lock(); }
@@ -2191,6 +2221,26 @@ struct AutoDelete : NonCopyable {
     }
     T* operator->() const { // NOLINT
         return o;
+    }
+};
+
+// frees a StrNode list (FreeStrNode(nullptr, head)) at the end of the scope
+struct AutoFreeStrNode : NonCopyable {
+    StrNode* head = nullptr;
+    explicit AutoFreeStrNode(StrNode* head) : head(head) {}
+    ~AutoFreeStrNode() { FreeStrNode(nullptr, head); }
+};
+
+// calls Release() on a ref-counted object (engine, COM interface) at the end of
+// the scope
+template <typename T>
+struct AutoRelease : NonCopyable {
+    T* o = nullptr;
+    explicit AutoRelease(T* p) : o(p) {}
+    ~AutoRelease() {
+        if (o) {
+            o->Release();
+        }
     }
 };
 

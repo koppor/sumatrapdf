@@ -31,6 +31,7 @@
     V(".ps", FileType::PS)             \
     V(".ps.gz", FileType::PS)          \
     V(".eps", FileType::PS)            \
+    V(".dvi", FileType::Dvi)           \
     V(".lit", FileType::Lit)           \
     V(".fb2", FileType::Fb2)           \
     V(".fb2z", FileType::Fb2z)         \
@@ -135,7 +136,22 @@ TempStr GetExtForFileTypeTemp(FileType ft) {
     if (idx >= 0) {
         return SeqStrByIndex(gFileExts, idx);
     }
-    return {};
+    // Office types aren't in the extension table: name-based lists (Browse
+    // Files in Folder, Explorer preview) shouldn't claim Office files
+    switch (ft) {
+        case FileType::Docx:
+            return StrL(".docx");
+        case FileType::Xlsx:
+            return StrL(".xlsx");
+        case FileType::Pptx:
+            return StrL(".pptx");
+        default:
+            return {};
+    }
+}
+
+bool IsOfficeFileType(FileType ft) {
+    return ft == FileType::Docx || ft == FileType::Xlsx || ft == FileType::Pptx;
 }
 
 int FileTypeIndexOf(const FileType* types, int nTypes, FileType ft) {
@@ -189,6 +205,21 @@ static FileSig gFileSigs[] = {FILE_SIGS(MK_SIG)};
 // PDF files have %PDF-${ver} somewhere in the beginning of the file
 static bool IsPdfFileContent(Str d) {
     return d.len >= 8 && str::IndexOf(d, StrL("%PDF-")) >= 0;
+}
+
+// TeX DVI preamble: pre (247), format id 2 (classic) or 3 (pTeX), then
+// num/den/mag and a comment length. The id check keeps a stray 0xF7 from
+// matching.
+static bool IsDviFileContent(Str d) {
+    if (d.len < 15) {
+        return false;
+    }
+    const u8* p = (const u8*)d.s;
+    if (p[0] != 247 || (p[1] != 2 && p[1] != 3)) {
+        return false;
+    }
+    int commentLen = p[14];
+    return d.len >= 15 + commentLen;
 }
 
 static bool IsPSFileContent(Str d) {
@@ -319,6 +350,9 @@ static FileType DetectFileTypeFromData(Str d) {
     }
     if (IsPSFileContent(d)) {
         return FileType::PS;
+    }
+    if (IsDviFileContent(d)) {
+        return FileType::Dvi;
     }
     if (tga::HasSignature(d)) {
         return FileType::Tga;
@@ -790,7 +824,11 @@ int WebpExifOrientation(Str d) {
     if (!FindWebpChunk(d, "EXIF", exif) || exif.len < 8) {
         return 0;
     }
-    return ExifOrientationFromTiff(ByteReader(exif), 0);
+    // the spec wants raw TIFF, but libvips (e.g. sharp) writes the JPEG-style
+    // "Exif\0\0" prefix first
+    Str prefix = StrL("Exif\0\0");
+    int tiffBase = str::StartsWith(exif, prefix) ? len(prefix) : 0;
+    return ExifOrientationFromTiff(ByteReader(exif), tiffBase);
 }
 
 // find a box of the given type among the ISO BMFF boxes in [idx, end).
@@ -1269,6 +1307,21 @@ static bool IsEpubArchive(Archive* archive) {
     return str::Eq(mtStr, StrL("application/x-ibooks+zip"));
 }
 
+// Office Open XML has the XPS container (_rels/.rels) too; its main part
+// tells which kind it is
+static FileType OfficeArchiveType(Archive* archive) {
+    if (archive->GetFileId(StrL("word/document.xml")) >= 0) {
+        return FileType::Docx;
+    }
+    if (archive->GetFileId(StrL("xl/workbook.xml")) >= 0) {
+        return FileType::Xlsx;
+    }
+    if (archive->GetFileId(StrL("ppt/presentation.xml")) >= 0) {
+        return FileType::Pptx;
+    }
+    return FileType::Unknown;
+}
+
 static bool IsXpsArchive(Archive* archive) {
     bool res = archive->GetFileId(StrL("_rels/.rels")) >= 0 || archive->GetFileId(StrL("_rels/.rels/[0].piece")) >= 0 ||
                archive->GetFileId(StrL("_rels/.rels/[0].last.piece")) >= 0;
@@ -1319,6 +1372,10 @@ FileType GuessFileTypeFromFile(Str path) {
     }
     if (IsXpsArchive(archive)) {
         res = FileType::Xps;
+        FileType office = OfficeArchiveType(archive);
+        if (office != FileType::Unknown) {
+            res = office;
+        }
     }
     if (IsEpubArchive(archive)) {
         res = FileType::Epub;

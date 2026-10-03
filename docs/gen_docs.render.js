@@ -4,8 +4,18 @@
 
   /*COMMANDS_SEARCH_BUNDLE*/
 
+  // hides / shows the sidebar TOC, at the start of the breadcrumbs above the page
+  // (see setupSidebarToggle)
+  const tocToggleHTML =
+    '<button type="button" class="toc-toggle" aria-label="Hide sidebar" title="Hide sidebar">' +
+    '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">' +
+    '<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M6 2.5v11"/></svg></button>';
   const h1BreadcrumbsStart =
     '<div class="breadcrumbs"><div><a href="SumatraPDF-documentation.html">SumatraPDF documentation</a></div><div>/</div><div>';
+  const h1BreadcrumbsStartWithToggle =
+    '<div class="breadcrumbs">' +
+    tocToggleHTML +
+    '<div><a href="SumatraPDF-documentation.html">SumatraPDF documentation</a></div><div>/</div><div>';
   const h1BreadcrumbsEnd = "</div></div>";
 
   let manifest = null;
@@ -46,11 +56,29 @@
     return text.slice(0, startIdx) + text.slice(endIdx);
   }
 
+  // ":video <youtube link> <r2 link>": a video recorded for the docs, shown as an embedded
+  // YouTube player; the r2 link is the same video on files.sumatrapdfreader.org
+  // (see youTubeEmbedHTML() in the website's server/gen_manual.go)
+  const rxVideoLine =
+    /^:video[ \t]+https:\/\/(?:youtu\.be\/|(?:www\.)?youtube\.com\/watch\?v=)([A-Za-z0-9_-]{11})\S*[ \t]+https:\/\/files\.sumatrapdfreader\.org\/\S+[ \t]*$/;
+
+  function videoHTML(youTubeId) {
+    return (
+      '\n<div class="doc-video"><iframe src="https://www.youtube-nocookie.com/embed/' +
+      youTubeId +
+      '" title="Video" loading="lazy" allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></div>\n'
+    );
+  }
+
   function preProcess(text) {
     const lines = text.split("\n");
     let inCols = false;
     return lines
       .map(function (line) {
+        const video = rxVideoLine.exec(line.trim());
+        if (video) {
+          return videoHTML(video[1]);
+        }
         if (line.trim() === ":columns") {
           if (!inCols) {
             inCols = true;
@@ -174,10 +202,20 @@
     const items = [];
     const lines = mainDocText.split("\n");
     let inColumns = false;
+    // "## Section" heading of the index, shown above its links
+    let section = "";
     for (let li = 0; li < lines.length; li++) {
       const line = lines[li];
+      if (line.startsWith("## ")) {
+        section = line.slice(3).trim();
+        continue;
+      }
       if (line.trim() === ":columns") {
         inColumns = !inColumns;
+        if (inColumns && section) {
+          items.push('<div class="toc-section">' + section + "</div>");
+          section = "";
+        }
         continue;
       }
       if (!inColumns) continue;
@@ -192,7 +230,100 @@
     return '<nav class="sidebar-toc">\n' + items.join("\n") + "\n</nav>";
   }
 
-  const kDocsImgCdn = "https://files.sumatrapdfreader.org/assets/sumatrapdf/";
+  // Keep the sidebar's scroll position when a sidebar link loads another page.
+  const kSidebarScrollKey = "docs-sidebar-scroll";
+
+  function keepSidebarScroll(toc) {
+    toc.addEventListener("click", function (e) {
+      if (!e.target.closest("a")) {
+        return;
+      }
+      try {
+        localStorage.setItem(kSidebarScrollKey, JSON.stringify({ top: toc.scrollTop, time: Date.now() }));
+      } catch (err) {}
+    });
+    try {
+      const saved = JSON.parse(localStorage.getItem(kSidebarScrollKey) || "null");
+      localStorage.removeItem(kSidebarScrollKey);
+      if (saved && Date.now() - saved.time < 60 * 1000) {
+        toc.scrollTop = saved.top;
+      }
+    } catch (err) {}
+  }
+
+  // Hide / show the sidebar: the button at the start of the breadcrumbs or
+  // Ctrl + B (Cmd + B on Mac). While hidden, the mouse at the left edge of the
+  // window shows it over the page until the mouse leaves it. manual.shell.html
+  // applies the saved state before the first paint.
+  const kSidebarCollapsedKey = "docs-sidebar-collapsed";
+  let sidebarToggleReady = false;
+
+  function setupSidebarToggle(toc) {
+    if (sidebarToggleReady) {
+      return;
+    }
+    sidebarToggleReady = true;
+    const root = document.documentElement;
+    const btn = document.querySelector(".toc-toggle");
+    const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+    const shortcut = isMac ? "Cmd + B" : "Ctrl + B";
+    const kEdgePx = 8;
+    function isCollapsed() {
+      return root.classList.contains("toc-collapsed");
+    }
+    function update() {
+      if (!btn) {
+        return;
+      }
+      const label = isCollapsed() ? "Show sidebar" : "Hide sidebar";
+      btn.title = label + " (" + shortcut + ")";
+      btn.setAttribute("aria-label", label);
+      btn.setAttribute("aria-expanded", String(!isCollapsed()));
+    }
+    function toggle() {
+      const collapsed = root.classList.toggle("toc-collapsed");
+      root.classList.remove("toc-peek");
+      try {
+        localStorage.setItem(kSidebarCollapsedKey, collapsed ? "1" : "0");
+      } catch (err) {}
+      update();
+    }
+    if (btn) {
+      btn.addEventListener("click", toggle);
+    }
+    document.addEventListener("keydown", function (e) {
+      if (e.key.toLowerCase() !== "b" || e.altKey || e.shiftKey) {
+        return;
+      }
+      if (!(isMac ? e.metaKey : e.ctrlKey)) {
+        return;
+      }
+      e.preventDefault();
+      toggle();
+    });
+    document.addEventListener("mousemove", function (e) {
+      if (!isCollapsed()) {
+        return;
+      }
+      if (!root.classList.contains("toc-peek")) {
+        if (e.clientX <= kEdgePx) {
+          root.classList.add("toc-peek");
+        }
+        return;
+      }
+      // shown but the mouse never went into it (e.g. moved right from the edge)
+      if (e.clientX > toc.getBoundingClientRect().right) {
+        root.classList.remove("toc-peek");
+      }
+    });
+    toc.addEventListener("mouseleave", function () {
+      root.classList.remove("toc-peek");
+    });
+    update();
+  }
+
+  // docs screenshots are stored in R2 under assets/sumatrapdf/docs/img/
+  const kDocsImgCdn = "https://files.sumatrapdfreader.org/assets/sumatrapdf/docs/img/";
 
   function docsImgToCdnUrl(src) {
     let s = (src || "").replace(/%20/g, " ").replace(/\\/g, "/");
@@ -304,8 +435,12 @@
     let innerHTML = md.render(text);
 
     if (h1Text && !isMainPage) {
+      const bcTop = h1BreadcrumbsStartWithToggle + h1Text + h1BreadcrumbsEnd;
       const bc = h1BreadcrumbsStart + h1Text + h1BreadcrumbsEnd;
-      innerHTML = bc + innerHTML + "<div>&nbsp;</div>" + bc;
+      innerHTML = bcTop + innerHTML + "<div>&nbsp;</div>" + bc;
+    } else {
+      // the main page has no breadcrumbs, only the sidebar toggle
+      innerHTML = '<div class="breadcrumbs">' + tocToggleHTML + "</div>" + innerHTML;
     }
 
     innerHTML = '<div class="notion-page">' + innerHTML + "</div>";
@@ -394,9 +529,17 @@
         const titleEl = document.getElementById("doc-title");
         if (tocSlot) {
           tocSlot.innerHTML = buildTocHTML(currentHtml);
+          const toc = tocSlot.querySelector(".sidebar-toc");
+          if (toc) {
+            keepSidebarScroll(toc);
+          }
         }
         if (innerSlot) {
           innerSlot.innerHTML = rendered.innerHTML;
+        }
+        const sidebar = tocSlot ? tocSlot.querySelector(".sidebar-toc") : null;
+        if (sidebar) {
+          setupSidebarToggle(sidebar);
         }
         // Ensure code Copy handlers are bound (gen_code_copy.js). Delegation
         // covers late-injected buttons; this is a safe no-op if already bound.

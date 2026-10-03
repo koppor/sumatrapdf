@@ -142,6 +142,8 @@ EXPORTS
 
 	pdf_can_be_saved_incrementally
 
+	pdf_has_unsaved_sigs
+
 	pdf_annot_page
 
 	pdf_drop_page_tree
@@ -295,6 +297,12 @@ EXPORTS
 	pdf_new_graft_map
 
 	pdf_drop_graft_map
+
+	pdf_graft_mapped_page
+
+	pdf_bake_document
+
+	pdf_rearrange_pages
 
 	pdf_graft_mapped_object
 
@@ -800,6 +808,8 @@ EXPORTS
 	fz_drop_outline
 
 
+
+	fz_new_output
 
 	fz_new_output_with_buffer
 
@@ -1832,6 +1842,9 @@ EXPORTS
 	WebPDecodeBGRAInto
 
 	WebPGetInfo
+	WebPDecodeRGBInto
+	WebPDecodeRGBAInto
+	WebPGetFeaturesInternal
 
 
 
@@ -1845,6 +1858,11 @@ EXPORTS
 	jxl_decode
 	jxl_decode_size
 	jxl_image_destroy
+	jxl_doc_open
+	jxl_doc_close
+	jxl_doc_info
+	jxl_frame_render_info
+	jxl_frame_render_into
 
 
 

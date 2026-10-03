@@ -59,6 +59,10 @@ struct Pixmap {
 Str PixmapToBmpFormat(const Pixmap* pixmap);
 Pixmap* GetClipboardImageAsPixmap();
 
+// Gives a decoder the buffer to decode into: RGB24, or RGBA32 (straight alpha)
+// if hasAlpha. Returns nullptr to abort the decode.
+typedef u8* (*DecodeDstAllocFn)(void* user, int dx, int dy, bool hasAlpha, int* stride);
+
 struct RenderedBitmap;
 
 // DIB-section-backed 32bpp BGRA8. Use only when this pixmap must be SelectObject'd
@@ -75,6 +79,7 @@ Pixmap* PixmapFromHBITMAP(HBITMAP hbmp, Size size, HANDLE hMap = nullptr);
 // out of one whose format is Native. Returns null if there's nothing to copy
 Pixmap* PixmapCopyAs32bppDIB(const Pixmap* p);
 Pixmap* PixmapToBgra(Pixmap* p);
+Pixmap* PixmapToBgr(Pixmap* p);
 Pixmap* PixmapFromRenderedBitmap(RenderedBitmap* rb);
 RenderedBitmap* RenderedBitmapFromPixmap(Pixmap* px);
 void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor = 0, Vec<Rect>* skipRects = nullptr);

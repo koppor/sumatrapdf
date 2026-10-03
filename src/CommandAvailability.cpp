@@ -250,6 +250,7 @@ static UINT_PTR removeIfAnnotsNotSupported[] = {
     // range check doesn't catch it
     CmdCreateAnnotImageFromClipboard,
     CmdInsertImage,
+    CmdSignWithImage,
     CmdAnnotationHighlightBrush,
     CmdFindAnnotation,
     CmdCutAnnotation,
@@ -651,6 +652,14 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return ctx.allowToggleMenuBar ? CommandVisibility::Show : CommandVisibility::Hide;
     }
 
+    // the bare command has no text: only the TextSnippets commands made from it
+    if (cmdId == CmdInsertTextSnippet) {
+        return CommandVisibility::Hide;
+    }
+    if (origCmdId == CmdInsertTextSnippet && !ctx.supportsAnnots) {
+        return CommandVisibility::Hide;
+    }
+
     if (!ctx.supportsAnnots) {
         if ((cmdId >= (int)CmdCreateAnnotFirst) && (cmdId <= (int)CmdCreateAnnotLast)) {
             return CommandVisibility::Hide;
@@ -681,7 +690,7 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         if (cmdId == CmdPdShowInfo || cmdId == CmdPdfBake || cmdId == CmdPdfCompress || cmdId == CmdPdfDecompress ||
             cmdId == CmdPdfEncrypt || cmdId == CmdPdfDecrypt || cmdId == CmdPdfDeletePages ||
             cmdId == CmdPdfExtractPages || cmdId == CmdTogglePageBoxes || cmdId == CmdConvertPdfToImages ||
-            cmdId == CmdToggleEditPDF) {
+            cmdId == CmdToggleEditPDF || cmdId == CmdMergePDF) {
             return CommandVisibility::Hide;
         }
     }
@@ -904,6 +913,9 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     }
     if ((cmdId == CmdToggleBookmarks) || (cmdId == CmdToggleTableOfContents)) {
         return ctx.hasToc ? CommandVisibility::Show : CommandVisibility::Hide;
+    }
+    if (cmdId == CmdToggleThumbnails) {
+        return ctx.isFixedPage ? CommandVisibility::Show : CommandVisibility::Hide;
     }
 
     // No extractable text on comics, image folders, or single images.

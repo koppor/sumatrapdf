@@ -87,6 +87,17 @@ bool Accelerators_UnitTestCustomShortcutShown();
 bool ShortcutParse_UnitTestShiftedPunct();
 bool AnnotSearch_UnitTests();
 void ReadAloudHighlight_UnitTests();
+bool RenderCache_UnitTestCookieUnlocked();
+
+static void ParseFileArgsTest() {
+    FileArgs* fa = ParseFileArgs(StrL("C:\\foo.pdf?page=4"));
+    utassert(fa && str::Eq(fa->cleanPath, StrL("C:\\foo.pdf")) && fa->pageNumber == 4);
+    delete fa;
+    utassert(!ParseFileArgs(StrL("C:\\foo.pdf")));
+    utassert(!ParseFileArgs(StrL("\\\\?\\C:\\foo.pdf")));
+    // a garbled drive letter: no file before the '?'
+    utassert(!ParseFileArgs(StrL("?:\\foo.pdf")));
+}
 
 static void ParseCommandLineTest() {
     {
@@ -393,6 +404,7 @@ static void SumatraPDF_UnitTests() {
     colorTest();
     BenchRangeTest();
     ParseCommandLineTest();
+    ParseFileArgsTest();
     versioncheck_test();
     hexstrTest();
 }
@@ -620,6 +632,7 @@ int RunAppUnitTests(bool forAi) {
     utassert(Accelerators_UnitTestCustomShortcutShown());
     utassert(ShortcutParse_UnitTestShiftedPunct());
     utassert(AnnotSearch_UnitTests());
+    utassert(RenderCache_UnitTestCookieUnlocked());
     ReadAloudHighlight_UnitTests();
 #endif
     return utassert_print_results();

@@ -94,6 +94,7 @@ extern Func0 gOnSessionRestored;
 void NotifySessionRestoreFinished();
 bool IsSessionRestoreFinished();
 bool HasPendingDocumentLoads();
+bool AreLoadThreadsActive();
 // tells the frame's virtual tree which splitters exist (they are created
 // with their panes)
 void FrameSyncSplitters(MainWindow*);
@@ -162,7 +163,7 @@ enum class SidebarResizeFrame {
     Keep,
     Adjust
 };
-void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites,
+void SetSidebarVisibility(MainWindow* win, bool topVisible, bool bottomVisible,
                           SidebarResizeFrame = SidebarResizeFrame::Keep);
 void RememberFavTreeExpansionState(MainWindow* win);
 void AdvanceFocus(MainWindow* win);
@@ -221,6 +222,7 @@ constexpr u32 kUiTabsDirty = 0x8;    // repaint the tab bar
 // ignored if another pending request wants them updated
 constexpr u32 kUiNoToolbars = 0x10;
 constexpr u32 kUiSidebarDirty = 0x20; // repaint toc/favorites boxes and their splitters
+constexpr u32 kUiPanelsDrag = 0x40;   // live drag of the splitter between the sidebar panels
 
 void ScheduleUiUpdate(MainWindow* win, u32 flags = kUiRelayout, int sidebarDx = -1);
 void DuplicateTabInNewWindow(WindowTab* tab);
@@ -323,6 +325,7 @@ void MessageBoxWarning(HWND hwnd, Str msg, Str title = {});
 void UpdateCursorPositionHelper(MainWindow* win, Point pos, NotificationWnd* wnd);
 void EnterFullScreen(MainWindow* win, bool presentation = false);
 void ExitFullScreen(MainWindow* win);
+void SwitchToFullScreen(MainWindow* win, bool presentation);
 void SetCurrentLang(Str langCode);
 void RebuildMenuBarForWindow(MainWindow* win);
 void DeleteMainWindow(MainWindow* win);
@@ -347,6 +350,9 @@ void SwitchToDisplayMode(MainWindow* win, DisplayMode displayMode, bool keepCont
 void OnDocumentVerticalScrollIntent(MainWindow* win, bool down);
 void DismissNextFileScrollHint(MainWindow* win);
 void MainWindowRerender(MainWindow* win, bool includeNonClientArea = false);
+void RerenderTabPage(WindowTab*, int pageNo);
+void GetFrameNcStrips(MainWindow*, Vec<Rect>& out);
+EngineBase* CreatePdfEngineForDialog(Str path, HWND hwnd);
 
 TempStr PageInfoOverlayResultTemp(Str pathTwoPages, Str pathOnePage, int* exitCodeOut = nullptr);
 TempStr WindowStateDuringLoadResultTemp(int* exitCodeOut = nullptr);
