@@ -45,7 +45,7 @@ const commandsRaw = [
     "CmdToggleMenuBar", "Toggle Menu Bar",
     "CmdCopySelection", "Copy Selection",
     "CmdTranslateSelectionWithGoogle", "Translate Selection with Google",
-    "CmdTranslateSelectionWithDeepL", "Translate Selection With DeepL",
+    "CmdTranslateSelectionWithDeepL", "Translate Selection with DeepL",
     "CmdSearchSelectionWithGoogle", "Search Selection with Google",
     "CmdSearchSelectionWithBing", "Search Selection with Bing",
     "CmdSearchSelectionWithWikipedia", "Search Selection with Wikipedia",
@@ -114,8 +114,8 @@ const commandsRaw = [
     "CmdOpenWithTotalCommander", "Open Directory In Total Commander",
     "CmdOpenWithDoubleCommander", "Open Directory In Double Commander",
     "CmdOpenWithAcrobat", "Open in Adobe Acrobat",
-    "CmdOpenWithFoxIt", "Open in Foxit Reader",
-    "CmdOpenWithFoxItPhantom", "Open in Foxit PhantomPDF",
+    "CmdOpenWithFoxit", "Open in Foxit Reader",
+    "CmdOpenWithFoxitPhantom", "Open in Foxit PhantomPDF",
     "CmdOpenWithPdfXchange", "Open in PDF-XChange",
     "CmdOpenWithXpsViewer", "Open in Microsoft XPS Viewer",
     "CmdOpenWithHtmlHelp", "Open in Microsoft HTML Help",
@@ -201,7 +201,7 @@ const commandsRaw = [
     "CmdDebugShowNotif", "Debug: Show Notification",
     "CmdDebugStartStressTest", "Debug: Start Stress Test",
     "CmdDebugTogglePredictiveRender", "Debug: Toggle Predictive Rendering",
-    "CmdDebugToggleRtl", "Debug: Toggle Rtl",
+    "CmdDebugToggleRtl", "Debug: Toggle RTL",
     // removed: CmdToggleHideScrollbar (replaced by CmdChangeScrollbar)
     "CmdListPrinters", "List Printers...",
     "CmdToggleWindowsPreviewer", "Toggle Windows Previewer",
@@ -223,7 +223,7 @@ const commandsRaw = [
     "CmdPdfEncrypt", "Encrypt PDF...",
     "CmdPdfDecrypt", "Decrypt PDF...",
     "CmdPdfBake", "Bake PDF File...",
-    "CmdPdShowInfo", "Show PDF Info...",
+    "CmdPdfShowInfo", "Show PDF Info...",
     "CmdDocumentExtractText", "Extract Text From Document...",
     "CmdDocumentShowOutline", "Show Document Bookmarks...",
     "CmdSetScreenshotHotkey", "Set Screenshot Hotkey...",
@@ -235,7 +235,7 @@ const commandsRaw = [
     "CmdReadAloudSelection", "Start Reading Selection",
     "CmdToggleToolbarShowReadAloud", "Read Aloud: Show In Toolbar",
     "CmdRemoveDeletedFilesFromHistory", "Remove Deleted Files From History",
-    "CmdCommandPaletteTOC", "Command Palette: Table Of Contents",
+    "CmdNavigateTableOfContents", "Navigate Table Of Contents",
     "CmdDebugToggleRenderInfo", "Debug: Toggle Render Queue Info",
     "CmdConvertImageToPdf", "Convert Image To PDF...",
     "CmdExpandToCurrentPage", "Expand TOC to Current Page",
@@ -251,7 +251,7 @@ const commandsRaw = [
     "CmdGoToPrevFavorite", "Go to Previous Favorite",
     "CmdCreateAnnotImageFromClipboard", "Create Image Annotation From Clipboard",
     "CmdSetInverseSearch", "Set Inverse Search Command Line...",
-    "CmdCommandPaletteFavorites", "Command Palette: Favorites",
+    "CmdNavigateFavorites", "Navigate Favorites",
     "CmdNavigateFilesInFolder", "Navigate Files in Folder...",
     "CmdDebugToggleCacheInfo", "Debug: Toggle Cache Info",
     "CmdToggleEngineeringDrawingEnhance", "Toggle Engineering Drawing Enhancement",
@@ -340,6 +340,12 @@ const commandsRaw = [
     "CmdInsertTextSnippet", "Insert Text Snippet",
     "CmdToggleThumbnails", "Toggle Thumbnails",
     "CmdMergePDF", "Merge PDF...",
+    "CmdToggleAutoRotateWidePages", "Toggle Auto-Rotate Wide Pages",
+    "CmdNavigateTabs", "Navigate Tabs",
+    "CmdNavigateHistory", "Navigate History",
+    "CmdQuickEditSettings", "Quick Edit Settings",
+    "CmdConfigureRestrictedUse", "Configure Restricted Use...",
+    "CmdRunPDFScript", "Run PDF Script...",
     "CmdRefHoverPushToJabRef", "Push Reference to JabRef",
 ];
 
@@ -421,48 +427,26 @@ function generateArrays(): string {
 
   lines.push("// clang-format off");
 
-  // gCommandNames: SeqStrings (null-separated, double-null terminated)
-  lines.push("static SeqStrings gCommandNames =");
-  for (const name of liveNames) {
-    lines.push(`    "${name}\\0"`);
-  }
-  lines.push(`    "\\0";`);
-  lines.push("");
-
-  // gCommandIds
-  lines.push("static i32 gCommandIds[] = {");
-  for (const name of liveNames) {
-    lines.push(`    ${name},`);
+  lines.push("const CommandInfo gCommands[] = {");
+  for (let i = 0; i < liveNames.length; i++) {
+    lines.push(`    {${liveNames[i]}, "${liveNames[i]}\\0", StrL("${liveDescs[i]}")},`);
   }
   lines.push("};");
+  lines.push("const int gCommandsCount = dimofi(gCommands);");
   lines.push("");
 
-  // gCommandDescriptions
-  lines.push("SeqStrings gCommandDescriptions =");
-  for (const desc of liveDescs) {
-    lines.push(`    "${desc}\\0"`);
-  }
-  lines.push(`    "\\0";`);
-  lines.push("");
-
-  // gCommandAltDescs / gCommandAltDescIds: parallel, like the tables above
   for (const [name] of commandAltDescs) {
     if (!liveNames.includes(name)) {
       console.error(`commandAltDescs: unknown command '${name}'`);
       process.exit(1);
     }
   }
-  lines.push("SeqStrings gCommandAltDescs =");
-  for (const [, desc] of commandAltDescs) {
-    lines.push(`    "${desc}\\0"`);
-  }
-  lines.push(`    "\\0";`);
-  lines.push("");
-  lines.push("i32 gCommandAltDescIds[] = {");
-  for (const [name] of commandAltDescs) {
-    lines.push(`    ${name},`);
+  lines.push("const CommandInfo gCommandAltDescs[] = {");
+  for (const [name, desc] of commandAltDescs) {
+    lines.push(`    {${name}, "${name}\\0", StrL("${desc}")},`);
   }
   lines.push("};");
+  lines.push("const int gCommandAltDescsCount = dimofi(gCommandAltDescs);");
   lines.push("// clang-format on");
 
   return lines.join("\n");
@@ -482,8 +466,8 @@ function replaceBetweenMarkers(content: string, startMarker: string, endMarker: 
 
 export function main() {
   const rootDir = join(import.meta.dir, "..");
-  const headerPath = join(rootDir, "src", "Commands.h");
-  const cppPath = join(rootDir, "src", "Commands.cpp");
+  const headerPath = join(rootDir, "src", "shared", "Commands.h");
+  const cppPath = join(rootDir, "src", "shared", "Commands.cpp");
 
   let headerContent = readFileSync(headerPath, "utf-8");
   let cppContent = readFileSync(cppPath, "utf-8");
@@ -491,12 +475,12 @@ export function main() {
   const enumCode = generateEnum();
   headerContent = replaceBetweenMarkers(headerContent, "// @gen-start cmd-enum", "// @gen-end cmd-enum", enumCode);
   writeFileSync(headerPath, headerContent, "utf-8");
-  console.log("Generated enum in src/Commands.h");
+  console.log("Generated enum in src/shared/Commands.h");
 
   const arraysCode = generateArrays();
   cppContent = replaceBetweenMarkers(cppContent, "// @gen-start cmd-c", "// @gen-end cmd-c", arraysCode);
   writeFileSync(cppPath, cppContent, "utf-8");
-  console.log("Generated arrays in src/Commands.cpp");
+  console.log("Generated arrays in src/shared/Commands.cpp");
 }
 
 if (import.meta.main) {

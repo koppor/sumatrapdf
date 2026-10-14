@@ -40,11 +40,7 @@
 #include "DarkMode.h"
 #include "Commands.h"
 #include "PdfTools.h"
-
-extern "C" int pdfbake_main(int argc, char** argv);
-extern "C" int pdfclean_main(int argc, char** argv);
-extern "C" int muconvert_main(int argc, char** argv);
-extern "C" void fz_set_optind(int val);
+#include "PdfToolsCommon.h"
 
 // compute a dialog client width that fits the source path text, clamped to a
 // minimum and to 80% of the screen width (long paths get ellipsized instead)
@@ -374,40 +370,6 @@ struct PdfExtractTextDialog : PdfToolDialog {
     void DoIt(VirtMouseEvent* ev = nullptr) override;
 };
 
-static bool ExtractTextViaEngine(PdfExtractTextDialog* dlg, Str destPath, Str pages) {
-    MainWindow* win = dlg->win;
-    if (!win || !win->ctrl) {
-        return false;
-    }
-    DisplayModel* dm = win->ctrl->AsFixed();
-    if (!dm) {
-        return false;
-    }
-    EngineBase* engine = dm->GetEngine();
-    if (!engine) {
-        return false;
-    }
-    int pageCount = engine->PageCount();
-    Vec<PageRange> ranges;
-    if (!ParsePageRanges(pages, ranges)) {
-        return false;
-    }
-    str::Builder text;
-    for (auto& range : ranges) {
-        int start = std::max(range.start, 1);
-        int end = std::min(range.end, pageCount);
-        for (int pageNo = start; pageNo <= end; pageNo++) {
-            PageText pt = engine->ExtractPageText(pageNo);
-            if (pt.text) {
-                text.Append(Str(pt.text.s));
-                text.AppendChar('\n');
-            }
-            FreePageText(&pt);
-        }
-    }
-    return file::WriteFile(destPath, ToStr(text));
-}
-
 void PdfExtractTextDialog::DoIt(VirtMouseEvent*) {
     TempStr destPath = destEdit->GetTextTemp();
     if (len(destPath) == 0) {
@@ -432,7 +394,7 @@ void PdfExtractTextDialog::DoIt(VirtMouseEvent*) {
         ok = muconvert_main(argc, argv) == 0;
     } else {
         // use engine text extraction for other formats (DjVu, etc.)
-        ok = ExtractTextViaEngine(this, destPath, pages);
+        ok = ExtractTextViaEngine(win, destPath, pages);
     }
 
     if (ok) {
@@ -623,171 +585,6 @@ struct PdfDeletePageDialog : PdfToolDialog {
     void PreTranslate(WindowBase::PreTranslateEvent* ev);
 };
 
-// Parse delete page ranges like "1,3-8,13-N" where N means last page.
-// Returns a sorted list of unique 1-based page numbers to delete.
-// Returns false if the syntax is invalid or any page is out of range.
-static bool ParseDeletePages(Str s, int pageCount, Vec<int>& pagesToDelete) {
-    if (len(s) == 0) {
-        return false;
-    }
-    StrVec parts;
-    Split(&parts, s, StrL(","), true);
-    if (len(parts) == 0) {
-        return false;
-    }
-    for (int pi = 0; pi < len(parts); pi++) {
-        Str part = parts[pi];
-        str::TrimWSInPlace(part, str::TrimOpt::Both);
-        if (len(part) == 0) {
-            return false;
-        }
-        // check for range "A-B" where A/B can be a number or "N"
-        Str startStr, endStr;
-        if (str::CutChar(part, '-', &startStr, &endStr)) {
-            str::TrimWSInPlace(startStr, str::TrimOpt::Both);
-            str::TrimWSInPlace(endStr, str::TrimOpt::Both);
-            if (len(startStr) == 0) {
-                return false;
-            }
-            // "8-" means "8-N" (from page 8 to the last page)
-            bool endIsEmpty = len(endStr) == 0;
-            int start, end;
-            if (str::EqI(startStr, StrL("N"))) {
-                start = pageCount;
-            } else {
-                start = !str::IsNull(str::Parse(startStr, "%d%$", &start)) ? start : -1;
-            }
-            if (endIsEmpty || str::EqI(endStr, StrL("N"))) {
-                end = pageCount;
-            } else {
-                end = !str::IsNull(str::Parse(endStr, "%d%$", &end)) ? end : -1;
-            }
-            if (start < 1 || start > pageCount || end < 1 || end > pageCount || start > end) {
-                return false;
-            }
-            for (int i = start; i <= end; i++) {
-                VecAppend(pagesToDelete, i);
-            }
-        } else {
-            // single page
-            int page;
-            if (str::EqI(part, StrL("N"))) {
-                page = pageCount;
-            } else {
-                page = !str::IsNull(str::Parse(part, "%d%$", &page)) ? page : -1;
-            }
-            if (page < 1 || page > pageCount) {
-                return false;
-            }
-            VecAppend(pagesToDelete, page);
-        }
-    }
-    if (len(pagesToDelete) == 0) {
-        return false;
-    }
-    // sort and deduplicate
-    VecSort(pagesToDelete, [](const int* a, const int* b) -> int { return *a - *b; });
-    int prev = -1;
-    Vec<int> unique;
-    for (int p : pagesToDelete) {
-        if (p != prev) {
-            VecAppend(unique, p);
-            prev = p;
-        }
-    }
-    pagesToDelete = unique;
-    return true;
-}
-
-// Build the page range string of pages to KEEP (complement of pagesToDelete).
-static TempStr BuildKeepPagesRangeTemp(int pageCount, const Vec<int>& pagesToDelete) {
-    str::Builder s;
-    int delIdx = 0;
-    int rangeStart = -1;
-    int rangeEnd = -1;
-    for (int p = 1; p <= pageCount; p++) {
-        bool shouldDelete = (delIdx < len(pagesToDelete) && pagesToDelete[delIdx] == p);
-        if (shouldDelete) {
-            delIdx++;
-            if (rangeStart != -1) {
-                if (len(s) > 0) {
-                    s.AppendChar(',');
-                }
-                if (rangeStart == rangeEnd) {
-                    s.Append(fmt("%d", rangeStart));
-                } else {
-                    s.Append(fmt("%d-%d", rangeStart, rangeEnd));
-                }
-                rangeStart = -1;
-            }
-        } else {
-            if (rangeStart == -1) {
-                rangeStart = p;
-            }
-            rangeEnd = p;
-        }
-    }
-    if (rangeStart != -1) {
-        if (len(s) > 0) {
-            s.AppendChar(',');
-        }
-        if (rangeStart == rangeEnd) {
-            s.Append(fmt("%d", rangeStart));
-        } else {
-            s.Append(fmt("%d-%d", rangeStart, rangeEnd));
-        }
-    }
-    return ToStrTemp(s);
-}
-
-// Format a sorted list of page numbers as a compact range string (e.g. "1-3,5,7-10").
-static TempStr FormatPageRangeTemp(const Vec<int>& pages) {
-    str::Builder s;
-    int i = 0;
-    int n = len(pages);
-    while (i < n) {
-        int start = pages[i];
-        int end = start;
-        while (i + 1 < n && pages[i + 1] == end + 1) {
-            end = pages[++i];
-        }
-        if (len(s) > 0) {
-            s.AppendChar(',');
-        }
-        if (start == end) {
-            s.Append(fmt("%d", start));
-        } else {
-            s.Append(fmt("%d-%d", start, end));
-        }
-        i++;
-    }
-    return ToStrTemp(s);
-}
-
-static bool KeepOnlyPagesWithAnnotations(EngineBase* engine, Vec<int>& pages) {
-    Vec<Annotation*> annotations;
-    if (!EngineGetAnnotations(engine, annotations)) {
-        return false;
-    }
-
-    Vec<int> annotationPages;
-    for (Annotation* annotation : annotations) {
-        int pageNo = PageNo(annotation);
-        if (!VecContains(annotationPages, pageNo)) {
-            VecAppend(annotationPages, pageNo);
-        }
-    }
-
-    Vec<int> filteredPages;
-    for (int pageNo : pages) {
-        if (VecContains(annotationPages, pageNo)) {
-            VecAppend(filteredPages, pageNo);
-        }
-    }
-    pages = filteredPages;
-    return true;
-}
-
 void PdfDeletePageDialog::UpdateButton() {
     TempStr pages = pagesEdit->GetTextTemp();
     Vec<int> parsedPages;
@@ -956,7 +753,7 @@ bool PdfDeletePageDialog::Create(MainWindow* w, WindowTab* tab, bool isExtractAr
     return true;
 }
 
-static void ShowPdfPageRangeDialog(MainWindow* win, bool isExtract) {
+void ShowPdfPageRangeDialog(MainWindow* win, bool isExtract) {
     if (!win || !win->IsDocLoaded()) {
         return;
     }
@@ -979,14 +776,6 @@ static void ShowPdfPageRangeDialog(MainWindow* win, bool isExtract) {
     if (!dlg->Create(win, tab, isExtract)) {
         delete dlg;
     }
-}
-
-void ShowPdfDeletePageDialog(MainWindow* win) {
-    ShowPdfPageRangeDialog(win, false);
-}
-
-void ShowPdfExtractPagesDialog(MainWindow* win) {
-    ShowPdfPageRangeDialog(win, true);
 }
 
 // --- Encrypt PDF dialog ---
@@ -1169,125 +958,10 @@ void ShowPdfDecryptDialog(MainWindow* win) {
 
 // --- Convert to PDF dialog (comics, image folders, single images; issue #4118) ---
 
-// Default destination: same path with .pdf extension, made unique if the file
-// already exists (e.g. comic.cbz → comic.pdf, or comic.1.pdf if taken).
-static TempStr DefaultPdfDestPathTemp(Str srcPath) {
-    if (len(srcPath) == 0) {
-        return {};
-    }
-    TempStr noExt = path::GetPathNoExtTemp(srcPath);
-    if (len(noExt) == 0) {
-        noExt = str::DupTemp(srcPath);
-    }
-    TempStr pdfPath = str::JoinTemp(noExt, StrL(".pdf"));
-    return MakeUniqueFilePathTemp(pdfPath);
-}
-
 struct ConvertToPdfDialog : PdfToolDialog {
     bool Create(MainWindow* win, WindowTab* tab);
     void DoIt(VirtMouseEvent* ev = nullptr) override;
 };
-
-// Same conversion as File → Convert to PDF (issue #4118).
-static bool ConvertImageCollectionToPdf(EngineBase* engine, Str destPath) {
-    if (!engine || !engine->IsImageCollection() || len(destPath) == 0) {
-        return false;
-    }
-
-    TempStr producer = fmt("SumatraPDF %s", currentVersion);
-    PdfCreator::SetProducerName(producer);
-    // Formats PDF cannot re-wrap (WebP, JXL, HEIC, AVIF, TGA, …): decode via
-    // the same codecs we use for viewing, then PNG + zopfli before embed.
-    auto toOptimizedPng = [](Str data) -> Str {
-        Pixmap* px = PixmapFromData(data);
-        if (!px) {
-            logf("ConvertToPdf: decode-to-pixmap failed (%d bytes)\n", len(data));
-            return {};
-        }
-        Str png = EncodeAndOptimizePngFromPixmap(px);
-        FreePixmap(px);
-        return png;
-    };
-    return PdfCreator::SaveImageCollectionAsPdf(destPath, engine, toOptimizedPng);
-}
-
-TempStr ConvertImageCollectionToPdfResultTemp(Str srcPath, Str destPath, int* exitCodeOut) {
-    auto finish = [&](int code, TempStr s) -> TempStr {
-        if (exitCodeOut) {
-            *exitCodeOut = code;
-        }
-        return s;
-    };
-    if (len(srcPath) == 0 || len(destPath) == 0) {
-        return finish(1, str::DupTemp(StrL("ERROR bad-args")));
-    }
-    EngineBase* engine = CreateEngineFromFile(srcPath, nullptr, false);
-    if (!engine) {
-        return finish(1, str::DupTemp(StrL("ERROR engine-create-failed")));
-    }
-    bool ok = ConvertImageCollectionToPdf(engine, destPath);
-    SafeEngineRelease(&engine);
-    if (!ok) {
-        return finish(1, str::DupTemp(StrL("ERROR convert-failed")));
-    }
-    return finish(0, str::DupTemp(StrL("OK")));
-}
-
-TempStr ExtractPdfPagesResultTemp(Str destPath, Str pagesSpec, int annotsOnly, int* exitCodeOut) {
-    auto finish = [&](int code, TempStr s) -> TempStr {
-        if (exitCodeOut) {
-            *exitCodeOut = code;
-        }
-        return s;
-    };
-    if (len(gWindows) == 0) {
-        return finish(2, str::DupTemp(StrL("NOTREADY no-window")));
-    }
-    MainWindow* win = gWindows[0];
-    WindowTab* tab = win ? win->CurrentTab() : nullptr;
-    EngineBase* engine = tab ? tab->GetEngine() : nullptr;
-    if (!engine || len(tab->filePath) == 0) {
-        return finish(2, str::DupTemp(StrL("NOTREADY no-engine")));
-    }
-    if (len(destPath) == 0 || len(pagesSpec) == 0) {
-        return finish(1, str::DupTemp(StrL("ERROR bad-args")));
-    }
-    int pageCount = engine->PageCount();
-    Vec<int> parsedPages;
-    if (!ParseDeletePages(pagesSpec, pageCount, parsedPages)) {
-        return finish(1, str::DupTemp(StrL("ERROR bad-pages")));
-    }
-    if (annotsOnly) {
-        if (!KeepOnlyPagesWithAnnotations(engine, parsedPages)) {
-            return finish(1, str::DupTemp(StrL("ERROR annots")));
-        }
-        if (len(parsedPages) == 0) {
-            return finish(1, str::DupTemp(StrL("ERROR no-annot-pages")));
-        }
-    }
-    TempStr pageRange = FormatPageRangeTemp(parsedPages);
-    Str inputPath = tab->filePath;
-    TempStr tmpPath;
-    if (EngineHasUnsavedAnnotations(engine)) {
-        tmpPath = GetTempFilePathTemp(StrL("extract-pages"));
-        if (len(tmpPath) == 0 || !EngineMupdfSaveCopy(engine, tmpPath)) {
-            return finish(1, str::DupTemp(StrL("ERROR save-copy")));
-        }
-        inputPath = tmpPath;
-    }
-    char* argv[] = {(char*)"clean",      (char*)"-gggg",     (char*)"-e",        (char*)"100",
-                    (char*)"-f",         (char*)"-i",        (char*)"-t",        (char*)"-Z",
-                    CStrTemp(inputPath), CStrTemp(destPath), CStrTemp(pageRange)};
-    fz_set_optind(0);
-    int res = pdfclean_main(11, argv);
-    if (tmpPath) {
-        file::Delete(tmpPath);
-    }
-    if (res != 0) {
-        return finish(1, str::DupTemp(StrL("ERROR pdfclean")));
-    }
-    return finish(0, str::DupTemp(StrL("OK")));
-}
 
 void ConvertToPdfDialog::DoIt(VirtMouseEvent*) {
     TempStr destPath = destEdit->GetTextTemp();
@@ -1299,7 +973,7 @@ void ConvertToPdfDialog::DoIt(VirtMouseEvent*) {
     }
     DisplayModel* dm = win->AsFixed();
     EngineBase* engine = dm ? dm->GetEngine() : nullptr;
-    if (!engine || !engine->IsImageCollection()) {
+    if (!engine || !engine->isImageCollection) {
         MessageBoxWarning(hwnd, Tr("Failed to save a file"), Tr("Convert to PDF"));
         return;
     }
@@ -1339,7 +1013,7 @@ void ShowConvertToPdfDialog(MainWindow* win) {
         return;
     }
     EngineBase* engine = tab->GetEngine();
-    if (!engine || !engine->IsImageCollection()) {
+    if (!engine || !engine->isImageCollection) {
         return;
     }
     if (!engine->AllowsPrinting()) {
@@ -1355,7 +1029,45 @@ void ShowConvertToPdfDialog(MainWindow* win) {
 
 // --- Convert PDF to Images dialog (issue #5991) ---
 
-constexpr float kConvertPdfToImagesDpi = 150.0f;
+// editable combo listing kImageDpiChoices; any other DPI can be typed in
+static DropDown* NewDpiCombo(HWND parent, PlatformFont* font, int dpi) {
+    DropDown::CreateArgs args;
+    args.parent = parent;
+    args.font = font;
+    args.isRtl = IsUIRtl();
+    args.isEditable = true;
+    auto* dd = new DropDown();
+    dd->Create(args);
+
+    StrVec items;
+    for (int choice : kImageDpiChoices) {
+        items.Append(fmt("%d", choice));
+    }
+    dd->SetItems(items);
+    dd->SetText(fmt("%d", dpi));
+    dd->SetColors(ThemeWindowTextColor(), ThemeWindowControlBackgroundColor());
+    return dd;
+}
+
+// 0 if not a usable DPI
+static int DpiFromComboText(DropDown* dd) {
+    Str s = dd->GetTextTemp();
+    str::TrimWsBoth(s);
+    int dpi = ParseInt(s);
+    if (dpi < 1 || dpi > kMaxImageDpi) {
+        return 0;
+    }
+    return dpi;
+}
+
+// on CBN_SELCHANGE the edit still has the previous text, so read the list
+static int DpiFromComboSel(DropDown* dd) {
+    int idx = CbGetCurrentSelection(dd);
+    if (idx < 0 || idx >= dimofi(kImageDpiChoices)) {
+        return DpiFromComboText(dd);
+    }
+    return kImageDpiChoices[idx];
+}
 
 // PNG / JPEG / BMP, same core formats as the Save Image dialog
 struct ConvertImageFormat {
@@ -1375,60 +1087,6 @@ static int ConvertImageFormatCount() {
     return dimofi(kConvertImageFormats);
 }
 
-static int ConvertImageFormatIdxFromPath(Str path) {
-    if (str::EndsWithI(path, StrL(".jpg")) || str::EndsWithI(path, StrL(".jpeg"))) {
-        return 1;
-    }
-    if (str::EndsWithI(path, StrL(".bmp"))) {
-        return 2;
-    }
-    return 0; // PNG
-}
-
-static bool IsSupportedConvertImageExt(Str path) {
-    return str::EndsWithI(path, StrL(".png")) || str::EndsWithI(path, StrL(".jpg")) ||
-           str::EndsWithI(path, StrL(".jpeg")) || str::EndsWithI(path, StrL(".bmp"));
-}
-
-static bool PathHasPagePlaceholder(Str path) {
-    return str::ContainsI(path, StrL("<N>"));
-}
-
-// dest template: if <N> is missing and we'll write more than one file, insert
-// it before the extension so pages don't overwrite each other
-static TempStr EnsurePagePlaceholderTemp(Str path, bool multiPage) {
-    if (PathHasPagePlaceholder(path) || !multiPage) {
-        return str::DupTemp(path);
-    }
-    TempStr ext = path::GetExtTemp(path);
-    TempStr noExt = path::GetPathNoExtTemp(path);
-    if (len(ext) == 0) {
-        return str::JoinTemp(noExt, StrL("-<N>.png"));
-    }
-    return str::JoinTemp(noExt, StrL("-<N>"), ext);
-}
-
-static TempStr WithDefaultImageExtTemp(Str path) {
-    if (IsSupportedConvertImageExt(path)) {
-        return str::DupTemp(path);
-    }
-    TempStr ext = path::GetExtTemp(path);
-    if (ext) {
-        // has an extension we don't write
-        return {};
-    }
-    return str::JoinTemp(path, StrL(".png"));
-}
-
-static TempStr ReplacePagePlaceholderTemp(Str path, int pageNo) {
-    TempStr n = fmt("%d", pageNo);
-    TempStr s = str::ReplaceTemp(path, StrL("<N>"), n);
-    if (str::Contains(s, StrL("<n>"))) {
-        s = str::ReplaceTemp(s, StrL("<n>"), n);
-    }
-    return s;
-}
-
 static bool GetImageEncoderForPath(Str path, CLSID* encOut) {
     if (!IsSupportedConvertImageExt(path)) {
         return false;
@@ -1442,7 +1100,7 @@ static bool GetImageEncoderForPath(Str path, CLSID* encOut) {
     return true;
 }
 
-static bool SavePixmapAsImageFile(Pixmap* px, Str path) {
+bool SavePixmapAsImageFile(Pixmap* px, Str path) {
     if (!px || len(path) == 0) {
         return false;
     }
@@ -1479,103 +1137,6 @@ static bool SavePixmapAsImageFile(Pixmap* px, Str path) {
     return ok;
 }
 
-// render each page at kConvertPdfToImagesDpi and write it to templatePath with
-// <N> replaced by the 1-based page number. Returns how many files were written.
-static int ConvertPagesToImages(EngineBase* engine, int rotation, Str templatePath, const Vec<int>& pages,
-                                Str* firstPathOwnedOut) {
-    if (firstPathOwnedOut) {
-        *firstPathOwnedOut = {};
-    }
-    if (!engine || len(pages) == 0 || len(templatePath) == 0) {
-        return 0;
-    }
-    TempStr withExt = WithDefaultImageExtTemp(templatePath);
-    if (len(withExt) == 0) {
-        return 0;
-    }
-    TempStr templ = EnsurePagePlaceholderTemp(withExt, len(pages) > 1);
-    float fileDpi = engine->GetFileDPI();
-    if (fileDpi <= 0) {
-        fileDpi = 72.0f;
-    }
-    float zoom = kConvertPdfToImagesDpi / fileDpi;
-    int nOk = 0;
-    StrVec pngs;
-    for (int pageNo : pages) {
-        TempStr dest = ReplacePagePlaceholderTemp(templ, pageNo);
-        RenderPageArgs args(pageNo, zoom, rotation);
-        Pixmap* px = engine->RenderPage(args);
-        if (!px) {
-            logf("ConvertPagesToImages: RenderPage failed for page %d\n", pageNo);
-            continue;
-        }
-        px->xres = kConvertPdfToImagesDpi;
-        px->yres = kConvertPdfToImagesDpi;
-        bool ok = SavePixmapAsImageFile(px, dest);
-        FreePixmap(px);
-        if (!ok) {
-            logf("ConvertPagesToImages: save failed for '%s'\n", dest);
-            continue;
-        }
-        if (nOk == 0 && firstPathOwnedOut) {
-            *firstPathOwnedOut = str::Dup(dest);
-        }
-        if (str::EndsWithI(dest, StrL(".png"))) {
-            pngs.Append(dest);
-        }
-        nOk++;
-    }
-    OptimizePngFilesAsync(pngs);
-    return nOk;
-}
-
-static void CollectAllPages(int pageCount, Vec<int>& pages) {
-    VecReset(pages);
-    for (int i = 1; i <= pageCount; i++) {
-        VecAppend(pages, i);
-    }
-}
-
-TempStr ConvertPagesToImagesResultTemp(Str templatePath, Str pagesSpec, int* exitCodeOut) {
-    auto finish = [&](int code, TempStr s) -> TempStr {
-        if (exitCodeOut) {
-            *exitCodeOut = code;
-        }
-        return s;
-    };
-    if (len(gWindows) == 0) {
-        return finish(2, str::DupTemp(StrL("NOTREADY no-window")));
-    }
-    MainWindow* win = gWindows[0];
-    DisplayModel* dm = win ? win->AsFixed() : nullptr;
-    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
-    if (!engine) {
-        return finish(2, str::DupTemp(StrL("NOTREADY no-engine")));
-    }
-    int pageCount = engine->PageCount();
-    Vec<int> pages;
-    if (str::EqI(pagesSpec, StrL("current"))) {
-        int cur = dm->CurrentPageNo();
-        if (cur < 1 || cur > pageCount) {
-            return finish(1, str::DupTemp(StrL("ERROR bad-current")));
-        }
-        VecAppend(pages, cur);
-    } else if (str::EqI(pagesSpec, StrL("all"))) {
-        CollectAllPages(pageCount, pages);
-    } else if (!ParseDeletePages(pagesSpec, pageCount, pages)) {
-        return finish(1, str::DupTemp(StrL("ERROR bad-pages")));
-    }
-    Str firstPath;
-    int n = ConvertPagesToImages(engine, dm->GetRotation(), templatePath, pages, &firstPath);
-    if (n == 0) {
-        str::Free(firstPath);
-        return finish(1, str::DupTemp(StrL("ERROR convert-failed")));
-    }
-    TempStr res = fmt("OK n=%d first=%s", n, firstPath);
-    str::Free(firstPath);
-    return finish(0, res);
-}
-
 struct ConvertPdfToImagesDialog : PdfToolDialog {
     int pageCount = 0;
     Checkbox* radioCurrent = nullptr;
@@ -1583,6 +1144,8 @@ struct ConvertPdfToImagesDialog : PdfToolDialog {
     Checkbox* radioCustom = nullptr;
     Edit* pagesEdit = nullptr;
     DropDown* dropFormat = nullptr;
+    DropDown* dropDpi = nullptr;
+    int dpi = kConvertPdfToImagesDpi; // 0 if what's typed is not a DPI
     bool syncingFormat = false;
 
     bool Create(MainWindow* win, WindowTab* tab);
@@ -1591,6 +1154,8 @@ struct ConvertPdfToImagesDialog : PdfToolDialog {
     void UpdateButton();
     void OnPagesModeChanged();
     void OnFormatChanged();
+    void OnDpiPicked();
+    void OnDpiTyped();
     void SetDestExtFromFormat();
     void SyncFormatFromPath(Str path);
     int SelectedFormatIdx() const;
@@ -1659,6 +1224,16 @@ void ConvertPdfToImagesDialog::OnFormatChanged() {
     SetDestExtFromFormat();
 }
 
+void ConvertPdfToImagesDialog::OnDpiPicked() {
+    dpi = DpiFromComboSel(dropDpi);
+    UpdateButton();
+}
+
+void ConvertPdfToImagesDialog::OnDpiTyped() {
+    dpi = DpiFromComboText(dropDpi);
+    UpdateButton();
+}
+
 void ConvertPdfToImagesDialog::OnPagesModeChanged() {
     bool custom = radioCustom && radioCustom->IsChecked();
     if (pagesEdit) {
@@ -1679,7 +1254,7 @@ void ConvertPdfToImagesDialog::UpdateButton() {
         Vec<int> parsed;
         pagesOk = ParseDeletePages(pages, pageCount, parsed);
     }
-    bool valid = destOk && pagesOk;
+    bool valid = destOk && pagesOk && dpi > 0;
     if (valid == actionBtn->HasFlag(vwfEnabled)) {
         return;
     }
@@ -1757,11 +1332,21 @@ void ConvertPdfToImagesDialog::DoIt(VirtMouseEvent*) {
         }
     }
 
-    logf("ConvertPdfToImages: '%s' -> '%s', %d page(s)\n", srcPath, destPath, len(pages));
+    // the box may have been filled without a change notification
+    dpi = DpiFromComboText(dropDpi);
+    if (dpi < 1) {
+        return;
+    }
+    if (!PagesFitDpi(engine, pages, dpi)) {
+        MessageBoxWarning(hwnd, Tr("Too large for this DPI"), Tr("Convert PDF to Images"));
+        return;
+    }
+
+    logf("ConvertPdfToImages: '%s' -> '%s', %d page(s), %d DPI\n", srcPath, destPath, len(pages), dpi);
 
     HCURSOR prev = SetCursor(LoadCursor(nullptr, IDC_WAIT));
     Str firstPath;
-    int nOk = ConvertPagesToImages(engine, dm->GetRotation(), destPath, pages, &firstPath);
+    int nOk = ConvertPagesToImages(engine, dm->GetRotation(), destPath, pages, dpi, &firstPath);
     SetCursor(prev);
 
     if (nOk == 0) {
@@ -1856,6 +1441,15 @@ bool ConvertPdfToImagesDialog::Create(MainWindow* w, WindowTab* tab) {
     pagesEdit->SetIsEnabled(false);
     row->AddChild(pagesEdit, 1);
 
+    HBox* dpiRow = AddRow();
+    dpiRow->gap = font->averageCharWidth;
+    dpiRow->AddChild(NewVirtText({.s = Tr("Resolution (DPI):"), .font = font, .isRtl = IsUIRtl()}));
+
+    dropDpi = NewDpiCombo(hwnd, font, dpi);
+    dropDpi->onSelectionChanged = MkMethod0<ConvertPdfToImagesDialog, &ConvertPdfToImagesDialog::OnDpiPicked>(this);
+    dropDpi->onTextChanged = MkMethod0<ConvertPdfToImagesDialog, &ConvertPdfToImagesDialog::OnDpiTyped>(this);
+    dpiRow->AddChild(dropDpi);
+
     AddButtonsRow(Tr("Convert"), Tr("Use <N> for the page number"));
     FinishDialog(destEdit);
 
@@ -1884,125 +1478,7 @@ void ShowConvertPdfToImagesDialog(MainWindow* win) {
     }
 }
 
-// rectangular selection → PNG / JPEG / BMP at a chosen DPI, independent of
-// the current zoom (issue #6127)
-constexpr i64 kMaxSaveSelectionPixels = 100LL * 1000 * 1000;
-constexpr int kMaxSaveSelectionSide = 16384;
-constexpr int kSaveSelectionDefaultDpi = 300;
-
-static const int kSaveSelectionDpiChoices[] = {72, 150, 300, 600, 1200};
-
-static float SaveSelectionZoom(EngineBase* engine, float dpi) {
-    float fileDpi = engine->GetFileDPI();
-    if (fileDpi <= 0) {
-        fileDpi = 72.0f;
-    }
-    if (dpi < 1) {
-        dpi = (float)kSaveSelectionDefaultDpi;
-    }
-    return dpi / fileDpi;
-}
-
-static bool SaveSelectionSizeOk(int w, int h) {
-    if (w <= 0 || h <= 0) {
-        return false;
-    }
-    if (w > kMaxSaveSelectionSide || h > kMaxSaveSelectionSide) {
-        return false;
-    }
-    i64 pixels = (i64)w * (i64)h;
-    return pixels <= kMaxSaveSelectionPixels;
-}
-
-static bool EstimateSelectionPx(RectF rect, float zoom, int& w, int& h) {
-    w = (int)floorf((rect.dx * zoom) + 0.5f);
-    h = (int)floorf((rect.dy * zoom) + 0.5f);
-    return w > 0 && h > 0;
-}
-
-static Kind kNotifSaveSelectionAsImage = "notifSaveSelectionAsImage";
-
-static Pixmap* RenderSelectionPixmap(EngineBase* engine, int rotation, int pageNo, RectF rect, float dpi) {
-    if (!engine || rect.IsEmpty()) {
-        return nullptr;
-    }
-    if (pageNo < 1 || pageNo > engine->PageCount()) {
-        return nullptr;
-    }
-    float zoom = SaveSelectionZoom(engine, dpi);
-    int estW = 0;
-    int estH = 0;
-    if (!EstimateSelectionPx(rect, zoom, estW, estH) || !SaveSelectionSizeOk(estW, estH)) {
-        logf("RenderSelectionPixmap: %dx%d at %.0f DPI is too large\n", estW, estH, dpi);
-        return nullptr;
-    }
-    RenderPageArgs args(pageNo, zoom, rotation, &rect, RenderTarget::Export);
-    Pixmap* px = engine->RenderPage(args);
-    if (!px) {
-        logf("RenderSelectionPixmap: RenderPage failed page %d\n", pageNo);
-        return nullptr;
-    }
-    px->xres = dpi;
-    px->yres = dpi;
-    return PixmapToBgra(px);
-}
-
-static bool WriteSelectionPixmap(Pixmap* px, Str destPath) {
-    if (!px || len(destPath) == 0) {
-        return false;
-    }
-    bool ok = false;
-    if (str::EndsWithI(destPath, StrL(".png"))) {
-        // lodepng (no pHYs, so EngineImages displays 1:1) now, zopfli in the
-        // background: a 300 dpi page takes it many seconds
-        Str png = EncodePngFromPixmap(px);
-        ok = len(png) > 0 && file::WriteFile(destPath, png);
-        str::Free(png);
-        if (!ok) {
-            file::Delete(destPath);
-        } else {
-            OptimizePngFileAsync(destPath);
-        }
-    } else {
-        ok = SavePixmapAsImageFile(px, destPath);
-    }
-    return ok;
-}
-
-static bool SavePageRectAsImage(EngineBase* engine, int rotation, int pageNo, RectF rect, Str destPath, float dpi,
-                                int* widthOut, int* heightOut) {
-    if (widthOut) {
-        *widthOut = 0;
-    }
-    if (heightOut) {
-        *heightOut = 0;
-    }
-    Pixmap* px = RenderSelectionPixmap(engine, rotation, pageNo, rect, dpi);
-    if (!px) {
-        return false;
-    }
-    bool ok = WriteSelectionPixmap(px, destPath);
-    if (ok) {
-        if (widthOut) {
-            *widthOut = px->width;
-        }
-        if (heightOut) {
-            *heightOut = px->height;
-        }
-    }
-    FreePixmap(px);
-    return ok;
-}
-
-struct SaveSelImgWork {
-    Pixmap* px = nullptr;
-    Str destPath;
-    HWND hwndCanvas = nullptr;
-    MainWindow* win = nullptr;
-    bool ok = false;
-};
-
-static void FinishSaveSelImg(SaveSelImgWork* d) {
+void FinishSaveSelImg(SaveSelImgWork* d) {
     if (IsWindow(d->hwndCanvas)) {
         RemoveNotificationsForGroup(d->hwndCanvas, kNotifSaveSelectionAsImage);
     }
@@ -2023,64 +1499,25 @@ static void FinishSaveSelImg(SaveSelImgWork* d) {
     delete d;
 }
 
-static void SaveSelImgThread(SaveSelImgWork* d) {
-    d->ok = WriteSelectionPixmap(d->px, d->destPath);
-    FreePixmap(d->px);
-    d->px = nullptr;
-    uitask::Post(MkFunc0(FinishSaveSelImg, d), "FinishSaveSelImg");
-}
-
-TempStr SaveSelectionAsImageResultTemp(Str destPath, int dpi, int pageNo, int x, int y, int dx, int dy,
-                                       int* exitCodeOut) {
-    auto finish = [&](int code, TempStr s) -> TempStr {
-        if (exitCodeOut) {
-            *exitCodeOut = code;
-        }
-        return s;
-    };
-    if (len(gWindows) == 0) {
-        return finish(2, str::DupTemp(StrL("NOTREADY no-window")));
-    }
-    MainWindow* win = gWindows[0];
-    DisplayModel* dm = win ? win->AsFixed() : nullptr;
-    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
-    if (!engine) {
-        return finish(2, str::DupTemp(StrL("NOTREADY no-engine")));
-    }
-    if (len(destPath) == 0 || dpi < 1 || dx <= 0 || dy <= 0) {
-        return finish(1, str::DupTemp(StrL("ERROR bad-args")));
-    }
-    TempStr withExt = WithDefaultImageExtTemp(destPath);
-    if (len(withExt) == 0) {
-        return finish(1, str::DupTemp(StrL("ERROR bad-ext")));
-    }
-    RectF rect{(float)x, (float)y, (float)dx, (float)dy};
-    int w = 0;
-    int h = 0;
-    if (!SavePageRectAsImage(engine, dm->GetRotation(), pageNo, rect, withExt, (float)dpi, &w, &h)) {
-        return finish(1, str::DupTemp(StrL("ERROR save-failed")));
-    }
-    return finish(0, fmt("OK w=%d h=%d path=%s", w, h, withExt));
-}
-
 struct SaveSelectionAsImageDialog : PdfToolDialog {
     int pageNo = 0;
     RectF selRect;
     DropDown* dropFormat = nullptr;
     DropDown* dropDpi = nullptr;
     VirtText* sizeLabel = nullptr;
+    int dpi = kSaveSelectionDefaultDpi; // 0 if what's typed is not a DPI
     bool syncingFormat = false;
 
     bool Create(MainWindow* win, WindowTab* tab);
     void DoIt(VirtMouseEvent* ev = nullptr) override;
     void OnBrowseDest(VirtMouseEvent* ev = nullptr);
     void OnFormatChanged();
-    void OnDpiChanged();
+    void OnDpiPicked();
+    void OnDpiTyped();
     void SetDestExtFromFormat();
     void SyncFormatFromPath(Str path);
     void UpdateSizeLabel();
     int SelectedFormatIdx() const;
-    int SelectedDpi() const;
 };
 
 int SaveSelectionAsImageDialog::SelectedFormatIdx() const {
@@ -2092,17 +1529,6 @@ int SaveSelectionAsImageDialog::SelectedFormatIdx() const {
         return 0;
     }
     return idx;
-}
-
-int SaveSelectionAsImageDialog::SelectedDpi() const {
-    if (!dropDpi) {
-        return kSaveSelectionDefaultDpi;
-    }
-    int idx = CbGetCurrentSelection(dropDpi);
-    if (idx < 0 || idx >= dimofi(kSaveSelectionDpiChoices)) {
-        return kSaveSelectionDefaultDpi;
-    }
-    return kSaveSelectionDpiChoices[idx];
 }
 
 void SaveSelectionAsImageDialog::SetDestExtFromFormat() {
@@ -2144,11 +1570,16 @@ void SaveSelectionAsImageDialog::UpdateSizeLabel() {
     if (!engine) {
         return;
     }
-    float zoom = SaveSelectionZoom(engine, (float)SelectedDpi());
+    float zoom = SaveSelectionZoom(engine, (float)dpi);
     int w = 0;
     int h = 0;
     EstimateSelectionPx(selRect, zoom, w, h);
-    if (!SaveSelectionSizeOk(w, h)) {
+    if (dpi < 1) {
+        sizeLabel->SetText(StrL(""));
+        if (actionBtn) {
+            actionBtn->SetIsEnabled(false);
+        }
+    } else if (!SaveSelectionSizeOk(w, h)) {
         sizeLabel->SetText(Tr("Too large for this DPI"));
         if (actionBtn) {
             actionBtn->SetIsEnabled(false);
@@ -2170,7 +1601,13 @@ void SaveSelectionAsImageDialog::OnFormatChanged() {
     SetDestExtFromFormat();
 }
 
-void SaveSelectionAsImageDialog::OnDpiChanged() {
+void SaveSelectionAsImageDialog::OnDpiPicked() {
+    dpi = DpiFromComboSel(dropDpi);
+    UpdateSizeLabel();
+}
+
+void SaveSelectionAsImageDialog::OnDpiTyped() {
+    dpi = DpiFromComboText(dropDpi);
     UpdateSizeLabel();
 }
 
@@ -2222,7 +1659,11 @@ void SaveSelectionAsImageDialog::DoIt(VirtMouseEvent*) {
         MessageBoxWarning(hwnd, StrL("Unsupported image format."), Tr("Save Selection As Image"));
         return;
     }
-    int dpi = SelectedDpi();
+    // the box may have been filled without a change notification
+    dpi = DpiFromComboText(dropDpi);
+    if (dpi < 1) {
+        return;
+    }
     Pixmap* px = RenderSelectionPixmap(engine, dm->GetRotation(), pageNo, selRect, (float)dpi);
     if (!px) {
         MessageBoxWarning(hwnd, StrL("Failed to save the selection as an image."), Tr("Save Selection As Image"));
@@ -2236,7 +1677,7 @@ void SaveSelectionAsImageDialog::DoIt(VirtMouseEvent*) {
     work->win = win;
 
     NotificationCreateArgs nargs;
-    nargs.hwndParent = win->hwndCanvas;
+    nargs.win = win;
     nargs.msg = Tr("Saving image...");
     nargs.groupId = kNotifSaveSelectionAsImage;
     nargs.timeoutMs = kNotifNoTimeout;
@@ -2309,30 +1750,12 @@ bool SaveSelectionAsImageDialog::Create(MainWindow* w, WindowTab* tab) {
 
     HBox* dpiRow = AddRow();
     dpiRow->gap = font->averageCharWidth;
-    dpiRow->AddChild(NewVirtText({.s = Tr("DPI:"), .font = font, .isRtl = IsUIRtl()}));
+    dpiRow->AddChild(NewVirtText({.s = Tr("Resolution (DPI):"), .font = font, .isRtl = IsUIRtl()}));
 
-    {
-        auto* dd = new DropDown();
-        DropDown::CreateArgs ddargs;
-        ddargs.parent = hwnd;
-        ddargs.font = font;
-        ddargs.isRtl = IsUIRtl();
-        dd->Create(ddargs);
-        StrVec items;
-        int selIdx = 0;
-        for (int i = 0; i < dimofi(kSaveSelectionDpiChoices); i++) {
-            items.Append(fmt("%d", kSaveSelectionDpiChoices[i]));
-            if (kSaveSelectionDpiChoices[i] == kSaveSelectionDefaultDpi) {
-                selIdx = i;
-            }
-        }
-        dd->SetItems(items);
-        CbSetCurrentSelection(dd, selIdx);
-        dd->SetColors(ThemeWindowTextColor(), ThemeWindowControlBackgroundColor());
-        dd->onSelectionChanged = MkMethod0<SaveSelectionAsImageDialog, &SaveSelectionAsImageDialog::OnDpiChanged>(this);
-        dropDpi = dd;
-        dpiRow->AddChild(dropDpi);
-    }
+    dropDpi = NewDpiCombo(hwnd, font, dpi);
+    dropDpi->onSelectionChanged = MkMethod0<SaveSelectionAsImageDialog, &SaveSelectionAsImageDialog::OnDpiPicked>(this);
+    dropDpi->onTextChanged = MkMethod0<SaveSelectionAsImageDialog, &SaveSelectionAsImageDialog::OnDpiTyped>(this);
+    dpiRow->AddChild(dropDpi);
 
     sizeLabel = NewVirtText({.s = StrL(""), .font = font, .isRtl = IsUIRtl()});
     dpiRow->AddChild(sizeLabel, 1);

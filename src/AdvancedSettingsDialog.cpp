@@ -9,6 +9,7 @@
 // re-computed); Cancel abandons the changes.
 
 #include "base/Base.h"
+#include "base/File.h"
 #include "base/Win.h"
 #include "gui/Dpi.h"
 #include "base/UITask.h"
@@ -37,239 +38,8 @@
 #include "Translations.h"
 #include "FilterHighlightDraw.h"
 #include "SumatraDialogs.h"
-
-constexpr const char* kSettingsDocsUrl = "https://www.sumatrapdfreader.org/settings/settings3-7.html";
-// smallest client width the user can drag the dialog to (96 dpi pixels)
-constexpr int kAdvSettingsMinClientDx = 480;
-
-// a single editable setting; the pending (possibly edited) value is kept
-// here and only written back on Save. The field is addressed by its offset
-// into gSettings, not a pointer: a settings reload (file watcher, Save)
-// frees and re-creates gSettings while the dialog stays open
-namespace {
-struct SettingItem {
-    Str name;    // dotted path, e.g. "FixedPageUI.TextColor", owned
-    Str comment; // doc comment describing the setting, owned
-    SettingType type = SettingType::Bool;
-    int fieldOffset = 0;
-    const char** enumValues = nullptr; // non-null for enum (string) settings
-
-    // pending value; strVal (owned) is used for String, Color and Compact
-    bool boolVal = false;
-    int intVal = 0;
-    float floatVal = 0;
-    Str strVal;
-    const StructInfo* compactInfo = nullptr; // Compact: WindowMargin, PageSpacing, …
-
-    // default value from the settings metadata; defStr (owned) for String/Color
-    bool defBool = false;
-    int defInt = 0;
-    float defFloat = 0;
-    Str defStr;
-
-    bool changed = false; // pending value differs from what was loaded (this session)
-
-    ~SettingItem() {
-        str::Free(name);
-        str::Free(comment);
-        str::Free(strVal);
-        str::Free(defStr);
-    }
-};
-} // namespace
-
-static bool CompactIsAllInts(const StructInfo* info) {
-    if (!info || info->fieldCount == 0) {
-        return false;
-    }
-    for (size_t i = 0; i < info->fieldCount; i++) {
-        if (info->fields[i].type != SettingType::Int) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static TempStr FormatCompactIntsTemp(const StructInfo* info, const u8* base, bool useDefault) {
-    str::Builder b;
-    for (size_t i = 0; i < info->fieldCount; i++) {
-        const FieldInfo& f = info->fields[i];
-        if (i > 0) {
-            b.AppendChar(' ');
-        }
-        int val = useDefault ? (int)f.value : *(const int*)(base + f.offset);
-        b.Append(fmt("%d", val));
-    }
-    return ToStrTemp(b);
-}
-
-static void ApplyCompactInts(const StructInfo* info, u8* base, Str s) {
-    int off = 0;
-    for (size_t i = 0; i < info->fieldCount; i++) {
-        const FieldInfo& f = info->fields[i];
-        if (f.type != SettingType::Int) {
-            continue;
-        }
-        Str rest = Str(s.s + off, len(s) - off);
-        off += str::TrimWs(rest);
-        int val = (int)f.value;
-        if (len(rest) > 0) {
-            val = ParseInt(rest);
-            off += str::TrimNonWs(rest);
-        }
-        *(int*)(base + f.offset) = val;
-    }
-}
-
-static bool StrValsEq(Str a, Str b) {
-    if (len(a) == 0 && len(b) == 0) {
-        return true;
-    }
-    return str::Eq(a, b);
-}
-
-// true if the pending value differs from the setting's default value
-static bool SettingDiffersFromDefault(SettingItem* item) {
-    switch (item->type) {
-        case SettingType::Bool:
-            return item->boolVal != item->defBool;
-        case SettingType::Int:
-            return item->intVal != item->defInt;
-        case SettingType::Float:
-            return item->floatVal != item->defFloat;
-        default:
-            return !StrValsEq(item->strVal, item->defStr);
-    }
-}
-
-// value of the setting formatted for display; the result is temp-allocated
-static TempStr FormatSettingValueTemp(SettingItem* item) {
-    switch (item->type) {
-        case SettingType::Bool:
-            return str::DupTemp(item->boolVal ? StrL("true") : StrL("false"));
-        case SettingType::Int:
-            return fmt("%d", item->intVal);
-        case SettingType::Float:
-            return fmt("%g", item->floatVal);
-        default:
-            return str::DupTemp(item->strVal);
-    }
-}
-
-static TempStr FormatSettingDefaultTemp(SettingItem* item) {
-    switch (item->type) {
-        case SettingType::Bool:
-            return str::DupTemp(item->defBool ? StrL("true") : StrL("false"));
-        case SettingType::Int:
-            return fmt("%d", item->defInt);
-        case SettingType::Float:
-            return fmt("%g", item->defFloat);
-        default:
-            return str::DupTemp(item->defStr);
-    }
-}
-
-// Show what a setting does before it's saved: some settings change how pages
-// are rendered, and picking a value from a list is guesswork without seeing it.
-// The value is previewed without touching gSettings, so Cancel (or closing
-// the dialog) puts the saved value back - see EndPreviewSettingChange().
-static void PreviewSettingChange(SettingItem* item) {
-    if (!str::EqI(item->name, StrL("DocumentColorsFollowTheme"))) {
-        return;
-    }
-    SetDocumentColorsFollowThemePreview(DocumentColorsFollowThemeFromString(item->strVal));
-    UpdateDocumentColors();
-}
-
-// drop every preview and render with the saved settings again
-static void EndPreviewSettingChange() {
-    ClearDocumentColorsFollowThemePreview();
-    UpdateDocumentColors();
-}
-
-static void SetItemChanged(SettingItem* item) {
-    u8* p = SettingFieldPtr(item->fieldOffset);
-    switch (item->type) {
-        case SettingType::Bool:
-            item->changed = item->boolVal != *(bool*)p;
-            break;
-        case SettingType::Int:
-            item->changed = item->intVal != *(int*)p;
-            break;
-        case SettingType::Float:
-            item->changed = item->floatVal != *(float*)p;
-            break;
-        case SettingType::Compact:
-            item->changed = !StrValsEq(item->strVal, FormatCompactIntsTemp(item->compactInfo, p, false));
-            break;
-        default: {
-            Str curr = *(Str*)p;
-            bool bothEmpty = len(item->strVal) == 0 && len(curr) == 0;
-            item->changed = !bothEmpty && !str::Eq(item->strVal, curr);
-            break;
-        }
-    }
-}
-
-// one dialog item per editable setting, seeded with the current value
-static void CollectSettings(Vec<SettingItem*>& items) {
-    Vec<SettingField> fields;
-    CollectSettingFields(fields);
-    for (const SettingField& sf : fields) {
-        const FieldInfo& field = *sf.field;
-        u8* fieldPtr = SettingFieldPtr(sf.offset);
-        if (field.type == SettingType::Compact) {
-            // only all-int compact structs; the "Open Settings File" button
-            // covers the rest
-            const auto* sub = (const StructInfo*)field.value;
-            if (!CompactIsAllInts(sub)) {
-                continue;
-            }
-            auto* item = new SettingItem();
-            item->name = str::Dup(sf.path);
-            item->comment = str::Dup(sf.comment);
-            item->type = field.type;
-            item->fieldOffset = sf.offset;
-            item->compactInfo = sub;
-            item->strVal = str::Dup(FormatCompactIntsTemp(sub, fieldPtr, false));
-            item->defStr = str::Dup(FormatCompactIntsTemp(sub, fieldPtr, true));
-            VecAppend(items, item);
-            continue;
-        }
-
-        auto* item = new SettingItem();
-        item->name = str::Dup(sf.path);
-        item->comment = str::Dup(sf.comment);
-        item->type = field.type;
-        item->fieldOffset = sf.offset;
-        // field.value holds the default: the value itself for Bool/Int,
-        // a string pointer for Float/String/Color (null == empty). It's
-        // NOT a valid pointer for Bool/Int, so only deref it for the
-        // string-backed types.
-        switch (field.type) {
-            case SettingType::Bool:
-                item->boolVal = *(bool*)fieldPtr;
-                item->defBool = field.value != 0;
-                break;
-            case SettingType::Int:
-                item->intVal = *(int*)fieldPtr;
-                item->defInt = (int)field.value;
-                break;
-            case SettingType::Float:
-                item->floatVal = *(float*)fieldPtr;
-                str::Parse(Str((const char*)field.value), "%f", &item->defFloat);
-                break;
-            default:
-                item->strVal = str::Dup(*(Str*)fieldPtr);
-                item->defStr = str::Dup(Str((const char*)field.value));
-                if (field.type == SettingType::String) {
-                    item->enumValues = GetSettingsEnumValues(sf.path);
-                }
-                break;
-        }
-        VecAppend(items, item);
-    }
-}
+#include "RestrictedUseConfig.h"
+#include "AdvancedSettingsDialogCommon.h"
 
 struct ListBoxModelSettings : ListBoxModel {
     Vec<SettingItem*>* items = nullptr; // not owned
@@ -345,6 +115,7 @@ struct AdvancedSettingsWnd : WindowBase {
 
     Rect ValueRectForItem(int idx); // in listBox client coords
     void BeginEditValue(int idx);
+    bool RestoreSelectedDefault(bool isEditingValue, bool isEditingEnum);
     void CommitEditValue();
     void CancelEditValue();
 
@@ -386,38 +157,6 @@ AdvancedSettingsWnd::~AdvancedSettingsWnd() {
 
 static void ClearAdvancedSettingsWnd() {
     gAdvancedSettingsWnd = nullptr;
-}
-
-// Match setting name against a pre-split filter so "use tabs" hits "UseTabs".
-// words is empty when the filter is empty or only whitespace (match all).
-// SplitFilterToWords already trims; do not ContainsI against the raw edit text
-// ("use " would miss "UseTabs" because of the trailing space).
-static bool SettingNameMatchesFilter(Str name, const StrVec& words) {
-    if (len(words) == 0) {
-        return true;
-    }
-    // Single token: continuous case-insensitive substring ("use" / "use " → UseTabs)
-    if (len(words) == 1) {
-        return str::ContainsI(name, words[0]);
-    }
-    // Multi-word: every word must appear (camelCase-friendly; order-independent)
-    return FilterMatches(name, words);
-}
-
-// Keep the metadata order within each group, but put customized settings first
-// so the values users are most likely to review are immediately visible.
-static void CollectFilteredSettings(Vec<SettingItem*>& items, const StrVec& words, Vec<int>& filtered) {
-    VecReset(filtered);
-    for (int group = 0; group < 2; group++) {
-        bool wantNonDefault = group == 0;
-        int n = len(items);
-        for (int i = 0; i < n; i++) {
-            SettingItem* item = items[i];
-            if (SettingDiffersFromDefault(item) == wantNonDefault && SettingNameMatchesFilter(item->name, words)) {
-                VecAppend(filtered, i);
-            }
-        }
-    }
 }
 
 void AdvancedSettingsWnd::QueryChanged() {
@@ -987,6 +726,26 @@ bool AdvancedSettingsWnd::HandleEnterKey(bool isEditingValue, bool isEditingEnum
     return true;
 }
 
+// Delete puts the selected setting's default back; while a value is being
+// typed it edits that text instead
+bool AdvancedSettingsWnd::RestoreSelectedDefault(bool isEditingValue, bool isEditingEnum) {
+    if (isEditingValue) {
+        return false;
+    }
+    int lbIdx = listBox->GetCurrentSelection();
+    SettingItem* item = model->ItemAt(lbIdx);
+    if (!item) {
+        return false;
+    }
+    if (isEditingEnum) {
+        CloseEnumEdit(false);
+    }
+    RestoreSettingDefault(item);
+    NoteItemEdited(item);
+    listBox->Invalidate();
+    return true;
+}
+
 // up/down in the filter edit moves the list selection (wrapping)
 bool AdvancedSettingsWnd::HandleUpDownKey(const KeyEvent& ev) {
     int dir = 0;
@@ -1022,6 +781,10 @@ void AdvancedSettingsWnd::OnKeyDown(KeyEvent* ev) {
     }
     if (ev->vkey == VK_RETURN) {
         ev->didHandle = HandleEnterKey(isEditingValue, isEditingEnum);
+        return;
+    }
+    if (ev->vkey == VK_DELETE) {
+        ev->didHandle = RestoreSelectedDefault(isEditingValue, isEditingEnum);
         return;
     }
     if (HandleUpDownKey(*ev)) {
@@ -1240,7 +1003,7 @@ bool AdvancedSettingsWnd::Create(MainWindow* mainWin) {
         vbox->AddChild(new Padding(c, DpiScaledInsets(4, 2)));
     }
 
-    // one centered hint above the buttons
+    // one centered hint line above the buttons
     {
         auto* hbox = new HBox();
         hbox->alignMain = MainAxisAlign::MainCenter;
@@ -1251,6 +1014,12 @@ bool AdvancedSettingsWnd::Create(MainWindow* mainWin) {
             .isRtl = isRtl,
         });
         hbox->AddChild(new Padding(c, DpiScaledInsets(1, 8)));
+        auto* c2 = NewVirtText({
+            .s = fmt(Tr("%s: restore default").s, StrL(kRestoreDefaultKeyName)),
+            .font = font,
+            .isRtl = isRtl,
+        });
+        hbox->AddChild(new Padding(c2, DpiScaledInsets(1, 8)));
         vbox->AddChild(hbox);
     }
 
@@ -1435,6 +1204,34 @@ TempStr AdvSettingsRowsResultTemp(Str action, int arg, int* exitCodeOut) {
         out.Append(fmt("toggled=%s changed=%d banner=%d\n", target->name, n, banner ? 1 : 0));
         return finish(0);
     }
+    // select the row of the arg-th bool setting (as "toggle" counts them) and
+    // press Delete on it
+    if (str::Eq(action, StrL("restore"))) {
+        int nBool = 0;
+        int lbIdx = -1;
+        int n = wnd->model ? wnd->model->ItemsCount() : 0;
+        for (int i = 0; i < len(wnd->items) && lbIdx < 0; i++) {
+            if (wnd->items[i]->type != SettingType::Bool || nBool++ != arg) {
+                continue;
+            }
+            for (int row = 0; row < n; row++) {
+                if (wnd->model->filtered[row] == i) {
+                    lbIdx = row;
+                    break;
+                }
+            }
+        }
+        if (lbIdx < 0) {
+            out.Append(StrL("ERROR no-bool\n"));
+            return finish(1);
+        }
+        wnd->listBox->SetCurrentSelection(lbIdx);
+        wnd->OnSelectionChanged();
+        bool restored = wnd->RestoreSelectedDefault(wnd->editValue != nullptr, wnd->dropDownValue != nullptr);
+        out.Append(fmt("restored=%s changed=%d\n", restored ? wnd->model->ItemAt(lbIdx)->name : StrL(""),
+                       wnd->CountChangedSettings()));
+        return finish(0);
+    }
     if (str::Eq(action, StrL("esc"))) {
         bool editingValue = wnd->editValue != nullptr;
         bool editingEnum = wnd->dropDownValue != nullptr;
@@ -1544,4 +1341,264 @@ void ShowAdvancedSettingsDialog(MainWindow* win) {
         return;
     }
     gAdvancedSettingsWnd = wnd;
+}
+
+struct RestrictedUseWnd;
+
+struct RestrictedUseListBox : VirtListBox {
+    RestrictedUseWnd* owner = nullptr;
+    void OnRestrictedMouseDown(VirtMouseEvent* ev);
+};
+
+struct RestrictedUseWnd : WindowBase {
+    MainWindow* win = nullptr;
+    RestrictedUseConfig config;
+    RestrictedUseListBox* listBox = nullptr;
+    VirtFixedLinesText* commentText = nullptr;
+    VirtButton* btnSave = nullptr;
+    ILayout* saveLayout = nullptr;
+    ILayout* deleteLayout = nullptr;
+    PlatformFont* fontBold = nullptr;
+
+    bool Create(MainWindow* mainWin);
+    void ToggleSelected();
+    void UpdateSelection();
+    void UpdateButtons();
+    void DrawItem(VirtListBox::DrawItemEvent* ev);
+    void OnKeyDown(KeyEvent* ev);
+    void OnCancel(VirtMouseEvent* ev = nullptr);
+    void OnSave(VirtMouseEvent* ev = nullptr);
+    void OnDelete(VirtMouseEvent* ev = nullptr);
+    void OnHelp(VirtMouseEvent* ev = nullptr);
+};
+
+static RestrictedUseWnd* gRestrictedUseWnd = nullptr;
+
+void RestrictedUseListBox::OnRestrictedMouseDown(VirtMouseEvent* ev) {
+    int idx = ItemFromPoint(ev->pt);
+    VirtListBox::OnMouseDown(ev);
+    if (idx >= 0 && owner) {
+        owner->ToggleSelected();
+    }
+}
+
+void RestrictedUseWnd::UpdateButtons() {
+    saveLayout->SetVisibility(RestrictedUseConfigChanged(config) ? Visibility::Visible : Visibility::Collapse);
+    deleteLayout->SetVisibility(config.fileExists ? Visibility::Visible : Visibility::Collapse);
+    if (vroot) {
+        vroot->RequestLayout();
+    }
+}
+
+void RestrictedUseWnd::UpdateSelection() {
+    int idx = listBox->GetCurrentSelection();
+    commentText->SetText(idx >= 0 ? RestrictedUseFeatureDescription(idx) : Str());
+}
+
+void RestrictedUseWnd::ToggleSelected() {
+    int idx = listBox->GetCurrentSelection();
+    if (idx < 0 || idx >= RestrictedUseFeatureCount()) {
+        return;
+    }
+    config.items[idx].enabled = !config.items[idx].enabled;
+    UpdateRestrictedUseChanged(config);
+    UpdateButtons();
+    listBox->Invalidate();
+}
+
+void RestrictedUseWnd::DrawItem(VirtListBox::DrawItemEvent* ev) {
+    int idx = ev->itemIndex;
+    if (idx < 0 || idx >= RestrictedUseFeatureCount()) {
+        return;
+    }
+    Gfx* gfx = ev->gfx;
+    Rect row = ev->itemRect;
+    Color bg = listBox->GetColor(kColListBg);
+    Color text = listBox->GetColor(kColListText);
+    if (IsSpecialColor(bg)) {
+        bg = GetSysColor(COLOR_WINDOW);
+    }
+    if (IsSpecialColor(text)) {
+        text = GetSysColor(COLOR_WINDOWTEXT);
+    }
+    if (ev->selected) {
+        bg = AccentColor(bg, 30);
+    }
+    gfx->FillRect(row, bg);
+
+    int boxDx = DpiScale(13);
+    int pad = DpiScale(5);
+    Rect box{row.Right() - pad - boxDx, row.y + (row.dy - boxDx) / 2, boxDx, boxDx};
+    Rect name = row;
+    name.SubLR(pad, pad + boxDx + pad);
+    PlatformFont* itemFont = config.items[idx].changed ? fontBold : GetFont();
+    gfx->DrawText(RestrictedUseFeatureName(idx), name, gfxTextLeft | gfxTextVCenter | gfxTextEllipsis, itemFont, text);
+    gfx->DrawRect(box, text);
+    if (config.items[idx].enabled) {
+        Point p1{box.x + 2, box.y + box.dy / 2};
+        Point p2{box.x + box.dx / 2, box.y + box.dy - 3};
+        Point p3{box.x + box.dx - 2, box.y + 3};
+        gfx->DrawLineAA(p1, p2, text, 2);
+        gfx->DrawLineAA(p2, p3, text, 2);
+    }
+}
+
+void RestrictedUseWnd::OnKeyDown(KeyEvent* ev) {
+    if (ev->vkey == VK_RETURN && vroot && vroot->focused == listBox) {
+        ToggleSelected();
+        ev->didHandle = true;
+    }
+}
+
+void RestrictedUseWnd::OnCancel(VirtMouseEvent*) {
+    ScheduleDelete();
+}
+
+void RestrictedUseWnd::OnSave(VirtMouseEvent*) {
+    if (!SaveRestrictedUseConfig(config)) {
+        MsgBox(hwnd, Tr("Failed to save sumatrapdfrestrict.ini."), Tr("Error"), MB_OK | MB_ICONERROR);
+        return;
+    }
+    ScheduleDelete();
+}
+
+void RestrictedUseWnd::OnDelete(VirtMouseEvent*) {
+    int res =
+        MsgBox(hwnd, Tr("Delete sumatrapdfrestrict.ini?"), Tr("Configure Restricted Use"), MB_YESNO | MB_ICONQUESTION);
+    if (res != IDYES) {
+        return;
+    }
+    if (!DeleteRestrictedUseConfig()) {
+        MsgBox(hwnd, Tr("Failed to delete sumatrapdfrestrict.ini."), Tr("Error"), MB_OK | MB_ICONERROR);
+        return;
+    }
+    ScheduleDelete();
+}
+
+void RestrictedUseWnd::OnHelp(VirtMouseEvent*) {
+    SumatraLaunchBrowser(Str(kRestrictedUseDocsUrl));
+}
+
+bool RestrictedUseWnd::Create(MainWindow* mainWin) {
+    win = mainWin;
+    TempStr path = GetPathInExeDirTemp(Str(kRestrictionsFileName));
+    bool exists = file::Exists(path);
+    LoadRestrictedUseConfig(config, exists ? file::ReadFile(path) : Str(),
+                            exists ? RestrictedUseFile::Exists : RestrictedUseFile::Missing);
+
+    CreateCustomArgs args;
+    args.owner = win ? win->hwndFrame : nullptr;
+    args.title = Tr("Configure Restricted Use");
+    args.visible = false;
+    args.style = WS_POPUPWINDOW | WS_CAPTION;
+    args.font = GetFont();
+    args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
+    CreateCustom(args);
+    if (!hwnd) {
+        return false;
+    }
+    fontBold = GetBoldPlatformFont(GetFont());
+
+    auto* vbox = new VBox();
+    vbox->alignCross = CrossAxisAlign::Stretch;
+    auto* list = new RestrictedUseListBox();
+    list->owner = this;
+    list->dpi = GetDpi();
+    list->font = GetFont();
+    list->idealSizeLines = RestrictedUseFeatureCount();
+    auto* model = new ListBoxModelStrings();
+    for (int i = 0; i < RestrictedUseFeatureCount(); i++) {
+        model->strings.Append(RestrictedUseFeatureName(i));
+    }
+    list->SetModel(model);
+    list->SetCurrentSelection(0);
+    list->onMouseDown =
+        MkMethod1<RestrictedUseListBox, VirtMouseEvent*, &RestrictedUseListBox::OnRestrictedMouseDown>(list);
+    list->onSelectionChanged = MkMethod0<RestrictedUseWnd, &RestrictedUseWnd::UpdateSelection>(this);
+    list->onDrawItem = MkMethod1<RestrictedUseWnd, VirtListBox::DrawItemEvent*, &RestrictedUseWnd::DrawItem>(this);
+    listBox = list;
+    vbox->AddChild(list);
+
+    auto* help = new VirtFixedLinesText();
+    help->font = GetFont();
+    help->borderCol = ThemeEdgeColor();
+    help->padding = DpiScaledInsets(4);
+    commentText = help;
+    vbox->AddChild(new Padding(help, DpiScaledInsets(4, 2)));
+    UpdateSelection();
+
+    auto* buttons = new HBox();
+    buttons->alignMain = MainAxisAlign::SpaceBetween;
+    buttons->alignCross = CrossAxisAlign::CrossCenter;
+    auto* left = new HBox();
+    left->gap = GetFont()->averageCharWidth;
+    auto pad = Insets{4, 0, 4, 0};
+    btnSave = NewThemedButton(hwnd, Tr("Save"), GetFont(), true);
+    btnSave->onClick = MkMethod1<RestrictedUseWnd, VirtMouseEvent*, &RestrictedUseWnd::OnSave>(this);
+    saveLayout = new Padding(btnSave, pad);
+    left->AddChild(saveLayout);
+    auto* btnDelete = NewThemedButton(hwnd, Tr("Delete File"), GetFont(), false);
+    btnDelete->onClick = MkMethod1<RestrictedUseWnd, VirtMouseEvent*, &RestrictedUseWnd::OnDelete>(this);
+    deleteLayout = new Padding(btnDelete, pad);
+    left->AddChild(deleteLayout);
+    auto* btnCancel = NewThemedButton(hwnd, Tr("Cancel"), GetFont(), false);
+    btnCancel->onClick = MkMethod1<RestrictedUseWnd, VirtMouseEvent*, &RestrictedUseWnd::OnCancel>(this);
+    left->AddChild(new Padding(btnCancel, pad));
+    buttons->AddChild(left);
+    auto* btnHelp = NewThemedButton(hwnd, Tr("Help"), GetFont(), false);
+    btnHelp->onClick = MkMethod1<RestrictedUseWnd, VirtMouseEvent*, &RestrictedUseWnd::OnHelp>(this);
+    buttons->AddChild(new Padding(btnHelp, pad));
+    vbox->AddChild(buttons);
+
+    layout = new Padding(vbox, DpiScaledInsets(4, 8));
+    UpdateButtons();
+    LayoutAndSizeToContent(layout, DpiScale(520), 0, hwnd);
+    DoLayout(HwndClientRect(hwnd).Size());
+    HwndCenterDialog(hwnd, win ? win->hwndFrame : nullptr);
+    UpdateTheme();
+    SetIsVisible(true);
+    vroot->SetFocus(list);
+    return true;
+}
+
+static void ClearRestrictedUseWnd() {
+    gRestrictedUseWnd = nullptr;
+}
+
+static void CloseRestrictedUseWnd(WindowBase::CloseEvent*) {
+    if (gRestrictedUseWnd) {
+        gRestrictedUseWnd->ScheduleDelete();
+    }
+}
+
+void ShowConfigureRestrictedUseDialog(MainWindow* win) {
+    if (!CanWriteRestrictedUseConfig()) {
+        Str msg = Tr("SumatraPDF cannot create files in its installation folder.");
+        if (!IsProcessRunningElevated()) {
+            int res = MsgBox(win ? win->hwndFrame : nullptr, Tr("Administrator access is required. Restart elevated?"),
+                             Tr("Configure Restricted Use"), MB_YESNO | MB_ICONERROR);
+            if (res == IDYES) {
+                LaunchElevated(GetSelfExePathTemp(), StrL("-configure-restricted-use"));
+            }
+        } else {
+            MsgBox(win ? win->hwndFrame : nullptr, msg, Tr("Configure Restricted Use"), MB_OK | MB_ICONERROR);
+        }
+        return;
+    }
+    if (gRestrictedUseWnd) {
+        HwndSetFocus(gRestrictedUseWnd->hwnd);
+        return;
+    }
+    auto* wnd = new RestrictedUseWnd();
+    wnd->closeOnEsc = true;
+    wnd->onBeforeDelete = MkFunc0Void(ClearRestrictedUseWnd);
+    wnd->onClose = MkFunc1Void<WindowBase::CloseEvent*>(CloseRestrictedUseWnd);
+    wnd->onKeyDown = MkMethod1<RestrictedUseWnd, KeyEvent*, &RestrictedUseWnd::OnKeyDown>(wnd);
+    wnd->SetFont(GetAppFont());
+    if (!wnd->Create(win)) {
+        delete wnd;
+        return;
+    }
+    gRestrictedUseWnd = wnd;
+    RunModalWindow(wnd->hwnd, win ? win->hwndFrame : nullptr);
 }

@@ -2,10 +2,11 @@
 // field must not draw the selection outline on top of the search field.
 import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { IS_MAC } from "./host";
 import { ROOT, runStandalone, tmpPath } from "./util";
 import { postMessage, setCursorPos, sleep } from "./winapi";
 import { findCanvas, launchControlled, killAndWait, ensureModifierKeysUp } from "./win-automation";
-import type { ControlClient, HomeSelection } from "./control.ts";
+import { ControlCommand, type HomeSelection, waitForHome } from "./control.ts";
 
 const WM_MOUSEWHEEL = 0x020a;
 const WHEEL_DELTA = 120;
@@ -41,26 +42,6 @@ function rectsOverlap(a: number[], b: number[]): boolean {
   return a[0]! < b[0]! + b[2]! && a[0]! + a[2]! > b[0]! && a[1]! < b[1]! + b[3]! && a[1]! + a[3]! > b[1]!;
 }
 
-async function waitForHome(
-  client: ControlClient,
-  pred: (h: HomeSelection) => boolean,
-  what: string,
-  timeoutMs = 8000,
-): Promise<HomeSelection> {
-  const deadline = Date.now() + timeoutMs;
-  let last: HomeSelection | null = null;
-  for (;;) {
-    last = await client.homeSelection();
-    if (last.ready && pred(last)) {
-      return last;
-    }
-    if (Date.now() > deadline) {
-      throw new Error(`issue-5978: ${what} (last: ${last.raw})`);
-    }
-    await sleep(50);
-  }
-}
-
 export async function testit(): Promise<void> {
   // a cursor left sitting over the thumbnails keeps re-selecting whatever is
   // under it as the band scrolls, so the selection never ends up under the
@@ -76,8 +57,10 @@ export async function testit(): Promise<void> {
       "home page never listed the files with a search box and a selection outline",
     );
 
-    const canvas = findCanvas(frame);
-    if (!canvas) {
+    // Windows posts WM_MOUSEWHEEL at the canvas. macOS delivers a wheel
+    // through the control channel, over the thumbnail band.
+    const canvas = IS_MAC ? 0 : findCanvas(frame);
+    if (!IS_MAC && !canvas) {
       throw new Error("issue-5978: no canvas");
     }
 
@@ -102,7 +85,18 @@ export async function testit(): Promise<void> {
     let last = await settled();
     await ensureModifierKeysUp();
     for (let i = 0; i < 12; i++) {
-      postMessage(canvas, WM_MOUSEWHEEL, (-WHEEL_DELTA << 16) >>> 0, 0n);
+      if (IS_MAC) {
+        const area = last.thumbsArea;
+        const x = area.length >= 4 && area[2]! > 0 ? Math.round(area[0]! + area[2]! / 2) : 200;
+        const y = area.length >= 4 && area[3]! > 0 ? Math.round(area[1]! + Math.min(40, area[3]! / 2)) : 240;
+        const res = await client.request(ControlCommand.TestInput, ["wheel", x, y, -WHEEL_DELTA, 0]);
+        const raw = String(res[1] ?? "");
+        if (res[0] !== 0 || raw.startsWith("ERR")) {
+          throw new Error(`issue-5978: wheel failed: ${raw || res[0]}`);
+        }
+      } else {
+        postMessage(canvas, WM_MOUSEWHEEL, (-WHEEL_DELTA << 16) >>> 0, 0n);
+      }
       const h = await settled();
       if (rectsOverlap(h.outline, h.search)) {
         throw new Error(`issue-5978: painted outline overlaps the search field: ${h.raw}`);

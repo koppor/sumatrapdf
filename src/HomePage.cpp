@@ -39,6 +39,7 @@
 #include "SvgIcons.h"
 #include "PagePosition.h"
 #include "HomePage.h"
+#include "HomePageCommon.h"
 
 // how the shared tip code (TipText.cpp) opens a url link
 static void OpenTipUrl(Str url) {
@@ -100,86 +101,14 @@ constexpr int kAboutLineOuterSize = 1;
 #endif
 constexpr int kAboutLineSepSize = 1;
 
-// one tip per line; cmd/trans-dl.ts extracts each line for translation
-static Str sumatraTips = StrL(R"tips(You can [customize scrollbar](CmdChangeScrollbar).
-You can [customize keyboard shortcuts](Help/Customize-keyboard-shortcuts).
-You can [customize toolbar](Help/Customize-toolbar).
-Press (Kbd/(Key/CmdCommandPalette)) to open [command palette](CmdCommandPalette).
-To open file from history open [command palette](CmdCommandPalette) with (Kbd/(Key/CmdCommandPalette)) and type (Kbd/#).
-You can [extract text from PDF file](Help/Tool-x-extract-text-from-pdf).
-You can [toggle menu bar](CmdToggleMenuBar) with (Kbd/(Key/CmdToggleMenuBar)).
-You can [toggle toolbar](CmdToggleToolbar) with (Kbd/(Key/CmdToggleToolbar)).
-You can [edit PDF annotations](Help/Editing-annotations).
-You can enable [citation preview on hover](Help/Citation-hover-preview).
-You can [have documents read aloud](Help/Read-Aloud).
-You can [sign a PDF](Help/Sign-a-PDF).
-You can [fill PDF forms](Help/Fill-PDF-forms).
-You can [merge PDFs](Help/Merge-PDFs) and [reorder pages](Help/Reorder-PDF-pages).
-You can [split a PDF](Help/Split-a-PDF).
-You can [redact a PDF](Help/Redact-a-PDF).
-You can [present a PDF](Help/Present-a-PDF) full screen.
-You can [use SumatraPDF with LaTeX](Help/LaTeX-integration) for forward and inverse search.
-You can [read comics and manga](Help/Comics-and-manga) right to left.
-You can [bookmark pages as favorites](Help/Managing-favorites).
-You can [chat with AI about a document](Help/AI-Chat-with-document).
-You can [customize theme colors](Help/Customize-theme-colors).
-You can [save a page region as an image](Help/Save-page-region-as-image).
-You can [print selected pages](Help/Print-selected-pages).
-)tips");
-
 static Str sumatraPromos = StrL(R"promos(Try [Edna](https://edna.arslexis.io): a note taking web app for power users.
 Try [MarkLexis](https://marklexis.arslexis.io): a bookmarking web application.
+Try [Sumatra File Manager](https://sumatrafilemanager.com): file manager with super powers.
 )promos");
 
 static Str promoFromServer;
 
 static void FreeHomeFileIcons();
-
-// the tip markup, one line each; the selected one is parsed by the tip band
-static StrVec gTipLines;
-static StrVec gPromoLines;
-static bool gTipsParsed = false;
-static bool gSelectedIsPromo = false;
-static int gSelectedTipIdx = -1;
-
-static void CollectTipsFromString(Str src, StrVec* out) {
-    StrVec lines;
-    Split(&lines, src, StrL("\n"));
-    for (int i = 0; i < len(lines); i++) {
-        Str line = lines[i];
-        if (str::IsEmptyOrWhiteSpace(line)) {
-            continue;
-        }
-        out->Append(line);
-    }
-}
-
-// the markup of the tip currently on show, {} when there is none
-static Str SelectedTipLine() {
-    if (!gSettings->showTips || gSelectedTipIdx < 0) {
-        return {};
-    }
-    StrVec& v = gSelectedIsPromo ? gPromoLines : gTipLines;
-    if (gSelectedTipIdx >= len(v)) {
-        return {};
-    }
-    if (gSelectedIsPromo) {
-        return v[gSelectedTipIdx];
-    }
-    // translated when shown, so a language change applies without re-parsing
-    return str::JoinTemp(Tr("Tip:"), StrL(" "), Tr(v[gSelectedTipIdx]));
-}
-
-static void PickRandomTipOrPromo() {
-    bool pickPromo = (len(gPromoLines) > 0) && (rand() % 100 < 30);
-    if (pickPromo) {
-        gSelectedIsPromo = true;
-        gSelectedTipIdx = rand() % len(gPromoLines);
-    } else if (len(gTipLines) > 0) {
-        gSelectedIsPromo = false;
-        gSelectedTipIdx = rand() % len(gTipLines);
-    }
-}
 
 static void EnsureTipsParsed() {
     if (gTipsParsed) {
@@ -204,19 +133,6 @@ void FreeHomePageTips() {
     HomePageInvalidateLayoutCache();
 }
 
-static void PickAnotherRandomTip() {
-    bool prevIsPromo = gSelectedIsPromo;
-    int prev = gSelectedTipIdx;
-    // keep picking until we get a different one
-    int maxIter = 100;
-    while (maxIter-- > 0) {
-        PickRandomTipOrPromo();
-        if (gSelectedIsPromo != prevIsPromo || gSelectedTipIdx != prev) {
-            return;
-        }
-    }
-}
-
 constexpr Color kAboutBorderCol = kColBlack;
 
 constexpr int kAboutLeftRightSpaceDx = 8;
@@ -224,6 +140,8 @@ constexpr int kAboutMarginDx = 10;
 constexpr int kAboutBoxMarginDy = 6;
 constexpr int kAboutTxtDy = 6;
 constexpr int kAboutRectPadding = 8;
+constexpr int kAboutCopyGap = 6;
+constexpr int kAboutSoftwareGap = 12;
 
 constexpr int kInnerPadding = 8;
 
@@ -261,12 +179,15 @@ static AboutRow gAboutRows[] = {
      StrL("https://github.com/sumatrapdfreader/sumatrapdf/commit/" GIT_COMMIT_ID_STR)},
 #endif
 #ifdef PRE_RELEASE_VER
-    {StrL("a note"), StrL("Pre-release version, for testing only!"), {}},
+    {StrL("a note"), StrL("Pre-release version"), {}},
 #endif
 #if IS_DEBUG
     {StrL("a note"), StrL("Debug version, for testing only!"), {}},
 #endif
+    {StrL("more software by me"), StrL("Sumatra File Manager"), StrL("https://sumatrafilemanager.com")},
     {{}, {}, {}}};
+
+constexpr int kAboutSoftwareRow = dimofi(gAboutRows) - 2;
 
 // The About screen's two text columns: a Table (ILayout) whose left column
 // is right-aligned and right column left-aligned. Rows with a url become
@@ -285,6 +206,8 @@ struct AboutCtrl : VirtCtrl {
     SumatraLogo* logo = nullptr;
     // copies version / OS / machine info for bug reports (dialog and dropdown)
     VirtButton* copyInfoBtn = nullptr;
+    VirtText* softwareHeader = nullptr;
+    VirtLink* softwareLink = nullptr;
     bool hideLogo = false;
 
     // geometry, computed by UpdateLayout()
@@ -372,15 +295,6 @@ void SumatraLogo::Paint(VirtPaintCtx& ctx) {
         ctx.gfx->DrawText(letter, {pt.x, pt.y, sz.dx, sz.dy}, 0, font, cols[i % dimofi(cols)]);
         pt.x += sz.dx;
     }
-}
-
-static TempStr TrimGitTemp(Str s) {
-    if (gitCommidId && str::EndsWith(s, gitCommidId)) {
-        int sLen = len(s);
-        int gitLen = len(gitCommidId);
-        return str::DupTemp(Str(s.s, sLen - gitLen - 7));
-    }
-    return s;
 }
 
 // the About screen's virtual controls for one HWND. Positions come from
@@ -491,6 +405,10 @@ ILayout* AboutCtrl::LayoutChildAt(int i) {
 // and the DPI. Sizing happens in UpdateLayout(), which measures what we set here
 void AboutCtrl::Sync() {
     int n = AboutRowCount();
+    bool showSoftware = GetHwnd() == gHwndAbout;
+    if (showSoftware) {
+        n = kAboutSoftwareRow;
+    }
     bool canAccessDisk = CanAccessDisk();
     if (table->rows != n) {
         table->SetSize(n, 2);
@@ -526,6 +444,26 @@ void AboutCtrl::Sync() {
     Color colText = ThemeWindowTextColor();
     Color colLink = ThemeWindowLinkColor();
 
+    if (showSoftware) {
+        AboutRow& software = gAboutRows[kAboutSoftwareRow];
+        if (!softwareHeader) {
+            softwareHeader = new VirtText(software.leftTxt);
+            AddChild(softwareHeader);
+            softwareLink = new VirtLink(software.rightTxt);
+            softwareLink->SetTarget(software.url);
+            softwareLink->SetTooltip(software.url);
+            softwareLink->underlineOffsetY = -3;
+            softwareLink->onClick = MkFunc1Void(OpenAboutUrl);
+            AddChild(softwareLink);
+        }
+        softwareHeader->font = fontLeftTxt;
+        softwareHeader->SetColor(kColText, colText);
+        softwareLink->font = fontRightTxt;
+        softwareLink->SetColor(kColText, canAccessDisk ? colLink : colText);
+        softwareLink->withUnderline = canAccessDisk;
+        softwareLink->SetFlag(vwfNoHitTest, !canAccessDisk);
+    }
+
     for (int i = 0; i < n; i++) {
         AboutRow* el = &gAboutRows[i];
         VirtText* left = LeftAt(i);
@@ -559,12 +497,24 @@ void AboutCtrl::UpdateLayout(Rect clientRc) {
     Size tableSize = table->Layout(ExpandInf());
 
     Size btnSz{};
-    int gap = DpiScale(12);
+    int gap = DpiScale(kAboutCopyGap);
     int padBottom = DpiScale(kAboutRectPadding);
     int copyBlockDy = 0;
     if (showCopy) {
         btnSz = copyInfoBtn->GetIdealSize();
         copyBlockDy = gap + btnSz.dy + padBottom;
+    }
+
+    bool showSoftware = softwareHeader != nullptr;
+    Size softwareHeaderSz{};
+    Size softwareLinkSz{};
+    int softwareBlockDy = 0;
+    if (showSoftware) {
+        copyBlockDy = gap + btnSz.dy;
+        softwareHeaderSz = softwareHeader->GetIdealSize(false);
+        softwareLinkSz = softwareLink->GetIdealSize(false);
+        softwareBlockDy =
+            DpiScale(kAboutSoftwareGap) + softwareHeaderSz.dy + aboutTxtDy + softwareLinkSz.dy + padBottom;
     }
 
     Rect r;
@@ -574,7 +524,8 @@ void AboutCtrl::UpdateLayout(Rect clientRc) {
         r.dx = std::max(r.dx, btnSz.dx + (2 * marginDx) + (2 * kAboutLineOuterSize));
     }
     // one extra row gap so the last row isn't flush against the frame
-    r.dy = headerSize.dy + tableSize.dy + aboutTxtDy + (2 * kAboutLineOuterSize) + 4 + copyBlockDy;
+    int tableBottomDy = showSoftware ? 0 : aboutTxtDy + (2 * kAboutLineOuterSize);
+    r.dy = headerSize.dy + tableSize.dy + tableBottomDy + 4 + copyBlockDy + softwareBlockDy;
     r.x = clientRc.x + ((clientRc.dx - r.dx) / 2);
     if (hideLogo) {
         r.y = clientRc.y;
@@ -596,8 +547,16 @@ void AboutCtrl::UpdateLayout(Rect clientRc) {
 
     if (showCopy) {
         int btnX = r.x + ((r.dx - btnSz.dx) / 2);
-        int btnY = r.y + r.dy - padBottom - btnSz.dy;
+        int btnY = showSoftware ? y + tableSize.dy + gap : r.y + r.dy - padBottom - btnSz.dy;
         copyInfoBtn->SetBounds({btnX, btnY, btnSz.dx, btnSz.dy});
+        if (showSoftware) {
+            int softwareY = btnY + btnSz.dy + DpiScale(kAboutSoftwareGap);
+            softwareHeader->SetBounds(
+                {r.x + (r.dx - softwareHeaderSz.dx) / 2, softwareY, softwareHeaderSz.dx, softwareHeaderSz.dy});
+            softwareY += softwareHeaderSz.dy + aboutTxtDy;
+            softwareLink->SetBounds(
+                {r.x + (r.dx - softwareLinkSz.dx) / 2, softwareY, softwareLinkSz.dx, softwareLinkSz.dy});
+        }
     }
 }
 
@@ -670,9 +629,6 @@ static void AppendBugReportInfo(str::Builder& s) {
     Str theme = ThemeGetNameAt(ThemeGetCurrentIndex());
     if (theme) {
         s.Append(fmt("Theme: %s\n", theme));
-    }
-    if (IsRunningOnWine()) {
-        s.Append(StrL("Wine: yes\n"));
     }
 }
 
@@ -963,6 +919,7 @@ constexpr i64 kSizeNotFetched = -2;
 constexpr i64 kSizeFetchFail = -1;
 
 struct ThumbnailLayout {
+    Rect rcCell; // the grid slot; rcPage is the thumbnail inside it
     Rect rcPage;
     Size szThumb;
     Rect rcText;
@@ -1254,23 +1211,6 @@ struct HomeSearchEdit : Edit {
     }
 };
 
-// Home-list entries with a path (same set as thumbnails when search is empty).
-static int CountHomePageFiles() {
-    Vec<FileState*> all;
-    if (gSettings && gSettings->homePageSortByFrequentlyRead) {
-        FileHistoryGetFrequencyOrder(all);
-    } else {
-        FileHistoryGetRecentlyOpenedOrder(all);
-    }
-    int n = 0;
-    for (FileState* fs : all) {
-        if (fs && len(fs->filePath) > 0) {
-            n++;
-        }
-    }
-    return n;
-}
-
 // Cue banner when the search field is empty: "Search N files (Ctrl + F)".
 static void UpdateHomeSearchCueBanner(MainWindow* win) {
     if (!win || !win->homeSearch) {
@@ -1483,6 +1423,7 @@ static void OffsetThumbnailLayouts(Vec<ThumbnailLayout>& thumbs, int dy) {
         return;
     }
     for (ThumbnailLayout& t : thumbs) {
+        t.rcCell.y += dy;
         t.rcPage.y += dy;
         t.rcText.y += dy;
         t.rcListRow.y += dy;
@@ -1662,10 +1603,8 @@ static void ApplyHomeLayoutCache(HomePageLayout& l, int scrollY) {
     hdr->SetBounds(c.rcFreqRead);
     l.freqRead = hdr;
 
-    TempStr openTxt = str::DupTemp(Tr("&Open..."));
-    str::RemoveCharsInPlace(openTxt, StrL("&"));
     VirtText* openDoc = chrome->openDoc->text;
-    openDoc->SetText(openTxt);
+    openDoc->SetText(Tr("Open..."));
     openDoc->font = fontText;
     openDoc->isRtl = isRtl;
     openDoc->withUnderline = true;
@@ -1712,19 +1651,20 @@ static void LayoutHomePage(HomePageLayout& l) {
     // --- Pre-compute thumbnail grid x offset so header can align with it ---
     // use unfiltered count so layout stays stable when search filters results
     int nFilesForLayout = len(allFileStates);
+    Size frame = ThumbnailFrameSize();
     int colsForLayout =
-        (rc.dx - kThumbsMarginLeft - kThumbsMarginRight + kThumbsSpaceBetweenX) / (kThumbnailDx + kThumbsSpaceBetweenX);
+        (rc.dx - kThumbsMarginLeft - kThumbsMarginRight + kThumbsSpaceBetweenX) / (frame.dx + kThumbsSpaceBetweenX);
     int thumbsColsForLayout = std::max(colsForLayout, 1);
     int thumbsStartX = rc.x + kThumbsMarginLeft +
-                       ((rc.dx - (thumbsColsForLayout * kThumbnailDx) -
-                         ((thumbsColsForLayout - 1) * kThumbsSpaceBetweenX) - kThumbsMarginLeft - kThumbsMarginRight) /
+                       ((rc.dx - (thumbsColsForLayout * frame.dx) - ((thumbsColsForLayout - 1) * kThumbsSpaceBetweenX) -
+                         kThumbsMarginLeft - kThumbsMarginRight) /
                         2);
     if (thumbsStartX < DpiScale(kInnerPadding)) {
         thumbsStartX = DpiScale(kInnerPadding);
     } else if (nFilesForLayout == 0) {
         thumbsStartX = kThumbsMarginLeft;
     }
-    int thumbsContentWidth = (thumbsColsForLayout * kThumbnailDx) + ((thumbsColsForLayout - 1) * kThumbsSpaceBetweenX);
+    int thumbsContentWidth = (thumbsColsForLayout * frame.dx) + ((thumbsColsForLayout - 1) * kThumbsSpaceBetweenX);
 
     // --- Step 1: two header rows: [palette] SumatraPDF [help] on top, then
     // [open link] [search edit] [view icons] ---
@@ -1764,10 +1704,8 @@ static void LayoutHomePage(HomePageLayout& l) {
     Rect rcIconOpen(0, 0, 0, 0);
     rcIconOpen.dx = rcIconOpen.dy = HomePageIconSize();
 
-    TempStr openTxt = str::DupTemp(Tr("&Open..."));
-    str::RemoveCharsInPlace(openTxt, StrL("&"));
     VirtText* openDoc = chrome->openDoc->text;
-    openDoc->SetText(openTxt);
+    openDoc->SetText(Tr("Open..."));
     openDoc->font = fontText;
     openDoc->isRtl = isRtl;
     openDoc->withUnderline = true;
@@ -1841,7 +1779,7 @@ static void LayoutHomePage(HomePageLayout& l) {
         thumbsRows = (nFiles + thumbsColsForLayout - 1) / thumbsColsForLayout;
         if (thumbsRows > 0) {
             // the last row's caption hangs below its thumbnails (issue #6234)
-            thumbsContentDy = (thumbsRows * (kThumbnailDy + kThumbsSpaceBetweenY)) - kThumbsSpaceBetweenY +
+            thumbsContentDy = (thumbsRows * (frame.dy + kThumbsSpaceBetweenY)) - kThumbsSpaceBetweenY +
                               kThumbsCaptionGapY + kThumbsCaptionDy;
         }
     }
@@ -1918,7 +1856,7 @@ static void LayoutHomePage(HomePageLayout& l) {
             }
         }
     } else {
-        int thumbPrefetchY = kThumbnailDy + kThumbsSpaceBetweenY;
+        int thumbPrefetchY = frame.dy + kThumbsSpaceBetweenY;
         for (int row = 0; row < thumbsRows; row++) {
             for (int col = 0; col < thumbsColsForLayout; col++) {
                 if ((row * thumbsColsForLayout) + col >= nFiles) {
@@ -1931,25 +1869,30 @@ static void LayoutHomePage(HomePageLayout& l) {
                 FileState* fs = fileStates[(row * thumbsColsForLayout) + col];
                 thumb.fs = fs;
 
-                Rect rcPage(ptOff.x + (col * (kThumbnailDx + kThumbsSpaceBetweenX)),
-                            ptOff.y + (row * (kThumbnailDy + kThumbsSpaceBetweenY)), kThumbnailDx, kThumbnailDy);
+                Rect rcCell(ptOff.x + (col * (frame.dx + kThumbsSpaceBetweenX)),
+                            ptOff.y + (row * (frame.dy + kThumbsSpaceBetweenY)), frame.dx, frame.dy);
                 if (isRtl) {
-                    rcPage.x = rc.dx - rcPage.x - rcPage.dx;
+                    rcCell.x = rc.dx - rcCell.x - rcCell.dx;
                 }
-                bool onScreen = IsHomeThumbOnScreen(rcPage, l.rcThumbsArea, thumbPrefetchY);
+                bool onScreen = IsHomeThumbOnScreen(rcCell, l.rcThumbsArea, thumbPrefetchY);
+                Rect rcPage = rcCell;
                 // only use already-resident thumbnails for aspect adjust — never LoadThumbnail
                 // during layout (disk I/O dominated scroll/paint CPU)
                 if (onScreen && fs->thumbnail) {
                     Size szThumb(fs->thumbnail->width, fs->thumbnail->height);
-                    if (szThumb.dx != kThumbnailDx || szThumb.dy != kThumbnailDy) {
-                        rcPage.dy = szThumb.dy * kThumbnailDx / szThumb.dx;
-                        rcPage.y += kThumbnailDy - rcPage.dy;
+                    // a thumbnail smaller than the frame (a whole page, a cover)
+                    // sits at the bottom of its cell, centered
+                    if (szThumb != frame) {
+                        Size drawn = ThumbnailDrawSize(szThumb, frame);
+                        rcPage = Rect(rcCell.x + ((rcCell.dx - drawn.dx) / 2), rcCell.y + rcCell.dy - drawn.dy,
+                                      drawn.dx, drawn.dy);
                     }
                     thumb.szThumb = szThumb;
                 }
+                thumb.rcCell = rcCell;
                 thumb.rcPage = rcPage;
                 int iconSpace = kThumbsCaptionDy;
-                Rect rcText(rcPage.x + iconSpace, rcPage.y + rcPage.dy + kThumbsCaptionGapY, rcPage.dx - iconSpace,
+                Rect rcText(rcCell.x + iconSpace, rcCell.y + rcCell.dy + kThumbsCaptionGapY, rcCell.dx - iconSpace,
                             kThumbsCaptionDy);
                 if (isRtl) {
                     rcText.x -= iconSpace;
@@ -2247,7 +2190,9 @@ static void DrawHomeThumbnail(Gfx* gfx, ThumbnailLayout& thumb, const StrVec& fi
                              fontText, ThemeWindowTextColor());
 
     Pixmap* icon = GetFileStateIconPixmap(fs);
-    int x = isRtl ? page.x + page.dx - DpiScale(16) : page.x;
+    // the caption spans the cell, so the icon goes by the cell, not the page
+    const Rect& cell = thumb.rcCell;
+    int x = isRtl ? cell.x + cell.dx - DpiScale(16) : cell.x;
     if (icon) {
         gfx->DrawPixmap(icon, {x, rect.y, icon->width, icon->height});
     }
@@ -3354,9 +3299,9 @@ static int HomeGridColumnCount(MainWindow* win) {
     if (n == 0) {
         return 1;
     }
-    int y0 = c.thumbs[0].rcPage.y;
+    int y0 = c.thumbs[0].rcCell.y;
     int nCols = 0;
-    while (nCols < n && c.thumbs[nCols].rcPage.y == y0) {
+    while (nCols < n && c.thumbs[nCols].rcCell.y == y0) {
         nCols++;
     }
     return nCols > 0 ? nCols : 1;
@@ -3676,7 +3621,7 @@ void HomePageMoveSelection(MainWindow* win, int dCol, int dRow) {
 
 void HomePageOnVScroll(MainWindow* win, WPARAM wp) {
     USHORT msg = LOWORD(wp);
-    int lineDy = HomePageIsListView() ? kHomeListRowDy : kThumbnailDy + kThumbsSpaceBetweenY;
+    int lineDy = HomePageIsListView() ? kHomeListRowDy : ThumbnailFrameSize().dy + kThumbsSpaceBetweenY;
     int pageDy = lineDy * 3;
 
     int newScrollY = win->homePageScrollY;
@@ -3719,7 +3664,7 @@ void HomePageOnVScroll(MainWindow* win, WPARAM wp) {
 }
 
 void HomePageOnMouseWheel(MainWindow* win, int delta) {
-    int thumbsRowDy = HomePageIsListView() ? kHomeListRowDy : kThumbnailDy + kThumbsSpaceBetweenY;
+    int thumbsRowDy = HomePageIsListView() ? kHomeListRowDy : ThumbnailFrameSize().dy + kThumbsSpaceBetweenY;
 
     int scrollBy = thumbsRowDy / 3;
     if (delta > 0) {
@@ -3733,3 +3678,6 @@ void HomePageOnMouseWheel(MainWindow* win, int delta) {
         HwndInvalidate(win->hwndCanvas);
     }
 }
+
+// ng drops its cached thumbnail texture here; orig loads thumbnails when it paints
+void HomePageThumbnailChanged(FileState*) {}

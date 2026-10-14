@@ -16,9 +16,19 @@
 #include "gui/Gfx.h"
 #include "gui/GuiColors.h"
 #include "gui/VirtHost.h"
+#include "Theme.h"
+#include "TipLink.h"
 #include "gui/VirtCtrl.h"
 
 //--- VirtCtrl
+
+VirtButton* NewThemedButton(HWND hwndForDpi, Str text, PlatformFont* font, bool isDefault) {
+    DpiSetFromHwnd(hwndForDpi);
+    auto* b = new VirtButton(text, font);
+    b->SetIsDefault(isDefault);
+    b->textPadding = DpiScaledInsets(5, 12);
+    return b;
+}
 
 static Kind kindVirtCtrl = "virtCtrl";
 
@@ -937,6 +947,7 @@ static void FillMouseEvent(VirtMouseEvent& ev, VirtCtrl* target, Point ptWindow,
     ev.isCtrl = IsCtrlPressed() || (wp & MK_CONTROL) != 0;
     ev.isShift = IsShiftPressed() || (wp & MK_SHIFT) != 0;
     ev.isAlt = IsAltPressed();
+    ev.isLeftDown = (wp & MK_LBUTTON) != 0;
 }
 
 // walks up from target until someone consumes the event
@@ -3802,21 +3813,6 @@ static void AppendKbdWords(VirtRichText& tip, Str content, bool noSpace) {
         w->isKbd = true;
         w->noSpaceBefore = noSpace;
     }
-}
-
-// resolve a link command to the target a tip link stores
-static TempStr ResolveLinkCmdTemp(Str cmd) {
-    if (str::StartsWith(cmd, StrL("https://")) || str::StartsWith(cmd, StrL("http://"))) {
-        return str::DupTemp(cmd);
-    }
-    if (str::TrimPrefix(cmd, StrL("Help/"))) {
-        // cmd is a non-NUL-terminated view into the tip line, so %s must get a
-        // zero-terminated copy of exactly the remainder -- otherwise it reads
-        // past the link, pulling in trailing chars like ")."
-        return fmt("https://www.sumatrapdfreader.org/docs/%s", cmd);
-    }
-    // Cmd* - use as-is, will be resolved to command ID on click
-    return str::DupTemp(cmd);
 }
 
 // Text from outside the app -- a clipboard string, a file name -- can contain
