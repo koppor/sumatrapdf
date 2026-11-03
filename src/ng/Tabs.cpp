@@ -48,6 +48,7 @@
 #include "SessionState.h"
 #include "AIChatCommon.h"
 #include "AIChatPanel.h"
+#include "HomePage.h"
 #include "Tabs.h"
 #include "MenuDefs.h"
 #include "TabsCommon.h"
@@ -70,9 +71,10 @@ bool TabIsDirty(WindowTab* tab) {
 }
 
 // Hide a lone Home tab. Favorites is a closable tab, so it must remain visible
-// even when it is the only tab left.
+// even when it is the only tab left. On wasm Home has no toolbar, so the strip
+// stays for its menu button.
 bool TabsAreVisible(MainWindow* win) {
-    if (win->isQuickLook) {
+    if (win->isQuickLook || (win->tabsInTitlebar && !gSettings->showCaption && !win->captionOverlayShown)) {
         return false;
     }
     // orig's showTabsBar: fullscreen and presentation hide the strip
@@ -83,7 +85,7 @@ bool TabsAreVisible(MainWindow* win) {
     if (nTabs == 0) {
         return false;
     }
-    bool onlyHomeTab = nTabs == 1 && win->GetTab(0)->IsAboutTab();
+    bool onlyHomeTab = !OS_WASM && nTabs == 1 && win->GetTab(0)->IsAboutTab();
     bool showSingleTab = SettingsUseTabs();
     return !onlyHomeTab && ((nTabs > 1) || (showSingleTab && (nTabs > 0)));
 }
@@ -197,10 +199,7 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab, bool deferUpdate) {
     bool noHomeTab = gSettings->noHomeTab;
     bool createHomeTab = useTabs && !noHomeTab && (idx == 0);
     if (createHomeTab) {
-        auto* homeTab = new WindowTab(win);
-        homeTab->type = WindowTab::Type::About;
-        homeTab->canvasRc = win->canvasRc;
-        VecAppend(win->tabs, homeTab);
+        VecAppend(win->tabs, NewHomeTab(win, HomeTabKind::Pinned));
         idx++;
     }
 
@@ -237,20 +236,53 @@ void GoToHomeTab(MainWindow* win) {
     if (!win || !SettingsUseTabs()) {
         return;
     }
-    for (int i = 0; i < win->TabCount(); i++) {
-        if (win->GetTab(i)->IsAboutTab()) {
-            TabsSelect(win, i);
-            return;
-        }
+    WindowTab* homeTab = FindHomeTab(win);
+    if (homeTab) {
+        TabsSelect(win, win->GetTabIdx(homeTab));
+        HomePageFocusSearch(win);
+        return;
     }
 
     SaveCurrentWindowTab(win);
-    auto* homeTab = new WindowTab(win);
-    homeTab->type = WindowTab::Type::About;
-    homeTab->canvasRc = win->canvasRc;
+    homeTab = NewHomeTab(win, HomeTabKind::Pinned);
     VecInsertAt(win->tabs, 0, homeTab);
     TabsUIOnTabsChanged(win);
     LoadModelIntoTab(homeTab);
+    HomePageFocusSearch(win);
+}
+
+#if OS_WASM
+// A window has no tabs until its first document; wasm shows Home in the strip
+// from the start.
+void AddStartupHomeTab(MainWindow* win) {
+    if (!SettingsUseTabs() || gSettings->noHomeTab || win->TabCount() > 0) {
+        return;
+    }
+    WindowTab* homeTab = NewHomeTab(win, HomeTabKind::Pinned);
+    VecAppend(win->tabs, homeTab);
+    TabsUIOnTabsChanged(win);
+    LoadModelIntoTab(homeTab);
+}
+#endif
+
+// the "+" button: another Home tab after the last one. It stays out of the
+// session, which only stores documents
+void AddExtraHomeTab(MainWindow* win) {
+    if (!win || !SettingsUseTabs()) {
+        return;
+    }
+    // the first Home tab is pinned, unless NoHomeTab: a file opened from it must
+    // not leave a Home tab behind
+    if (win->TabCount() == 0 && !gSettings->noHomeTab) {
+        GoToHomeTab(win);
+        return;
+    }
+    SaveCurrentWindowTab(win);
+    WindowTab* homeTab = NewHomeTab(win, HomeTabKind::Extra);
+    VecAppend(win->tabs, homeTab);
+    TabsUIOnTabsChanged(win);
+    LoadModelIntoTab(homeTab);
+    HomePageFocusSearch(win);
 }
 
 void RemoveTab(WindowTab* tab) {
@@ -301,6 +333,11 @@ void MaybeMigrateTab(WindowTab* tab, MainWindow* newWin) {
     if (tab->IsNonDocumentTab()) {
         return;
     }
+    // wasm has one window: there is nowhere for the tab to go, and it must not
+    // be removed below
+    if (OS_WASM && !newWin) {
+        return;
+    }
     // don't migrate a lone document tab unless it is dropped on another window
     int nDocTabs = 0;
     for (WindowTab* t : oldWin->Tabs()) {
@@ -314,8 +351,9 @@ void MaybeMigrateTab(WindowTab* tab, MainWindow* newWin) {
     if (EngineHasUnsavedAnnotations(tab->GetEngine())) {
         return;
     }
-    TempStr path = str::DupTemp(tab->filePath);
-    TempStr displayName = str::DupTemp(tab->displayName);
+    // not temp: creating the window reuses the temp arena
+    Str path = str::Dup(tab->filePath);
+    Str displayName = str::Dup(tab->displayName);
     TabState* state = NewTabStateFromTab(tab);
     RemoveTab(tab);
     delete tab;
@@ -350,6 +388,8 @@ void MaybeMigrateTab(WindowTab* tab, MainWindow* newWin) {
     }
     if (!newWin) {
         DeleteTabState(state);
+        str::Free(path);
+        str::Free(displayName);
         return;
     }
     logf("MaybeMigrateTab: '%s' -> window 0x%p\n", path, newWin);
@@ -359,11 +399,14 @@ void MaybeMigrateTab(WindowTab* tab, MainWindow* newWin) {
     WindowTab* newTab = newWin->CurrentTab();
     if (newTab && len(displayName) > 0) {
         newTab->SetDisplayName(displayName);
+        UpdateWindowTitle(newWin);
     }
     if (state) {
         SetTabState(newTab, state);
         DeleteTabState(state);
     }
+    str::Free(path);
+    str::Free(displayName);
     CloseWindowIfNoDocuments(oldWin);
 }
 
@@ -373,14 +416,7 @@ void CloseAllTabs(MainWindow* win) {
     }
     // can't close while iterating over the tabs so collect them first
     Vec<WindowTab*> toClose;
-    int nTabs = win->TabCount();
-    for (int i = 0; i < nTabs; i++) {
-        WindowTab* t = win->GetTab(i);
-        if (t->IsAboutTab()) {
-            continue;
-        }
-        VecAppend(toClose, t);
-    }
+    CollectClosableTabs(win, toClose);
     CloseCollectedTabs(win, toClose);
 }
 
@@ -405,6 +441,9 @@ void MoveTab(MainWindow* win, int dir) {
     int idx = win->GetTabIdx(win->CurrentTab());
     int newIdx = idx + dir;
     if (idx < 0 || newIdx < 0 || newIdx >= nTabs) {
+        return;
+    }
+    if (win->GetTab(idx)->IsPinnedHomeTab() || win->GetTab(newIdx)->IsPinnedHomeTab()) {
         return;
     }
     WindowTab* tmp = win->tabs[idx];

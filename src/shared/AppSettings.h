@@ -12,6 +12,7 @@ enum {
 extern bool gDontSaveSettings;
 
 extern Vec<SessionData*>* gInitialSessionData;
+extern int gInitialSessionDataGen;
 extern void (*gRememberSessionStateFn)();
 
 struct PlatformFont;
@@ -23,6 +24,7 @@ bool LoadSettings();
 void OpenSettingsFile();
 void ScheduleSaveSettings();
 void FlushScheduledSaveSettings();
+void SaveSettingsNow();
 void ForceReloadSettings();
 void ReloadDeferredSettings();
 void ApplySettingsToOpenWindows();
@@ -39,6 +41,8 @@ bool IsAppFontSizeDefault();
 PlatformFont* GetAppMenuFont();
 PlatformFont* GetAppMenuFontForDpi(int dpi);
 PlatformFont* GetAppBiggerFont();
+int GetAnnotPopupFontSize();
+PlatformFont* GetAnnotPopupFontForDpi(int dpi);
 PlatformFont* GetAppBiggerFontForDpi(int dpi);
 PlatformFont* GetAppTreeFont();
 PlatformFont* GetAppTreeFontForDpi(int dpi);

@@ -2,6 +2,7 @@
    License: GPLv3 */
 
 #include "base/Base.h"
+#include "base/Http.h"
 
 #if IS_DEBUG
 
@@ -9,6 +10,9 @@
 #include "base/DbgHelpDyn.h"
 #include "base/File.h"
 #include "base/Pixmap.h"
+#include "base/GuessFileType.h"
+#include "base/SettingsUtil.h"
+#include "base/Win.h"
 
 #include "gui/UIModels.h"
 #include "gui/Layout.h"
@@ -21,11 +25,18 @@
 #include "DocController.h"
 #include "DocProperties.h"
 #include "EngineBase.h"
+#include "EngineAll.h"
 #include "AppSettings.h"
 #include "Flags.h"
 #include "Commands.h"
+#include "Annotation.h"
+#include "CommandAvailability.h"
+#include "CommandPalette.h"
+#include "CommandPaletteCommon.h"
 #include "SvgIcons.h"
 #include "AppUnitTests.h"
+#include "PDFScript.h"
+#include "RegistryPreview.h"
 
 // must be last to over-write assert()
 #include "base/tests/UtAssert.h"
@@ -35,10 +46,14 @@ void BenchRangeTest();
 void versioncheck_test();
 void hexstrTest();
 void colorTest();
+void PngSizeTest();
 void parseCommandsTest();
 void DocPropertiesTest();
 void ParseFileArgsTest();
 void RestrictedUseConfigTest();
+void ControlFrameActionTest();
+void OpenDdeCmdTest();
+void UpdateCheckDecisionTest();
 
 // in src/base/tests/
 void ArchiveTest();
@@ -50,6 +65,7 @@ void CryptoUtilTest();
 void CssParser_UnitTests();
 void DictTest();
 void DirRemoveAllTest();
+void UncExistsTest();
 void FileUtilTest();
 void UpdateTempFileTests();
 void GuessFileTypeTest();
@@ -66,6 +82,7 @@ void WinUtilTest();
 // in src/tests/*_ut.cpp
 void ChapterTable_UnitTests();
 void LitDoc_UnitTests();
+void RtfDoc_UnitTests();
 void MobiDoc_UnitTests();
 void PagePosition_UnitTests();
 void PdfSync_UnitTests();
@@ -79,10 +96,13 @@ void EngineDjvuDec_UnitTests();
 void Layout_UnitTests();
 void VirtCtrl_UnitTests();
 bool TableOfContents_UnitTestSnapshotNamedDest();
+bool Translations_UnitTestUnescape();
 bool MarkdownModel_UnitTestBrowserNavigationUrl();
 bool MarkdownToc_UnitTestHtmlLinks();
 bool MarkdownToc_UnitTestHtmlHeadings();
 bool MarkdownToc_UnitTestMermaid();
+bool MarkdownToc_UnitTestHighlightWikilinks();
+bool MarkdownToc_TestLineBreaks();
 bool EbookDoc_UnitTestNormalizeURL();
 bool EbookDoc_UnitTestLoading();
 bool GumboHtmlParser_UnitTest();
@@ -94,6 +114,7 @@ bool EngineMupdf_UnitTestEbookFontFamilyCss();
 bool EngineMupdf_UnitTestEbookMarginCss();
 bool EngineMupdf_UnitTestMergeEBookUI();
 bool EngineMupdf_UnitTestPageLabels();
+bool EngineMupdf_UnitTestDoi();
 bool Accelerators_UnitTestFolderNavIsSafe();
 bool Accelerators_UnitTestTreeTakesLetters();
 bool Accelerators_UnitTestCreateAnnotEdit();
@@ -102,6 +123,43 @@ bool ShortcutParse_UnitTestShiftedPunct();
 bool AnnotSearch_UnitTests();
 void ReadAloudHighlight_UnitTests();
 bool RenderCache_UnitTestCookieUnlocked();
+bool RenderCache_UnitTestFullOfOneVisiblePage();
+bool RenderCache_UnitTestFullOfOldZoom();
+
+// a color setting's row gets a swatch of its value, or of the value being typed
+static void PaletteRowColorTest() {
+    Settings* prevSettings = gSettings;
+    if (!gSettings) {
+        gSettings = NewSettings({});
+    }
+
+    StrVecCP rows;
+    CollectSettingRows(rows);
+    // an unset (empty) color has no swatch
+    int nSwatches = 0;
+    Color col;
+    for (int i = 0; i < len(rows); i++) {
+        ItemDataCP* d = rows.AtData(i);
+        if (!PaletteRowColor(d, rows[i], &col)) {
+            continue;
+        }
+        utassert(d->settingType == SettingType::Color);
+        nSwatches++;
+    }
+    utassert(nSwatches > 0);
+
+    ItemDataCP typed;
+    typed.settingType = SettingType::Color;
+    typed.settingPath = StrL("FixedPageUI.TextColor");
+    utassert(PaletteRowColor(&typed, StrL("#ff0000"), &col));
+    utassert(col == kColRed);
+    utassert(!PaletteRowColor(&typed, StrL("not a color"), &col));
+
+    if (!prevSettings) {
+        DeleteSettings(gSettings);
+        gSettings = nullptr;
+    }
+}
 
 static void ParseCommandLineTest() {
     {
@@ -215,18 +273,151 @@ static void ParseCommandLineTest() {
     }
 }
 
+static void ExpandPDFScriptTest() {
+    StrVec none;
+    utassert(str::Eq(ExpandPDFScript(StrL("print(1);\n"), none), StrL("print(1);\n")));
+
+    StrVec inputOnly;
+    inputOnly.Append(StrL("C:\\docs\\a \"b\".pdf"));
+    utassert(str::Eq(ExpandPDFScript(StrL("print(1);\n"), inputOnly), StrL("print(1);\n")));
+    utassert(str::Eq(ExpandPDFScript(StrL("\"<INPUT>\" \"<OUTPUT>\""), inputOnly),
+                     StrL("\"C:\\\\docs\\\\a \\\"b\\\".pdf\" \"\"")));
+
+    StrVec emptyOut;
+    emptyOut.Append(StrL("in.pdf"));
+    emptyOut.Append(Str());
+    utassert(str::Eq(ExpandPDFScript(StrL("print(\"ok\");\n"), emptyOut), StrL("print(\"ok\");\n")));
+
+    StrVec both;
+    both.Append(StrL("in.pdf"));
+    both.Append(StrL("out.pdf"));
+    utassert(str::Eq(ExpandPDFScript(StrL("\"<INPUT>\" \"<OUTPUT>\""), both), StrL("\"in.pdf\" \"out.pdf\"")));
+}
+
+static void PDFScriptArgHintTest() {
+    Str script = StrL(
+        "// Arg: <DIR>/<BASE>-[page].png : Output filename template (folder must exist)\n"
+        "// Arg: <DIR>/<BASE>-[page].png : Image filename template (.png or .jpg; folder must exist)\n"
+        "// Arg: Page %page / %lastpage : Footer text (empty = none)\n"
+        "// Arg: x : Keep (this) word\n");
+    StrVec values;
+    StrVec hints;
+    GetPDFScriptArgs(script, StrL("C:\\docs\\a.pdf"), values, hints);
+    utassert(len(hints) == 4);
+    utassert(str::Eq(hints[0], StrL("Output filename template")));
+    utassert(str::Eq(hints[1], StrL("Image filename template")));
+    utassert(str::Eq(hints[2], StrL("Footer text")));
+    utassert(str::Eq(hints[3], StrL("Keep (this) word")));
+    utassert(str::EndsWith(values[0], StrL("a-[page].png")));
+}
+
+#define kUtThumbnailIid "{e357fccd-a995-4576-b01f-234630154e96}"
+#define kUtPreviewIid "{8895b1c6-b41f-4c1c-a562-0d564250836f}"
+#define kUtForeignClsid "{11111111-2222-3333-4444-555555555555}"
+#define kUtStaleClsid "{66666666-7777-8888-9999-000000000000}"
+
+static TempStr UtShellExTemp(Str ext, Str iid) {
+    return ReadRegStrTemp(HKEY_CURRENT_USER, fmt("Software\\Classes\\%s\\shellex\\%s", ext, iid), {});
+}
+
+// PdfPreview.dll (un)registration leaves other apps' handlers alone (#6442).
+// HKCR, HKCU and HKLM are redirected to scratch keys; HKCR doesn't merge the
+// HKCU one, so a handler Explorer would see is written to both.
+static void PreviewHandlersTest() {
+    Str root = StrL("Software\\SumatraPDF-unit-tests\\preview-handlers");
+    DeleteRegKey(HKEY_CURRENT_USER, root);
+    HKEY predefs[3] = {HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    Str names[3] = {StrL("cr"), StrL("cu"), StrL("lm")};
+    HKEY keys[3]{};
+    for (int i = 0; i < 3; i++) {
+        WCHAR* path = CWStrTemp(fmt("%s\\%s", root, names[i]));
+        LSTATUS st =
+            RegCreateKeyExW(HKEY_CURRENT_USER, path, 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &keys[i], nullptr);
+        utassert(st == ERROR_SUCCESS);
+    }
+    bool overridden = true;
+    for (int i = 0; i < 3; i++) {
+        overridden &= RegOverridePredefKey(predefs[i], keys[i]) == ERROR_SUCCESS;
+    }
+    utassert(overridden);
+    if (!overridden) {
+        goto Exit;
+    }
+
+    {
+        // another app's thumbnailer for .epub, a stale one for .mobi
+        Str epubThumb = StrL(".epub\\shellex\\" kUtThumbnailIid);
+        WriteRegStr(HKEY_CLASSES_ROOT, epubThumb, {}, StrL(kUtForeignClsid));
+        CreateRegKey(HKEY_CLASSES_ROOT, StrL("CLSID\\" kUtForeignClsid "\\InProcServer32"));
+        WriteRegStr(HKEY_CURRENT_USER, fmt("Software\\Classes\\%s", epubThumb), {}, StrL(kUtForeignClsid));
+        WriteRegStr(HKEY_CLASSES_ROOT, StrL(".mobi\\shellex\\" kUtThumbnailIid), {}, StrL(kUtStaleClsid));
+
+        PreviewHandlers foreign = GetForeignPreviewHandlers();
+        utassert(foreign.preview == 0);
+        utassert(foreign.thumbnails != 0 && (foreign.thumbnails & (foreign.thumbnails - 1)) == 0);
+
+        PreviewHandlers which{kAllPreviewExts, kAllPreviewExts & ~foreign.thumbnails};
+        utassert(InstallPreviewDll(StrL("C:\\SumatraPDF\\PdfPreview.dll"), false, which));
+        utassert(str::Eq(UtShellExTemp(StrL(".epub"), StrL(kUtThumbnailIid)), StrL(kUtForeignClsid)));
+        utassert(str::Eq(UtShellExTemp(StrL(".epub"), StrL(kUtPreviewIid)), StrL(kEpubPreviewClsid)));
+        utassert(str::Eq(UtShellExTemp(StrL(".pdf"), StrL(kUtThumbnailIid)), StrL(kPdfPreviewClsid)));
+        utassert(str::Eq(UtShellExTemp(StrL(".mobi"), StrL(kUtThumbnailIid)), StrL(kMobiPreviewClsid)));
+
+        // preview pane only
+        UninstallPreviewDll();
+        utassert(InstallPreviewDll(StrL("C:\\SumatraPDF\\PdfPreview.dll"), false, {kAllPreviewExts, 0}));
+        utassert(len(UtShellExTemp(StrL(".pdf"), StrL(kUtThumbnailIid))) == 0);
+        utassert(str::Eq(UtShellExTemp(StrL(".pdf"), StrL(kUtPreviewIid)), StrL(kPdfPreviewClsid)));
+
+        UninstallPreviewDll();
+        utassert(str::Eq(UtShellExTemp(StrL(".epub"), StrL(kUtThumbnailIid)), StrL(kUtForeignClsid)));
+        utassert(len(UtShellExTemp(StrL(".pdf"), StrL(kUtPreviewIid))) == 0);
+        utassert(len(UtShellExTemp(StrL(".epub"), StrL(kUtPreviewIid))) == 0);
+    }
+
+Exit:
+    for (int i = 0; i < 3; i++) {
+        RegOverridePredefKey(predefs[i], nullptr);
+        RegCloseKey(keys[i]);
+    }
+    DeleteRegKey(HKEY_CURRENT_USER, StrL("Software\\SumatraPDF-unit-tests"));
+}
+
+static void OnlineURLAllowedTest() {
+    utassert(OnlineURLAllowed(StrL("https://online.sumatrapdfreader.org/api/files")));
+    utassert(OnlineURLAllowed(StrL("http://localhost:9332/desktop")));
+    utassert(OnlineURLAllowed(StrL("http://127.0.0.1:9332/api/files")));
+    utassert(OnlineURLAllowed(StrL("https://online.sumatrapdfreader.org")));
+    utassert(OnlineURLAllowed(StrL("http://localhost:9332")));
+    utassert(OnlineURLAllowed(StrL("http://127.0.0.1:9332")));
+    utassert(OnlineURLAllowed(StrL("https://online.sumatrapdfreader.org:443/api/files")));
+    utassert(!OnlineURLAllowed(StrL("https://online.sumatrapdfreader.org.evil.example/api/files")));
+    utassert(!OnlineURLAllowed(StrL("http://localhost")));
+    utassert(!OnlineURLAllowed(StrL("http://localhost:80")));
+    utassert(!OnlineURLAllowed(StrL("https://user@online.sumatrapdfreader.org/api/files")));
+}
+
 static void SumatraPDF_UnitTests() {
+    OnlineURLAllowedTest();
     RestrictedUseConfigTest();
+    ControlFrameActionTest();
+    OpenDdeCmdTest();
+    UpdateCheckDecisionTest();
     CachedObjects_UnitTests();
     CommandPaletteModel_UnitTests();
+    PaletteRowColorTest();
     DocPropertiesTest();
     parseCommandsTest();
     colorTest();
+    PngSizeTest();
     BenchRangeTest();
     ParseCommandLineTest();
     ParseFileArgsTest();
     versioncheck_test();
     hexstrTest();
+    ExpandPDFScriptTest();
+    PDFScriptArgHintTest();
+    PreviewHandlersTest();
 }
 
 static void ParseTipExpectWordsLinks(Str input, int expWords, int expLinks) {
@@ -278,6 +469,56 @@ static void SvgTextIcon_UnitTests() {
         utassert(px != nullptr);
         utassert(CountPaintedPixels(px) > 0);
     }
+}
+
+// a black triangle on white; its diagonal edge is anti-aliased on screen
+static const char* kTrianglePdf =
+    "%PDF-1.4\n"
+    "1 0 obj <</Type/Catalog/Pages 2 0 R>> endobj\n"
+    "2 0 obj <</Type/Pages/Kids[3 0 R]/Count 1>> endobj\n"
+    "3 0 obj <</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Contents 4 0 R>> endobj\n"
+    "4 0 obj <</Length 32>> stream\n"
+    "0 g 10 10 m 90 10 l 50 87.3 l f\n"
+    "endstream endobj\n"
+    "trailer <</Root 1 0 R>>\n"
+    "%%EOF\n";
+
+static int CountGrayPixels(Pixmap* px) {
+    int bpp = PixmapBytesPerPixel(px->format);
+    int n = 0;
+    for (int y = 0; y < px->height; y++) {
+        u8* d = px->data + ((size_t)px->stride * (size_t)y);
+        for (int x = 0; x < px->width; x++, d += bpp) {
+            if (d[0] != 0 && d[0] != 255) {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+static int RenderGrayPixels(EngineBase* engine, RenderTarget target) {
+    RenderPageArgs args(1, 2.f, 0, nullptr, target);
+    Pixmap* rendered = engine->RenderPage(args);
+    // a few-color page renders to a palette DIB, readable only through GDI
+    Pixmap* px = rendered ? PixmapCopyAs32bppDIB(rendered) : nullptr;
+    FreePixmap(rendered);
+    utassert(px && px->data);
+    int n = px ? CountGrayPixels(px) : -1;
+    FreePixmap(px);
+    return n;
+}
+
+// #6384: printers halftone anti-aliased edge grays into toothy edges
+static void PrintNoAntiAlias_UnitTest() {
+    EngineBase* engine = CreateEngineMupdfFromData(Str(kTrianglePdf), StrL("triangle.pdf"), nullptr);
+    utassert(engine);
+    if (!engine) {
+        return;
+    }
+    utassert(RenderGrayPixels(engine, RenderTarget::View) > 0);
+    utassert(RenderGrayPixels(engine, RenderTarget::Print) == 0);
+    SafeEngineRelease(&engine);
 }
 
 static void ParseTip_UnitTests() {
@@ -405,6 +646,7 @@ int RunAppUnitTests(bool forAi) {
     CssParser_UnitTests();
     DictTest();
     DirRemoveAllTest();
+    UncExistsTest();
     FileUtilTest();
     UpdateTempFileTests();
     GuessFileTypeTest();
@@ -421,6 +663,7 @@ int RunAppUnitTests(bool forAi) {
 
     ChapterTable_UnitTests();
     LitDoc_UnitTests();
+    RtfDoc_UnitTests();
     MobiDoc_UnitTests();
     PagePosition_UnitTests();
     PdfSync_UnitTests();
@@ -429,6 +672,7 @@ int RunAppUnitTests(bool forAi) {
 
     ParseTip_UnitTests();
     SvgTextIcon_UnitTests();
+    PrintNoAntiAlias_UnitTest();
 #if IS_DEBUG
     TextSelection_UnitTests();
     EngineDjvuDec_UnitTests();
@@ -436,10 +680,13 @@ int RunAppUnitTests(bool forAi) {
     LayoutWin_UnitTests();
     VirtCtrl_UnitTests();
     utassert(TableOfContents_UnitTestSnapshotNamedDest());
+    utassert(Translations_UnitTestUnescape());
     utassert(MarkdownModel_UnitTestBrowserNavigationUrl());
     utassert(MarkdownToc_UnitTestHtmlLinks());
     utassert(MarkdownToc_UnitTestHtmlHeadings());
     utassert(MarkdownToc_UnitTestMermaid());
+    utassert(MarkdownToc_UnitTestHighlightWikilinks());
+    utassert(MarkdownToc_TestLineBreaks());
     utassert(EbookDoc_UnitTestNormalizeURL());
     utassert(EbookDoc_UnitTestLoading());
     utassert(GumboHtmlParser_UnitTest());
@@ -451,6 +698,7 @@ int RunAppUnitTests(bool forAi) {
     utassert(EngineMupdf_UnitTestEbookMarginCss());
     utassert(EngineMupdf_UnitTestMergeEBookUI());
     utassert(EngineMupdf_UnitTestPageLabels());
+    utassert(EngineMupdf_UnitTestDoi());
     utassert(Accelerators_UnitTestFolderNavIsSafe());
     utassert(Accelerators_UnitTestTreeTakesLetters());
     utassert(Accelerators_UnitTestCreateAnnotEdit());
@@ -458,6 +706,8 @@ int RunAppUnitTests(bool forAi) {
     utassert(ShortcutParse_UnitTestShiftedPunct());
     utassert(AnnotSearch_UnitTests());
     utassert(RenderCache_UnitTestCookieUnlocked());
+    utassert(RenderCache_UnitTestFullOfOneVisiblePage());
+    utassert(RenderCache_UnitTestFullOfOldZoom());
     ReadAloudHighlight_UnitTests();
 #endif
     return utassert_print_results();

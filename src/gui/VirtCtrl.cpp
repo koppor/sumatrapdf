@@ -30,6 +30,44 @@ VirtButton* NewThemedButton(HWND hwndForDpi, Str text, PlatformFont* font, bool 
     return b;
 }
 
+constexpr int kStyledBtnHoverShift = 14;
+constexpr int kStyledBtnFaintShift = 25;
+// a black fill moved by 14 is still black; hover has to read as a lighter gray
+constexpr int kFilledDarkHoverShift = 48;
+
+// the colors of `style` in the current gui palette
+void SetVirtButtonStyle(VirtButton* b, VirtButtonStyle style) {
+    GuiColorsInitIfNeeded();
+    Color colTxt = gColsWin[kColWinText];
+    Color colBg = gColsWin[kColWinBg];
+    Color fg = colTxt;
+    Color bg = colBg;
+    Color border = kColorTransparent;
+    switch (style) {
+        case VirtButtonStyle::Filled:
+            fg = colBg;
+            bg = colTxt;
+            border = colTxt;
+            break;
+        case VirtButtonStyle::Outline:
+            border = gColsLine[kColLineFg];
+            break;
+        case VirtButtonStyle::Ghost:
+            fg = gColsBtn[kColBtnTextDisabled];
+            // muted already: disabled, it fades further
+            b->SetColor(kColBtnTextDisabled, AccentColor(colBg, kStyledBtnFaintShift));
+            break;
+    }
+    b->SetColor(kColBtnText, fg);
+    b->SetColor(kColBtnBg, bg);
+    int hoverShift = kStyledBtnHoverShift;
+    if (style == VirtButtonStyle::Filled && !IsLightColor(bg)) {
+        hoverShift = kFilledDarkHoverShift;
+    }
+    b->SetColor(kColBtnBgHover, AccentColor(bg, hoverShift));
+    b->SetColor(kColBtnBorder, border);
+}
+
 static Kind kindVirtCtrl = "virtCtrl";
 
 VirtCtrl::VirtCtrl() {
@@ -289,6 +327,15 @@ bool VirtCtrl::OnMouseWheel(VirtMouseEvent& ev) {
     }
     ev.didHandle = false;
     onMouseWheel.Call(&ev);
+    return ev.didHandle;
+}
+
+bool VirtCtrl::OnPan(VirtMouseEvent& ev) {
+    if (!onPan.IsValid()) {
+        return false;
+    }
+    ev.didHandle = false;
+    onPan.Call(&ev);
     return ev.didHandle;
 }
 
@@ -598,11 +645,18 @@ void VirtCtrl::SetRoot(VirtRoot* r) {
 
 //--- VirtRoot
 
+static Vec<VirtRoot*> gLiveVirtRoots;
+
 VirtRoot::VirtRoot(HWND hwnd) {
     this->hwnd = hwnd;
+    VecAppend(gLiveVirtRoots, this);
 }
 
 VirtRoot::~VirtRoot() {
+    int idx = VecFind(gLiveVirtRoots, this);
+    if (idx >= 0) {
+        VecRemoveAt(gLiveVirtRoots, idx);
+    }
     // `tops` belong to the layout tree and can outlive us; make sure they don't
     // report their destruction to a root that is gone
     ForgetTops();
@@ -701,6 +755,95 @@ void VirtRoot::Paint(Gfx* gfx, Rect clip) {
     for (VirtCtrl* w : tops) {
         w->PaintTree(gfx, bounds.TL(), c);
     }
+}
+
+// virt class=<wnd> hwnd=<n> kind=<k> name=<n|-> rect=x,y,dx,dy text=<t>
+static Str VirtClassTemp(HWND hwnd) {
+    WCHAR buf[128];
+    if (!hwnd || GetClassNameW(hwnd, buf, dimof(buf)) <= 0) {
+        return {};
+    }
+    return ToUtf8Temp(WStr(buf));
+}
+
+static void AppendSanitized(str::Builder& out, Str s) {
+    for (int i = 0; i < len(s); i++) {
+        char c = s.s[i];
+        if (c == '\n' || c == '\r') {
+            c = ' ';
+        }
+        out.AppendChar(c);
+    }
+}
+
+static void AppendVirtLine(str::Builder& out, Str cls, HWND hwnd, VirtCtrl* w) {
+    Rect r = w->BoundsInWindow();
+    if (r.dx <= 0 || r.dy <= 0) {
+        return;
+    }
+    Kind k = w->GetKind();
+    Str kindName = k ? Str(k) : StrL("none");
+    Str name = w->name ? w->name : StrL("-");
+    VirtText* text = AsVirtText(w);
+    out.Append(fmt("virt class=%s hwnd=%d kind=%s name=%s rect=%d,%d,%d,%d text=", cls, (i64)(uintptr_t)hwnd, kindName,
+                   name, r.x, r.y, r.dx, r.dy));
+    if (text) {
+        AppendSanitized(out, text->s);
+    }
+    out.AppendChar('\n');
+}
+
+static void AppendVirtCtrl(str::Builder& out, Str cls, HWND hwnd, VirtCtrl* w, int depth) {
+    if (!w || depth > 32 || !w->IsVisible()) {
+        return;
+    }
+    AppendVirtLine(out, cls, hwnd, w);
+    if (w->HasFlag(vwfPaintsOwnChildren)) {
+        return;
+    }
+    for (VirtCtrl* c : w->children) {
+        AppendVirtCtrl(out, cls, hwnd, c, depth + 1);
+    }
+}
+
+static bool VirtRootMatches(VirtRoot* root, Str classFilter, Str& clsOut) {
+    if (!root || !root->hwnd || !IsWindow(root->hwnd) || !IsWindowVisible(root->hwnd)) {
+        return false;
+    }
+    clsOut = VirtClassTemp(root->hwnd);
+    if (len(clsOut) == 0) {
+        return false;
+    }
+    return len(classFilter) == 0 || str::Eq(clsOut, classFilter);
+}
+
+void AppendVirtTreeDump(str::Builder& out, Str classFilter) {
+    for (VirtRoot* root : gLiveVirtRoots) {
+        Str cls;
+        if (!VirtRootMatches(root, classFilter, cls)) {
+            continue;
+        }
+        for (VirtCtrl* w : root->tops) {
+            AppendVirtCtrl(out, cls, root->hwnd, w, 0);
+        }
+    }
+}
+
+bool AppendVirtHit(str::Builder& out, Str className, int x, int y) {
+    for (VirtRoot* root : gLiveVirtRoots) {
+        Str cls;
+        if (!VirtRootMatches(root, className, cls)) {
+            continue;
+        }
+        ILayout* el = ElementFromPoint(root, Point{x, y}, nullptr, 0);
+        VirtCtrl* w = el ? el->AsVirtCtrl() : nullptr;
+        if (!w) {
+            continue;
+        }
+        AppendVirtLine(out, cls, root->hwnd, w);
+        return true;
+    }
+    return false;
 }
 
 ILayout* ElementFromPoint(VirtRoot* root, Point ptWindow, Point* ptLocalOut, u32 flags) {
@@ -1017,6 +1160,73 @@ static bool BeginVirtPress(VirtRoot* root, VirtCtrl* target, Point ptWindow, Poi
     return BubbleMouse(target, ev, &VirtCtrl::OnMouseDown);
 }
 
+// a control under ptWindow, or one of its ancestors, scrolls with a touch pan
+static bool CanPanAt(VirtRoot* root, Point ptWindow) {
+    Point ptLocal;
+    for (VirtCtrl* w = VirtAtPoint(root, ptWindow, &ptLocal); w; w = w->parent) {
+        if (w->onPan.IsValid()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static Point GesturePtInWindow(HWND hwnd, POINTS pts) {
+    Point pt = HwndScreenToClient(hwnd, Point(pts.x, pts.y));
+    UnmirrorRtl(hwnd, pt);
+    return pt;
+}
+
+// Windows pans with one finger only in windows with scrollbars; our lists draw
+// their own, so without this a touch drag on them becomes a mouse drag
+static bool OnGestureNotify(VirtRoot* root, GESTURENOTIFYSTRUCT* gn, LRESULT& res) {
+    if (!CanPanAt(root, GesturePtInWindow(root->hwnd, gn->ptsLocation))) {
+        return false;
+    }
+    GESTURECONFIG gc{};
+    gc.dwID = GID_PAN;
+    gc.dwWant = GC_PAN | GC_PAN_WITH_SINGLE_FINGER_VERTICALLY | GC_PAN_WITH_GUTTER | GC_PAN_WITH_INERTIA;
+    gc.dwBlock = GC_PAN_WITH_SINGLE_FINGER_HORIZONTALLY;
+    SetGestureConfig(root->hwnd, 0, 1, &gc, sizeof(gc));
+    res = 0;
+    return true;
+}
+
+// a touch pan scrolls what is under where it started, the way the wheel does
+// (issue #6359)
+static bool OnGesture(VirtRoot* root, HGESTUREINFO hgi, LRESULT& res) {
+    GESTUREINFO gi{};
+    gi.cbSize = sizeof(gi);
+    if (!GetGestureInfo(hgi, &gi) || gi.dwID != GID_PAN) {
+        return false;
+    }
+    Point pt = GesturePtInWindow(root->hwnd, gi.ptsLocation);
+    if (gi.dwFlags & GF_BEGIN) {
+        root->panStart = pt;
+        root->panLastY = pt.y;
+        root->panActive = CanPanAt(root, pt);
+    }
+    if (!root->panActive) {
+        return false;
+    }
+    int dy = pt.y - root->panLastY;
+    root->panLastY = pt.y;
+    if (gi.dwFlags & GF_END) {
+        root->panActive = false;
+    }
+    Point ptLocal;
+    VirtCtrl* target = dy != 0 ? VirtAtPoint(root, root->panStart, &ptLocal) : nullptr;
+    if (target) {
+        VirtMouseEvent ev;
+        FillMouseEvent(ev, target, root->panStart, ptLocal, false, 0);
+        ev.panDy = dy;
+        BubbleMouse(target, ev, &VirtCtrl::OnPan);
+    }
+    CloseGestureInfoHandle(hgi);
+    res = 0;
+    return true;
+}
+
 bool VirtRoot::OnMessage(UINT msg, WPARAM wp, LPARAM lp, LRESULT& res) {
     if (len(tops) == 0) {
         return false;
@@ -1154,6 +1364,12 @@ bool VirtRoot::OnMessage(UINT msg, WPARAM wp, LPARAM lp, LRESULT& res) {
             return BubbleMouse(target, ev, &VirtCtrl::OnMouseWheel);
         }
 
+        case WM_GESTURENOTIFY:
+            return OnGestureNotify(this, (GESTURENOTIFYSTRUCT*)lp, res);
+
+        case WM_GESTURE:
+            return OnGesture(this, (HGESTUREINFO)lp, res);
+
         case WM_CONTEXTMENU: {
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             if (pt.x == -1 && pt.y == -1) {
@@ -1229,6 +1445,7 @@ static Kind kindVirtCtrlScroll = "virtCtrlScroll";
 
 VirtScroll::VirtScroll() {
     onMouseWheel = MkMethod1<VirtScroll, VirtMouseEvent*, &VirtScroll::OnMouseWheel>(this);
+    onPan = MkMethod1<VirtScroll, VirtMouseEvent*, &VirtScroll::OnPan>(this);
 
     kind = kindVirtCtrlScroll;
     flags |= vwfClipChildren;
@@ -1325,6 +1542,13 @@ void VirtScroll::OnMouseWheel(VirtMouseEvent* ev) {
     }
     int lines = -(ev->wheelDelta * 3) / WHEEL_DELTA;
     if (ScrollBy(lines * lineDy)) {
+        ev->didHandle = true;
+    }
+}
+
+// the content follows the finger
+void VirtScroll::OnPan(VirtMouseEvent* ev) {
+    if (ScrollBy(-ev->panDy)) {
         ev->didHandle = true;
     }
 }
@@ -1566,6 +1790,7 @@ VirtListBox::VirtListBox() {
     onMouseUp = MkMethod1<VirtListBox, VirtMouseEvent*, &VirtListBox::OnMouseUp>(this);
     onMouseMove = MkMethod1<VirtListBox, VirtMouseEvent*, &VirtListBox::OnMouseMove>(this);
     onMouseWheel = MkMethod1<VirtListBox, VirtMouseEvent*, &VirtListBox::OnMouseWheel>(this);
+    onPan = MkMethod1<VirtListBox, VirtMouseEvent*, &VirtListBox::OnPan>(this);
     // onDoubleClick is the public item-activated Func0; wire the mouse path on VirtCtrl
     VirtCtrl::onDoubleClick = MkMethod1<VirtListBox, VirtMouseEvent*, &VirtListBox::OnDoubleClick>(this);
     onKeyDown = MkMethod1<VirtListBox, VirtKeyEvent*, &VirtListBox::OnKeyDown>(this);
@@ -1615,6 +1840,9 @@ int VirtListBox::ViewportDy() {
 // the list reads as a rendering glitch, so the strip below the last whole row
 // is left empty and never scrolled into
 int VirtListBox::UsableDy() {
+    if (!wholeRows) {
+        return ViewportDy();
+    }
     int dy = GetItemHeight();
     int usable = (ViewportDy() / dy) * dy;
     return usable > 0 ? usable : ViewportDy();
@@ -1958,6 +2186,9 @@ Rect VirtListBox::ItemRect(int idx) {
     content.dy = UsableDy();
     int dy = GetItemHeight();
     Rect r = {content.x, content.y + (idx * dy) - scrollY, content.dx - ScrollbarDx(), dy};
+    if (!wholeRows && r.Bottom() > content.y && r.y < content.Bottom()) {
+        return r; // shown, maybe cut by an edge
+    }
     if (r.y < content.y || r.Bottom() > content.Bottom()) {
         return {}; // not (fully) visible
     }
@@ -1979,7 +2210,7 @@ void VirtListBox::Paint(VirtPaintCtx& ctx) {
         // from it by the strip the scrollbar takes on the right
         Rect items = ctx.content;
         items.dx -= ScrollbarDx();
-        // only whole rows: the strip below the last one stays background
+        // whole rows only unless !wholeRows: the strip below the last one stays background
         items.dy = UsableDy();
         int dy = GetItemHeight();
         int first = scrollY / dy;
@@ -2033,7 +2264,7 @@ void VirtListBox::Paint(VirtPaintCtx& ctx) {
 
     // dashed outline while the list has the keys (annotations list, find
     // results, command palette, …)
-    if (isFocused) {
+    if (isFocused && showFocusRing) {
         Rect ring = ctx.bounds;
         ring.SubTB(1, 1);
         ring.SubLR(1, 1);
@@ -2110,6 +2341,13 @@ void VirtListBox::OnMouseWheel(VirtMouseEvent* ev) {
     }
     int lines = -(ev->wheelDelta * 3) / WHEEL_DELTA;
     if (ScrollBy(lines * GetItemHeight())) {
+        ev->didHandle = true;
+    }
+}
+
+// the rows follow the finger
+void VirtListBox::OnPan(VirtMouseEvent* ev) {
+    if (ScrollBy(-ev->panDy)) {
         ev->didHandle = true;
     }
 }
@@ -2611,7 +2849,8 @@ void VirtText::PaintText(VirtPaintCtx& ctx, Color textColor) {
     if (withUnderline) {
         GetIdealSize(true);
         Rect lineRect = {r.x, r.y + sz.dy + underlineOffsetY, sz.dx, 0};
-        ctx.gfx->DrawLine(lineRect, textColor);
+        Color col = underlineColor == kColorUnset ? textColor : underlineColor;
+        ctx.gfx->DrawLine(lineRect, col);
     }
 }
 
@@ -2733,8 +2972,14 @@ Color VirtButton::TextColor(Color bg) const {
 void VirtButton::Paint(VirtPaintCtx& ctx) {
     bool isEnabled = HasFlag(vwfEnabled);
     Color bg = GetColor((isEnabled && HasFlag(vwfHovered)) ? kColBtnBgHover : kColBtnBg);
-    ctx.gfx->FillRect(ctx.bounds, bg);
     Color borderCol = GetColor(kColBtnBorder);
+    if (cornerRadius > 0) {
+        Color border = ColorSkipsPaint(borderCol) ? kColorTransparent : borderCol;
+        ctx.gfx->FillRoundedRect(ctx.bounds, cornerRadius, bg, border);
+        borderCol = kColorUnset;
+    } else {
+        ctx.gfx->FillRect(ctx.bounds, bg);
+    }
     if (!ColorSkipsPaint(borderCol)) {
         Rect b = ctx.bounds;
         ctx.gfx->FillRect({b.x, b.y, b.dx, 1}, borderCol);
@@ -3123,9 +3368,9 @@ VirtSlider::VirtSlider() {
     kind = kindVirtCtrlSlider;
     colorDefaults = gColsSlider;
     nColors = kColSliderCount;
-    flags |= vwfCapturesMouse;
-    flags &= ~vwfFocusable;
+    flags |= vwfCapturesMouse | vwfFocusable;
     cursor = CursorId::Hand;
+    onKeyDown = MkMethod1<VirtSlider, VirtKeyEvent*, &VirtSlider::OnKeyDown>(this);
     onMouseDown = MkMethod1<VirtSlider, VirtMouseEvent*, &VirtSlider::OnMouseDown>(this);
     onMouseMove = MkMethod1<VirtSlider, VirtMouseEvent*, &VirtSlider::OnMouseMove>(this);
     onMouseUp = MkMethod1<VirtSlider, VirtMouseEvent*, &VirtSlider::OnMouseUp>(this);
@@ -3143,14 +3388,37 @@ int VirtSlider::ThumbRadius() const {
     return std::max(DpiScaleByDpi(dpi, 7), 5);
 }
 
+// focus halo drawn around the thumb, beyond its radius
+int VirtSlider::HaloWidth() const {
+    return std::max(ThumbRadius() / 2, 3);
+}
+
 Rect VirtSlider::TrackRectLocal() const {
     int r = ThumbRadius();
     int thick = std::max(r / 3, 3);
     Rect c = {0, 0, bounds.dx, bounds.dy};
     int y = c.y + ((c.dy - thick) / 2);
-    int x = c.x + r;
-    int dx = std::max(c.dx - (2 * r), 1);
+    // inset so the focus halo fits at either end
+    int pad = r + HaloWidth();
+    int x = c.x + pad;
+    int dx = std::max(c.dx - (2 * pad), 1);
     return {x, y, dx, thick};
+}
+
+Point VirtSlider::ThumbCenterLocal() const {
+    Rect track = TrackRectLocal();
+    int n = maxVal - minVal;
+    float t = (n <= 0) ? 0 : (float)(value - minVal) / (float)n;
+    HWND hwnd = GetHwnd();
+    int off = (int)lroundf(t * (float)track.dx);
+    int cx = (hwnd && HwndIsRtl(hwnd)) ? track.x + track.dx - off : track.x + off;
+    return {cx, track.y + (track.dy / 2)};
+}
+
+Rect VirtSlider::ThumbHaloRectLocal() const {
+    Point c = ThumbCenterLocal();
+    int r = ThumbRadius() + HaloWidth();
+    return {c.x - r, c.y - r, 2 * r, 2 * r};
 }
 
 int VirtSlider::ValueFromLocalX(int xLocal) {
@@ -3200,7 +3468,7 @@ void VirtSlider::SetValue(int v, bool notify) {
 Size VirtSlider::GetIdealSize() {
     HWND hwnd = GetHwnd();
     int dpi = hwnd ? DpiGetForHwnd(hwnd) : 96;
-    int r = ThumbRadius();
+    int r = ThumbRadius() + HaloWidth();
     int dx = idealDx > 0 ? idealDx : DpiScaleByDpi(dpi, 88);
     return {dx, (2 * r) + DpiScaleByDpi(dpi, 4)};
 }
@@ -3210,17 +3478,11 @@ void VirtSlider::Paint(VirtPaintCtx& ctx) {
     track.x += ctx.bounds.x;
     track.y += ctx.bounds.y;
     int r = ThumbRadius();
-    int n = maxVal - minVal;
-    float t = (n <= 0) ? 0 : (float)(value - minVal) / (float)n;
     HWND hwnd = GetHwnd();
     bool rtl = hwnd && HwndIsRtl(hwnd);
-    int cx;
-    if (rtl) {
-        cx = track.x + track.dx - (int)lroundf(t * (float)track.dx);
-    } else {
-        cx = track.x + (int)lroundf(t * (float)track.dx);
-    }
-    int cy = track.y + (track.dy / 2);
+    Point c = ThumbCenterLocal();
+    int cx = c.x + ctx.bounds.x;
+    int cy = c.y + ctx.bounds.y;
 
     Color trackCol = GetColor(kColSliderTrack);
     Color fillCol = GetColor(kColSliderFill);
@@ -3240,6 +3502,13 @@ void VirtSlider::Paint(VirtPaintCtx& ctx) {
     bool hot = HasFlag(vwfHovered) || HasFlag(vwfPressed);
     Color thumb = GetColor(hot ? kColSliderThumbHover : kColSliderThumb);
     int d = r * 2;
+    if (HasFlag(vwfFocused)) {
+        // focus: a halo around the thumb
+        Rect halo = ThumbHaloRectLocal();
+        halo.x += ctx.bounds.x;
+        halo.y += ctx.bounds.y;
+        ctx.gfx->FillEllipse(halo, fillCol, 80);
+    }
     ctx.gfx->FillEllipse({cx - r, cy - r, d, d}, thumb);
 }
 
@@ -3280,6 +3549,50 @@ void VirtSlider::OnMouseWheel(VirtMouseEvent* ev) {
         onValueCommitted.Call();
     }
     ev->didHandle = true;
+}
+
+// arrows step by 1 (Ctrl: by a tenth of the range), PgUp / PgDn by a tenth,
+// Home / End go to the ends; left / right are mirrored in RTL
+void VirtSlider::OnKeyDown(VirtKeyEvent* ev) {
+    int bigStep = std::max((maxVal - minVal) / 10, 1);
+    int step = ev->isCtrl ? bigStep : 1;
+    HWND hwnd = GetHwnd();
+    if (hwnd && HwndIsRtl(hwnd) && (ev->vkey == VK_LEFT || ev->vkey == VK_RIGHT)) {
+        step = -step;
+    }
+    int v = value;
+    switch (ev->vkey) {
+        case VK_LEFT:
+        case VK_DOWN:
+            v -= step;
+            break;
+        case VK_RIGHT:
+        case VK_UP:
+            v += step;
+            break;
+        case VK_PRIOR:
+            v += bigStep;
+            break;
+        case VK_NEXT:
+            v -= bigStep;
+            break;
+        case VK_HOME:
+            v = minVal;
+            break;
+        case VK_END:
+            v = maxVal;
+            break;
+        default:
+            return;
+    }
+    ev->didHandle = true;
+    if (adjusting) {
+        return;
+    }
+    SetValue(v, true);
+    if (onValueCommitted.IsValid()) {
+        onValueCommitted.Call();
+    }
 }
 
 void VirtSlider::OnMouseEnter() {
@@ -3489,6 +3802,8 @@ static bool IsVirtMouseMsg(UINT msg) {
         case WM_MBUTTONDOWN:
         case WM_MBUTTONUP:
         case WM_MOUSEWHEEL:
+        case WM_GESTURENOTIFY:
+        case WM_GESTURE:
         case WM_CONTEXTMENU:
             return true;
     }
@@ -3519,7 +3834,8 @@ bool VirtTreeOnMessage(HWND hwnd, VirtRoot* root, UINT msg, WPARAM wp, LPARAM lp
     if (IsVirtMouseMsg(msg)) {
         // WM_CONTEXTMENU and the wheel come in screen coordinates, which
         // VirtRoot::OnMessage converts itself
-        bool inClientCoords = (msg != WM_CONTEXTMENU) && (msg != WM_MOUSEWHEEL);
+        bool inClientCoords =
+            (msg != WM_CONTEXTMENU) && (msg != WM_MOUSEWHEEL) && (msg != WM_GESTURE) && (msg != WM_GESTURENOTIFY);
         LPARAM lp2 = inClientCoords ? UnmirrorRtlLparam(hwnd, lp) : lp;
         return root->OnMessage(msg, wp, lp2, res);
     }
@@ -3833,6 +4149,23 @@ static TempStr CommandShortcutTemp(Str cmdName) {
     return gCommandsContext->GetCommandShortcutTemp(cmdName);
 }
 
+void InitKeyHint(VirtRichText* t, PlatformFont* font, Str key, Str desc, Color colTxt, Color colBg) {
+    ParseTipInto(t, str::JoinTemp(StrL("(Kbd/"), key, StrL(") "), desc));
+    t->font = font;
+    // a hint is not a link, so it takes the plain text color
+    t->SetColor(kColRichText, colTxt);
+    t->SetColor(kColRichLink, colTxt);
+    t->SetColor(kColRichBg, colBg);
+    int padX = DpiScale(8);
+    t->padding = Insets{0, padX, 0, padX};
+}
+
+VirtRichText* NewKeyHint(PlatformFont* font, Str key, Str desc, Color colTxt, Color colBg) {
+    auto* t = new VirtRichText();
+    InitKeyHint(t, font, key, desc, colTxt, colBg);
+    return t;
+}
+
 void ParseTipInto(VirtRichText* tipIn, Str s) {
     VirtRichText& tip = *tipIn;
     if (len(s) == 0) {
@@ -4080,9 +4413,41 @@ void VirtRichText::SetBounds(Rect r) {
     LayoutText(content.dx);
 }
 
+// size queries (e.g. WM_GETMINMAXINFO's) re-wrap the words to the width they
+// ask about; wrap them back to our bounds before drawing or hit-testing
+void VirtRichText::WrapToBounds() {
+    int dx = lastBounds.dx - padding.left - padding.right;
+    if (dx > 0) {
+        LayoutText(dx);
+    }
+}
+
+// one underline per line the link's words wrapped onto, in word coordinates
+void TipLinkUnderlines(TipLink* link, Vec<Rect>& out) {
+    TipWord* last = link->lastWord;
+    TipWord* lineStart = link->firstWord;
+    if (!lineStart || !last) {
+        return;
+    }
+    for (TipWord* w = lineStart; w; w = w->next) {
+        // a wrapped word starts back at the left (y differs within a line: VCenter)
+        bool lineEnds = w == last || w->next->x <= w->x;
+        if (!lineEnds) {
+            continue;
+        }
+        int y = lineStart->y + lineStart->dy - 3;
+        VecAppend(out, Rect(lineStart->x, y, w->x + w->dx - lineStart->x, 0));
+        if (w == last) {
+            break;
+        }
+        lineStart = w->next;
+    }
+}
+
 // draws the words (link words in kColRichLink, underlined; others in kColRichText;
 // isKbd words as key-caps like the keyboard help sheet)
 void VirtRichText::Paint(VirtPaintCtx& ctx) {
+    WrapToBounds();
     Gfx* gfx = ctx.gfx;
     PlatformFont* boldFont = nullptr;
     Color textCol = GetColor(kColRichText);
@@ -4118,21 +4483,20 @@ void VirtRichText::Paint(VirtPaintCtx& ctx) {
         gfx->DrawText(w->text, rc, wordFmt | gfxTextLeft, use, w->isLink ? linkCol : textCol);
     }
     // underline each link
+    Vec<Rect> lines;
     for (TipLink* link = links.next; link; link = link->next) {
-        TipWord* first = link->firstWord;
-        TipWord* last = link->lastWord;
-        if (!first || !last) {
-            continue;
+        VecReset(lines);
+        TipLinkUnderlines(link, lines);
+        for (Rect r : lines) {
+            r.Offset(offX, offY);
+            gfx->DrawLine(r, linkCol);
         }
-        int underlineY = offY + first->y + first->dy - 3;
-        int x1 = offX + first->x;
-        int x2 = offX + last->x + last->dx;
-        gfx->DrawLine(Rect(x1, underlineY, x2 - x1, 0), linkCol);
     }
 }
 
 // the link under a point in our own coordinates, or null
 TipLink* VirtRichText::LinkAt(Point ptLocal) {
+    WrapToBounds();
     int x = ptLocal.x - padding.left;
     int y = ptLocal.y - padding.top;
     for (TipWord* w = words.next; w; w = w->next) {
@@ -4148,9 +4512,17 @@ TipLink* VirtRichText::LinkAt(Point ptLocal) {
 }
 
 // a click on a link runs it; anything else bubbles up to whoever hosts us
+// LayoutText's line pitch: a word's height with a pixel above and below it,
+// and 2 between the lines
 int VirtFixedLinesText::FixedDy() {
-    int lineDy = PlatformFontMeasureText(font, StrL("Ag")).dy;
-    return (lineDy * nLines) + padding.top + padding.bottom;
+    int lineDy = PlatformFontMeasureText(font, StrL("Ag")).dy + (2 * DpiScale(1));
+    return (lineDy * nLines) + (2 * (nLines - 1)) + padding.top + padding.bottom;
+}
+
+// wraps to the width it is given. The unwrapped line is not a minimum, or a
+// long note becomes the window's minimum width instead of wrapping inside it.
+int VirtFixedLinesText::MinIntrinsicWidth(int) {
+    return 0;
 }
 
 // the height is ours in all three, or the box would follow the text: it is

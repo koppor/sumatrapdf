@@ -60,7 +60,10 @@
 #include "Canvas.h"
 #include "HomePage.h"
 #include "MainWindow.h"
+#include "Selection.h"
+#include "Tabs.h"
 #include "MainWindowCommon.h"
+#include "SignatureUI.h"
 
 static void SafeDeleteTabsCtrl(TabsCtrl* tabsCtrl) {
     logf("SafeDeleteTabsCtrl: 0x%p\n", tabsCtrl);
@@ -132,9 +135,10 @@ MainWindow::~MainWindow() {
 
     // the panels hand the views' layouts back before those are deleted
     DeleteSidebarPanel(sidebarTop);
+    DeleteSidebarPanel(sidebarMiddle);
     DeleteSidebarPanel(sidebarBottom);
     DeleteSidebarPanel(favoritesTabPanel);
-    sidebarTop = sidebarBottom = favoritesTabPanel = nullptr;
+    sidebarTop = sidebarMiddle = sidebarBottom = favoritesTabPanel = nullptr;
     HomePageDestroySearch(this);
     HomePageDestroyChrome(this);
 
@@ -220,6 +224,8 @@ MainWindow::~MainWindow() {
     // the views' layouts own their controls
     delete tocViewLayout;
     delete pageThumbs;
+    DeleteSignaturesCtrl(this);
+    DeleteSigBar(this);
     delete tocFilteredTree;
     if (favTreeView) {
         delete favTreeView->treeModel;
@@ -237,6 +243,8 @@ MainWindow::~MainWindow() {
 void ClearMouseState(MainWindow* win) {
     CancelAnnotationResizeRerender(win);
     HideAnnotationHoverOverlay(win);
+    // the comment card holds an Annotation* of the engine about to go
+    HideAnnotationTextPopup(win);
     win->dragStartPending = false;
     win->textDragPending = false;
     win->imageDragPending = false;
@@ -473,11 +481,8 @@ bool MainWindow::CreateUIAProvider() {
 }
 
 static void LaunchEmbeddedDestination(MainWindow* win, PageDestination* pd) {
-    if (pd->embedObjNum <= 0) {
-        return;
-    }
     EngineBase* engine = win->CurrentTab()->AsFixed()->GetEngine();
-    Str data = EngineMupdfLoadAnnotAttachment(engine, pd->embedObjNum);
+    Str data = EngineMupdfLoadEmbedded(engine, pd);
     if (len(data) == 0) {
         return;
     }
@@ -682,15 +687,16 @@ void LinkHandler::LaunchFile(Str pathOrig, IPageDestination* remoteLink) {
         return;
     }
 
+    // remoteLink's page and rect are in the source document: only its name means
+    // something in the target
     Str destName = remoteLink->GetName();
-    if (destName) {
-        CleanRemoteDestNameInPlace(destName);
-        IPageDestination* dest = targetWin->ctrl->GetNamedDest(destName);
-        if (dest) {
-            targetWin->linkHandler->ScrollTo(dest);
-        }
-    } else {
-        targetWin->linkHandler->ScrollTo(remoteLink);
+    if (len(destName) == 0) {
+        return;
+    }
+    CleanRemoteDestNameInPlace(destName);
+    IPageDestination* dest = targetWin->ctrl->GetNamedDest(destName);
+    if (dest) {
+        targetWin->linkHandler->ScrollTo(dest);
     }
 }
 
@@ -717,23 +723,7 @@ static void PopulateTabCloseFlags(AppCommandCtx& ctx) {
 
     int nTabs = ctx.win->TabCount();
     ctx.nTabs = nTabs;
-    WindowTab* currTab = ctx.tab;
-    int tabIdx = ctx.win->GetTabIdx(currTab);
-    ctx.canCloseTabsToRight = tabIdx < (nTabs - 1);
-    int nFirstDocTab = 0;
-    for (int i = 0; i < nTabs; i++) {
-        WindowTab* tab = ctx.win->GetTab(i);
-        if (tab->IsAboutTab()) {
-            nFirstDocTab = 1;
-            continue;
-        }
-        ctx.hasDocTabs = true;
-        if (tab == currTab) {
-            ctx.canCloseTabsToLeft = i > nFirstDocTab;
-            continue;
-        }
-        ctx.canCloseOtherTabs = true;
-    }
+    SetTabCloseFlags(ctx);
 }
 
 AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
@@ -761,10 +751,10 @@ AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
         EngineBase* engine = ctx.tab->GetEngine();
         ctx.isCbx = engine && engine->kind == kindEngineComicBooks;
         ctx.isImageCollection = engine && engine->isImageCollection;
+        ctx.isEpub = IsEpubDoc(ctx.tab);
         ctx.isReflowable = engine && engine->isReflowable;
         ctx.engineKind = ctx.tab->GetEngineType();
         ctx.engineHasErrors = engine && engine->HasErrors();
-        ctx.canSendEmail = CanSendAsEmailAttachment(ctx.tab);
 #ifndef DISABLE_DOCUMENT_RESTRICTIONS
         ctx.allowsPrinting = !win->AsFixed() || (engine && engine->AllowsPrinting());
 #endif
@@ -779,6 +769,7 @@ AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
 
     ctx.isSpeaking = TtsIsSpeaking();
     ctx.clipboardHasImage = IsClipboardFormatAvailable(CF_BITMAP);
+    ctx.hasSignatures = TabHasSignatures(ctx.tab);
     ctx.aiChatAvailable = IsAIChatAvailable();
     ctx.aiChatSupported = IsAIChatSupportedForTab(ctx.tab);
     ctx.grokInstalled = IsBackendInstalled(AIChatBackend::Grok);
@@ -798,12 +789,13 @@ AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
         ctx.isFixedPage = true;
         EngineBase* engine = dm->GetEngine();
         ctx.hasTextSelection = ctx.hasSelection && len(dm->textSelection->result) > 0;
+        ctx.hasDrawnRectSelection = ctx.hasSelection && IsDrawnRectSelection(win);
         ctx.supportsAnnots = EngineSupportsAnnotations(engine);
         ctx.hasUnsavedAnnotations = EngineHasUnsavedAnnotations(engine);
-        ctx.hasRedactMarks = EngineHasRedactMarks(engine);
+        ctx.hasRedactMarks = EngineHasRedactMarksNoWait(engine);
         ctx.hasUserRedactMarks = EngineHasUserRedactMarks(engine);
-        ctx.canUndo = EngineMupdfCanUndo(engine);
-        ctx.canRedo = EngineMupdfCanRedo(engine);
+        ctx.canUndo = EngineMupdfCanUndoNoWait(engine);
+        ctx.canRedo = EngineMupdfCanRedoNoWait(engine);
         ctx.isCursorOnPage = dm->GetPageNoByPoint(cursorPos) > 0;
         ctx.annotationUnderCursor = dm->GetAnnotationAtPos(cursorPos, nullptr);
         IPageElement* pageEl = dm->GetElementAtPos(cursorPos, nullptr);

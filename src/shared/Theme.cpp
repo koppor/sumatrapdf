@@ -1033,6 +1033,13 @@ Color ThemeEdgeColor() {
     return GetThemeCol(gCurrentTheme->edgeColor, fallback);
 }
 
+// the app icon's yellow, lighter on a dark page: reading progress, the build
+// note, the search matches
+Color ThemeAccentColor() {
+    bool light = IsLightColor(ThemeMainWindowBackgroundColor());
+    return light ? MkRgb(0xe9, 0xb4, 0x00) : MkRgb(0xf2, 0xc5, 0x3d);
+}
+
 Color ThemeHotEdgeColor() {
     if (gUseHighContrast) {
         return SysHighlightBgColor();
@@ -1102,6 +1109,26 @@ Color ThemeNotificationsHighlightTextColor() {
         fallback = RgbToColor(0xFDE68A); // light amber
     }
     return GetThemeCol(gCurrentTheme->notificationHighlightTextColor, fallback);
+}
+
+// the padding around the citation hover preview's page snippet: the classic
+// tooltip yellow in a light theme, which glares in a dark one (#6328)
+Color ThemeHoverPreviewBackgroundColor() {
+    if (gUseHighContrast) {
+        return SysWindowBgColor();
+    }
+    Color fallback = ThemeHotBackgroundColor();
+    if (IsLightColor(ThemeWindowControlBackgroundColor())) {
+        fallback = MkRgb(255, 252, 200);
+    }
+    return GetThemeCol(gCurrentTheme->hoverPreviewBackgroundColor, fallback);
+}
+
+Color ThemeHoverPreviewEdgeColor() {
+    if (gUseHighContrast) {
+        return SysWindowTextColor();
+    }
+    return GetThemeCol(gCurrentTheme->hoverPreviewEdgeColor, ThemeHotEdgeColor());
 }
 
 // Links inside a warning notification. The theme's link color is picked to sit on

@@ -52,6 +52,7 @@
 #include "Menu.h"
 #include "uia/Provider.h"
 #include "SearchAndDDE.h"
+#include "SignatureUI.h"
 #include "Selection.h"
 #include "LinkFollow.h"
 #include "SelectTextKeyboard.h"
@@ -401,6 +402,43 @@ static void OnVScroll(MainWindow* win, WPARAM wp) {
         return;
     }
 
+    // Page Up/Down follow the rotated stack. Arrow keys stay on this scrollbar.
+    DisplayModel* dm = win->AsFixed();
+    if (dm && dm->ScrollFollowsRotation() && msg != SB_LINEUP && msg != SB_LINEDOWN && msg != SB_THUMBTRACK) {
+        bool handled = true;
+        int span = dm->ContentScrollHorizontal() ? dm->GetViewPort().dx : dm->GetViewPort().dy;
+        switch (msg) {
+            case SB_TOP:
+                dm->ScrollContentToEdge(false);
+                break;
+            case SB_BOTTOM:
+                dm->ScrollContentToEdge(true);
+                break;
+            case SB_PAGEUP:
+                dm->ScrollContentBy(-span, false);
+                break;
+            case SB_PAGEDOWN:
+                dm->ScrollContentBy(span, false);
+                break;
+            case kSbHalfPageUp:
+                dm->ScrollContentBy(-span / 2, false);
+                break;
+            case kSbHalfPageDown:
+                dm->ScrollContentBy(span / 2, false);
+                break;
+            default:
+                handled = false;
+                break;
+        }
+        if (handled) {
+            ReadAloudOnUserViewChanged(win);
+            if (scrollDown || scrollUp) {
+                OnDocumentVerticalScrollIntent(win, scrollDown);
+            }
+            return;
+        }
+    }
+
     // Original logic for other display modes
 
     // SmoothScroll eases wheel input and arrow-key / scrollbar line steps
@@ -745,6 +783,14 @@ static void StopMouseDrag(MainWindow* win, int x, int y, bool aborted) {
 static bool StopAnnotationResize(MainWindow* win, bool aborted);
 
 void CancelDrag(MainWindow* win) {
+    if (PageGridDragActive()) {
+        PageGridDragCancel();
+        if (GetCapture() == win->hwndCanvas) {
+            ReleaseCapture();
+        }
+        SetCanvasCursor(win, IDC_ARROW);
+        return;
+    }
     if (StopAnnotationResize(win, true)) {
         win->mouseAction = MouseAction::None;
         win->linkOnLastButtonDown = nullptr;
@@ -979,6 +1025,12 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM key) {
     DisplayModel* dm = win->AsFixed();
     // ReportIf(!dm); // can happen if reload fails, we delete DisplayModel
     if (!dm) return;
+
+    if (PageGridDragActive()) {
+        PageGridDragMove(dm, x, y);
+        SetCursorCached(PageGridCursorAxis(dm, x, y, true) == PageGridAxis::Height ? IDC_SIZENS : IDC_SIZEWE);
+        return;
+    }
 
     if (AnnotationPlacementOnMouseMove(win, Point{x, y}, key)) {
         return;
@@ -1358,6 +1410,9 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
     if (ReadingBarOnLeftDown(win, x, y)) {
         return;
     }
+    if (SigMarksOnLeftDown(win, x, y)) {
+        return;
+    }
 
     if (AnnotationPlacementOnLeftDown(win, Point{x, y}, key)) {
         return;
@@ -1391,6 +1446,13 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
         win->dragStartPending = true;
         win->dragStart = pt;
         OnSelectionStart(win, x, y, key, true);
+        return;
+    }
+
+    // Configure Page Grid is open, or Alt is held: a press on a grid line
+    // resizes that cell instead of selecting text.
+    if ((IsPageGridDialogOpen() || IsAltPressed()) && PageGridDragStart(dm, x, y)) {
+        SetCapture(win->hwndCanvas);
         return;
     }
 
@@ -1617,8 +1679,10 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y, WPARAM key) {
     // A finger doesn't rubber-band: dragging pans the page and a long press
     // selects, so letting touch start a selection here only flashes a
     // rectangle before the gesture takes over (issue #538).
+    // DisableLeftDragPan: where there's no text, a drag selects instead of panning (#6444)
+    bool panOffText = !gSettings->disableLeftDragPan;
     bool startDrag = resizeHandle != ResizeHandle::None || isMoveableAnnot || !canCopy || win->lastInputWasTouch ||
-                     (isShift || !isOverText) && !isCtrl;
+                     (isShift || (!isOverText && panOffText)) && !isCtrl;
     if (startDrag) {
         StartMouseDrag(win, x, y);
     } else {
@@ -1633,6 +1697,15 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
 
     DisplayModel* dm = win->AsFixed();
     ReportIf(!dm);
+
+    if (PageGridDragActive()) {
+        PageGridDragMove(dm, x, y);
+        PageGridDragEnd();
+        if (GetCapture() == win->hwndCanvas) {
+            ReleaseCapture();
+        }
+        return;
+    }
 
     if (AnnotationPlacementOnLeftUp(win, Point{x, y}, key)) {
         return;
@@ -1813,6 +1886,12 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y, WPARAM key) {
             return;
         }
 
+        // an EPUB footnote link shows the note in a popup instead of jumping to it
+        if (dest && dest->isNoteRef &&
+            RefHoverShowNoteRef(win->refHover, win->hwndCanvas, win->ctrl, win->linkHandler, dm, x, y, link)) {
+            return;
+        }
+
         win->ctrl->HandleLink(dest, win->linkHandler);
         // win->linkHandler->GotoLink(dest);
         return;
@@ -1883,7 +1962,11 @@ static void OnMouseLeftButtonDblClk(MainWindow* win, int x, int y, WPARAM key) {
         return;
     }
     if (gPressOnlyDeselected) {
+        // the first click deselected another annotation; free text still edits (#6387)
         gPressOnlyDeselected = false;
+        if (!IsPlacingHighlighterAnnotation(win)) {
+            StartFreeTextInPlaceEditAt(win, Point{x, y});
+        }
         return;
     }
     // while an annotation is selected, double-clicking it (to edit free text in
@@ -2280,56 +2363,6 @@ constexpr int kPageGridMinMajorPx = 4;
 constexpr int kPageGridMaxDots = 8000;
 constexpr int kPageGridMaxLines = 800;
 
-enum class PageGridStyleKind {
-    Dots,
-    Dotted,
-    Solid
-};
-
-struct PageGridDraw {
-    float widthPt = 72.f;
-    float heightPt = 72.f;
-    int subdiv = 4;
-    float offsetXPt = 0;
-    float offsetYPt = 0;
-    Color color = kPageGridDefaultColor;
-    PageGridStyleKind style = PageGridStyleKind::Dots;
-};
-
-static PageGridDraw GetPageGridDraw() {
-    PageGridDraw d;
-    if (!gSettings) {
-        return d;
-    }
-    PageGrid& pg = gSettings->fixedPageUI.pageGrid;
-    if (pg.width > 0) {
-        d.widthPt = pg.width;
-    }
-    if (pg.height > 0) {
-        d.heightPt = pg.height;
-    }
-    if (pg.subdivisions > 0) {
-        d.subdiv = pg.subdivisions;
-    }
-    d.offsetXPt = pg.offsetX;
-    d.offsetYPt = pg.offsetY;
-    ParseColor(pg.color);
-    if (pg.color.parsedOk && !IsSpecialColor(pg.color.col)) {
-        d.color = pg.color.col;
-    }
-    if (str::EqI(pg.style, StrL("dotted"))) {
-        d.style = PageGridStyleKind::Dotted;
-    } else if (str::EqI(pg.style, StrL("solid"))) {
-        d.style = PageGridStyleKind::Solid;
-    }
-    d.widthPt = limitValue(d.widthPt, 1.f, 720.f);
-    d.heightPt = limitValue(d.heightPt, 1.f, 720.f);
-    d.subdiv = limitValue(d.subdiv, 1, 32);
-    d.offsetXPt = limitValue(d.offsetXPt, -720.f, 720.f);
-    d.offsetYPt = limitValue(d.offsetYPt, -720.f, 720.f);
-    return d;
-}
-
 static int PageGridScreenDist(Point a, Point b) {
     int dx = a.x - b.x;
     int dy = a.y - b.y;
@@ -2347,6 +2380,32 @@ static void PageGridStroke(HDC hdc, DisplayModel* dm, int pageNo, PointF a, Poin
     Point sb = dm->CvtToScreen(pageNo, b);
     MoveToEx(hdc, sa.x, sa.y, nullptr);
     LineTo(hdc, sb.x, sb.y);
+}
+
+static void PaintPageGridSlanted(DisplayModel* dm, HDC hdc, int pageNo, const Rect& bounds, const RectF& vis,
+                                 const RectF& box, const PageGridDraw& g, HBRUSH br, HPEN penMinor, HPEN penMajor) {
+    bool drawMinor = false;
+    if (!PageGridSlantVisible(dm, pageNo, g, box, drawMinor)) {
+        return;
+    }
+    Vec<PageGridSeg> segs;
+    PageGridSlantedSegs(g, box, vis, drawMinor, segs);
+    int saved = SaveDC(hdc);
+    IntersectClipRect(hdc, bounds.x, bounds.y, bounds.x + bounds.dx, bounds.y + bounds.dy);
+    SetBkMode(hdc, TRANSPARENT);
+    for (PageGridSeg& s : segs) {
+        if (s.dot) {
+            Point pt = dm->CvtToScreen(pageNo, PointF(s.x0, s.y0));
+            int sz = s.major ? 3 : 1;
+            int o = sz / 2;
+            RECT rc = {pt.x - o, pt.y - o, pt.x - o + sz, pt.y - o + sz};
+            FillRect(hdc, &rc, br);
+            continue;
+        }
+        SelectObject(hdc, s.major ? penMajor : penMinor);
+        PageGridStroke(hdc, dm, pageNo, PointF(s.x0, s.y0), PointF(s.x1, s.y1));
+    }
+    RestoreDC(hdc, saved);
 }
 
 // Graph-paper overlay in page space, clipped to the visible page.
@@ -2392,6 +2451,10 @@ static void PaintPageGrid(DisplayModel* dm, HDC hdc) {
 
         float ox = box.x + g.offsetXPt;
         float oy = box.y + g.offsetYPt;
+        if (!PageGridIsUpright(g.slantDeg)) {
+            PaintPageGridSlanted(dm, hdc, pageNo, bounds, vis, box, g, br, penMinor, penMajor);
+            continue;
+        }
         Point p0 = dm->CvtToScreen(pageNo, PointF(ox, oy));
         Point px = dm->CvtToScreen(pageNo, PointF(ox + minorX, oy));
         Point py = dm->CvtToScreen(pageNo, PointF(ox, oy + minorY));
@@ -3023,6 +3086,7 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
 
     PaintReadAloudHighlight(win, &gfx);
     ReadingBarPaint(win, &gfx);
+    PaintSignatureMarks(win, &gfx);
 
     if (win->fwdSearchMark.show) {
         PaintForwardSearchMark(win, &gfx);
@@ -3219,9 +3283,22 @@ static LRESULT OnSetCursorMouseNone(MainWindow* win, HWND hwnd) {
 
 static LRESULT OnSetCursor(MainWindow* win, HWND hwnd) {
     ReportIf(win->hwndCanvas != hwnd);
+    if (SigMarksOnSetCursor(win)) {
+        return TRUE;
+    }
     if (ReadingBarOnSetCursor(win)) {
         win->DeleteToolTip();
         return TRUE;
+    }
+    if (DisplayModel* dm = win->AsFixed()) {
+        Point pt = HwndGetCursorPos(hwnd);
+        bool allow = PageGridDragActive() || IsPageGridDialogOpen() || IsAltPressed();
+        PageGridAxis axis = PageGridCursorAxis(dm, pt.x, pt.y, allow);
+        if (axis != PageGridAxis::None) {
+            SetCursorCached(axis == PageGridAxis::Height ? IDC_SIZENS : IDC_SIZEWE);
+            win->DeleteToolTip();
+            return TRUE;
+        }
     }
     if (win->mouseAction != MouseAction::None) {
         win->DeleteToolTip();
@@ -3502,7 +3579,7 @@ static bool RefHoverTakesWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp) 
     if (!s->displayed.srcRect.Contains(pagePt)) {
         return false;
     }
-    RefHoverOnWheel(s, dm->GetEngine(), msg, wp);
+    RefHoverOnWheel(s, dm->GetEngine(), msg, wp, lp, RefHoverWheelAt::Link);
     return true;
 }
 
@@ -3672,13 +3749,25 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
         if (scrollBy == 0) {
             return 0;
         }
-        if (hScroll) {
+        if (dm->ScrollFollowsRotation()) {
+            if (hScroll && dm->ContentScrollHorizontal()) {
+                dm->ScrollYBy(scrollBy, false);
+            } else if (hScroll) {
+                dm->ScrollXBy(scrollBy);
+            } else {
+                dm->ScrollContentBy(scrollBy, gSettings->scrollEdgeTurnsPage);
+            }
+        } else if (hScroll) {
             dm->ScrollXBy(scrollBy);
         } else {
             dm->ScrollYBy(scrollBy, gSettings->scrollEdgeTurnsPage);
         }
         if (ScrollbarsUseOverlay()) {
-            OverlayScrollbarNotifyScroll(hScroll ? win->overlayScrollH : win->overlayScrollV);
+            bool notifyH = hScroll;
+            if (dm->ScrollFollowsRotation() && dm->ContentScrollHorizontal()) {
+                notifyH = !hScroll;
+            }
+            OverlayScrollbarNotifyScroll(notifyH ? win->overlayScrollH : win->overlayScrollV);
         }
         ReadAloudOnUserViewChanged(win);
         return 0;
@@ -3705,6 +3794,36 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
     }
 
     win->wheelAccumDelta += delta;
+    // Unshifted wheel follows the rotated stack. Shift+wheel stays the other axis.
+    if (dm && dm->ScrollFollowsRotation() && (!hScroll || dm->ContentScrollHorizontal())) {
+        int line = DpiScale(ScrollLineAmount(gSettings->scrollLineAmount));
+        bool crossY = hScroll && dm->ContentScrollHorizontal();
+        if (win->wheelAccumDelta < 0) {
+            while (win->wheelAccumDelta <= -gDeltaPerLine) {
+                if (crossY) {
+                    dm->ScrollYBy(line, false);
+                } else {
+                    dm->ScrollContentBy(line, false);
+                }
+                win->wheelAccumDelta += gDeltaPerLine;
+            }
+        } else {
+            while (win->wheelAccumDelta >= gDeltaPerLine) {
+                if (crossY) {
+                    dm->ScrollYBy(-line, false);
+                } else {
+                    dm->ScrollContentBy(-line, false);
+                }
+                win->wheelAccumDelta -= gDeltaPerLine;
+            }
+        }
+        if (ScrollbarsUseOverlay()) {
+            bool contentH = dm->ContentScrollHorizontal() && !crossY;
+            OverlayScrollbarNotifyScroll(contentH ? win->overlayScrollH : win->overlayScrollV);
+        }
+        ReadAloudOnUserViewChanged(win);
+        return 0;
+    }
     int prevScrollPos = WheelScrollPosOrTarget(win);
 
     UINT scrollMsg = hScroll ? WM_HSCROLL : WM_VSCROLL;
@@ -4618,6 +4737,10 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
 
         case kAnnotationNudgeTimerID:
             FinishAnnotationNudge(win);
+            break;
+
+        case kSidebarOverlayTimerID:
+            UpdateSidebarOverlay(win, SidebarOverlayUpdate::Mouse);
             break;
 
         case kTouchLongPressTimerID: {

@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { dlopen, FFIType, ptr, toArrayBuffer } from "bun:ffi";
+import { IS_WIN } from "./host.ts";
 
 export const TestLayout = 70;
 const TestInvokeCommand = 87;
@@ -90,7 +91,11 @@ function errno(): number {
 
 function closeFd(): void {
   if (gFd >= 0) {
-    lib().symbols.close(gFd);
+    if (IS_WIN) {
+      kernel32().symbols.CloseHandle(gFd);
+    } else {
+      lib().symbols.close(gFd);
+    }
     gFd = -1;
   }
 }
@@ -215,6 +220,48 @@ function decodeArg(r: PacketReader): ControlArg | undefined {
   throw new Error(`unknown control argument type ${type}`);
 }
 
+// Windows: a second, synchronous connection to the named pipe (the server
+// serves one thread per client)
+const GENERIC_READ_WRITE = 0xc0000000;
+const OPEN_EXISTING = 3;
+
+let k32: ReturnType<typeof dlopen> | null = null;
+
+function kernel32(): ReturnType<typeof dlopen> {
+  if (!k32) {
+    k32 = dlopen("kernel32.dll", {
+      CreateFileW: {
+        args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr],
+        returns: FFIType.i64_fast,
+      },
+      WriteFile: {
+        args: [FFIType.i64_fast, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr],
+        returns: FFIType.i32,
+      },
+      ReadFile: {
+        args: [FFIType.i64_fast, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr],
+        returns: FFIType.i32,
+      },
+      PeekNamedPipe: {
+        args: [FFIType.i64_fast, FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr],
+        returns: FFIType.i32,
+      },
+      CloseHandle: { args: [FFIType.i64_fast], returns: FFIType.i32 },
+      GetLastError: { args: [], returns: FFIType.u32 },
+    });
+  }
+  return k32;
+}
+
+function connectPipe(path: string): number {
+  const name = Buffer.from(path + String.fromCharCode(0), "utf16le");
+  const h = Number(kernel32().symbols.CreateFileW(ptr(name), GENERIC_READ_WRITE, 0, null, OPEN_EXISTING, 0, null));
+  if (h === -1) {
+    throw new Error(`control CreateFileW ${path} failed, err=${kernel32().symbols.GetLastError()}`);
+  }
+  return h;
+}
+
 function connectUnix(path: string): number {
   const fd = lib().symbols.socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) {
@@ -252,7 +299,7 @@ function ensureFd(): number {
   let last = "";
   while (Date.now() < deadline) {
     try {
-      gFd = connectUnix(gPath);
+      gFd = IS_WIN ? connectPipe(gPath) : connectUnix(gPath);
       return gFd;
     } catch (e) {
       last = String((e as Error).message ?? e);
@@ -265,6 +312,15 @@ function ensureFd(): number {
 function writeAll(fd: number, buf: Buffer): void {
   let off = 0;
   while (off < buf.length) {
+    if (IS_WIN) {
+      const part = buf.subarray(off);
+      const done = new Uint32Array(1);
+      if (!kernel32().symbols.WriteFile(fd, ptr(part), part.length, ptr(done), null) || done[0] === 0) {
+        throw new Error(`control WriteFile failed, err=${kernel32().symbols.GetLastError()}`);
+      }
+      off += done[0]!;
+      continue;
+    }
     const n = Number(lib().symbols.send(fd, ptr(buf.subarray(off)), BigInt(buf.length - off), 0));
     if (n <= 0) {
       throw new Error(`control send failed, errno=${errno()}`);
@@ -273,10 +329,50 @@ function writeAll(fd: number, buf: Buffer): void {
   }
 }
 
+// A synchronous ReadFile has no timeout: input that opens a modal native
+// window (MessageBox, Save As) never gets its reply and would hang the test.
+const kPipeReplyTimeoutMs = 60_000;
+
+// waits until the pipe has data to read
+function waitPipeData(fd: number, deadline: number): void {
+  const avail = new Uint32Array(1);
+  const start = Date.now();
+  for (;;) {
+    if (!kernel32().symbols.PeekNamedPipe(fd, null, 0, null, ptr(avail), null)) {
+      throw new Error("control pipe closed while reading");
+    }
+    if (avail[0]! > 0) {
+      return;
+    }
+    if (Date.now() >= deadline) {
+      // the late reply would answer the next request
+      closeFd();
+      throw new Error(
+        `no control reply in ${kPipeReplyTimeoutMs / 1000}s: the app is likely in a modal native window (MessageBox, file dialog)`,
+      );
+    }
+    // replies usually take a few ms: spin briefly before sleeping
+    if (Date.now() - start > 20) {
+      Bun.sleepSync(1);
+    }
+  }
+}
+
 function readExact(fd: number, len: number): Buffer {
   const out = Buffer.alloc(len);
   let got = 0;
+  const deadline = Date.now() + kPipeReplyTimeoutMs;
   while (got < len) {
+    if (IS_WIN) {
+      waitPipeData(fd, deadline);
+      const part = out.subarray(got);
+      const done = new Uint32Array(1);
+      if (!kernel32().symbols.ReadFile(fd, ptr(part), part.length, ptr(done), null) || done[0] === 0) {
+        throw new Error("control pipe closed while reading");
+      }
+      got += done[0]!;
+      continue;
+    }
     const n = Number(lib().symbols.recv(fd, ptr(out.subarray(got)), BigInt(len - got), 0));
     if (n === 0) {
       throw new Error("control pipe closed while reading");
@@ -397,11 +493,20 @@ function dips(px: number, py: number, g: Geom): { x: number; y: number } {
   return { x: Math.round(px * g.scale), y: Math.round(py * g.scale) };
 }
 
-function modsOf(w: number): number {
+// Windows: the gpui window a message was aimed at. TestInput takes its client
+// pixels as they are and scales them itself. clientCenter: a tool window's,
+// where a wheel aimed at the window (lParam 0) goes.
+export type InputTarget = {
+  hwnd: number;
+  screenToClient: (x: number, y: number) => { x: number; y: number };
+  clientCenter?: () => { x: number; y: number };
+};
+
+function modsOf(w: number, target?: InputTarget): number {
   let m = 0;
   // Control-click is the context click. Command is orig's Ctrl. Alt is bit 4.
   if (w & MK_CONTROL) {
-    m |= 8;
+    m |= target ? 1 : 8;
   }
   if (w & MK_SHIFT) {
     m |= 2;
@@ -439,18 +544,22 @@ function isMouseDown(msg: number): boolean {
 
 // One click, not down then up: the run loop can snap in a real mouse move
 // between the two and gpui treats that as a drag.
-export function macClick(px: number, py: number, wParam = 0): void {
-  const g = geom();
-  const at = dips(px, py, g);
-  input("click", at.x, at.y, 0, modsOf(wParam));
+export function macClick(px: number, py: number, wParam = 0, target?: InputTarget): void {
+  const at = target ? { x: px, y: py } : dips(px, py, geom());
+  input("click", at.x, at.y, 0, modsOf(wParam, target), target);
 }
 
-function input(kind: string, a: number, b: number, c: number, d: number): void {
-  const res = macControlRequest(TestInput, [kind, a, b, c, d]);
+function input(kind: string, a: number, b: number, c: number, d: number, target?: InputTarget): string {
+  const args: ControlArg[] = [kind, a, b, c, d];
+  if (target) {
+    args.push(target.hwnd);
+  }
+  const res = macControlRequest(TestInput, args);
   const raw = String(res[1] ?? "");
   if (res[0] !== 0 || raw.startsWith("ERR")) {
     throw new Error(`TestInput ${kind} failed: ${raw}`);
   }
+  return raw;
 }
 
 function invoke(name: string, x?: number, y?: number): void {
@@ -475,8 +584,14 @@ export function macDdeExecute(dataId: number, text: string): bigint {
 }
 
 // Frame-client pixels, as WM_COMMAND and WM_*BUTTON lParam carry on Windows.
-// A command point is canvas pixels. TestInput wants frame dips.
-export function macSendMessage(msg: number, wParam: number | bigint, lParam: number | bigint): bigint {
+// A command point is canvas pixels. TestInput wants frame dips, or with a
+// target (Windows) that window's client pixels.
+export function macSendMessage(
+  msg: number,
+  wParam: number | bigint,
+  lParam: number | bigint,
+  target?: InputTarget,
+): bigint {
   const wp = BigInt(wParam);
   const lp = BigInt(lParam);
   if (msg === WM_COMMAND) {
@@ -512,11 +627,12 @@ export function macSendMessage(msg: number, wParam: number | bigint, lParam: num
   }
   if (msg === WM_KEYDOWN || msg === WM_KEYUP) {
     const repeat = msg === WM_KEYDOWN && (lp & (1n << 30n)) !== 0n ? 8 : 0;
-    input(msg === WM_KEYDOWN ? "key" : "keyup", Number(wp & 0xffffn), repeat, 0, 0);
-    return 0n;
+    const raw = input(msg === WM_KEYDOWN ? "key" : "keyup", Number(wp & 0xffffn), repeat, 0, 0, target);
+    // with a target: 1 for a key the app handled
+    return target && raw.includes("eaten=1") ? 1n : 0n;
   }
   if (msg === WM_CHAR) {
-    input("char", Number(wp & 0xffffn), 0, 0, 0);
+    input("char", Number(wp & 0xffffn), 0, 0, 0, target);
     return 0n;
   }
   if (msg === WM_HSCROLL || msg === WM_VSCROLL) {
@@ -526,27 +642,35 @@ export function macSendMessage(msg: number, wParam: number | bigint, lParam: num
   if (msg === WM_MOUSEWHEEL || msg === WM_MOUSEHWHEEL) {
     const g = geom();
     // a wheel's lParam is in screen coordinates, unlike the other mouse messages
-    const origin = macClientToScreen(0, 0);
-    let px = sign16(lp) - origin.x;
-    let py = sign16(lp >> 16n) - origin.y;
+    const client = target
+      ? target.screenToClient(sign16(lp), sign16(lp >> 16n))
+      : (() => {
+          const origin = macClientToScreen(0, 0);
+          return { x: sign16(lp) - origin.x, y: sign16(lp >> 16n) - origin.y };
+        })();
+    let px = client.x;
+    let py = client.y;
     // A posted wheel of lParam 0 is "the document", not the corner pixel.
-    if (lp === 0n && g.cdx > 0 && g.cdy > 0) {
+    if (lp === 0n && target?.clientCenter) {
+      ({ x: px, y: py } = target.clientCenter());
+    } else if (lp === 0n && g.cdx > 0 && g.cdy > 0) {
       px = Math.round(g.ox + g.cdx / g.scale / 2);
       py = Math.round(g.oy + g.cdy / g.scale / 2);
     }
-    const at = dips(px, py, g);
+    const at = target ? { x: px, y: py } : dips(px, py, g);
     let delta = sign16(wp >> 16n);
     if (msg === WM_MOUSEHWHEEL) {
       delta += 1000000;
     }
-    input("wheel", at.x, at.y, delta, modsOf(Number(wp & 0xffffn)));
+    input("wheel", at.x, at.y, delta, modsOf(Number(wp & 0xffffn), target), target);
     return 0n;
   }
   if (isMouseDown(msg)) {
-    const g = geom();
-    const at = dips(sign16(lp), sign16(lp >> 16n), g);
+    const px = sign16(lp);
+    const py = sign16(lp >> 16n);
+    const at = target ? { x: px, y: py } : dips(px, py, geom());
     const w = Number(wp & 0xffffn);
-    const m = modsOf(w);
+    const m = modsOf(w, target);
     if (msg === WM_MOUSEMOVE) {
       let c = 0;
       if (w & MK_LBUTTON) {
@@ -556,7 +680,7 @@ export function macSendMessage(msg: number, wParam: number | bigint, lParam: num
       } else if (w & MK_MBUTTON) {
         c = 3;
       }
-      input("move", at.x, at.y, c, m);
+      input("move", at.x, at.y, c, m, target);
       return 0n;
     }
     const down =
@@ -566,7 +690,7 @@ export function macSendMessage(msg: number, wParam: number | bigint, lParam: num
       msg === WM_LBUTTONDBLCLK ||
       msg === WM_RBUTTONDBLCLK ||
       msg === WM_MBUTTONDBLCLK;
-    input(down ? "down" : "up", at.x, at.y, buttonOf(msg), m);
+    input(down ? "down" : "up", at.x, at.y, buttonOf(msg), m, target);
     return 0n;
   }
   throw new Error(`macOS sendMessage does not handle msg 0x${msg.toString(16)}`);

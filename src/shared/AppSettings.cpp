@@ -20,7 +20,6 @@
 #include "gui/UIModels.h"
 
 #if defined(SUMATRA_NG)
-#define INCLUDE_SETTINGSSTRUCTS_METADATA
 #endif
 #include "Settings.h"
 #include "Commands.h"
@@ -458,13 +457,26 @@ void ApplySettingsToOpenWindows() {
         // selection handlers, shortcuts) with fresh command ids. Menus still
         // hold the old ids unless rebuilt - without this, e.g. "Set theme ..."
         // does nothing until restart (issue #5822).
+        bool customCaption = SettingsUseTabs() || !gSettings->showCaption;
+        if (!win->isQuickLook && !gPluginMode && !gMyWindowWasEmbedded && customCaption != win->tabsInTitlebar) {
+            SetMenu(win->hwndFrame, nullptr);
+            if (!customCaption) {
+                DestroyMenuBarRebar(win);
+            }
+            SetTabsInTitlebar(win, customCaption);
+            UpdateTabWidth(win);
+            bool menuVisible = SettingsUseTabs() ? gSettings->showMenubarWithTabs : gSettings->showMenubar;
+            if (customCaption && menuVisible) {
+                CreateMenuBarRebar(win);
+            }
+        }
         RebuildMenuBarForWindow(win);
         ReCreateToolbar(win);
         ToolbarUpdateStateForWindow(win, true);
         UpdateFindbox(win);
         // force the relayout: toolbar size/font are not part of the layout
         // state snapshot (see issue #5136), and repaint the toolbar after it
-        ScheduleUiUpdate(win, kUiForceRelayout | kUiToolbarDirty);
+        ScheduleUiUpdate(win, kUiForceRelayout | kUiToolbarDirty | kUiTabsDirty);
         for (WindowTab* tab : win->Tabs()) {
             UpdateTabPageText(tab);
         }
@@ -523,6 +535,8 @@ static SessionData* CloneSessionData(const SessionData* src) {
 // not-yet-loaded (lazy) tabs, kept mirroring the live session by
 // SyncInitialSessionData() so it never carries closed-window entries.
 Vec<SessionData*>* gInitialSessionData = nullptr;
+// bumped when gInitialSessionData is rebuilt, freeing its SessionData
+int gInitialSessionDataGen = 0;
 
 #if defined(SUMATRA_NG)
 // ng: orig's SaveSettings() calls UpdateTabFileDisplayStateForTab() for every
@@ -597,6 +611,7 @@ static void SyncInitialSessionData() {
         return;
     }
     FreeSessionDataVec(gInitialSessionData);
+    gInitialSessionDataGen++;
     for (SessionData* sd : *gSettings->sessionData) {
         VecAppend(*gInitialSessionData, CloneSessionData(sd));
     }
@@ -809,6 +824,12 @@ void FlushScheduledSaveSettings() {
     if (!gSaveSettingsPending) {
         return;
     }
+    SaveSettings();
+}
+
+// Settings aren't written on every change; this gets the current state, including
+// the session, into the file. Still honors -for-testing and restricted use.
+void SaveSettingsNow() {
     SaveSettings();
 }
 
@@ -1169,6 +1190,12 @@ void UnregisterSettingsForFileChanges() {
 
 constexpr int kMinFontSize = 9;
 
+// Annotations.PopupFontSize, used as-is at every dpi; 0 when not set
+int GetAnnotPopupFontSize() {
+    int fntSize = gSettings->annotations.popupFontSize;
+    return fntSize >= kMinFontSize ? fntSize : 0;
+}
+
 #if !defined(SUMATRA_NG)
 // metrics for an explicit DPI (system dpi when GetNonClientMetricsForDpi fails)
 static void GetNonClientMetricsForDpiValue(int dpi, NONCLIENTMETRICS* ncm) {
@@ -1248,6 +1275,14 @@ PlatformFont* GetAppBiggerFontForDpi(int dpi) {
 
 PlatformFont* GetAppBiggerFont() {
     return GetAppBiggerFontForDpi(DpiGet());
+}
+
+PlatformFont* GetAnnotPopupFontForDpi(int dpi) {
+    int fntSize = GetAnnotPopupFontSize();
+    if (fntSize == 0) {
+        return GetAppFontForDpi(dpi);
+    }
+    return GetUserGuiFont(StrL("auto"), fntSize);
 }
 
 PlatformFont* GetAppTreeFontExForDpi(int dpi, bool bold, bool italic) {
@@ -1396,20 +1431,12 @@ static float gZoomLevelsChm[] = {
 
 // "#ff0000 #00ff00 ..." => list of colors. maxColors of 0 means no limit
 void ParseColorList(Str s, Vec<Color>& out, int maxColors) {
-    int i = 0;
-    while (i < s.len && (maxColors == 0 || len(out) < maxColors)) {
-        while (i < s.len && s.s[i] == ' ') {
-            i++;
-        }
-        if (i >= s.len) {
+    while (Str token = str::NextWord(s)) {
+        if (maxColors != 0 && len(out) >= maxColors) {
             break;
         }
-        int start = i;
-        while (i < s.len && s.s[i] != ' ') {
-            i++;
-        }
         ParsedColor parsed;
-        ParseColor(parsed, Str(s.s + start, i - start));
+        ParseColor(parsed, token);
         if (parsed.parsedOk) {
             VecAppend(out, parsed.col);
         }

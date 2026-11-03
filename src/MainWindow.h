@@ -13,6 +13,8 @@ struct ReadingAutoScrollBar;
 struct VirtText;
 struct VirtCloseButton;
 struct PageThumbnailsCtrl;
+struct SignaturesCtrl;
+struct SigBar;
 struct SidebarPanel;
 struct VirtRoot;
 struct VirtSplitter;
@@ -277,9 +279,10 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     // chapter number edit, next to pageEdit; only for HasChapters() docs
     Edit* chapterEdit = nullptr;
 
-    // the sidebar's two panels, top and bottom, and the full-window Favorites
-    // tab's; each shows one of the views below (see SidebarPanel.h)
+    // the sidebar's panels, top, middle and bottom, and the full-window
+    // Favorites tab's; each shows one of the views below (see SidebarPanel.h)
     SidebarPanel* sidebarTop = nullptr;
+    SidebarPanel* sidebarMiddle = nullptr;
     SidebarPanel* sidebarBottom = nullptr;
     SidebarPanel* favoritesTabPanel = nullptr;
 
@@ -289,6 +292,8 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     TreeView* tocTreeView = nullptr;
     // the Thumbnails view: the document's page thumbnails
     PageThumbnailsCtrl* pageThumbs = nullptr;
+    SignaturesCtrl* signaturesCtrl = nullptr;
+    SigBar* sigBar = nullptr;
     TocTree* tocFilteredTree = nullptr;
 
     // whether the current tab's ToC has been loaded into the tree
@@ -348,6 +353,8 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
 
     // horizontal splitter between the sidebar's top and bottom panels
     VirtSplitter* sidebarPanelsSplitter = nullptr;
+    // horizontal splitter between the middle and bottom panels
+    VirtSplitter* sidebarMiddleSplitter = nullptr;
 
     TabsCtrl* tabsCtrl = nullptr;
     bool tabsVisible = false;
@@ -372,6 +379,17 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     Point captionPressPt;
     bool isMenuOpen = false;
     Rect captionRect;
+    HWND hwndCaptionOverlay = nullptr;
+    bool captionOverlayShown = false;
+    // SidebarAutoHide: the sidebar floats over the canvas in sidebarOverlayRc
+    // (frame client coords), shown while the mouse or the focus is in it
+    bool sidebarOverlayShown = false;
+    bool sidebarOverlayByMouse = false;
+    Rect sidebarOverlayRc;
+    int sidebarOverlayTopDy = 0;
+    int sidebarOverlayMiddleDy = 0;
+    // a 1px edge between the floating sidebar and the document
+    HWND hwndSidebarOverlayEdge = nullptr;
 
     Tooltip* infotip = nullptr;
 
@@ -488,6 +506,8 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     // splitter | AI chat
     HBox* frameLayout = nullptr;
     HwndSlot* sidebarTopSlot = nullptr;
+    HwndSlot* sidebarMiddleSlot = nullptr;
+    HwndSlot* sigBarSlot = nullptr;
     HwndSlot* sidebarBottomSlot = nullptr;
     // favoritesTabPanel; shown instead of the canvas when the Favorites tab is
     // selected
@@ -566,19 +586,23 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
             bool isToolbarVisible = false;
             bool isToolbarOverlay = false;
             bool sidebarTopVisible = false;
+            bool sidebarMiddleVisible = false;
             bool sidebarBottomVisible = false;
             // full-window Favorites tab vs. sidebar panel: different geometry
             bool favoritesAsTab = false;
+            bool sigBarVisible = false;
             bool showMenuBarRebar = false;
             bool aiChatVisible = false;
             int aiChatDx = 0;
             bool sidebarOnRight = false;
+            bool sidebarAutoHide = false;
         };
         Layout layout;    // last applied layout state
         Rect lastFrameRc; // previous frame client size; a change skips WM_SETREDRAW
         // desired visibility of the sidebar / AI chat panels; applied
         // (HwndSetVisible) by RelayoutFrame
         bool sidebarTopVisible = false;
+        bool sidebarMiddleVisible = false;
         bool sidebarBottomVisible = false;
         bool aiChatVisible = false;
         bool updatePending = false; // a FrameUpdateUi uitask is queued

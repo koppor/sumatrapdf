@@ -124,6 +124,7 @@ const gpuiWinLibs = [
   "dxgi.lib",
   "dwrite.lib",
   "dwmapi.lib",
+  "dcomp.lib",
   "psapi.lib",
   "ole32.lib",
   "uiautomationcore.lib",
@@ -578,6 +579,7 @@ const enginesSources = [
   "src/ng/EngineBase.cpp",
   "src/ng/EngineCreate.cpp",
   "src/ng/EngineDjvuDec.cpp",
+  "src/ng/EngineCaj.cpp",
   "src/ng/EngineDvi.cpp",
   "src/ng/ExifDump.cpp",
   "src/ng/EngineEbook.cpp",
@@ -591,6 +593,7 @@ const enginesSources = [
   "src/ng/ImageReader.cpp",
   "src/ng/JxlReader.cpp",
   "src/ng/LitDoc.cpp",
+  "src/ng/RtfDoc.cpp",
   "src/ng/MobiDoc.cpp",
   "src/PalmDbReader.cpp",
   "src/ng/PdfCad.cpp",
@@ -611,6 +614,7 @@ const enginesSources = [
 const appSources = [
   "src/ng/Accelerators.cpp",
   "src/ng/AIChatProcess.cpp",
+  "src/ng/AppDecisions.cpp",
   "src/ng/AppSettings.cpp",
   "src/ng/AppTools.cpp",
   "src/ng/AppTools_posix.cpp",
@@ -637,6 +641,7 @@ const appSources = [
   "src/ng/RefHoverTextDetect.cpp",
   "src/ng/RestrictedUseConfig.cpp",
   "src/ng/RenderCache.cpp",
+  "src/ng/Settings.cpp",
   "src/ng/ShortcutParse.cpp",
   "src/ng/SystemFonts.cpp",
   "src/ng/Theme.cpp",
@@ -1556,6 +1561,8 @@ export const targets: Target[] = [
       "src/ng/ChangeScrollbarDialog.cpp",
       "src/ng/ChangeLanguageDialog.cpp",
       "src/ng/ChangeThemeDialog.cpp",
+      "src/ng/BrightnessContrastDialog.cpp",
+      "src/ng/BrightnessContrastDialogCommon.cpp",
       "src/ng/ChangeColorDialog.cpp",
       "src/ng/ChangeColorDialogCommon.cpp",
       "src/ng/InverseSearchDialog.cpp",
@@ -1624,6 +1631,7 @@ export const targets: Target[] = [
       "src/ng/gui/NativeWindow_wasm.cpp",
       "src/ng/gui/OleDragDrop_win.cpp",
       "src/ng/OleDragDropCommon_win.cpp",
+      "src/ng/WebViewCapture_win.cpp",
       "src/ng/gui/NativeFileDlg_win.cpp",
       "src/ng/OpenFileFilters_win.cpp",
       "src/ng/gui/NativeMsgBox_win.cpp",
@@ -1680,7 +1688,7 @@ export const targets: Target[] = [
     // orig's desktop screenshot picker. Win32 only; other platforms keep the
     // page render in src/ng/Screenshot.cpp.
     perPlatform: {
-      win: { sources: ["src/ScreenshotCapture.cpp"] },
+      win: { sources: ["src/ScreenshotCapture.cpp"], includes: ["ext/webview2"] },
     },
   },
 ];

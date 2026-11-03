@@ -7,6 +7,7 @@
 namespace gpui {
 struct App;
 struct Window;
+struct MouseMoveEvent;
 } // namespace gpui
 
 struct MainWindow;
@@ -37,9 +38,12 @@ void AppShellInvalidate(MainWindow* win);
 TempStr AppShellFrameStatsTemp(MainWindow* win, bool reset);
 // -dbg-control's TestInput / TestUiState: input a posted window message cannot
 // carry (modifiers, hover, a held button) and what the shell made of it
-TempStr AppShellTestInput(MainWindow* win, Str kind, int a, int b, int c, int d);
+TempStr AppShellTestInput(MainWindow* win, Str kind, int a, int b, int c, int d, float k = 1);
 // the same into any gpui window (a tool window's)
-TempStr AppShellTestInputGpui(gpui::Window* gw, Str kind, int a, int b, int c, int d);
+TempStr AppShellTestInputGpui(gpui::Window* gw, Str kind, int a, int b, int c, int d, float k = 1);
+#if OS_WIN
+TempStr AppShellTestInputHwnd(HWND hwnd, Str kind, int a, int b, int c, int d);
+#endif
 TempStr AppShellUiStateTemp(MainWindow* win);
 // orig's gSupressNextAltMenuTrigger: the Alt that is down was used for
 // something (Alt + wheel), so its release must not enter the menu bar
@@ -62,6 +66,7 @@ TempStr AppShellPromptForFileTemp(MainWindow* win);
 // the same prompt with a title of its own (certificate, image, ...); filter is
 // orig's lpstrFilter with \1 for \0, which only Windows' dialog can apply
 TempStr AppShellPromptForPathTemp(MainWindow* win, Str title, Str filter, Str initialPath = {});
+TempStr AppShellPromptForFolderTemp(MainWindow* win, Str title);
 // false on a Linux without zenity / kdialog, which gpui's prompt runs
 bool AppShellHasOsFilePicker();
 // ng: where the platform's open prompt cannot answer at once (the browser's
@@ -91,6 +96,8 @@ bool AppShellCaptionRects(MainWindow* win, Rect* menuOut, Rect* tabsOut, int* dy
 bool AppShellSysMenuRect(MainWindow* win, Rect* out);
 // the border the frame keeps around its content while it has the caption
 int AppShellFrameBorder(MainWindow* win);
+bool AppShellSidebarFloats(MainWindow* win);
+void AppShellSidebarCanvasMove(MainWindow* win, const gpui::MouseMoveEvent* ev);
 // gpui's client-side title bar for the frame, without touching the flag
 // (fullscreen has no caption of either kind)
 void AppShellSetClientTitleBar(MainWindow* win, bool on);
@@ -163,8 +170,8 @@ void AppShellPreventSleep(bool on);
 #if OS_WIN
 // the native handle of a window, or null; orig's MainWindow::hwndFrame
 HWND AppShellNativeHwnd(MainWindow* win);
-HWND TestingCanvasHwnd(HWND frame);
 MainWindow* AppShellWindowFromHwnd(HWND hwnd);
+bool AppShellOnWmContextMenu(MainWindow* win, int screenX, int screenY);
 // the top-level windows of another SumatraPDF process: `procId`, or with 0 any
 // process running this exe (orig: FindWindowW(kFrameClassName))
 void AppShellFindOtherInstanceWindows(DWORD procId, Vec<HWND>& out);

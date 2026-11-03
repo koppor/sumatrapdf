@@ -128,6 +128,7 @@ void EditSetCueText(HWND hwnd, Str);
 void EditSetMargins(HWND hwnd, int left, int right);
 void EditSetNumbersOnly(HWND hwnd, bool);
 void EditSetPasswordVisible(HWND hwnd, bool);
+bool EditHandleCtrlBack(HWND hwnd, WPARAM ch);
 
 //--- list box
 
@@ -348,6 +349,8 @@ TempStr MenuToSafeStringTemp(Str s);
 bool IsKeyPressed(int key);
 bool IsShiftPressed();
 bool IsAltPressed();
+void SetTestSaveFileName(Str path);
+bool TakeTestSaveFileName(OPENFILENAMEW* ofn);
 bool IsCtrlPressed();
 bool IsRightButtonPressed();
 int ReleaseThreadKeyState();

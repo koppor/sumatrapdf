@@ -130,6 +130,16 @@ void CloseGetPasswordDialog();
 bool IsGetPasswordDialogVisible();
 gpui::El* GetPasswordDialogBuild(MainWindow* win, gpui::Ctx* cx);
 
+struct Caj2pdfDownloadDialogResult {
+    bool download = false;
+    bool dontAskAgain = false;
+};
+
+void ShowCaj2pdfDownloadDialog(MainWindow* win, Func1<Caj2pdfDownloadDialogResult*> onDone);
+void CloseCaj2pdfDownloadDialog();
+bool IsCaj2pdfDownloadDialogVisible();
+gpui::El* Caj2pdfDownloadDialogBuild(MainWindow* win, gpui::Ctx* cx);
+
 void ShowCustomZoomDialog(MainWindow* win);
 bool CustomZoomMoveSelection(int dir);
 void CustomZoomOk();
@@ -185,6 +195,11 @@ void CloseChangeColorDialog();
 bool IsChangeColorDialogVisible();
 gpui::El* ChangeColorDialogBuild(MainWindow* win, gpui::Ctx* cx);
 
+void ShowBrightnessContrastDialog(MainWindow* win);
+void CloseBrightnessContrastDialog();
+bool IsBrightnessContrastDialogVisible();
+gpui::El* BrightnessContrastDialogBuild(MainWindow* win, gpui::Ctx* cx);
+
 void ShowInverseSearchDialog(MainWindow* win);
 void CloseInverseSearchDialog();
 bool IsInverseSearchDialogVisible();
@@ -222,6 +237,7 @@ void CloseSignDocumentDialog(MainWindow* win);
 bool IsSignDocumentDialogVisible();
 TempStr SignDocumentPlacementTemp();
 TempStr SignDocumentChecksTemp();
+TempStr SignDocumentUseCertFileTemp();
 gpui::El* SignDocumentDialogBuild(MainWindow* win, gpui::Ctx* cx);
 // the dialog hid itself and the next click / drag on the page places the
 // signature (issue #5967)

@@ -12,11 +12,6 @@ struct MainWindow;
 struct Gfx;
 enum class ScrollMsg;
 
-constexpr const char* kLeftTextFont = "Arial";
-constexpr int kLeftTextFontSize = 14;
-constexpr const char* kRightTextFont = "Arial Black";
-constexpr int kRightTextFontSize = 14;
-
 // the About box (CmdHelpAbout); orig opens a window of its own
 void ShowAboutWindow(MainWindow*);
 void CloseAboutWindow();
@@ -56,6 +51,9 @@ void HomePageRelayout(MainWindow* win);
 void HomePageHideSearch(MainWindow* win);
 void HomePageOnVScroll(MainWindow* win, WPARAM wp);
 void HomePageOnMouseWheel(MainWindow* win, int delta);
+// native home scrollbar: a frame paint lost at startup stays black until
+// something else invalidates the non-client area (#6462)
+void HomePageRepaintWinScrollbar(MainWindow* win);
 void HomePageUpdateSearchColors(MainWindow* win);
 void HomePageOnDpiChanged(MainWindow* win, int dpi);
 void HomePageDestroySearch(MainWindow* win);

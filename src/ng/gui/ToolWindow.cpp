@@ -67,8 +67,6 @@ struct ToolWindow {
     Str title; // owned; what the caption shows
 #if OS_WIN
     HWND hwnd = nullptr;
-    // orig's dialog class. gpui's window stays GpuiSystemMonitor.
-    HWND classHwnd = nullptr;
     bool styled = false;
     int darkCaption = -1;
     // the main window's handle while this modal window keeps it disabled
@@ -187,10 +185,6 @@ void ToolWindowsInvalidateFor(MainWindow* win) {
 }
 
 // the record of a window that is gone
-#if OS_WIN
-static void DestroyOrigDialogClass(ToolWindow* tw);
-#endif
-
 static void FinishClosed(ToolWindow* tw) {
     if (!tw->closing && tw->desc.onClosed) {
         tw->desc.onClosed(IsMainWindowValid(tw->owner) ? tw->owner : nullptr);
@@ -203,9 +197,6 @@ static void FinishClosed(ToolWindow* tw) {
 }
 
 static void Forget(ToolWindow* tw) {
-#if OS_WIN
-    DestroyOrigDialogClass(tw);
-#endif
     VecRemove(gToolWindows, tw);
     tw->gw = nullptr;
     uitask::Post(MkFunc0(FinishClosed, tw), "ToolWindowFinishClosed");
@@ -226,85 +217,17 @@ bool ToolWindowOwnsHwnd(HWND hwnd) {
     return false;
 }
 
+ToolWindow* ToolWindowFromHwnd(HWND hwnd) {
+    for (ToolWindow* tw : gToolWindows) {
+        if (tw->hwnd == hwnd) {
+            return tw;
+        }
+    }
+    return nullptr;
+}
+
 HWND ToolWindowHwnd(ToolWindow* tw) {
     return IsLive(tw) ? tw->hwnd : nullptr;
-}
-
-// Tests look up a modal dialog, and the command palette, as orig's
-// WindowBase class and post WM_CLOSE to that window.
-static const WCHAR* kOrigDialogClass = L"SumatraWgDefaultWinClass";
-
-static bool WantsOrigDialogClass(const ToolWindow* tw) {
-    if (tw->desc.modal == ToolWinModal::Yes) {
-        return true;
-    }
-    return tw->desc.name && str::Eq(Str(tw->desc.name), StrL("palette"));
-}
-
-static LRESULT CALLBACK OrigDialogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg != WM_CLOSE) {
-        return DefWindowProcW(hwnd, msg, wp, lp);
-    }
-    auto* tw = (ToolWindow*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-    HWND tool = nullptr;
-    if (tw) {
-        tool = tw->hwnd;
-        tw->classHwnd = nullptr;
-    }
-    if (tool && IsWindow(tool)) {
-        SendMessageW(tool, WM_CLOSE, 0, 0);
-    }
-    DestroyWindow(hwnd);
-    return 0;
-}
-
-static void EnsureOrigDialogClass() {
-    static bool registered = false;
-    if (registered) {
-        return;
-    }
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
-    wc.lpfnWndProc = OrigDialogProc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.lpszClassName = kOrigDialogClass;
-    registered = RegisterClassExW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
-}
-
-static void ShowOrigDialogClass(ToolWindow* tw) {
-    if (!WantsOrigDialogClass(tw) || tw->classHwnd) {
-        return;
-    }
-    HWND owner = AppShellNativeHwnd(tw->owner);
-    if (!owner) {
-        return;
-    }
-    EnsureOrigDialogClass();
-    HWND hwnd = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, kOrigDialogClass, L"", WS_POPUP | WS_VISIBLE, 0, 0,
-                                0, 0, owner, nullptr, GetModuleHandleW(nullptr), nullptr);
-    if (!hwnd) {
-        return;
-    }
-    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)tw);
-    tw->classHwnd = hwnd;
-}
-
-static void DestroyOrigDialogClass(ToolWindow* tw) {
-    HWND hwnd = tw->classHwnd;
-    tw->classHwnd = nullptr;
-    if (!hwnd || !IsWindow(hwnd)) {
-        return;
-    }
-    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-    DestroyWindow(hwnd);
-}
-
-HWND ToolWindowOrigHwnd(ToolWindow* tw) {
-    if (!IsLive(tw)) {
-        return nullptr;
-    }
-    return tw->classHwnd ? tw->classHwnd : tw->hwnd;
 }
 
 MainWindow* ToolWindowOwnerFromHwnd(HWND hwnd) {
@@ -585,20 +508,6 @@ static void RunOnDeactivated(ToolWindow* tw) {
     RunOnActivate(tw, false);
 }
 
-// gpui reads modifiers with GetKeyState. A posted click carries them in MK_*.
-static LRESULT MouseWithPostedMods(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    BYTE before[256]{};
-    GetKeyboardState(before);
-    BYTE keys[256];
-    memcpy(keys, before, sizeof(keys));
-    keys[VK_CONTROL] = (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) ? 0x80 : 0;
-    keys[VK_SHIFT] = (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT) ? 0x80 : 0;
-    SetKeyboardState(keys);
-    LRESULT res = DefSubclassProc(hwnd, msg, wp, lp);
-    SetKeyboardState(before);
-    return res;
-}
-
 static LRESULT CALLBACK ToolSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) {
     auto* tw = (ToolWindow*)data;
     switch (msg) {
@@ -634,14 +543,35 @@ static LRESULT CALLBACK ToolSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, 
                 return 0;
             }
             break;
+        case WM_COMMAND:
+            // a command id sent at the tool window (tests send the palette
+            // Ctrl+A / Ctrl+C that way) runs on its owner, like orig
+            if (HIWORD(wp) == 0 && LOWORD(wp) > 0 && IsMainWindowValid(tw->owner)) {
+                ExecuteCmd(tw->owner, (int)LOWORD(wp));
+                return 0;
+            }
+            break;
         case WM_GETMINMAXINFO: {
             LRESULT res = DefSubclassProc(hwnd, msg, wp, lp);
+            if (!IsMainWindowValid(tw->owner)) {
+                return res;
+            }
+            auto* mmi = (MINMAXINFO*)lp;
             Size minClient = tw->desc.minClient;
-            if (!minClient.IsEmpty() && IsMainWindowValid(tw->owner)) {
+            if (!minClient.IsEmpty()) {
                 Size sz = ToolWindowOuterSize(tw->desc, tw->owner, minClient);
-                auto* mmi = (MINMAXINFO*)lp;
                 mmi->ptMinTrackSize.x = sz.dx;
                 mmi->ptMinTrackSize.y = sz.dy;
+            }
+            Size maxClient = tw->desc.maxClient;
+            if (maxClient.dx > 0 || maxClient.dy > 0) {
+                Size sz = ToolWindowOuterSize(tw->desc, tw->owner, maxClient);
+                if (maxClient.dx > 0) {
+                    mmi->ptMaxTrackSize.x = sz.dx;
+                }
+                if (maxClient.dy > 0) {
+                    mmi->ptMaxTrackSize.y = sz.dy;
+                }
             }
             return res;
         }
@@ -675,15 +605,6 @@ static LRESULT CALLBACK ToolSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, 
                 tw->desc.onExitSizeMove(tw->owner, HwndWindowRect(hwnd));
             }
             break;
-        case WM_LBUTTONDOWN:
-        case WM_LBUTTONUP:
-        case WM_LBUTTONDBLCLK:
-        case WM_RBUTTONDOWN:
-        case WM_RBUTTONUP:
-        case WM_MBUTTONDOWN:
-        case WM_MBUTTONUP:
-        case WM_MOUSEMOVE:
-            return MouseWithPostedMods(hwnd, msg, wp, lp);
         case WM_NCDESTROY: {
             RemoveWindowSubclass(hwnd, ToolSubclass, kToolSubclassId);
             LRESULT res = DefSubclassProc(hwnd, msg, wp, lp);
@@ -771,7 +692,6 @@ static void CreateNow(ToolWindow* tw) {
     if (tw->desc.onTick) {
         gp::WindowSetInterval(gw, tw->desc.tickMs, gp::ListenTo(tw->view, &ToolRootView::OnTick));
     }
-    ShowOrigDialogClass(tw);
     logf("ToolWindow: '%s' hwnd 0x%p at %d,%d %dx%d\n", Str(tw->desc.name), (void*)tw->hwnd, tw->outer.x, tw->outer.y,
          tw->outer.dx, tw->outer.dy);
     gp::AppInvalidate(gw);
@@ -952,6 +872,9 @@ static void ApplyNative(ToolWindow* tw) {
     ToolWinNativeSetOwner(tw->gw, owner, tw->desc.owner == ToolWinOwner::Owned);
     if (!tw->desc.minClient.IsEmpty()) {
         ToolWinNativeSetMinClient(tw->gw, tw->desc.minClient.dx, tw->desc.minClient.dy);
+    }
+    if (tw->desc.maxClient.dx > 0 || tw->desc.maxClient.dy > 0) {
+        ToolWinNativeSetMaxClient(tw->gw, tw->desc.maxClient.dx, tw->desc.maxClient.dy);
     }
     if (tw->desc.modal == ToolWinModal::Yes && !tw->hidden && owner) {
         ToolWinNativeSetModal(tw->gw, owner, true);
@@ -1165,9 +1088,27 @@ float ToolWindowSetUiFontPx(gp::Ctx* cx, float px) {
 }
 
 void ToolWindowSetMinClient(ToolWindow* tw, Size minClientDip) {
-    if (IsLive(tw)) {
-        tw->desc.minClient = minClientDip;
+    if (!IsLive(tw)) {
+        return;
     }
+    tw->desc.minClient = minClientDip;
+#if !OS_WIN && !OS_WASM
+    if (tw->gw && !minClientDip.IsEmpty()) {
+        ToolWinNativeSetMinClient(tw->gw, minClientDip.dx, minClientDip.dy);
+    }
+#endif
+}
+
+void ToolWindowSetMaxClient(ToolWindow* tw, Size maxClientDip) {
+    if (!IsLive(tw)) {
+        return;
+    }
+    tw->desc.maxClient = maxClientDip;
+#if !OS_WIN && !OS_WASM
+    if (tw->gw) {
+        ToolWinNativeSetMaxClient(tw->gw, maxClientDip.dx, maxClientDip.dy);
+    }
+#endif
 }
 
 void ToolWindowSetClientSize(ToolWindow* tw, Size clientDip) {

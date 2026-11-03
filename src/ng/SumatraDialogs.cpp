@@ -41,6 +41,7 @@
 #include "gui/DialogWidgets.h"
 #include "gui/NativeMsgBox.h"
 #include "SumatraDialogs.h"
+#include "shared/PdfToolsCommon.h"
 
 #include "SumatraLog.h"
 
@@ -410,6 +411,9 @@ static ToolWindowDesc DlgWindowDesc(const DlgWindowSpec& spec) {
     ToolWindowDesc desc = ToolWindowModalDesc(spec.name, spec.title);
     desc.modal = spec.modal ? ToolWinModal::Yes : ToolWinModal::No;
     desc.owner = (spec.modal || spec.owned) ? ToolWinOwner::Owned : ToolWinOwner::TopLevel;
+    if (spec.resizable) {
+        desc.resize = ToolWinResize::Resizable;
+    }
     desc.build = DlgWindowBuild;
     desc.onKey = DlgWindowOnKey;
     desc.onCaptureKey = DlgWindowOnCaptureKey;
@@ -470,10 +474,15 @@ static void DlgWindowFit(DlgWindowEntry* e) {
     Size client((int)(e->width + 0.5f), (int)(std::max(e->content.h, e->comboBottom) + 0.5f));
     if (e->placed) {
         ToolWindowSetClientSize(e->tw, client);
-        return;
+    } else {
+        e->placed = true;
+        ToolWindowMove(e->tw, ToolWindowCenteredRect(DlgWindowDesc(e->spec), e->win, client));
     }
-    e->placed = true;
-    ToolWindowMove(e->tw, ToolWindowCenteredRect(DlgWindowDesc(e->spec), e->win, client));
+    if (e->spec.resizable) {
+        // the frame drags only sideways: the height is the content's
+        ToolWindowSetMinClient(e->tw, Size((int)e->spec.minClientDx, client.dy));
+        ToolWindowSetMaxClient(e->tw, Size(0, client.dy));
+    }
 }
 
 static gp::El* DlgWindowFitTo(DlgWindowEntry* e, gp::Ctx* cx, gp::El* col, float width);
@@ -510,6 +519,13 @@ gp::El* DlgIntoEl(gp::Ctx* cx, gpc::Dialog* dlg) {
 // asks for the window to be `width` wide and as tall as `col` came out
 static gp::El* DlgWindowFitTo(DlgWindowEntry* e, gp::Ctx* cx, gp::El* col, float width) {
     gp::WinSize ws = gp::WindowSize(cx->win);
+    // once placed, a resizable window is as wide as the user left it
+    if (e->spec.resizable && e->placed) {
+        if (e->spec.onResized && std::abs(ws.dipW - e->width) >= 1) {
+            e->spec.onResized(ws.dipW);
+        }
+        width = ws.dipW;
+    }
     e->width = width;
     constexpr float kComboListMargin = 4;
     float comboBottom = DialogComboListBottom(cx->win);
@@ -527,81 +543,12 @@ static gp::El* DlgWindowFitTo(DlgWindowEntry* e, gp::Ctx* cx, gp::El* col, float
     return gp::Div(cx->a)->FlexCol()->SizeFull()->Child(col);
 }
 
-float DlgWinFont(gp::Ctx* cx) {
-    return kDlgWinFontPx * ToolWindowSetUiFontPx(cx, kDlgWinFontPx);
-}
-
 float DlgWinTextDx(gp::Ctx* cx, Str label) {
     DlgWindowEntry* e = DlgWindowEntryOf(cx->win);
     int dpi = std::max(e ? AppShellWindowDpi(e->win) : 96, 96);
     TempStr noAmp = str::ReplaceTemp(label, StrL("&"), StrL(""));
     int dx = PlatformFontMeasureText(GetDefaultGuiFont(), noAmp).dx;
     return (float)dx * 96.f / (float)dpi;
-}
-
-gp::El* DlgWinButton(gp::Ctx* cx, gp::Str id, Str label, gp::Listener onClick, bool isDefault, bool disabled) {
-    gpc::Button* b = gpc::Button::New(cx, id)->Disabled(disabled);
-    if (isDefault) {
-        b->Primary();
-    }
-    float dx = DlgWinTextDx(cx, label) + 2 * kDlgWinBtnPadDx;
-    gp::El* el = DlgAccelEl(cx, b, label, onClick, disabled)->H(kDlgWinBtnDy)->W(dx)->PadX(0)->Shrink0();
-    if (isDefault) {
-        // orig's gColsBtnDefault
-        el->Border(1, ToGpui(ThemeHotEdgeColor()));
-    }
-    return el;
-}
-
-// orig's kColListSel / kColListSelFocused
-gp::Rgba DlgWinListSelBg(bool listFocused) {
-    constexpr int kListSelPct = 25;
-    constexpr int kListSelFocusedPct = 45;
-    return ToGpui(AccentColor(ThemeWindowControlBackgroundColor(), listFocused ? kListSelFocusedPct : kListSelPct));
-}
-
-gp::El* DlgWinLabel(gp::Ctx* cx, gp::Str text, float font, float padB) {
-    const gp::Theme& th = gp::ThemeNow(cx->app);
-    return gp::Div(cx->a)
-        ->FlexRow()
-        ->ItemsCenter()
-        ->H(kDlgWinLineDy + padB)
-        ->PadB(padB)
-        ->Shrink0()
-        ->Child(DlgAccelText(cx, text)->Font(font)->Fg(th.foreground));
-}
-
-gp::El* DlgWinEdit(gp::Ctx* cx, gp::Str id, gp::InputState* edit) {
-    return gp::Div(cx->a)
-        ->FlexRow()
-        ->ItemsCenter()
-        ->W(gp::kFill)
-        ->H(kDlgWinEditDy)
-        ->Shrink0()
-        ->Child(gpc::Input::New(cx, id, edit)->WithSize(gp::UiSize::Small)->W(gp::kFill)->IntoEl()->H(kDlgWinEditDy));
-}
-
-gp::El* DlgWinCheck(gp::Ctx* cx, gp::El* box, float padT) {
-    constexpr float kCheckLabelGap = 2;
-    return gp::Div(cx->a)
-        ->FlexRow()
-        ->ItemsCenter()
-        ->W(gp::kFill)
-        ->H(kDlgWinCheckDy + padT)
-        ->PadT(padT)
-        ->Shrink0()
-        ->Child(box->Gap(kCheckLabelGap));
-}
-
-gp::El* DlgWinButtonRow(gp::Ctx* cx, float padY) {
-    return gp::Div(cx->a)
-        ->FlexRow()
-        ->JustifyEnd()
-        ->ItemsCenter()
-        ->W(gp::kFill)
-        ->H(kDlgWinBtnDy + 2 * padY)
-        ->Gap(kDlgWinBtnGap)
-        ->Shrink0();
 }
 
 gp::El* DlgWinContent(gp::Ctx* cx, gp::El* col) {
@@ -635,6 +582,9 @@ gp::El* DialogsBuild(MainWindow* win, gp::Ctx* cx) {
     if (gp::El* e = TabGroupsDialogBuild(win, cx)) {
         return e;
     }
+    if (gp::El* e = Caj2pdfDownloadDialogBuild(win, cx)) {
+        return e;
+    }
     if (gp::El* e = GetPasswordDialogBuild(win, cx)) {
         return e;
     }
@@ -651,6 +601,9 @@ gp::El* DialogsBuild(MainWindow* win, gp::Ctx* cx) {
         return e;
     }
     if (gp::El* e = ChangeColorDialogBuild(win, cx)) {
+        return e;
+    }
+    if (gp::El* e = BrightnessContrastDialogBuild(win, cx)) {
         return e;
     }
     if (gp::El* e = PDFScriptDialogBuild(win, cx)) {
@@ -736,10 +689,10 @@ DialogAccels DialogsAccelTable(MainWindow* win) {
                IsSelectionTranslateDialogVisible() || IsAboutWindowVisible() || IsAddFavoriteDialogVisible() ||
                IsGoToPageDialogVisible() || IsTabGroupsDialogVisible() || IsGetPasswordDialogVisible() ||
                IsCustomZoomDialogVisible() || IsChangeScrollbarDialogVisible() || IsChangeLanguageDialogVisible() ||
-               IsChangeThemeDialogVisible() || IsChangeColorDialogVisible() || IsPDFScriptDialogVisible() ||
-               IsInverseSearchDialogVisible() || IsSignDocumentDialogVisible() || IsPdfToolDialogVisible() ||
-               IsImageEditWindowVisible() || IsSetScreenshotHotkeyDialogVisible() || IsEbookSettingsDialogVisible() ||
-               IsSettingsDialogVisible() || IsAdvancedSettingsDialogVisible() ||
+               IsChangeThemeDialogVisible() || IsChangeColorDialogVisible() || IsBrightnessContrastDialogVisible() ||
+               IsPDFScriptDialogVisible() || IsInverseSearchDialogVisible() || IsSignDocumentDialogVisible() ||
+               IsPdfToolDialogVisible() || IsImageEditWindowVisible() || IsSetScreenshotHotkeyDialogVisible() ||
+               IsEbookSettingsDialogVisible() || IsSettingsDialogVisible() || IsAdvancedSettingsDialogVisible() ||
                IsConfigureRestrictedUseDialogVisible() || IsPageGridDialogVisible() || IsKeyboardHelpVisible() ||
                IsUnsavedAnnotationsDialogVisible() || IsSavePathDialogVisible();
     (void)win;
@@ -829,6 +782,126 @@ bool DialogsOnEnter(MainWindow*) {
         return true;
     }
     return AdvancedSettingsOnEnter();
+}
+
+// --- the "Download caj2pdf" dialog ------------------------------------------
+
+// ng: orig's task dialog from inside the load. A gpui frame can't wait, so the
+// answer goes to onDone and the caller loads again, like the password dialog.
+struct Caj2pdfDlg {
+    MainWindow* win = nullptr;
+    bool visible = false;
+    bool dontAskAgain = false;
+    Func1<Caj2pdfDownloadDialogResult*> onDone;
+};
+
+static Caj2pdfDlg gCaj2pdf;
+static ToolWindow* gCaj2pdfTw = nullptr;
+constexpr float kCaj2pdfDlgDx = 400;
+
+struct Caj2pdfView {
+    static void OnDownload(Caj2pdfView* self, gp::Ctx* cx, const gp::ClickEvent*);
+    static void OnCancel(Caj2pdfView* self, gp::Ctx* cx, const gp::ClickEvent*);
+    static void OnDontAsk(Caj2pdfView* self, gp::Ctx* cx, const gp::ClickEvent*);
+};
+
+static gp::Entity<Caj2pdfView> gCaj2pdfView;
+
+// the dialog in the frame; a window of its own is not the frame's business
+bool IsCaj2pdfDownloadDialogVisible() {
+    return gCaj2pdf.visible && !gCaj2pdfTw;
+}
+
+static Str Caj2pdfDlgTitle() {
+    return Tr("Download caj2pdf");
+}
+
+static void FinishCaj2pdfDialog(bool download) {
+    if (!gCaj2pdf.visible) {
+        return;
+    }
+    gCaj2pdf.visible = false;
+    DlgWindowClose(&gCaj2pdfTw);
+    MainWindow* win = gCaj2pdf.win;
+    Caj2pdfDownloadDialogResult res;
+    res.download = download;
+    res.dontAskAgain = gCaj2pdf.dontAskAgain;
+    Func1<Caj2pdfDownloadDialogResult*> onDone = gCaj2pdf.onDone;
+    gCaj2pdf.onDone = {};
+    logf("Caj2pdfDownloadDialog: download %d, don't ask again %d\n", (int)download, (int)res.dontAskAgain);
+    onDone.Call(&res);
+    AppShellInvalidate(win);
+}
+
+void CloseCaj2pdfDownloadDialog() {
+    FinishCaj2pdfDialog(false);
+}
+
+void ShowCaj2pdfDownloadDialog(MainWindow* win, Func1<Caj2pdfDownloadDialogResult*> onDone) {
+    if (!IsMainWindowValidAndNotClosing(win)) {
+        Caj2pdfDownloadDialogResult res;
+        onDone.Call(&res);
+        return;
+    }
+    CloseCaj2pdfDownloadDialog();
+    gCaj2pdf.win = win;
+    gCaj2pdf.dontAskAgain = false;
+    gCaj2pdf.onDone = onDone;
+    gCaj2pdf.visible = true;
+    DlgWindowSpec spec;
+    spec.name = "caj2pdf-download";
+    spec.title = Caj2pdfDlgTitle;
+    spec.build = Caj2pdfDownloadDialogBuild;
+    spec.close = CloseCaj2pdfDownloadDialog;
+    spec.clientDx = kCaj2pdfDlgDx;
+    gCaj2pdfTw = DlgWindowOpen(spec, win);
+    AppShellInvalidate(win);
+}
+
+void Caj2pdfView::OnDownload(Caj2pdfView*, gp::Ctx* cx, const gp::ClickEvent*) {
+    FinishCaj2pdfDialog(true);
+    gp::Notify(cx);
+}
+
+void Caj2pdfView::OnCancel(Caj2pdfView*, gp::Ctx* cx, const gp::ClickEvent*) {
+    FinishCaj2pdfDialog(false);
+    gp::Notify(cx);
+}
+
+void Caj2pdfView::OnDontAsk(Caj2pdfView*, gp::Ctx* cx, const gp::ClickEvent*) {
+    gCaj2pdf.dontAskAgain = !gCaj2pdf.dontAskAgain;
+    gp::Notify(cx);
+    AppShellInvalidate(gCaj2pdf.win);
+}
+
+gp::El* Caj2pdfDownloadDialogBuild(MainWindow* win, gp::Ctx* cx) {
+    if (!gCaj2pdf.visible || gCaj2pdf.win != win) {
+        return nullptr;
+    }
+    if (gCaj2pdfTw && !DlgWindowIsHost(cx)) {
+        return nullptr;
+    }
+    if (!gCaj2pdfView.IsValid()) {
+        gCaj2pdfView = gp::EntityNewState<Caj2pdfView>(cx->app);
+    }
+    gp::Listener onDownload = gp::ListenTo(gCaj2pdfView, &Caj2pdfView::OnDownload);
+    gp::Listener onCancel = gp::ListenTo(gCaj2pdfView, &Caj2pdfView::OnCancel);
+    DlgSetDefault(cx, onDownload);
+
+    gp::El* col = gp::Div(cx->a)->FlexCol()->W(gp::kFill);
+    col->Child(DlgCaption(cx, Tr("Opening CAJ files needs the caj2pdf converter")));
+    gp::El* box = DlgAccelEl(cx, gpc::Checkbox::New(cx, GStrL("caj2pdf-dont-ask"))->Checked(gCaj2pdf.dontAskAgain),
+                             Tr("Do&n't ask again"), gp::ListenTo(gCaj2pdfView, &Caj2pdfView::OnDontAsk));
+    col->Child(gp::Div(cx->a)
+                   ->FlexRow()
+                   ->ItemsCenter()
+                   ->W(gp::kFill)
+                   ->H(kToolDlgRowDy)
+                   ->Shrink0()
+                   ->PadX(kToolDlgPadDx)
+                   ->Child(box->Font(kToolDlgTextFontPx)));
+    col->Child(DlgFooter(cx, Tr("&Download caj2pdf"), onDownload, onCancel));
+    return DlgToolContent(cx, col, Caj2pdfDlgTitle(), kCaj2pdfDlgDx, onCancel);
 }
 
 // --- the "Unsaved changes" dialog -------------------------------------------
@@ -999,6 +1072,10 @@ bool DialogsOnEscape(MainWindow* win) {
         CloseTabGroupsDialog();
         return true;
     }
+    if (IsCaj2pdfDownloadDialogVisible()) {
+        CloseCaj2pdfDownloadDialog();
+        return true;
+    }
     if (IsGetPasswordDialogVisible()) {
         CloseGetPasswordDialog();
         return true;
@@ -1021,6 +1098,10 @@ bool DialogsOnEscape(MainWindow* win) {
     }
     if (IsChangeColorDialogVisible()) {
         CloseChangeColorDialog();
+        return true;
+    }
+    if (IsBrightnessContrastDialogVisible()) {
+        CloseBrightnessContrastDialog();
         return true;
     }
     if (IsPDFScriptDialogVisible()) {
@@ -1078,4 +1159,202 @@ bool DialogsOnEscape(MainWindow* win) {
         return true;
     }
     return false;
+}
+
+//--- the redrawn dialogs' pieces, laid out as orig's NewDlg*() do
+
+constexpr float kDlgCaptionPadDy = 14;
+
+gp::El* DlgFieldRow(gp::Ctx* cx) {
+    return gp::Div(cx->a)->FlexRow()->ItemsCenter()->W(gp::kFill)->H(kToolDlgRowDy)->Shrink0()->Gap(kToolDlgGapDx);
+}
+
+gp::El* DlgFieldLabel(gp::Ctx* cx, Str s, float dx) {
+    gp::El* t =
+        gp::TextEl(cx->a, GpuiDup(cx->a, s))->Font(kToolDlgTextFontPx)->Fg(ToGpui(ThemeWindowTextDisabledColor()));
+    gp::El* box = gp::Div(cx->a)->Shrink0()->Child(t);
+    if (dx > 0) {
+        box->W(dx);
+    }
+    return box;
+}
+
+// the app font is the labels' family, a size smaller
+float DlgFieldLabelDx(gp::Ctx* cx, Str s) {
+    return DlgWinTextDx(cx, s) * kToolDlgTextFontPx / kDlgWinFontPx;
+}
+
+gp::El* DlgSectionHeader(gp::Ctx* cx, Str s) {
+    return gp::Div(cx->a)
+        ->FlexRow()
+        ->ItemsCenter()
+        ->H(kToolDlgRowDy)
+        ->Shrink0()
+        ->Child(
+            gp::TextEl(cx->a, GpuiDup(cx->a, s))->Font(kToolDlgMetaFontPx)->Fg(ToGpui(ThemeWindowTextDisabledColor())));
+}
+
+gp::El* DlgSection(gp::Ctx* cx) {
+    return gp::Div(cx->a)->FlexCol()->W(gp::kFill)->Shrink0()->PadX(kToolDlgPadDx)->PadY(kToolDlgFilesPadDy);
+}
+
+gp::El* DlgCheck(gp::Ctx* cx, Str id, Str label, bool checked, gp::Listener onClick, DlgCheckKind kind, bool disabled) {
+    gp::Str gid = GpuiDup(cx->a, id);
+    if (kind == DlgCheckKind::Radio) {
+        gpc::Radio* r = gpc::Radio::New(cx, gid)->Checked(checked)->Disabled(disabled)->WithSize(gp::UiSize::Small);
+        return DlgAccelEl(cx, r, label, onClick, disabled)->Font(kToolDlgTextFontPx);
+    }
+    gpc::Checkbox* c = gpc::Checkbox::New(cx, gid)->Checked(checked)->Disabled(disabled);
+    return DlgAccelEl(cx, c, label, onClick, disabled)->Font(kToolDlgTextFontPx);
+}
+
+// muted text over the line it describes, cut with ... when too long
+gp::El* DlgCaption(gp::Ctx* cx, Str s) {
+    gp::El* t = gp::TextEl(cx->a, GpuiDup(cx->a, s))
+                    ->Font(kToolDlgTextFontPx)
+                    ->Fg(ToGpui(ThemeWindowTextDisabledColor()))
+                    ->Truncate()
+                    ->MinW(0);
+    return gp::Div(cx->a)->FlexRow()->W(gp::kFill)->Shrink0()->PadT(kDlgCaptionPadDy)->PadX(kToolDlgPadDx)->Child(t);
+}
+
+// a line: `label` muted in a column `labelDx` wide (0: its own width), then
+// `edit` in the larger font. The caller adds what goes after the field
+gp::El* DlgLine(gp::Ctx* cx, Str label, float labelDx, Str id, gp::InputState* edit, DlgField kind) {
+    gp::El* row = gp::Div(cx->a)
+                      ->FlexRow()
+                      ->ItemsCenter()
+                      ->W(gp::kFill)
+                      ->H(kToolDlgLineDy)
+                      ->Shrink0()
+                      ->PadX(kToolDlgPadDx)
+                      ->Gap(kToolDlgGapDx);
+    if (len(label) > 0) {
+        Color colMuted = ThemeWindowTextDisabledColor();
+        gp::El* t = DlgAccelText(cx, DlgAccelInput(cx, label, edit))->Font(kToolDlgTextFontPx)->Fg(ToGpui(colMuted));
+        gp::El* box = gp::Div(cx->a)->Shrink0()->Child(t);
+        if (labelDx > 0) {
+            box->W(labelDx);
+        }
+        row->Child(box);
+    }
+    gp::El* field;
+    if (kind == DlgField::Plain) {
+        field = gpc::Input::New(cx, GpuiDup(cx->a, id), edit)
+                    ->Appearance(false)
+                    ->WithSize(gp::UiSize::Small)
+                    ->W(gp::kFill)
+                    ->IntoEl()
+                    ->Font(kToolDlgQueryFontPx);
+    } else {
+        bool masked = kind == DlgField::Password;
+        field = DlgUnderlineInput(cx, GpuiDup(cx->a, id), edit, kToolDlgQueryFontPx, ThemeEdgeColor(), masked);
+    }
+    row->Child(gp::Div(cx->a)->Flex1()->MinW(0)->Child(field));
+    return row;
+}
+
+// `extra` (a quiet button) at the left, Cancel and the one filled action at
+// the right
+gp::El* DlgFooter(gp::Ctx* cx, Str okLabel, gp::Listener onOk, gp::Listener onCancel, gp::El* extra, bool okDisabled) {
+    gp::El* row = gp::Div(cx->a)
+                      ->FlexRow()
+                      ->ItemsCenter()
+                      ->W(gp::kFill)
+                      ->Shrink0()
+                      ->PadX(kToolDlgPadDx)
+                      ->PadY(kToolDlgFootPadDy)
+                      ->Gap(kToolDlgGapDx);
+    if (extra) {
+        row->Child(extra);
+    }
+    row->Child(gp::Div(cx->a)->Flex1());
+    row->Child(gpc::Button::New(cx, GStrL("dlg-cancel"))
+                   ->Label(ToGpui(Tr("Cancel")))
+                   ->Outline()
+                   ->WithSize(gp::UiSize::Small)
+                   ->OnClick(onCancel)
+                   ->IntoEl());
+    row->Child(DlgFilledButton(cx, GStrL("dlg-ok"), okLabel, onOk, okDisabled));
+    return row;
+}
+
+constexpr float kDlgListInsetDx = 8;
+constexpr float kDlgListRadius = 4;
+constexpr int kDlgListSelShift = 28;
+
+gp::El* DlgListRow(gp::Ctx* cx, Str id, Str text, bool selected, gp::Listener onClick, Str meta) {
+    gp::El* row = gp::Div(cx->a)
+                      ->FlexRow()
+                      ->W(gp::kFill)
+                      ->H(kDlgListRowDy)
+                      ->Shrink0()
+                      ->ItemsCenter()
+                      ->PadX(kDlgListInsetDx)
+                      ->Radius(kDlgListRadius)
+                      ->PathClick(GpuiDup(cx->a, id))
+                      ->OnClick(onClick);
+    if (selected) {
+        row->Bg(ToGpui(AccentColor(ThemeWindowControlBackgroundColor(), kDlgListSelShift)));
+    }
+    row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, text))
+                   ->Font(kToolDlgTextFontPx)
+                   ->Fg(ToGpui(ThemeWindowTextColor()))
+                   ->Truncate()
+                   ->Flex1()
+                   ->MinW(0));
+    if (len(meta) > 0) {
+        row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, meta))
+                       ->Font(kToolDlgTextFontPx)
+                       ->Fg(ToGpui(ThemeWindowTextDisabledColor()))
+                       ->Shrink0());
+    }
+    return row;
+}
+
+// the list padded as orig's NewDlgListBox
+gp::El* DlgListBox(gp::Ctx* cx, gp::El* list) {
+    return gp::Div(cx->a)
+        ->W(gp::kFill)
+        ->Shrink0()
+        ->PadX(kToolDlgPadDx - kDlgListInsetDx)
+        ->PadY(kToolDlgFilesPadDy)
+        ->Child(list);
+}
+
+// `col` in its own window (DlgWindowOpen), else in a card over the frame
+gp::El* DlgToolContent(gp::Ctx* cx, gp::El* col, Str title, float dx, gp::Listener onCancel) {
+    col->Bg(ToGpui(ThemeWindowControlBackgroundColor()));
+    if (DlgWindowIsHost(cx)) {
+        return DlgWinContent(cx, col);
+    }
+    return DlgFrameCard(cx, col, title, dx, onCancel);
+}
+
+// a dialog drawn over the frame (no window of its own, e.g. Wasm): `col` under
+// the title as the whole card. gpui's own header and button row would pad it
+// and add a default OK button
+gp::El* DlgFrameCard(gp::Ctx* cx, gp::El* col, Str title, float dx, gp::Listener onClose) {
+    constexpr float kTitleFontPx = 15;
+    constexpr float kTitlePadT = 14;
+    gp::El* titleEl = gp::TextEl(cx->a, GpuiDup(cx->a, title))
+                          ->Font(kTitleFontPx)
+                          ->Semibold()
+                          ->Fg(ToGpui(ThemeWindowTextColor()))
+                          ->Truncate()
+                          ->MinW(0);
+    gp::El* card = gp::Div(cx->a)
+                       ->FlexCol()
+                       ->W(gp::kFill)
+                       ->MinH(0)
+                       ->Bg(ToGpui(ThemeWindowControlBackgroundColor()))
+                       ->Child(gp::Div(cx->a)
+                                   ->FlexRow()
+                                   ->W(gp::kFill)
+                                   ->Shrink0()
+                                   ->PadT(kTitlePadT)
+                                   ->PadX(kToolDlgPadDx)
+                                   ->Child(titleEl))
+                       ->Child(col);
+    return gpc::Dialog::New(cx)->Open(true)->Surface(card)->W(dx)->OnClose(onClose)->IntoEl(gp::WindowSize(cx->win));
 }

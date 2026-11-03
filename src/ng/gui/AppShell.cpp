@@ -283,7 +283,7 @@ static int CaptionDy(MainWindow* win, bool twoRow, bool tabsVisible) {
 }
 
 bool AppShellCaptionRects(MainWindow* win, Rect* menuOut, Rect* tabsOut, int* dyOut) {
-    if (!ShowCaption(win)) {
+    if (!ShowCaption(win) || (!gSettings->showCaption && !win->captionOverlayShown)) {
         return false;
     }
     bool twoRow = win->isMenuBarVisible && !gp::AppHasMenuBar();
@@ -573,19 +573,19 @@ static bool ForwardTestWheelToBrowser(MainWindow* win, int delta, int mods) {
 // dips; c = button: 0 left, 1 right, 2 middle; d = mods: 1 Ctrl, 2 Shift,
 // 4 Alt, 8 Command), move (c = pressed
 // button + 1, or 0) and wheel (c = delta in 120ths of a notch, 1000000 + delta
-// for a horizontal one)
-TempStr AppShellTestInput(MainWindow* win, Str kind, int a, int b, int c, int d) {
+// for a horizontal one). k is dips per unit of a mouse x, y.
+TempStr AppShellTestInput(MainWindow* win, Str kind, int a, int b, int c, int d, float k) {
     // a modal dialog in a window of its own has the input, as on screen: the
     // main window is disabled, so what a test sends "to the window" is the
     // dialog's (mouse coordinates are the dialog's client area then)
     if (ToolWindow* modal = ToolWindowModalOf(win)) {
-        TempStr res = AppShellTestInputGpui(ToolWindowGpui(modal), kind, a, b, c, d);
+        TempStr res = AppShellTestInputGpui(ToolWindowGpui(modal), kind, a, b, c, d, k);
         ToolWindowInvalidate(modal);
         return res;
     }
     // and so has one of orig's modeless dialogs while it is the active window
     if (gp::Window* dlgWin = DlgWindowInputTarget(win)) {
-        TempStr res = AppShellTestInputGpui(dlgWin, kind, a, b, c, d);
+        TempStr res = AppShellTestInputGpui(dlgWin, kind, a, b, c, d, k);
         gp::AppInvalidate(dlgWin);
         return res;
     }
@@ -595,7 +595,7 @@ TempStr AppShellTestInput(MainWindow* win, Str kind, int a, int b, int c, int d)
         return StrL("OK eaten=1");
     }
     if (gp::Window* paletteWin = CommandPaletteInputWindow(win)) {
-        TempStr res = AppShellTestInputGpui(paletteWin, kind, a, b, c, d);
+        TempStr res = AppShellTestInputGpui(paletteWin, kind, a, b, c, d, k);
         gp::AppInvalidate(paletteWin);
         return res;
     }
@@ -607,15 +607,15 @@ TempStr AppShellTestInput(MainWindow* win, Str kind, int a, int b, int c, int d)
     if (str::Eq(kind, StrL("char")) && SelectTextWithKeyboardOnChar(win, a)) {
         return StrL("OK");
     }
-    return AppShellTestInputGpui(win ? win->gpuiWin : nullptr, kind, a, b, c, d);
+    return AppShellTestInputGpui(win ? win->gpuiWin : nullptr, kind, a, b, c, d, k);
 }
 
-TempStr AppShellTestInputGpui(gp::Window* gw, Str kind, int a, int b, int c, int d) {
+TempStr AppShellTestInputGpui(gp::Window* gw, Str kind, int a, int b, int c, int d, float k) {
     if (!gw) {
         return StrL("ERR no-window");
     }
-    float x = (float)a;
-    float y = (float)b;
+    float x = (float)a * k;
+    float y = (float)b * k;
     if (str::Eq(kind, StrL("key"))) {
         gp::KeyDownFlags flags;
         flags.held = (b & 8) != 0;
@@ -669,6 +669,78 @@ TempStr AppShellTestInputGpui(gp::Window* gw, Str kind, int a, int b, int c, int
     }
     return StrL("OK");
 }
+
+#if OS_WIN
+// Windows tests aim input at a frame or a tool window, at its client pixels
+TempStr AppShellTestInputHwnd(HWND hwnd, Str kind, int a, int b, int c, int d) {
+    MainWindow* win = AppShellWindowFromHwnd(hwnd);
+    ToolWindow* tw = win ? nullptr : ToolWindowFromHwnd(hwnd);
+    gp::Window* gw = win ? win->gpuiWin : ToolWindowGpui(tw);
+    // as PostMessage to a window that closed (Esc's key up after the key down)
+    if (!gw) {
+        return StrL("OK gone");
+    }
+    gp::WinSize ws = gp::WindowSize(gw);
+    float k = (ws.dipW > 0 && ws.pxW > 0) ? ws.dipW / (float)ws.pxW : 1.f;
+    if (win) {
+        // the frame's arrow keys scroll a CHM or markdown page, as WM_KEYDOWN does
+        bool isKey = str::Eq(kind, StrL("key"));
+        if ((isKey || str::Eq(kind, StrL("keyup"))) && ForwardBrowserMsg(win, isKey ? WM_KEYDOWN : WM_KEYUP, a, 0)) {
+            return StrL("OK");
+        }
+        return AppShellTestInput(win, kind, a, b, c, d, k);
+    }
+    TempStr res = AppShellTestInputGpui(gw, kind, a, b, c, d, k);
+    ToolWindowInvalidate(tw);
+    return res;
+}
+
+// orig's WM_CONTEXTMENU: from the keyboard (-1, -1) the Apps key's menu, from a
+// screen point the menu a right click there opens. Both are gpui's menus.
+// False for a point outside the client area (a border): DefWindowProc's.
+bool AppShellOnWmContextMenu(MainWindow* win, int screenX, int screenY) {
+    gp::Window* gw = win ? win->gpuiWin : nullptr;
+    HWND hwnd = AppShellNativeHwnd(win);
+    if (!gw || !hwnd) {
+        return false;
+    }
+    float k = CanvasScale(win);
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    if (screenX == -1 && screenY == -1) {
+        // orig opens it at the cursor; gpui's position is stale until the mouse moves here
+        POINT cur{};
+        if (GetCursorPos(&cur) && ScreenToClient(hwnd, &cur) && PtInRect(&rc, cur)) {
+            gp::PlatformInput mv =
+                gp::InputMouseMove((float)cur.x * k, (float)cur.y * k, false, gp::MouseButton::Left, gp::Modifiers{});
+            gp::WindowDispatchInput(gw, &mv);
+        }
+        gp::WindowKeyDown(gw, VK_APPS, false, false, false, false, false, gp::KeyDownFlags{});
+        gp::WindowKeyUp(gw, VK_APPS, false, false, false, false);
+        gw->eatChar = false;
+        gp::AppInvalidate(gw);
+        return true;
+    }
+
+    POINT pt{screenX, screenY};
+    ScreenToClient(hwnd, &pt);
+    if (!PtInRect(&rc, pt)) {
+        return false;
+    }
+    float x = (float)pt.x * k;
+    float y = (float)pt.y * k;
+    gp::MouseButton btn = gp::MouseButton::Right;
+    gp::PlatformInput mv = gp::InputMouseMove(x, y, false, btn, gp::Modifiers{});
+    gp::WindowDispatchInput(gw, &mv);
+    int clicks = gp::WindowClickCount(gw, x, y, btn);
+    gp::PlatformInput down = gp::InputMouseDown(btn, x, y, gp::Modifiers{}, clicks, false);
+    gp::WindowDispatchInput(gw, &down);
+    gp::PlatformInput up = gp::InputMouseUp(btn, x, y, gp::Modifiers{}, gp::WindowCurrentClickCount(gw));
+    gp::WindowDispatchInput(gw, &up);
+    gp::AppInvalidate(gw);
+    return true;
+}
+#endif
 
 bool AppShellNativeCursorActive(MainWindow* win) {
     gp::Window* gw = IsMainWindowValid(win) ? win->gpuiWin : nullptr;
@@ -836,6 +908,9 @@ void AppShellFocusFrame(MainWindow* win) {
 }
 
 void AppShellQuit() {
+#if OS_WASM
+    WasmNotifyExit();
+#endif
     if (gApp) {
         gp::AppQuitAll(gApp);
     }
@@ -1141,14 +1216,127 @@ TempStr AppShellPromptForPathTemp(MainWindow* win, Str title, Str filter, Str in
     return str::DupTemp(FromGpui(path));
 }
 
+// a folder, with gpui's prompt (it has no initial folder)
+TempStr AppShellPromptForFolderTemp(MainWindow* win, Str title) {
+    if (!win || !win->gpuiWin) {
+        return {};
+    }
+    gp::PathPrompt prompt;
+    prompt.files = false;
+    prompt.directories = true;
+    prompt.title = ToGpui(title);
+    gp::TempStr path = gp::PromptForPathTemp(win->gpuiWin, prompt);
+    return str::DupTemp(FromGpui(path));
+}
+
 #if OS_WASM
-// WasmShell.js calls this. gpui leaves Ctrl+K / Cmd+K with the browser, so
-// the accelerator never runs.
-extern "C" EMSCRIPTEN_KEEPALIVE void sumatra_wasm_command_palette() {
-    if (len(gWindows) == 0) {
+// WasmShell.js calls the sumatra_wasm_* functions below. A browser tab has
+// one canvas, so one MainWindow.
+static MainWindow* WasmMainWindow() {
+    if (len(gWindows) == 0 || !IsMainWindowValidAndNotClosing(gWindows[0])) {
+        return nullptr;
+    }
+    return gWindows[0];
+}
+
+// Ctrl+arrows, Ctrl+Backspace and the like move or delete by word in a text
+// field, and gpui leaves every Ctrl chord but A/C/X/Y/Z with the browser
+static bool IsTextEditKey(int vk) {
+    return vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN || vk == VK_HOME || vk == VK_END ||
+           vk == VK_BACK || vk == VK_DELETE;
+}
+
+// gpui left the key with the browser. 1 if the app should get it instead: a
+// command is bound to it, or a focused text field uses it.
+extern "C" EMSCRIPTEN_KEEPALIVE int sumatra_wasm_key_wanted(int vk, int ch, int shift, int ctrl, int alt) {
+    MainWindow* win = WasmMainWindow();
+    if (!win || !win->gpuiWin) {
+        return 0;
+    }
+    KeyShortcut sc;
+    sc.vk = (u16)vk;
+    sc.shift = shift != 0;
+    sc.ctrl = ctrl != 0;
+    sc.alt = alt != 0;
+    sc.isVirt = true;
+    if (IsBrowserReservedShortcut(sc)) {
+        return 0;
+    }
+    gp::Window* gw = win->gpuiWin;
+    bool inTextField = gw->input && gp::FocusHandleIsFocused(gw, gw->input->focus);
+    if (inTextField && ctrl && !alt && IsTextEditKey(vk)) {
+        return 1;
+    }
+    return WasmAcceleratorCmd((u16)vk, (u32)ch, ctrl != 0, shift != 0, alt != 0) != 0 ? 1 : 0;
+}
+
+// the key the page took from the browser, delivered the way gpui delivers keys
+extern "C" EMSCRIPTEN_KEEPALIVE void sumatra_wasm_key(int vk, int shift, int ctrl, int alt, int down, int repeat) {
+    MainWindow* win = WasmMainWindow();
+    if (!win || !win->gpuiWin) {
         return;
     }
-    ExecuteCmd(gWindows[0], CmdCommandPalette);
+    if (!down) {
+        gp::WindowKeyUp(win->gpuiWin, vk, shift != 0, ctrl != 0, alt != 0);
+        return;
+    }
+    gp::KeyDownFlags flags;
+    flags.held = repeat != 0;
+    gp::WindowKeyDown(win->gpuiWin, vk, shift != 0, ctrl != 0, alt != 0, false, false, flags);
+}
+
+// files dropped on the page, stored by WasmShell.js
+extern "C" EMSCRIPTEN_KEEPALIVE void sumatra_wasm_open_dropped() {
+    Vec<Str> paths;
+    WasmTakeDroppedPathsTemp(paths);
+    MainWindow* win = WasmMainWindow();
+    if (!win || paths.len == 0) {
+        return;
+    }
+    OpenDroppedFiles(win, paths.els, paths.len);
+}
+
+// the browser left fullscreen by itself, e.g. on Esc, which the page never
+// sees. A no-op when the app left it, as it exits its mode first.
+extern "C" EMSCRIPTEN_KEEPALIVE void sumatra_wasm_fullscreen_left() {
+    for (MainWindow* win : gWindows) {
+        if (win->isFullScreen || win->InPresentation()) {
+            ExitFullScreen(win);
+        }
+    }
+}
+
+// a save to OPFS failed: the document or setting is only in this tab
+extern "C" EMSCRIPTEN_KEEPALIVE void sumatra_wasm_storage_error() {
+    MainWindow* win = WasmMainWindow();
+    if (!win) {
+        return;
+    }
+    TempStr msg = fmt("%s: %s", Tr("Couldn't save to the browser's storage, changes are lost when the tab is closed"),
+                      WasmStorageErrorTemp());
+    ShowPlainWarningNotification(win, msg, kNotifNoTimeout);
+}
+
+// the page is being hidden and may be discarded: put the settings and the
+// session into MEMFS now, WasmShell.js then copies them to OPFS
+extern "C" EMSCRIPTEN_KEEPALIVE void sumatra_wasm_flush() {
+    if (!WasmMainWindow()) {
+        return;
+    }
+    SaveSettingsNow();
+}
+
+// for the page's "leave site?" prompt
+extern "C" EMSCRIPTEN_KEEPALIVE int sumatra_wasm_has_unsaved() {
+    for (MainWindow* win : gWindows) {
+        for (WindowTab* tab : win->Tabs()) {
+            DisplayModel* dm = tab->AsFixed();
+            if (dm && EngineHasUnsavedAnnotations(dm->GetEngine())) {
+                return 1;
+            }
+        }
+    }
+    return 0;
 }
 
 // the browser's file input answers on a later event-loop turn, so the document
@@ -1760,7 +1948,11 @@ static gp::El* BuildCanvas(ShellView* self, gp::Ctx* cx, bool overlayUp) {
     }
     if (browser && !overlayUp) {
         gp::El* box = gp::Div(cx->a)->Flex1()->W(gp::kFill)->Bg(ThemeGpuiCanvasBg());
-        box->Child(BrowserViewBuild(browser, cx));
+        int clipTop = 0;
+        if (win->captionOverlayShown && ShowCaption(win) && !gSettings->showCaption) {
+            clipTop = std::max(0, CaptionDy(win, win->isMenuBarVisible, TabsAreVisible(win)) - win->canvasRc.y);
+        }
+        box->Child(BrowserViewBuild(browser, cx, clipTop));
         return box;
     }
     gp::El* canvas = gp::Div(cx->a)->FlexCol()->Flex1()->W(gp::kFill)->ItemsCenter()->JustifyCenter()->Gap(6)->Bg(
@@ -1771,6 +1963,10 @@ static gp::El* BuildCanvas(ShellView* self, gp::Ctx* cx, bool overlayUp) {
         if (tab && tab->loadState == WindowTab::LoadState::Error && len(tab->filePath) > 0) {
             TempStr msg = fmt(Tr("Error loading %s").s, tab->filePath);
             canvas->Child(gp::TextEl(cx->a, GpuiDup(cx->a, msg))->Font(16)->Fg(th.foreground));
+            TempStr reason = CajErrorReasonTemp(tab->filePath);
+            if (len(reason) > 0) {
+                canvas->Child(gp::TextEl(cx->a, GpuiDup(cx->a, reason))->Font(16)->Fg(th.foreground));
+            }
             return canvas;
         }
         canvas->Child(gp::TextEl(cx->a, GStrL("SumatraPDF is a PDF reader"))->Font(16)->Fg(th.mutedFg));
@@ -1786,6 +1982,77 @@ static gp::El* BuildCanvas(ShellView* self, gp::Ctx* cx, bool overlayUp) {
 static void BuildNotifications(MainWindow* win, gp::Ctx* cx, gp::El* parent);
 static bool HasNotificationsFor(MainWindow* win);
 
+// SidebarAutoHide (#5819): a shown sidebar floats over the canvas instead of
+// taking a column. Not in presentation.
+bool AppShellSidebarFloats(MainWindow* win) {
+    if (!gSettings->sidebarAutoHide || win->presentation) {
+        return false;
+    }
+    return win->uiState.tocVisible || win->uiState.favVisible;
+}
+
+// a mouse move on the canvas, which is under the floating sidebar: one at the
+// edge on the sidebar's side shows it, one past its column hides it (orig
+// polls the cursor instead)
+void AppShellSidebarCanvasMove(MainWindow* win, const gp::MouseMoveEvent* ev) {
+    constexpr float kRevealDx = 8;
+    if (!AppShellSidebarFloats(win)) {
+        return;
+    }
+    bool onRight = gSettings->sidebarOnRight;
+    float fromEdge = onRight ? ev->el.Right() - ev->x : ev->x - ev->el.x;
+    bool inColumn = fromEdge < (float)win->sidebarDx;
+    if (!win->sidebarOverlayShown) {
+        // a drag on the canvas (selection, pan) passing the edge doesn't show it
+        if (ev->pressed || fromEdge >= kRevealDx) {
+            return;
+        }
+        win->sidebarOverlayShown = true;
+        win->sidebarOverlayByMouse = true;
+    }
+    if (inColumn == win->sidebarOverlayHovered) {
+        return;
+    }
+    win->sidebarOverlayHovered = inColumn;
+    AppShellInvalidate(win);
+}
+
+// orig's UpdateSidebarOverlay: shown while the mouse is over it, a context
+// menu of it is up, or the keyboard put the focus in it
+static void UpdateSidebarOverlayState(MainWindow* win, gp::Ctx* cx) {
+    bool focusIn = SidebarHasFocus(win);
+    if (!win->sidebarOverlayShown) {
+        if (focusIn) {
+            win->sidebarOverlayShown = true;
+            win->sidebarOverlayByMouse = false;
+        }
+        return;
+    }
+    bool keep = win->sidebarOverlayHovered || SidebarMenuOpen(win, cx) || (focusIn && !win->sidebarOverlayByMouse);
+    if (keep) {
+        return;
+    }
+    win->sidebarOverlayShown = false;
+    // keys must not go to a hidden tree
+    if (focusIn) {
+        gp::FocusHandleFocus(cx->win, win->shell->frameFocus);
+    }
+}
+
+// the floating sidebar over the canvas column
+static void AddSidebarOverlay(ShellView* self, gp::Ctx* cx, gp::El* canvasCol, gp::El* sidebar) {
+    MainWindow* win = self->win;
+    UpdateSidebarOverlayState(win, cx);
+    if (!win->sidebarOverlayShown) {
+        return;
+    }
+    const gp::Theme& th = gp::ThemeNow(cx->app);
+    bool onRight = gSettings->sidebarOnRight;
+    gp::El* el = gp::Div(cx->a)->Absolute()->Top(0)->Bottom(0)->FlexCol()->W((float)win->sidebarDx)->Child(sidebar);
+    el = onRight ? el->Right(0)->BorderL(1, th.border) : el->Left(0)->BorderR(1, th.border);
+    canvasCol->Child(el);
+}
+
 // the sidebar, the splitter and the canvas; orig's RelayoutFrame puts the same
 // three side by side with a SplitterCtrl between them
 static gp::El* BuildBody(ShellView* self, gp::Ctx* cx, bool overlayUp) {
@@ -1800,6 +2067,10 @@ static gp::El* BuildBody(ShellView* self, gp::Ctx* cx, bool overlayUp) {
         canvas = box;
     }
     gp::El* sidebar = SidebarBuild(win, cx);
+    bool floats = sidebar && AppShellSidebarFloats(win);
+    if (!floats) {
+        win->sidebarOverlayShown = false;
+    }
     gp::El* aiChat = overlayUp ? nullptr : AIChatPanelBuild(win, cx);
     // orig docks the folder picker's window beside the frame; here it is the
     // frame's last column
@@ -1811,7 +2082,7 @@ static gp::El* BuildBody(ShellView* self, gp::Ctx* cx, bool overlayUp) {
     gp::El* row = gp::Div(cx->a)->FlexRow()->Flex1()->W(gp::kFill)->MinH(0);
     gp::El* sidebarBox = nullptr;
     gp::El* splitter = nullptr;
-    if (sidebar) {
+    if (sidebar && !floats) {
         sidebarBox = gp::Div(cx->a)->FlexCol()->W((float)win->sidebarDx)->H(gp::kFill)->Shrink0()->Child(sidebar);
         splitter = gp::Div(cx->a)
                        ->W((float)kSplitterDx)
@@ -1829,7 +2100,11 @@ static gp::El* BuildBody(ShellView* self, gp::Ctx* cx, bool overlayUp) {
             row->Child(splitter);
         }
     }
-    row->Child(gp::Div(cx->a)->FlexCol()->Flex1()->MinW(0)->H(gp::kFill)->Child(canvas));
+    gp::El* canvasCol = gp::Div(cx->a)->FlexCol()->Flex1()->MinW(0)->H(gp::kFill)->Child(canvas);
+    if (floats) {
+        AddSidebarOverlay(self, cx, canvasCol, sidebar);
+    }
+    row->Child(canvasCol);
     if (sidebarBox && gSettings->sidebarOnRight) {
         row->Child(splitter);
         row->Child(sidebarBox);
@@ -2355,8 +2630,8 @@ void ShellView::OnKeyDown(ShellView* self, gp::Ctx* cx, const gp::KeyEvent* ev) 
         }
         return;
     }
-    // a context menu does not take the focus; a dialog's open drop-down
-    // would have its dialog closed under it
+    // a menu whose focus has not landed yet, or a dialog's open drop-down:
+    // Escape closes it, and nothing under it runs
     if (IsTrackedPopupOpen(cx)) {
         if (ev->vk == VK_ESCAPE) {
             DismissTrackedPopup(cx);
@@ -2398,7 +2673,7 @@ void ShellView::OnKeyDown(ShellView* self, gp::Ctx* cx, const gp::KeyEvent* ev) 
         return;
     }
     // the Merge PDF dialog's page grid: arrows, Delete, Ctrl + A
-    if (!editFocused && PdfToolDialogOnKeyDown(win, (int)ev->vk, ev->ctrl, ev->shift)) {
+    if (!editFocused && PdfToolDialogOnKeyDown(win, (int)ev->vk, ev->ctrl || ev->platform, ev->shift)) {
         mut->propagate = false;
         gp::Notify(cx);
         return;
@@ -2479,7 +2754,9 @@ void ShellView::OnKeyDown(ShellView* self, gp::Ctx* cx, const gp::KeyEvent* ev) 
     // box cycles between them. Elsewhere (a dialog, the find bar) Tab is gpui's
     if (ev->vk == VK_TAB && !ev->ctrl && !ev->alt && !self->overlayUp) {
         bool inTabOrder = AppShellIsFrameFocused(win) || IsToolbarPageBoxFocused(win) ||
-                          SidebarPanelHasFocus(win, true) || SidebarPanelHasFocus(win, false);
+                          SidebarPanelHasFocus(win, SidebarSlot::Top) ||
+                          SidebarPanelHasFocus(win, SidebarSlot::Middle) ||
+                          SidebarPanelHasFocus(win, SidebarSlot::Bottom);
         if (inTabOrder) {
             AdvanceFocus(win, ev->shift);
             mut->propagate = false;
@@ -2659,6 +2936,15 @@ void ShellView::OnKeyDown(ShellView* self, gp::Ctx* cx, const gp::KeyEvent* ev) 
         gp::Notify(cx);
         return;
     }
+#if !OS_WIN
+    // a CHM / markdown / HTML page scrolls; Windows does this in its WndProc
+    bool noMods = !ev->ctrl && !ev->shift && !ev->alt && !ev->platform;
+    if (noMods && !editFocused && !self->overlayUp && ScrollBrowserDocKey(win, (int)ev->vk)) {
+        mut->propagate = false;
+        gp::Notify(cx);
+        return;
+    }
+#endif
     // orig routes the arrow keys, Enter and Del on the start page to the file
     // list instead of scrolling (issue #1136)
     // only without modifiers: Shift + Up, Alt + Left &c stay accelerators.
@@ -2717,7 +3003,7 @@ void ShellView::OnKeyDown(ShellView* self, gp::Ctx* cx, const gp::KeyEvent* ev) 
         gp::Notify(cx);
         return;
     }
-    // orig's FrameOnChar: + = - / b. gpui hands the typed character on in a
+    // orig's FrameOnChar: + - / b. gpui hands the typed character on in a
     // key event of its own, without a virtual key
     if (ev->vk == 0 && ev->ch != 0) {
         // orig's TranslateAccelerator on WM_CHAR: '.', the palette prefixes
@@ -2845,6 +3131,30 @@ void ShellView::OnTick(ShellView* self, gp::Ctx* cx, const gp::TickEvent* ev) {
     PdfToolDialogTick(win, ms);
     // what moved inside the frame (a sidebar, a toolbar row) moves the canvas
     ToolWindowsFollow(win);
+    if (ShowCaption(win)) {
+        auto* menuState = (gpc::AppMenuBarState*)gp::EntityGet(cx->app, self->menuBarState.id);
+        auto* popup = (gp::PopupMenuState*)gp::EntityGet(cx->app, self->menuPopupState.id);
+        constexpr int kCaptionRevealDy = 8;
+        int hoverDy =
+            win->captionOverlayShown ? CaptionDy(win, win->isMenuBarVisible, TabsAreVisible(win)) : kCaptionRevealDy;
+        bool menuOpen = (menuState && menuState->selected >= 0) || (popup && popup->open);
+        float mouseX = cx->win->mouseX;
+        float mouseY = cx->win->mouseY;
+#if OS_WIN
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        ScreenToClient(AppShellNativeHwnd(win), &cursor);
+        float scale = CanvasScale(win);
+        mouseX = cursor.x * scale;
+        mouseY = cursor.y * scale;
+#endif
+        bool shown = !gSettings->showCaption &&
+                     ((mouseX >= 0 && mouseX < win->frameRc.dx && mouseY >= 0 && mouseY < hoverDy) || menuOpen);
+        if (shown != win->captionOverlayShown) {
+            win->captionOverlayShown = shown;
+            gp::Notify(cx);
+        }
+    }
     ToolbarTick(win, ms);
     AutoReloadTick(win, ms);
     DocCanvasAutoScrollTick(win, ms);
@@ -2872,10 +3182,27 @@ void ShellView::OnTick(ShellView* self, gp::Ctx* cx, const gp::TickEvent* ev) {
 }
 
 // Document area under the caption, menu, tabs and toolbar.
+// At most one drain queued: every uitask::Post wakes, and a second drain in
+// the same batch runs what the first one posted. A job that runs in slices
+// (see kUiSliceMs) then runs slice after slice without the browser getting a
+// turn, and each slice's posts queue more drains.
+static AtomicBool gUiDrainQueued = 0;
+
+static void DrainUiTasks() {
+    AtomicBoolSet(&gUiDrainQueued, false);
+    uitask::DrainQueue();
+}
+
+static void WakeForUiTasks() {
+    if (!AtomicBoolSwap(&gUiDrainQueued, true)) {
+        gp::ExecPost(gp::MkFunc0Void(DrainUiTasks));
+    }
+}
+
 static Rect CanvasRcForFrame(MainWindow* win, int frameDx, int frameDy, bool menuBarShown, bool tabsVisible) {
     int chromeDy;
     if (ShowCaption(win)) {
-        chromeDy = CaptionDy(win, menuBarShown, tabsVisible);
+        chromeDy = gSettings->showCaption ? CaptionDy(win, menuBarShown, tabsVisible) : 0;
     } else {
         chromeDy = (menuBarShown ? kMenuBarDy : 0) + (tabsVisible ? kTabBarDy : 0);
     }
@@ -2886,7 +3213,7 @@ static Rect CanvasRcForFrame(MainWindow* win, int frameDx, int frameDy, bool men
         chromeDy += toolbarDy;
     }
     int sidebarDx = 0;
-    if (win->uiState.tocVisible || win->uiState.favVisible) {
+    if ((win->uiState.tocVisible || win->uiState.favVisible) && !AppShellSidebarFloats(win)) {
         sidebarDx = win->sidebarDx + kSplitterDx;
     }
     int bodyDy = frameDy - 2 * border - chromeDy - (tbAtBottom ? toolbarDy : 0);
@@ -2953,6 +3280,16 @@ Rect AppShellPredictCanvasRc(MainWindow* win, CanvasPredict predict) {
     bool menuBarShown = win->isMenuBarVisible && !gp::AppHasMenuBar();
     Rect canvas = CanvasRcForFrame(win, frameDx, frameDy, menuBarShown, tabsVisible);
     win->isMaximized = wasMaximized;
+#if OS_WASM
+    // Home has no toolbar, the document about to replace it does
+    if (predict == CanvasPredict::DocumentTab && win->IsCurrentTabAbout() && !win->isToolbarVisible) {
+        int toolbarDy = ToolbarDocTabDy(win);
+        canvas.dy -= toolbarDy;
+        if (!ToolbarAtBottom()) {
+            canvas.y += toolbarDy;
+        }
+    }
+#endif
     return canvas;
 }
 
@@ -2996,7 +3333,8 @@ gp::El* ShellView::Render(ShellView* self, gp::Ctx* cx) {
     }
     bool menuBarShown = (win->isMenuBarVisible || self->menuBarTemp) && !nativeMenu;
     // orig: tabsInTitlebar follows UseTabs
-    SetTabsInTitlebar(win, CanHaveTabsInTitlebar() && SettingsUseTabs() && !win->isQuickLook);
+    SetTabsInTitlebar(win,
+                      CanHaveTabsInTitlebar() && (SettingsUseTabs() || !gSettings->showCaption) && !win->isQuickLook);
     bool showCaption = ShowCaption(win);
     if (!showCaption) {
         win->tabsAvailDx = 0;
@@ -3036,9 +3374,9 @@ gp::El* ShellView::Render(ShellView* self, gp::Ctx* cx) {
     if (border > 0) {
         root->Pad((float)border)->Bg(ToGpui(ThemeControlBackgroundColor()));
     }
-    if (showCaption) {
+    if (showCaption && gSettings->showCaption) {
         BuildCaption(self, cx, root, menuBarShown);
-    } else {
+    } else if (!showCaption) {
         if (menuBarShown) {
             root->Child(gp::Div(cx->a)
                             ->W(gp::kFill)
@@ -3089,6 +3427,11 @@ gp::El* ShellView::Render(ShellView* self, gp::Ctx* cx) {
     }
     if (gp::El* strip = ToolbarOverlayBuild(win, cx)) {
         root->Child(strip);
+    }
+    if (showCaption && !gSettings->showCaption && win->captionOverlayShown) {
+        gp::El* caption = gp::Div(cx->a)->Absolute()->Top(0)->Left(0)->W(gp::kFill)->FlexCol()->Bg(th.tokens.titleBar);
+        BuildCaption(self, cx, caption, menuBarShown);
+        root->Child(caption);
     }
     // orig floats the find bar over the frame, pinned to its right edge
     if (gp::El* findBar = FindBarBuild(win, cx)) {
@@ -3147,8 +3490,14 @@ MainWindow* AppShellCreateWindow(gp::App* app, int dipW, int dipH) {
 
     // orig sets tabsInTitlebar from UseTabs when it creates the frame
     gp::WinOpts opts;
-    opts.clientTitleBar = CanHaveTabsInTitlebar() && SettingsUseTabs();
+    opts.clientTitleBar = CanHaveTabsInTitlebar() && (SettingsUseTabs() || !gSettings->showCaption);
     gp::Window* gw = gp::WindowOpenView(app, GStrL("SumatraPDF"), dipW, dipH, ui->view.id, opts);
+    // wasm has one window: a browser tab has one canvas
+    if (!gw) {
+        logf("AppShellCreateWindow: gpui didn't open a window\n");
+        delete ui;
+        return nullptr;
+    }
     auto* win = new MainWindow(gw);
     // The first paint replaces this. Ebook layout runs before that paint and
     // needs the size the window was opened at (#3472).
@@ -3166,7 +3515,7 @@ MainWindow* AppShellCreateWindow(gp::App* app, int dipW, int dipH) {
         BindKeys();
         // uitask::Post from a worker wakes the main loop; the interval is the
         // fallback that also expires notifications
-        uitask::SetWakeupFn([] { gp::ExecPost(gp::MkFunc0Void(uitask::DrainQueue)); });
+        uitask::SetWakeupFn(WakeForUiTasks);
     }
     RebuildMenuBar(win);
     CreateToolbar(win);

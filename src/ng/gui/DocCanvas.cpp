@@ -45,6 +45,7 @@
 #include "Toolbar.h"
 #include "SelectTextKeyboard.h"
 #include "SumatraDialogs.h"
+#include "PageGridDialogCommon.h"
 #include "gui/GpuiTheme.h"
 #include "OverlayScrollbar.h"
 #include "ReadingBar.h"
@@ -390,11 +391,13 @@ void CanvasDrawText(gp::PaintCtx* ctx, Str s, Point at, Color col, float fontSiz
 // the modifiers of the last mouse or key event; orig asks GetKeyState()
 static bool gCtrlPressed = false;
 static bool gShiftPressed = false;
+static bool gAltPressed = false;
 static bool gPlatformPressed = false;
 
 static void SetCanvasModifiers(const gp::Modifiers& m) {
     gCtrlPressed = m.control;
     gShiftPressed = m.shift;
+    gAltPressed = m.alt;
     gPlatformPressed = m.platform;
 }
 
@@ -962,27 +965,6 @@ static bool DrawDocument(MainWindow* win, gp::PaintCtx* ctx, Rect rcArea) {
 
 // --- scrollbars -------------------------------------------------------------
 
-#if OS_WIN
-static void WriteScrollInfo(HWND hwnd, int bar, const CanvasScrollInfo& si) {
-    SCROLLINFO info{};
-    info.cbSize = sizeof(info);
-    info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-    info.nMin = si.nMin;
-    info.nMax = si.nMax;
-    info.nPage = (UINT)si.nPage;
-    info.nPos = si.nPos;
-    SetScrollInfo(hwnd, bar, &info, FALSE);
-}
-
-static void PublishScrollInfo(HWND hwnd, int bar, const CanvasScrollInfo& si) {
-    WriteScrollInfo(hwnd, bar, si);
-    LONG style = GetWindowLongW(hwnd, GWL_STYLE);
-    if (style & (WS_HSCROLL | WS_VSCROLL)) {
-        SetWindowLongW(hwnd, GWL_STYLE, style & ~(WS_HSCROLL | WS_VSCROLL));
-    }
-}
-#endif
-
 static void MakeFullScrollbar(CanvasScrollInfo& si) {
     si.nPos = 0;
     si.nMin = 0;
@@ -1045,23 +1027,6 @@ void CanvasUpdateScrollbars(MainWindow* win, DisplayModel* dm, Size canvas) {
     // orig's OverlayScrollbarSetInfo: a changed position re-reveals the bar
     OverlayScrollbarsNotifyScroll(win);
     AppShellInvalidate(win);
-#if OS_WIN
-    // Tests read the canvas scroll with GetScrollInfo. gpui has no scroll
-    // styles; publish the range and strip the styles SetScrollInfo adds.
-    // The window they query is the pixel mirror, not the frame.
-    HWND hwnd = AppShellNativeHwnd(win);
-    if (hwnd) {
-        PublishScrollInfo(hwnd, SB_HORZ, win->scrollH);
-        PublishScrollInfo(hwnd, SB_VERT, win->scrollV);
-        if (HWND canvas = TestingCanvasHwnd(hwnd)) {
-            WriteScrollInfo(canvas, SB_HORZ, win->scrollH);
-            WriteScrollInfo(canvas, SB_VERT, win->scrollV);
-            // SetWindowLong would leave the mirror client shrunk. Hiding the
-            // bars restores it and keeps the range GetScrollInfo just stored.
-            ShowScrollBar(canvas, SB_BOTH, FALSE);
-        }
-    }
-#endif
 }
 
 // what SetScrollInfo would have clamped the new position to
@@ -1083,6 +1048,10 @@ void CanvasHideScrollbars(MainWindow* win) {
 }
 
 int CanvasScrollPosV(MainWindow* win) {
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    if (dm && dm->ScrollFollowsRotation()) {
+        return dm->ContentScrollPos();
+    }
     return win->scrollV.nPos;
 }
 
@@ -1247,6 +1216,43 @@ void CanvasOnVScroll(MainWindow* win, ScrollMsg msg, int nTrackPos) {
             OnDocumentVerticalScrollIntent(win, scrollDown);
         }
         return;
+    }
+
+    // Page Up/Down follow the rotated stack. Arrow keys stay on this scrollbar.
+    if (dm->ScrollFollowsRotation() && msg != ScrollMsg::LineUp && msg != ScrollMsg::LineDown &&
+        msg != ScrollMsg::ThumbTrack) {
+        bool handled = true;
+        int span = dm->ContentScrollHorizontal() ? dm->GetViewPort().dx : dm->GetViewPort().dy;
+        switch (msg) {
+            case ScrollMsg::Top:
+                dm->ScrollContentToEdge(false);
+                break;
+            case ScrollMsg::Bottom:
+                dm->ScrollContentToEdge(true);
+                break;
+            case ScrollMsg::PageUp:
+                dm->ScrollContentBy(-span, false);
+                break;
+            case ScrollMsg::PageDown:
+                dm->ScrollContentBy(span, false);
+                break;
+            case ScrollMsg::HalfPageUp:
+                dm->ScrollContentBy(-span / 2, false);
+                break;
+            case ScrollMsg::HalfPageDown:
+                dm->ScrollContentBy(span / 2, false);
+                break;
+            default:
+                handled = false;
+                break;
+        }
+        if (handled) {
+            if (scrollDown || scrollUp) {
+                OnDocumentVerticalScrollIntent(win, scrollDown);
+            }
+            ReadAloudOnUserViewChanged(win);
+            return;
+        }
     }
 
     int currPos = si.nPos;
@@ -1510,7 +1516,7 @@ static bool RefHoverTakesWheel(MainWindow* win, int delta, bool isCtrl, bool isS
         return false;
     }
     if (isCtrl) {
-        RefHoverWheelZoom(s, dm->GetEngine(), delta);
+        RefHoverWheelZoom(s, dm->GetEngine(), delta, kRefHoverNoAnchor);
     } else {
         RefHoverWheelScroll(s, dm->GetEngine(), delta);
     }
@@ -1641,13 +1647,25 @@ static void CanvasOnMouseWheel(MainWindow* win, int delta, bool isCtrl, bool isS
         if (scrollBy == 0) {
             return;
         }
-        if (hScroll) {
+        if (dm->ScrollFollowsRotation()) {
+            if (hScroll && dm->ContentScrollHorizontal()) {
+                dm->ScrollYBy(scrollBy, false);
+            } else if (hScroll) {
+                dm->ScrollXBy(scrollBy);
+            } else {
+                dm->ScrollContentBy(scrollBy, gSettings->scrollEdgeTurnsPage);
+            }
+        } else if (hScroll) {
             dm->ScrollXBy(scrollBy);
         } else {
             dm->ScrollYBy(scrollBy, gSettings->scrollEdgeTurnsPage);
         }
         if (ScrollbarsUseOverlay()) {
-            OverlayScrollbarNotifyScroll(hScroll ? win->overlayScrollH : win->overlayScrollV);
+            bool notifyH = hScroll;
+            if (dm->ScrollFollowsRotation() && dm->ContentScrollHorizontal()) {
+                notifyH = !hScroll;
+            }
+            OverlayScrollbarNotifyScroll(notifyH ? win->overlayScrollH : win->overlayScrollV);
         }
         ReadAloudOnUserViewChanged(win);
         return;
@@ -1669,6 +1687,36 @@ static void CanvasOnMouseWheel(MainWindow* win, int delta, bool isCtrl, bool isS
     }
 
     win->wheelAccumDelta += delta;
+    // Unshifted wheel follows the rotated stack. Shift+wheel stays the other axis.
+    if (dm && dm->ScrollFollowsRotation() && (!hScroll || dm->ContentScrollHorizontal())) {
+        int line = DpiScale(ScrollLineAmount(gSettings->scrollLineAmount));
+        bool crossY = hScroll && dm->ContentScrollHorizontal();
+        if (win->wheelAccumDelta < 0) {
+            while (win->wheelAccumDelta <= -gDeltaPerLine) {
+                if (crossY) {
+                    dm->ScrollYBy(line, false);
+                } else {
+                    dm->ScrollContentBy(line, false);
+                }
+                win->wheelAccumDelta += gDeltaPerLine;
+            }
+        } else {
+            while (win->wheelAccumDelta >= gDeltaPerLine) {
+                if (crossY) {
+                    dm->ScrollYBy(-line, false);
+                } else {
+                    dm->ScrollContentBy(-line, false);
+                }
+                win->wheelAccumDelta -= gDeltaPerLine;
+            }
+        }
+        if (ScrollbarsUseOverlay()) {
+            bool contentH = dm->ContentScrollHorizontal() && !crossY;
+            OverlayScrollbarNotifyScroll(contentH ? win->overlayScrollH : win->overlayScrollV);
+        }
+        ReadAloudOnUserViewChanged(win);
+        return;
+    }
     // while a smooth scroll runs the view lags the target, so "did this notch
     // move anything" has to ask the target (orig's WheelScrollPosOrTarget)
     int prevScrollPos = WheelScrollPosOrTarget(win);
@@ -1733,14 +1781,14 @@ static void CanvasOnMouseWheel(MainWindow* win, int delta, bool isCtrl, bool isS
     Ui(win)->wheelDidTurnPage = true;
 }
 
-// A wheel sent straight at the frame (a test, or a point outside the client)
-// never hit-tests an element. Orig delivers that message to the canvas window.
-void DocCanvasPostedWheel(MainWindow* win, int delta, bool isCtrl, bool isShift) {
+// A wheel over the frame's caption or border never hit-tests an element.
+// Orig delivers that message to the canvas window.
+void DocCanvasFrameWheel(MainWindow* win, int delta, bool isCtrl, bool isShift, bool isAlt) {
     if (!IsMainWindowValid(win) || !win->AsFixed()) {
         return;
     }
     gInMouseWheelScroll = true;
-    CanvasOnMouseWheel(win, delta, isCtrl, isShift, false, Point{1, 1});
+    CanvasOnMouseWheel(win, delta, isCtrl, isShift, isAlt, Point{1, 1});
     gInMouseWheelScroll = false;
     AppShellInvalidate(win);
 }
@@ -1994,6 +2042,16 @@ static void OnSetCursorMouseNone(MainWindow* win, Point pt) {
 static void OnSetCursor(MainWindow* win, Point pt) {
     if (win->mouseAction != MouseAction::None) {
         DeleteLinkTooltip(win);
+    }
+    if (DisplayModel* dm = win->AsFixed()) {
+        bool allow = PageGridDragActive() || IsPageGridDialogOpen() || gAltPressed;
+        PageGridAxis axis = PageGridCursorAxis(dm, pt.x, pt.y, allow);
+        if (axis != PageGridAxis::None) {
+            int cur = axis == PageGridAxis::Height ? (int)gp::CursorKind::RowResize : (int)gp::CursorKind::ColResize;
+            CanvasSetCursor(win, cur);
+            DeleteLinkTooltip(win);
+            return;
+        }
     }
     if (ReadingBarOnSetCursor(win, pt.x, pt.y)) {
         DeleteLinkTooltip(win);
@@ -2550,6 +2608,11 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y) {
     if (AnnotationPlacementOnLeftDown(win, Point{x, y}, CanvasShiftPressed(), CanvasCtrlPressed())) {
         return;
     }
+    // Configure Page Grid is open, or Alt is held: a press on a grid line
+    // resizes that cell instead of selecting text.
+    if ((IsPageGridDialogOpen() || gAltPressed) && PageGridDragStart(win->AsFixed(), x, y)) {
+        return;
+    }
     if (IsRightDragging(win)) {
         return;
     }
@@ -2770,7 +2833,9 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y) {
     }
 #endif
 
-    bool startDrag = !canCopy || ((isShift || !isOverText) && !isCtrl);
+    // DisableLeftDragPan: where there's no text, a drag selects instead of panning (#6444)
+    bool panOffText = !gSettings->disableLeftDragPan;
+    bool startDrag = !canCopy || ((isShift || (!isOverText && panOffText)) && !isCtrl);
     logf("OnMouseLeftButtonDown: %d,%d overText %d ctrl %d shift %d -> %s\n", x, y, isOverText ? 1 : 0, isCtrl ? 1 : 0,
          isShift ? 1 : 0, startDrag ? StrL("drag") : StrL("select"));
     if (startDrag) {
@@ -2797,6 +2862,10 @@ static bool OnMouseLeftButtonDblClk(MainWindow* win, int x, int y) {
     }
     if (win->pressOnlyDeselected) {
         win->pressOnlyDeselected = false;
+        // the first click deselected another annotation; free text still edits (#6387)
+        if (!IsPlacingHighlighterAnnotation(win) && StartFreeTextInPlaceEditAt(win, Point{x, y})) {
+            return true;
+        }
         // gpui counts the next click here as a double-click. Orig still gets a
         // WM_LBUTTONDOWN, which selects or deselects on its own.
         return false;
@@ -2899,6 +2968,11 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y) {
         return;
     }
     if (AnnotationPlacementOnLeftUp(win, Point{x, y}, CanvasShiftPressed())) {
+        return;
+    }
+    if (PageGridDragActive()) {
+        PageGridDragMove(dm, x, y);
+        PageGridDragEnd();
         return;
     }
     // ng: orig's press that only deselected leaves no mouse action behind; the
@@ -3023,7 +3097,7 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y) {
 
     // Mouse-down hit testing gives up when text extraction holds the page
     // lock. The move before this click started that extraction.
-    if (!link && !gSettings->disableLinks) {
+    if (!link && !gSettings->disableLinks && dm->ValidPageNo(pageNo)) {
         IPageElement* again = EngineMupdfElementAtPosWait(dm->GetEngine(), pageNo, ptPage);
         if (again && again->Is(kindPageElementDest)) {
             link = again;
@@ -3073,6 +3147,13 @@ static void OnMouseLeftButtonUp(MainWindow* win, int x, int y) {
             if (newWin && newWin->IsDocLoaded()) {
                 newWin->linkHandler->ScrollTo(dest);
             }
+            AppShellInvalidate(win);
+            return;
+        }
+
+        // an EPUB footnote link shows the note in a popup instead of jumping to it
+        if (dest && dest->isNoteRef &&
+            RefHoverShowNoteRef(win->refHover, win, win->ctrl, win->linkHandler, dm, x, y, link)) {
             AppShellInvalidate(win);
             return;
         }
@@ -3154,6 +3235,11 @@ void DocCanvasClick(MainWindow* win, int x, int y) {
 
 // orig's CancelDrag: Escape abandons whatever the mouse was doing
 void CanvasCancelDrag(MainWindow* win) {
+    if (PageGridDragActive()) {
+        PageGridDragCancel();
+        CanvasSetCursor(win, kCurArrow);
+        return;
+    }
     Point pt = win->dragPrevPos;
     if (StopAnnotationResize(win, true)) {
         win->mouseAction = MouseAction::None;
@@ -3189,6 +3275,13 @@ static void OnMouseMove(MainWindow* win, int x, int y) {
     }
     DisplayModel* dm = win->AsFixed();
     if (!dm) {
+        return;
+    }
+    if (PageGridDragActive()) {
+        PageGridDragMove(dm, x, y);
+        PageGridAxis axis = PageGridCursorAxis(dm, x, y, true);
+        int cur = axis == PageGridAxis::Height ? (int)gp::CursorKind::RowResize : (int)gp::CursorKind::ColResize;
+        CanvasSetCursor(win, cur);
         return;
     }
     // orig's presentation branch: the cursor comes back when the mouse moves
@@ -3568,79 +3661,6 @@ static void OnWindowContextMenu(MainWindow* win, gp::Ctx* cx, int x, int y) {
     OpenPopupMenuAt(cx, ui->ctxPopup, (float)x * k, (float)y * k);
 }
 
-#if OS_WIN
-// A posted WM_CONTEXTMENU looks for a Win32 popup (#32768) and types its
-// access key. A gpui menu is not that window.
-static HMENU HmenuFromModel(MenuModel* m) {
-    if (!m) {
-        return nullptr;
-    }
-    HMENU menu = CreatePopupMenu();
-    for (MenuItemModel& it : m->items) {
-        if (it.separator) {
-            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            continue;
-        }
-        UINT flags = MF_STRING;
-        if (it.disabled) {
-            flags |= MF_GRAYED;
-        }
-        if (it.checked) {
-            flags |= MF_CHECKED;
-        }
-        WStr label = len(it.accel) > 0 ? ToWStrTemp(fmt("%s\t%s", it.title, it.accel)) : ToWStrTemp(it.title);
-        if (it.submenu) {
-            AppendMenuW(menu, flags | MF_POPUP, (UINT_PTR)HmenuFromModel(it.submenu), label.s);
-            continue;
-        }
-        AppendMenuW(menu, flags, (UINT_PTR)it.cmdId, label.s);
-    }
-    return menu;
-}
-
-void DocCanvasOnWmContextMenu(MainWindow* win, int screenX, int screenY) {
-    if (!IsMainWindowValid(win) || !win->AsFixed()) {
-        return;
-    }
-    HWND hwnd = AppShellNativeHwnd(win);
-    if (!hwnd) {
-        return;
-    }
-    POINT sp{(LONG)screenX, (LONG)screenY};
-    if (screenX == -1 && screenY == -1) {
-        GetCursorPos(&sp);
-    }
-    POINT client = sp;
-    ScreenToClient(hwnd, &client);
-    float k = CanvasScale(win);
-    Point doc;
-    ToDoc(win, (float)client.x * k, (float)client.y * k, &doc);
-    if (doc.x < 0) {
-        doc.x = 0;
-    }
-    if (doc.y < 0) {
-        doc.y = 0;
-    }
-
-    MenuModel* model = BuildWindowContextMenu(win, doc);
-    if (!model) {
-        return;
-    }
-    HMENU popup = HmenuFromModel(model);
-    int cmdId = (int)TrackPopupMenu(popup, TPM_RETURNCMD | TPM_RIGHTBUTTON, sp.x, sp.y, 0, hwnd, nullptr);
-    DestroyMenu(popup);
-    DeleteMenuModel(model);
-    if (!IsMainWindowValidAndNotClosing(win)) {
-        return;
-    }
-    if (cmdId == 0) {
-        win->contextMenuHighlightPageNo = 0;
-        return;
-    }
-    WindowContextMenuCommand(win, cmdId);
-}
-#endif
-
 void DocCanvasContextMenuFromKey(MainWindow* win, gp::Ctx* cx) {
     if (!IsMainWindowValid(win) || !win->AsFixed() || !cx->win) {
         return;
@@ -3850,6 +3870,7 @@ void DocCanvasView::OnMove(DocCanvasView* self, gp::Ctx* cx, const gp::MouseMove
     // orig's canvas does the same: the overlay toolbar shows while the cursor
     // is in the band at the top (or bottom) of the canvas
     UpdateOverlayToolbarForMouse(win, Point{(int)ev->x, (int)ev->y});
+    AppShellSidebarCanvasMove(win, ev);
     OverlayScrollbarsOnMouse(win, pt.x, pt.y, onCanvas);
     if (!onCanvas && win->mouseAction == MouseAction::None) {
         // the laser dot and the presentation auto-hide only own the canvas

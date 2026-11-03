@@ -713,6 +713,32 @@ void EditSetPasswordVisible(HWND hwnd, bool show) {
     HwndInvalidate(hwnd, true);
 }
 
+// Ctrl+Backspace reaches an edit as WM_CHAR 0x7F, which it would insert as a box.
+// Call on WM_CHAR: for 0x7F, deletes the selection or the word before the caret.
+bool EditHandleCtrlBack(HWND hwnd, WPARAM ch) {
+    constexpr WPARAM kCtrlBackChar = 0x7F;
+    if (!hwnd || ch != kCtrlBackChar) {
+        return false;
+    }
+    int selStart = 0;
+    int selEnd = 0;
+    EditGetSelection(hwnd, selStart, selEnd);
+    if (selStart == selEnd) {
+        // "foo bar  |" => "foo |"
+        TempWStr text = HwndGetTextWTemp(hwnd);
+        selStart = std::min(selStart, len(text));
+        for (; selStart > 0 && wstr::IsWs(text.s[selStart - 1]); selStart--) {
+            ;
+        }
+        for (; selStart > 0 && !wstr::IsWs(text.s[selStart - 1]); selStart--) {
+            ;
+        }
+        EditSelectText(hwnd, selStart, selEnd);
+    }
+    SendMessageW(hwnd, WM_CLEAR, 0, 0);
+    return true;
+}
+
 //--- list box
 
 int LbAddString(HWND hwnd, WStr text) {
@@ -1250,13 +1276,15 @@ static HWND GetClipboardOwnerWnd() {
 // --- end: merged from former src/common/win_util.cpp ---
 
 // OpenClipboard fails when another process still holds it (Explorer, a just-
-// exited Set-Clipboard). Retry briefly rather than silently dropping the copy.
+// exited Set-Clipboard, rdpclip syncing a change). Retry rather than silently
+// dropping the copy.
 bool OpenClipboardForUpdate() {
+    constexpr int kTries = 100; // 2 secs
     HWND owner = GetClipboardOwnerWnd();
     if (!owner) {
         return false;
     }
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < kTries; i++) {
         if (OpenClipboard(owner)) {
             if (EmptyClipboard()) {
                 return true;
@@ -1475,6 +1503,27 @@ bool IsShiftPressed() {
 
 bool IsAltPressed() {
     return IsKeyPressed(VK_MENU);
+}
+
+// a path the next Save As takes instead of showing the dialog: tests set it
+// through the control channel, so no script has to drive the system dialog
+static WStr gTestSaveFileName;
+
+void SetTestSaveFileName(Str path) {
+    wstr::Free(gTestSaveFileName);
+    gTestSaveFileName = len(path) > 0 ? ToWStr(path) : WStr{};
+}
+
+// call before GetSaveFileNameW: true when a test's path was put in ofn
+bool TakeTestSaveFileName(OPENFILENAMEW* ofn) {
+    if (len(gTestSaveFileName) == 0 || !ofn || !ofn->lpstrFile || ofn->nMaxFile == 0) {
+        return false;
+    }
+    int n = std::min(len(gTestSaveFileName), (int)ofn->nMaxFile - 1);
+    memcpy(ofn->lpstrFile, gTestSaveFileName.s, n * sizeof(WCHAR));
+    ofn->lpstrFile[n] = 0;
+    SetTestSaveFileName({});
+    return true;
 }
 
 bool IsCtrlPressed() {

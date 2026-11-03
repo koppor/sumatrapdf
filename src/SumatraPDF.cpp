@@ -43,6 +43,8 @@
 #include "DocController.h"
 #include "EngineBase.h"
 #include "EngineAll.h"
+#include "EutlTrust.h"
+#include "SignatureUI.h"
 #include "PdfDarkMode.h"
 #include "Annotation.h"
 #include "FormFields.h"
@@ -117,6 +119,7 @@
 #include "GoogleLens.h"
 #include "CommandPalette.h"
 #include "SumatraDialogs.h"
+#include "BrightnessContrastDialog.h"
 #include "NavFilesInFolder.h"
 #include "Installer.h"
 #include "RegistryPreview.h"
@@ -171,6 +174,15 @@ bool SettingsUseTabs() {
 
 static bool SettingsRestoreSession() {
     return gSettings->restoreSession && !gMyWindowWasEmbedded && !gForTesting;
+}
+
+// Page Up/Down decide "did it move" from the content axis when the stack follows rotation.
+static int PageScrollPos(MainWindow* win) {
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    if (dm && dm->ScrollFollowsRotation()) {
+        return dm->ContentScrollPos();
+    }
+    return GetScrollPos(win->hwndCanvas, SB_VERT);
 }
 
 bool SettingsRememberOpenedFiles() {
@@ -239,6 +251,7 @@ static void CloseDocumentInCurrentTab(MainWindow* /*win*/, bool keepUIEnabled, b
 static void SetFrameTitleForTab(WindowTab* tab, bool needRefresh);
 static void OnSidebarSplitterMove(VirtSplitter::MoveEvent* /*ev*/);
 static void OnPanelsSplitterMove(VirtSplitter::MoveEvent* /*ev*/);
+static void OnMiddleSplitterMove(VirtSplitter::MoveEvent* /*ev*/);
 
 // the per-document settings to hand to a load running off the UI thread
 static FileEBookUI* CopyFileEBookUIForPath(Str filePath) {
@@ -530,7 +543,51 @@ class HwndPasswordUI : public PasswordUI {
     explicit HwndPasswordUI(HWND hwnd) : hwnd(hwnd), pwdIdx(0) {}
 
     Str GetPassword(Str path, u8* fileDigest, u8 decryptionKeyOut[32], bool* saveKey) override;
+    bool ConfirmCaj2pdfDownload() override;
 };
+
+constexpr int kBtnIdDownloadCaj2pdf = 100;
+
+// runs on the load thread, like the password dialog
+bool HwndPasswordUI::ConfirmCaj2pdfDownload() {
+    if (gSettings->noCaj2pdfConverterDownload || IsStressTesting() || !hwnd || !IsWindow(hwnd)) {
+        return false;
+    }
+
+    TASKDIALOG_BUTTON buttons[2];
+    buttons[0].nButtonID = kBtnIdDownloadCaj2pdf;
+    buttons[0].pszButtonText = CWStrTemp(Tr("&Download caj2pdf"));
+    buttons[1].nButtonID = IDCANCEL;
+    buttons[1].pszButtonText = CWStrTemp(Tr("&Cancel"));
+
+    DWORD flags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+    if (trans::IsCurrLangRtl()) {
+        flags |= TDF_RTL_LAYOUT;
+    }
+    TASKDIALOGCONFIG cfg{};
+    cfg.cbSize = sizeof(cfg);
+    cfg.hwndParent = hwnd;
+    cfg.dwFlags = (TASKDIALOG_FLAGS)flags;
+    cfg.pszWindowTitle = CWStrTemp(Tr("Download caj2pdf"));
+    cfg.pszMainInstruction = CWStrTemp(Tr("Opening CAJ files needs the caj2pdf converter"));
+    cfg.pszMainIcon = TD_INFORMATION_ICON;
+    cfg.cButtons = dimof(buttons);
+    cfg.pButtons = buttons;
+    cfg.nDefaultButton = kBtnIdDownloadCaj2pdf;
+    cfg.pszVerificationText = CWStrTemp(Tr("Do&n't ask again"));
+
+    int pressed = 0;
+    BOOL dontAsk = FALSE;
+    HRESULT hr = TaskDialogIndirect(&cfg, &pressed, nullptr, &dontAsk);
+    if (hr == S_OK && pressed == kBtnIdDownloadCaj2pdf) {
+        return true;
+    }
+    if (hr == S_OK && dontAsk) {
+        gSettings->noCaj2pdfConverterDownload = true;
+        uitask::Post(MkFunc0Void(ScheduleSaveSettings), "SaveNoCaj2pdfDownload");
+    }
+    return false;
+}
 
 /* Get password for a given path, can be nullptr if user cancelled the
    dialog box or if the encryption key has been filled in instead.
@@ -769,6 +826,9 @@ static void UpdateWindowRtlLayout(MainWindow* win) {
         SetSidebarVisibility(win, topVisible, bottomVisible);
         if (topVisible) {
             SendMessageW(win->sidebarTop->hwnd, WM_SIZE, 0, 0);
+        }
+        if (win->uiState.sidebarMiddleVisible) {
+            SendMessageW(win->sidebarMiddle->hwnd, WM_SIZE, 0, 0);
         }
         if (bottomVisible) {
             SendMessageW(win->sidebarBottom->hwnd, WM_SIZE, 0, 0);
@@ -1134,7 +1194,7 @@ static bool WinScrollBarHasClientGap(HWND hwnd, int bar) {
 // If the bit is already on but the bar was never laid out (hidden restore),
 // hide then show so WM_NCCALCSIZE runs. ShowScrollBar(TRUE) alone does not
 // layout when the bit is already set.
-static void ShowWinScrollBar(HWND hwnd, int bar, BOOL show) {
+void ShowWinScrollBar(HWND hwnd, int bar, BOOL show) {
     DWORD bit = (bar == SB_HORZ) ? WS_HSCROLL : WS_VSCROLL;
     DWORD style = (DWORD)GetWindowLongW(hwnd, GWL_STYLE);
     bool isShown = (style & bit) != 0;
@@ -1625,6 +1685,10 @@ bool OpenDocumentFromMemory(MainWindow* win, Str data, Str nameHint) {
 
 static void SetFrameTitleForTab(WindowTab* tab, bool needRefresh) {
     Str titlePath = tab->displayName ? Str(tab->displayName) : tab->filePath;
+    // the Home tab has no file; name it like its tab (issue #6367)
+    if (tab->IsAboutTab()) {
+        titlePath = StrL("Home");
+    }
     TempStr embeddedFileName = ParseEmbeddedPdfName(titlePath).fileName;
     if (embeddedFileName) {
         titlePath = embeddedFileName;
@@ -1687,6 +1751,9 @@ static void UpdateUiForCurrentTab(MainWindow* win) {
 
     UpdateFindbox(win);
 
+    if (win->CurrentTab()->IsAboutTab()) {
+        SetFrameTitleForTab(win->CurrentTab(), false);
+    }
     HwndSetText(win->hwndFrame, win->CurrentTab()->frameTitle);
 
     bool onlyNumbers = !win->ctrl || !win->ctrl->HasPageLabels();
@@ -1728,7 +1795,7 @@ static bool ShouldUsePageAspectForView(Str path) {
     }
     FileType ft = GuessFileTypeFromName(path, true);
     return ft == FileType::PDF || ft == FileType::Xps || ft == FileType::DjVu || ft == FileType::PS ||
-           ft == FileType::Dvi;
+           ft == FileType::Dvi || ft == FileType::Caj;
 }
 
 static void ApplyPageAspectView(EngineBase* engine, DisplayMode* modeOut, float* zoomOut) {
@@ -1786,6 +1853,27 @@ static void FinishPendingDocumentRelayout(MainWindow* win) {
 // isNewWindow : if true then 'win' refers to a newly created window that needs
 //   to be resized and placed
 static void SetTabLoadError(WindowTab* tab, Str path);
+
+static void MaybeShowTemporaryFileNotification(MainWindow* win, WindowTab* tab);
+static void MaybeShowSignatureStatus(MainWindow* win, WindowTab* tab);
+
+// ShowThumbnailsIfNoToc: a document without bookmarks opens with page
+// thumbnails in the sidebar's top panel instead of no sidebar (#6407).
+// Bookmarks still being generated from headings count as bookmarks
+static bool OpensWithThumbnails(MainWindow* win, WindowTab* tab) {
+    if (!gSettings->showThumbnailsIfNoToc || !tab || win->presentation) {
+        return false;
+    }
+    // a top panel the user switched to favorites or thumbnails keeps that
+    if (tab->sidebarView != SidebarView::Bookmarks || !CanShowThumbnails(tab)) {
+        return false;
+    }
+    DisplayModel* dm = tab->AsFixed();
+    if (!dm || dm->PageCount() < 2 || EngineMupdfHeadingTocPending(dm->GetEngine())) {
+        return false;
+    }
+    return !win->ctrl->HasToc();
+}
 
 // placeWindow : if true then the Window will be moved/sized according
 //   to the 'state' information even if the window was already placed
@@ -1946,6 +2034,7 @@ static void ReplaceDocumentInCurrentTab(LoadArgs* args, DocController* ctrl, Fil
                 dm->SetUniformPageWidth(fs->uniformPageWidth);
                 dm->SetTrimEmptyMargins(fs->trimEmptyMargins);
                 dm->SetFreePan(fs->freePan);
+                dm->SetPageAdjust(fs->brightness, fs->contrast);
             }
             // migrate in place only. SaveSettings() here would rebuild
             // gInitialSessionData and free the TabState a lazily restored
@@ -2021,7 +2110,14 @@ static void ReplaceDocumentInCurrentTab(LoadArgs* args, DocController* ctrl, Fil
                     page = 1;
                 }
                 ss.page = page;
-                win->ctrl->GoToPage(page, false);
+                // same file (reload, session restore): keep its scroll position
+                bool hasScroll = fs && (fs->scrollPos.x > 0 || fs->scrollPos.y > 0);
+                if (hasScroll && path::IsSame(fs->filePath, win->ctrl->GetFilePath())) {
+                    RectF r(fs->scrollPos.x, fs->scrollPos.y, 0, 0);
+                    win->AsMarkdown()->ScrollTo(page, r, kInvalidZoom);
+                } else {
+                    win->ctrl->GoToPage(page, false);
+                }
             } else {
                 ss.page = limitValue(ss.page, 1, win->ctrl->PageCount());
                 if (fs) {
@@ -2141,7 +2237,13 @@ static void ReplaceDocumentInCurrentTab(LoadArgs* args, DocController* ctrl, Fil
     if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
+    if (OpensWithThumbnails(win, tab)) {
+        tab->sidebarView = SidebarView::Thumbnails;
+        showToc = true;
+    }
     SetSidebarVisibility(win, showToc, gSettings->showFavorites);
+    MaybeShowTemporaryFileNotification(win, tab);
+    MaybeShowSignatureStatus(win, tab);
     if (dm) {
         if (dm->pendingRelayout) {
             // canvas not yet sized; RelayoutFrame / ShowWindow WM_SIZE will
@@ -2420,7 +2522,8 @@ void FrameSyncSplitters(MainWindow* win) {
     if (win->captionLayout) {
         CollectVirtCtrls(win->captionLayout, tops);
     }
-    VirtSplitter* all[] = {win->sidebarSplitter, win->sidebarPanelsSplitter, win->aiChatSplitter};
+    VirtSplitter* all[] = {win->sidebarSplitter, win->sidebarPanelsSplitter, win->sidebarMiddleSplitter,
+                           win->aiChatSplitter};
     for (VirtSplitter* s : all) {
         if (s) {
             VecAppend(tops, s);
@@ -2518,6 +2621,7 @@ static void CreateCaptionLayout(MainWindow* win) {
 // they are simply collapsed.
 static void CreateFrameLayout(MainWindow* win) {
     win->sidebarTopSlot = new HwndSlot();
+    win->sidebarMiddleSlot = new HwndSlot();
     win->sidebarBottomSlot = new HwndSlot();
     win->favoritesTabSlot = new HwndSlot();
     win->canvasSlot = new HwndSlot();
@@ -2527,6 +2631,7 @@ static void CreateFrameLayout(MainWindow* win) {
     win->menuSlot = new HwndSlot();
     win->menuSlot->mapRtlX = true;
     win->toolbarTopSlot = new HwndSlot();
+    win->sigBarSlot = new HwndSlot();
     win->toolbarBottomSlot = new HwndSlot();
     CreateCaptionLayout(win);
 
@@ -2539,6 +2644,8 @@ static void CreateFrameLayout(MainWindow* win) {
     sidebar->alignCross = CrossAxisAlign::Stretch;
     sidebar->AddChild(win->sidebarTopSlot);
     sidebar->AddChild(win->sidebarPanelsSplitter);
+    sidebar->AddChild(win->sidebarMiddleSlot);
+    sidebar->AddChild(win->sidebarMiddleSplitter);
     sidebar->AddChild(win->sidebarBottomSlot, 1);
 
     // canvas and the Favorites tab share this box; only one HWND is shown
@@ -2561,6 +2668,7 @@ static void CreateFrameLayout(MainWindow* win) {
     chrome->AddChild(win->tabsSlot);
     chrome->AddChild(win->menuSlot);
     chrome->AddChild(win->toolbarTopSlot);
+    chrome->AddChild(win->sigBarSlot);
     chrome->AddChild(win->frameLayout, 1);
     chrome->AddChild(win->toolbarBottomSlot);
     win->chromeLayout = chrome;
@@ -2574,6 +2682,7 @@ static void CreateSidebar(MainWindow* win) {
     FrameSyncSplitters(win);
 
     win->sidebarTop = CreateSidebarPanel(win, SidebarPanelKind::Top);
+    win->sidebarMiddle = CreateSidebarPanel(win, SidebarPanelKind::Middle);
     win->sidebarBottom = CreateSidebarPanel(win, SidebarPanelKind::Bottom);
     win->favoritesTabPanel = CreateSidebarPanel(win, SidebarPanelKind::FavoritesTab);
     CreateToc(win);
@@ -2581,6 +2690,9 @@ static void CreateSidebar(MainWindow* win) {
     win->sidebarPanelsSplitter = NewFrameSplitter(SplitterType::Horiz, true);
     win->sidebarPanelsSplitter->thickness = kSplitterDy;
     win->sidebarPanelsSplitter->onMove = MkFunc1Void(OnPanelsSplitterMove);
+    win->sidebarMiddleSplitter = NewFrameSplitter(SplitterType::Horiz, true);
+    win->sidebarMiddleSplitter->thickness = kSplitterDy;
+    win->sidebarMiddleSplitter->onMove = MkFunc1Void(OnMiddleSplitterMove);
     FrameSyncSplitters(win);
 
     CreateFrameLayout(win);
@@ -2765,7 +2877,7 @@ static MainWindow* CreateMainWindow() {
     // is deferred to ShowMainWindow so the shell sees a normal frame during
     // the first ShowWindow and creates the taskbar button.
     {
-        bool inTitleBar = SettingsUseTabs();
+        bool inTitleBar = SettingsUseTabs() || !gSettings->showCaption;
         win->tabsInTitlebar = inTitleBar;
         win->tabsCtrl->inTitleBar = inTitleBar;
         if (inTitleBar) {
@@ -3106,6 +3218,11 @@ static TempStr FileLoadErrorReasonTemp(Str path) {
     HANDLE h = CreateFileW(pathW, GENERIC_READ, share, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h != INVALID_HANDLE_VALUE) {
         CloseHandle(h);
+        // the file is fine as far as we know: it's the converter that failed
+        TempStr cajReason = CajErrorReasonTemp(path);
+        if (len(cajReason) > 0) {
+            return cajReason;
+        }
         return str::DupTemp(Tr("The file format is not supported or the file is damaged"));
     }
     DWORD err = GetLastError();
@@ -3134,6 +3251,7 @@ static void SetTabLoadError(WindowTab* tab, Str path) {
     tab->loadState = WindowTab::LoadState::Error;
     str::Free(tab->loadErrorReason);
     tab->loadErrorReason = str::Dup(FileLoadErrorReasonTemp(path));
+    logf("SetTabLoadError: '%s': %s\n", path, tab->loadErrorReason);
     // the tab title paints in red while in error state
     UpdateTabIsError(tab);
 }
@@ -3162,6 +3280,9 @@ static void ShowLoadErrorInTab(MainWindow* win, LoadArgs* args, Str path) {
         if (tab && tab->IsAboutTab()) {
             tab = nullptr;
         }
+    }
+    if (!tab && !args->forceNewWindow) {
+        tab = HomeTabToReuse(win);
     }
     bool isNewTab = false;
     if (!tab && win->tabsCtrl && !gPluginMode) {
@@ -3243,6 +3364,10 @@ MainWindow* LoadDocumentFinish(LoadArgs* args) {
 
     bool openNewTab = SettingsUseTabs() && !args->forceReuse;
     ReportIf(openNewTab && args->forceReuse);
+    if (!targetTab && openNewTab) {
+        targetTab = HomeTabToReuse(win);
+        args->targetTab = targetTab;
+    }
 
     // Clear any tip from the previous document/tab (LoadModelIntoTab also does
     // this on tab switch; cover the first open / about-page case here too).
@@ -3457,7 +3582,7 @@ static bool gLoadQueueDispatchPosted = false;
 static UINT_PTR gLoadingMessageTimer = 0;
 
 bool AreLoadThreadsActive() {
-    return gLoadThreadsActive > 0;
+    return gLoadThreadsActive > 0 || AreThumbnailThreadsActive();
 }
 
 bool HasPendingDocumentLoads() {
@@ -3899,14 +4024,18 @@ void StartLoadDocument(LoadArgs* argsIn) {
             SaveCurrentWindowTab(win);
             CloseDocumentInCurrentTab(win, true, false);
         }
-        WindowTab* tab = new WindowTab(win);
+        WindowTab* homeTab = HomeTabToReuse(win);
+        WindowTab* tab = homeTab ? homeTab : new WindowTab(win);
         tab->SetFilePath(path);
         tab->SetDisplayName(argsIn->DisplayName());
         tab->loadState = WindowTab::LoadState::Loading;
         tab->skipHistory = argsIn->skipHistory;
-        argsIn->targetTab = AddTabToWindow(win, tab);
+        argsIn->targetTab = homeTab ? homeTab : AddTabToWindow(win, tab);
         win->currentTabTemp = argsIn->targetTab;
         LoadModelIntoTab(argsIn->targetTab);
+        if (homeTab) {
+            TabsOnChangedDoc(win);
+        }
     } else if (argsIn->forceReuse && win->CurrentTab() && !win->IsCurrentTabAbout()) {
         // Reuse current tab (next/prev in folder, navigate dialog, etc.): drop the
         // old document immediately so the canvas paints the standard "Loading ..."
@@ -4044,18 +4173,26 @@ void StartLoadDocuments(StrVec& paths, MainWindow* win, bool skipHistory) {
         SaveCurrentWindowTab(win);
     }
 
+    WindowTab* homeTab = HomeTabToReuse(win);
     Vec<WindowTab*> tabs;
     for (int i = 0; i < len(pathsToLoad); i++) {
-        WindowTab* tab = new WindowTab(win);
+        // the first file takes over an extra Home tab, the others get tabs
+        WindowTab* tab = homeTab;
+        homeTab = nullptr;
+        bool isNewTab = !tab;
+        if (isNewTab) {
+            tab = new WindowTab(win);
+        }
         tab->SetFilePath(pathsToLoad[i]);
         tab->loadState = WindowTab::LoadState::Loading;
         tab->skipHistory = skipHistory;
         bool deferUpdate = i != len(pathsToLoad) - 1;
-        VecAppend(tabs, AddTabToWindow(win, tab, deferUpdate));
+        VecAppend(tabs, isNewTab ? AddTabToWindow(win, tab, deferUpdate) : tab);
     }
     WindowTab* visibleTab = tabs[0];
     win->tabsCtrl->SetSelected(win->GetTabIdx(visibleTab));
     LoadModelIntoTab(visibleTab);
+    TabsOnChangedDoc(win);
 
     for (int i = 0; i < len(pathsToLoad); i++) {
         LoadArgs args(pathsToLoad[i], win);
@@ -4069,6 +4206,12 @@ void StartLoadDocuments(StrVec& paths, MainWindow* win, bool skipHistory) {
 // exclusively to sync. Copy to our open-cache and load that instead (#4705).
 static void MaybeDetachEphemeralHostFile(LoadArgs* args) {
     Str path = args->FilePath();
+    // TemporaryFileAutoMove: open the copy in TemporaryFileDestDir (#6437)
+    TempStr permanent = MaybeAutoCopyTemporaryFile(path);
+    if (len(permanent) > 0) {
+        args->SetFilePath(permanent);
+        return;
+    }
     if (!path::IsEphemeralHostFile(path) || IsOpenCachePath(path)) {
         return;
     }
@@ -4866,8 +5009,10 @@ bool SaveAnnotationsToMaybeNewPdfFile(WindowTab* tab) {
 
     TempStr srcFileName = str::DupTemp(engine->FilePath());
     // Seed the dialog with "foo Copy.pdf" so Save doesn't overwrite the source
-    // unless the user deliberately picks the original name.
-    TempStr noExt = path::GetPathNoExtTemp(srcFileName);
+    // unless the user deliberately picks the original name. For our copy of an
+    // Outlook / OneNote attachment, just the name: not our cache folder (#6435)
+    TempStr seed = IsOpenCachePath(srcFileName) ? path::GetBaseNameTemp(srcFileName) : srcFileName;
+    TempStr noExt = path::GetPathNoExtTemp(seed);
     TempStr ext = path::GetExtTemp(srcFileName);
     TempStr suggested = fmt("%s Copy%s", noExt, ext);
     TempWStr suggestedW = ToWStrTemp(suggested);
@@ -4884,7 +5029,7 @@ bool SaveAnnotationsToMaybeNewPdfFile(WindowTab* tab) {
     ofn.lpstrDefExt = L".pdf";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
 
-    bool ok = GetSaveFileNameW(&ofn);
+    bool ok = (TakeTestSaveFileName(&ofn) || GetSaveFileNameW(&ofn));
     if (!ok) {
         return false;
     }
@@ -5184,6 +5329,8 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
         return;
     }
 
+    // closing a Home tab isn't "the last document is gone": see below
+    bool closedHome = tab->IsAboutTab();
     int tabCount = win->TabCount();
     if (tabCount == 1 || (tabCount == 0 && quitIfLast)) {
         if (CanCloseWindow(win)) {
@@ -5218,7 +5365,7 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
 
     tabCount = win->TabCount();
     WindowTab* lastTab = (tabCount == 1) ? win->GetTab(0) : nullptr;
-    if (lastTab && lastTab->type == WindowTab::Type::About) {
+    if (lastTab && lastTab->type == WindowTab::Type::About && !closedHome) {
         // showing only home page tab so remove it
         // if there are other windows, close this one
         if (len(gWindows) > 1) {
@@ -5494,7 +5641,7 @@ static void SaveCurrentFileAs(MainWindow* win) {
     // picks a reasonable default (in particular, we don't want this
     // in plugin mode, which is likely the main reason for saving as...)
 
-    bool ok = GetSaveFileNameW(&ofn);
+    bool ok = (TakeTestSaveFileName(&ofn) || GetSaveFileNameW(&ofn));
     if (!ok) {
         // GetSaveFileNameW() returns FALSE both on user cancellation (extended
         // error == 0) and on an actual failure such as a path that is too long
@@ -5537,8 +5684,9 @@ static bool SaveDocAs(MainWindow* win, Str dstPath) {
     EngineBase* engine = dm ? dm->GetEngine() : nullptr;
 
     TempStr realDstFileName = str::DupTemp(dstPath);
-    bool convertedAsPdf = engine && str::EndsWithI(realDstFileName, StrL(".pdf")) &&
-                          (engine->kind == kindEnginePostScript || engine->kind == kindEngineDvi);
+    bool convertedAsPdf =
+        engine && str::EndsWithI(realDstFileName, StrL(".pdf")) &&
+        (engine->kind == kindEnginePostScript || engine->kind == kindEngineDvi || engine->kind == kindEngineCaj);
 
     // Make sure that the file has a valid extension
     Str defExt = ctrl->GetDefaultFileExt();
@@ -5727,6 +5875,184 @@ static void DeleteCurrentFile(MainWindow* win) {
 
 static bool RenameCurrentFileTo(MainWindow* win, Str dstFilePath);
 
+Kind kNotifTemporaryFile = "notifTemporaryFile";
+
+static void OnTemporaryFileNotifClosed(NotificationClosedEvent* ev) {
+    // closing it means "don't tell me again"
+    if (ev->reason == NotifCloseReason::User) {
+        gSettings->temporaryFileShowNotification = false;
+        ScheduleSaveSettings();
+    }
+    RemoveNotification(ev->wnd);
+}
+
+struct SigStatusJob {
+    WindowTab* tab = nullptr;
+    EngineBase* engine = nullptr;
+    PdfSigResult* res = nullptr;
+};
+
+static void OnSigStatusDone(SigStatusJob* job) {
+    WindowTab* tab = job->tab;
+    EngineBase* engine = job->engine;
+    PdfSigResult* res = job->res;
+    delete job;
+    defer {
+        engine->Release();
+    };
+    if (!IsWindowTabValid(tab) || !tab->AsFixed() || tab->AsFixed()->GetEngine() != engine) {
+        delete res;
+        return;
+    }
+    // a reload: the bar stays closed if it was
+    if (tab->signatures) {
+        res->barDismissed = tab->signatures->barDismissed;
+    }
+    delete tab->signatures;
+    tab->signatures = res;
+
+    MainWindow* win = tab->win;
+    if (!IsCurrentTab(win, tab)) {
+        return;
+    }
+    UpdateSignaturesCtrl(win);
+    ApplySidebarPanels(win);
+    SigBarUpdate(win);
+    ScheduleUiUpdate(win, kUiForceRelayout | kUiRelayout);
+    ScheduleRepaint(win, 0);
+}
+
+static void SigStatusThread(SigStatusJob* job) {
+    if (EutlNeedsUpdate()) {
+        EutlUpdate(nullptr);
+    }
+    job->res = EngineMupdfCheckSignatures(job->engine);
+    uitask::Post(MkFunc0<SigStatusJob>(OnSigStatusDone, job), "SigStatusDone");
+}
+
+// checks a signed document's signatures, for the bar, the sidebar view and the
+// marks. On a thread: it hashes the file and may update the EU list.
+static void MaybeShowSignatureStatus(MainWindow* win, WindowTab* tab) {
+    if (gPluginMode || !tab || !tab->AsFixed()) {
+        return;
+    }
+    EngineBase* engine = tab->AsFixed()->GetEngine();
+    if (!EngineMupdfIsPdf(engine) || EngineMupdfCountSignedSignatures(engine) == 0) {
+        delete tab->signatures;
+        tab->signatures = nullptr;
+        return;
+    }
+    EutlRegisterLookup();
+    auto* job = new SigStatusJob;
+    job->tab = tab;
+    job->engine = engine;
+    engine->AddRef();
+    RunAsync(MkFunc0<SigStatusJob>(SigStatusThread, job), StrL("SigStatus"));
+}
+
+// TemporaryFileShowNotification: say the document is from a temporary folder
+// and offer to copy it to a permanent one, once per file (#6437)
+static void MaybeShowTemporaryFileNotification(MainWindow* win, WindowTab* tab) {
+    if (!gSettings->temporaryFileShowNotification || gPluginMode || !CanAccessDisk() || !tab) {
+        return;
+    }
+    if (tab->temporaryFileNotified || !IsTemporaryFile(tab->filePath)) {
+        return;
+    }
+    tab->temporaryFileNotified = true;
+    NotificationCreateArgs args;
+    args.win = win;
+    args.groupId = kNotifTemporaryFile;
+    args.tab = tab;
+    args.corner = NotifCorner::BottomLeft;
+    args.timeoutMs = kNotifNoTimeout;
+    args.msg = fmt("%s ([%s](Help/Handling-temporary-files)). [%s](CmdCopyTemporaryFileToNonTemporary)",
+                   Tr("File from a temporary folder"), Tr("learn more"), Tr("Copy to a permanent folder"));
+    args.onClosed = MkFunc1Void(OnTemporaryFileNotifClosed);
+    ShowNotification(args);
+}
+
+static TempStr KnownFolderTemp(const KNOWNFOLDERID& id) {
+    PWSTR pathW = nullptr;
+    if (FAILED(SHGetKnownFolderPath(id, 0, nullptr, &pathW)) || !pathW) {
+        return {};
+    }
+    TempStr res = ToUtf8Temp(pathW);
+    CoTaskMemFree(pathW);
+    return res;
+}
+
+// asks for the folder temporary files are copied to, starting in Downloads
+// (or Documents)
+static TempStr AskTemporaryFileDestDirTemp(MainWindow* win) {
+    AutoReleaseComPtr<IFileOpenDialog> dlg;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg));
+    if (FAILED(hr) || !dlg) {
+        logf("AskTemporaryFileDestDirTemp: CoCreateInstance(CLSID_FileOpenDialog) failed: 0x%x\n", (uint)hr);
+        return {};
+    }
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+    dlg->SetTitle(CWStrTemp(Tr("Copy temporary files to")));
+    TempStr startDir = KnownFolderTemp(FOLDERID_Downloads);
+    if (!dir::Exists(startDir)) {
+        startDir = KnownFolderTemp(FOLDERID_Documents);
+    }
+    AutoReleaseComPtr<IShellItem> startItem;
+    if (len(startDir) > 0 &&
+        SUCCEEDED(SHCreateItemFromParsingName(CWStrTemp(startDir), nullptr, IID_PPV_ARGS(&startItem)))) {
+        dlg->SetFolder(startItem);
+    }
+    hr = dlg->Show(win->hwndFrame);
+    if (FAILED(hr)) {
+        return {};
+    }
+    AutoReleaseComPtr<IShellItem> result;
+    PWSTR pathW = nullptr;
+    if (FAILED(dlg->GetResult(&result)) || !result || FAILED(result->GetDisplayName(SIGDN_FILESYSPATH, &pathW))) {
+        return {};
+    }
+    TempStr res = ToUtf8Temp(pathW);
+    CoTaskMemFree(pathW);
+    return res;
+}
+
+// CmdCopyTemporaryFileToNonTemporary: copies the document from a temporary
+// folder to TemporaryFileDestDir (asked for when not set) and re-opens it from
+// there; its history entry moves along (#6437)
+static void CopyTemporaryFileToPermanent(MainWindow* win) {
+    if (!CanAccessDisk() || gPluginMode || !win->IsDocLoaded()) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    TempStr srcPath = str::DupTemp(tab->filePath);
+    if (!IsTemporaryFile(srcPath) || !file::Exists(srcPath)) {
+        return;
+    }
+    TempStr dir = TemporaryFileDestDirTemp();
+    if (len(dir) == 0) {
+        dir = AskTemporaryFileDestDirTemp(win);
+        if (len(dir) == 0) {
+            return;
+        }
+        str::ReplaceWithCopy(&gSettings->temporaryFileDestDir, dir);
+        ScheduleSaveSettings();
+    }
+    TempStr dstPath = CopyTemporaryFileTo(srcPath, dir);
+    if (len(dstPath) == 0) {
+        ShowWarningNotification(win, Tr("Failed to copy the file"), kNotif5SecsTimeOut);
+        return;
+    }
+    RemoveNotificationsForGroup(win, kNotifTemporaryFile);
+    UpdateTabFileDisplayStateForTab(tab);
+    RenameFileInHistory(srcPath, dstPath);
+    LoadArgs args(dstPath, win);
+    args.forceReuse = true;
+    LoadDocument(&args);
+    ShowPlainNotification(win, fmt("%s %s", Tr("Copied to"), dstPath), kNotif5SecsTimeOut);
+}
+
 static void RenameCurrentFile(MainWindow* win) {
     if (!CanAccessDisk()) {
         return;
@@ -5784,7 +6110,7 @@ static void RenameCurrentFile(MainWindow* win) {
     ofn.lpstrDefExt = defExtW.s + 1;
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
 
-    ok = GetSaveFileNameW(&ofn);
+    ok = (TakeTestSaveFileName(&ofn) || GetSaveFileNameW(&ofn));
     if (!ok) {
         return;
     }
@@ -5899,7 +6225,7 @@ static void CreateLnkShortcut(MainWindow* win) {
     ofn.lpstrDefExt = L"lnk";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
 
-    if (!GetSaveFileNameW(&ofn)) {
+    if (!(TakeTestSaveFileName(&ofn) || GetSaveFileNameW(&ofn))) {
         return;
     }
 
@@ -6478,9 +6804,10 @@ static bool IsUiLayoutEq(UILayout* s1, UILayout* s2) {
            s1->isFullScreen == s2->isFullScreen && s1->tabsVisible == s2->tabsVisible &&
            s1->isToolbarVisible == s2->isToolbarVisible && s1->isToolbarOverlay == s2->isToolbarOverlay &&
            s1->sidebarTopVisible == s2->sidebarTopVisible && s1->sidebarBottomVisible == s2->sidebarBottomVisible &&
-           s1->favoritesAsTab == s2->favoritesAsTab && s1->showMenuBarRebar == s2->showMenuBarRebar &&
+           s1->sidebarMiddleVisible == s2->sidebarMiddleVisible && s1->favoritesAsTab == s2->favoritesAsTab &&
+           s1->sigBarVisible == s2->sigBarVisible && s1->showMenuBarRebar == s2->showMenuBarRebar &&
            s1->aiChatVisible == s2->aiChatVisible && s1->aiChatDx == s2->aiChatDx &&
-           s1->sidebarOnRight == s2->sidebarOnRight;
+           s1->sidebarOnRight == s2->sidebarOnRight && s1->sidebarAutoHide == s2->sidebarAutoHide;
 }
 
 // Favorites-only must not reserve a tab row (issue #5861)
@@ -6611,6 +6938,26 @@ static void SyncCaptionLayout(MainWindow* win) {
     }
 }
 
+enum class CaptionUpdate {
+    Layout,
+    Mouse
+};
+
+static void UpdateCaptionOverlay(MainWindow* win, CaptionUpdate update);
+
+// SidebarAutoHide: a shown sidebar floats over the canvas instead of taking
+// its own column (#5819). Not over a Favorites tab, nor in presentation.
+static bool SidebarFloats(MainWindow* win) {
+    if (!gSettings->sidebarAutoHide || win->presentation) {
+        return false;
+    }
+    WindowTab* tab = win->CurrentTab();
+    if (tab && tab->IsFavoritesTab()) {
+        return false;
+    }
+    return win->uiState.sidebarTopVisible || win->uiState.sidebarBottomVisible;
+}
+
 static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     DpiSetFromHwnd(win->hwndFrame);
     Rect rc = HwndClientRect(win->hwndFrame);
@@ -6628,15 +6975,18 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     curState.isToolbarVisible = win->isToolbarVisible;
     curState.isToolbarOverlay = win->isToolbarOverlay;
     curState.sidebarTopVisible = win->uiState.sidebarTopVisible;
+    curState.sidebarMiddleVisible = win->uiState.sidebarMiddleVisible;
     bool favAsTabNow = win->CurrentTab() && win->CurrentTab()->IsFavoritesTab();
     // favoritesAsTab must differ so switching to and from the Favorites tab never
     // skips RelayoutFrame (otherwise the canvas stays hidden until another tab switch)
     curState.sidebarBottomVisible = win->uiState.sidebarBottomVisible || favAsTabNow;
     curState.favoritesAsTab = favAsTabNow;
+    curState.sigBarVisible = !favAsTabNow && SigBarWanted(win);
     curState.showMenuBarRebar = IsShowingMenuBarRebar(win);
     curState.aiChatVisible = win->uiState.aiChatVisible;
     curState.aiChatDx = win->aiChatDx;
     curState.sidebarOnRight = SidebarOnRightLayout();
+    curState.sidebarAutoHide = SidebarFloats(win);
 
     // A top-level size change is already a live, batched sibling resize.
     // Toggling WM_SETREDRAW on the frame for every step makes Windows discard
@@ -6675,12 +7025,18 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
         WindowTab* cur = win->CurrentTab();
         bool favAsTab = cur && cur->IsFavoritesTab();
         bool topVis = !favAsTab && ui.sidebarTopVisible;
+        bool middleVis = !favAsTab && ui.sidebarMiddleVisible;
         bool bottomVis = !favAsTab && ui.sidebarBottomVisible;
         bool aiVis = !favAsTab && ui.aiChatVisible;
-        win->sidebarSplitter->SetIsVisible(topVis || bottomVis);
-        HwndSetVisible(win->sidebarTop->hwnd, topVis);
-        win->sidebarPanelsSplitter->SetIsVisible(topVis && bottomVis);
-        HwndSetVisible(win->sidebarBottom->hwnd, bottomVis);
+        // a floating sidebar has no splitters and shows only when revealed
+        bool floats = SidebarFloats(win);
+        bool panelsShown = !floats || win->sidebarOverlayShown;
+        win->sidebarSplitter->SetIsVisible((topVis || bottomVis) && !floats);
+        HwndSetVisible(win->sidebarTop->hwnd, topVis && panelsShown);
+        win->sidebarPanelsSplitter->SetIsVisible(topVis && bottomVis && !floats);
+        HwndSetVisible(win->sidebarMiddle->hwnd, middleVis && panelsShown);
+        win->sidebarMiddleSplitter->SetIsVisible(middleVis && !floats);
+        HwndSetVisible(win->sidebarBottom->hwnd, bottomVis && panelsShown);
         HwndSetVisible(win->favoritesTabPanel->hwnd, favAsTab);
         // canvas stays sized under a Favorites tab (only hidden) so switching
         // back does not SetViewPortSize with a 0x0 canvas
@@ -6697,6 +7053,7 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     }
 
     if (PM_BLACK_SCREEN == win->presentation || PM_WHITE_SCREEN == win->presentation) {
+        SigBarSetVisible(win, false);
         // make the black/white canvas cover the entire window
         HwndMoveWindow(win->hwndCanvas, &rc);
         gAfterLayout.Call(win);
@@ -6748,10 +7105,17 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     WindowTab* curTab = win->CurrentTab();
     bool favAsTab = curTab && curTab->IsFavoritesTab();
     bool topVisible = !favAsTab && win->uiState.sidebarTopVisible;
+    bool middleVisible = !favAsTab && win->uiState.sidebarMiddleVisible;
     bool bottomVisible = !favAsTab && win->uiState.sidebarBottomVisible;
     bool sidebarVisible = topVisible || bottomVisible;
+    bool sidebarFloats = sidebarVisible && SidebarFloats(win);
+    // what takes a column in the layout; a floating sidebar is placed over the canvas
+    bool layTop = topVisible && !sidebarFloats;
+    bool layMiddle = middleVisible && !sidebarFloats;
+    bool layBottom = bottomVisible && !sidebarFloats;
+    bool laySidebar = sidebarVisible && !sidebarFloats;
     bool aiChatVisible = !favAsTab && win->uiState.aiChatVisible && win->hwndAiChatBox;
-    bool showCaption = !win->presentation && !win->isFullScreen && win->tabsInTitlebar;
+    bool showCaption = !win->presentation && !win->isFullScreen && win->tabsInTitlebar && gSettings->showCaption;
     bool showingMenuBar = IsShowingMenuBarRebar(win);
     bool showTabsBar = !win->presentation && !win->isFullScreen && !win->tabsInTitlebar && win->tabsVisible;
     bool showMenuRebar = showingMenuBar && (!win->tabsInTitlebar || win->isFullScreen);
@@ -6778,6 +7142,12 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     win->menuSlot->dy = menuBarDy;
     win->toolbarTopSlot->dy = rebarDy;
     win->toolbarBottomSlot->dy = rebarDy;
+    bool showSigBar = !favAsTab && SigBarWanted(win);
+    HWND hwndSigBar = showSigBar ? SigBarEnsure(win) : nullptr;
+    showSigBar = hwndSigBar != nullptr;
+    int sigBarDy = showSigBar ? SigBarDy(win) : 0;
+    SetVis(win->sigBarSlot, showSigBar);
+    win->sigBarSlot->dy = sigBarDy;
 
     // leave at least this much canvas for the document when sidebar is open
     constexpr int kMinDocCanvasDx = 200;
@@ -6806,7 +7176,8 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     // 1px caption-border inset can disagree with the HWND's x. Only pin when
     // the sidebar is on the left: on the right, side.x is the right pane and
     // using it as rc.x stacked fav+canvas at the same x (issue-2165).
-    if ((isFrameResize || isSplitterDrag) && sidebarVisible && prevSidebar && !SidebarOnRightLayout()) {
+    if ((isFrameResize || isSplitterDrag) && laySidebar && prevSidebar && !prevLayout.sidebarAutoHide &&
+        !SidebarOnRightLayout()) {
         HWND sideHwnd = topVisible ? win->sidebarTop->hwnd : win->sidebarBottom->hwnd;
         if (sideHwnd) {
             Rect side = ChildPosWithinParent(sideHwnd);
@@ -6822,9 +7193,11 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
         }
     }
 
-    int chromeDy = captionHeight + (showTabsBar ? tabHeight : 0) + menuBarDy + rebarDy;
+    int chromeDy = captionHeight + (showTabsBar ? tabHeight : 0) + menuBarDy + rebarDy + sigBarDy;
     int contentDy = std::max(rc.dy - chromeDy, 0);
 
+    // the bottom panel takes what the top and middle ones leave
+    int nPanels = middleVisible ? 3 : 2;
     int tocDy = 0;
     if (topVisible) {
         if (!bottomVisible) {
@@ -6834,10 +7207,16 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
             if (tocDy > 0) {
                 tocDy = limitValue(gSettings->tocDy, 0, contentDy);
             } else {
-                tocDy = contentDy / 2;
+                tocDy = contentDy / nPanels;
             }
-            tocDy = limitValue(tocDy, kTocMinDy, contentDy - kTocMinDy);
+            tocDy = limitValue(tocDy, kTocMinDy, contentDy - (nPanels - 1) * kTocMinDy);
         }
+    }
+    int middleDy = 0;
+    if (middleVisible) {
+        int restDy = contentDy - tocDy - kSplitterDy;
+        middleDy = gSettings->sidebarMiddleDy > 0 ? gSettings->sidebarMiddleDy : restDy / 2;
+        middleDy = limitValue(middleDy, kTocMinDy, std::max(kTocMinDy, restDy - kTocMinDy));
     }
 
     int aiChatDx = 0;
@@ -6846,21 +7225,25 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
         if (aiChatDx <= 0) {
             aiChatDx = rc.dx * 3 / 8;
         }
-        int availDx = rc.dx - (sidebarVisible ? sidebarDxApplied + kSplitterDx : 0);
+        int availDx = rc.dx - (laySidebar ? sidebarDxApplied + kSplitterDx : 0);
         aiChatDx = limitValue(aiChatDx, kSidebarMinDx, availDx / 2);
         win->aiChatDx = aiChatDx;
     }
 
-    SetVis(win->sidebarTopSlot, topVisible);
-    SetVis(win->sidebarBottomSlot, bottomVisible);
+    SetVis(win->sidebarTopSlot, layTop);
+    SetVis(win->sidebarMiddleSlot, layMiddle);
+    SetVis(win->sidebarMiddleSplitter, layMiddle);
+    SetVis(win->sidebarBottomSlot, layBottom);
     SetVis(win->favoritesTabSlot, favAsTab);
-    SetVis(win->sidebarPanelsSplitter, topVisible && bottomVisible);
-    SetVis(win->sidebarSplitter, sidebarVisible);
+    SetVis(win->sidebarPanelsSplitter, layTop && layBottom);
+    SetVis(win->sidebarSplitter, laySidebar);
     SetVis(win->aiChatSplitter, aiChatVisible);
     SetVis(win->aiChatSlot, aiChatVisible);
 
     win->sidebarTopSlot->dx = sidebarDxApplied;
     win->sidebarTopSlot->dy = tocDy;
+    win->sidebarMiddleSlot->dx = sidebarDxApplied;
+    win->sidebarMiddleSlot->dy = middleDy;
     win->sidebarBottomSlot->dx = sidebarDxApplied;
     win->aiChatSlot->dx = aiChatDx;
     if (win->frameLayout) {
@@ -6879,10 +7262,13 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
              updateToolbars && capTwoRow && capHasFileTabs);
     BindSlot(win->toolbarTopSlot, win->hwndToolbar, &dh, updateToolbars && showToolbar && !toolbarBottom);
     BindSlot(win->toolbarBottomSlot, win->hwndToolbar, &dh, updateToolbars && showToolbar && toolbarBottom);
+    BindSlot(win->sigBarSlot, hwndSigBar, &dh, showSigBar);
     HWND topHwnd = win->sidebarTop->hwnd;
+    HWND middleHwnd = win->sidebarMiddle->hwnd;
     HWND bottomHwnd = win->sidebarBottom->hwnd;
-    BindSlot(win->sidebarTopSlot, topHwnd, &dh, topVisible && !isFrameResize && !isSplitterDrag);
-    BindSlot(win->sidebarBottomSlot, bottomHwnd, &dh, bottomVisible && !isFrameResize && !isSplitterDrag);
+    BindSlot(win->sidebarTopSlot, topHwnd, &dh, layTop && !isFrameResize && !isSplitterDrag);
+    BindSlot(win->sidebarMiddleSlot, middleHwnd, &dh, layMiddle && !isFrameResize && !isSplitterDrag);
+    BindSlot(win->sidebarBottomSlot, bottomHwnd, &dh, layBottom && !isFrameResize && !isSplitterDrag);
     BindSlot(win->favoritesTabSlot, win->favoritesTabPanel->hwnd, &dh, favAsTab);
     BindSlot(win->canvasSlot, win->hwndCanvas, &dh, !discardCanvasBits);
     BindSlot(win->aiChatSlot, win->hwndAiChatBox, &dh, aiChatVisible);
@@ -6895,25 +7281,31 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     // Frame resize: keep the sidebar's x/width, only stretch its height.
     // Splitter drag: keep x/y/height, only stretch its width.
     if (isFrameResize) {
-        if (topVisible) {
+        if (layTop) {
             StretchHwndHeight(dh, topHwnd, win->sidebarTopSlot->lastBounds);
         }
-        if (bottomVisible) {
+        if (layMiddle) {
+            StretchHwndHeight(dh, middleHwnd, win->sidebarMiddleSlot->lastBounds);
+        }
+        if (layBottom) {
             StretchHwndHeight(dh, bottomHwnd, win->sidebarBottomSlot->lastBounds);
         }
     } else if (isSplitterDrag) {
-        if (topVisible) {
+        if (layTop) {
             StretchHwndWidth(dh, topHwnd, win->sidebarTopSlot->lastBounds);
         }
-        if (bottomVisible) {
+        if (layMiddle) {
+            StretchHwndWidth(dh, middleHwnd, win->sidebarMiddleSlot->lastBounds);
+        }
+        if (layBottom) {
             StretchHwndWidth(dh, bottomHwnd, win->sidebarBottomSlot->lastBounds);
         }
     }
 
-    HwndSlot* chromeSlots[] = {win->tabsSlot,          win->menuSlot,       win->toolbarTopSlot,
-                               win->toolbarBottomSlot, win->capMenuSlot,    win->capTabsRow1,
-                               win->capTabsRow2,       win->sidebarTopSlot, win->sidebarBottomSlot,
-                               win->favoritesTabSlot,  win->canvasSlot,     win->aiChatSlot};
+    HwndSlot* chromeSlots[] = {
+        win->tabsSlot,         win->menuSlot,    win->toolbarTopSlot, win->toolbarBottomSlot, win->capMenuSlot,
+        win->capTabsRow1,      win->capTabsRow2, win->sidebarTopSlot, win->sidebarMiddleSlot, win->sidebarBottomSlot,
+        win->favoritesTabSlot, win->canvasSlot,  win->aiChatSlot,     win->sigBarSlot};
     for (HwndSlot* s : chromeSlots) {
         ClearSlotDefer(s);
     }
@@ -6933,6 +7325,22 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     }
 
     dh.End();
+    SigBarSetVisible(win, showSigBar);
+    if (showSigBar) {
+        SigBarUpdate(win);
+    }
+    UpdateCaptionOverlay(win, CaptionUpdate::Layout);
+
+    // the floating sidebar's column: the canvas edge on the sidebar's side
+    if (sidebarFloats) {
+        Rect canvasRc = win->canvasSlot->lastBounds;
+        int dx = std::min(sidebarDxApplied, canvasRc.dx);
+        int x = SidebarOnRightLayout() ? canvasRc.x + canvasRc.dx - dx : canvasRc.x;
+        win->sidebarOverlayRc = {x, canvasRc.y, dx, canvasRc.dy};
+        win->sidebarOverlayTopDy = bottomVisible ? tocDy : canvasRc.dy;
+        win->sidebarOverlayMiddleDy = middleDy;
+    }
+    UpdateSidebarOverlay(win, SidebarOverlayUpdate::Layout);
 
     if (isSplitterDrag) {
         if (discardCanvasBits) {
@@ -6977,11 +7385,14 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     // A frame-size drag does not move the splitter; invalidating it paints a
     // 1-2px strip against the TOC and looks like the tree is shimmering.
     if (!isFrameResize) {
-        if (sidebarVisible) {
+        if (laySidebar) {
             win->sidebarSplitter->Invalidate();
         }
-        if (topVisible && bottomVisible) {
+        if (layTop && layBottom) {
             win->sidebarPanelsSplitter->Invalidate();
+        }
+        if (layMiddle) {
+            win->sidebarMiddleSplitter->Invalidate();
         }
     }
     if (updateToolbars && win->isToolbarVisible) {
@@ -7139,6 +7550,10 @@ static void FrameUpdateUi(MainWindow* win) {
         if (topVisible) {
             RedrawWindow(win->sidebarTop->hwnd, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
         }
+        if (ui.sidebarMiddleVisible) {
+            RedrawWindow(win->sidebarMiddle->hwnd, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
+            win->sidebarMiddleSplitter->Invalidate();
+        }
         if (bottomVisible) {
             RedrawWindow(win->sidebarBottom->hwnd, nullptr, nullptr, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN);
         }
@@ -7212,6 +7627,8 @@ static void ApplySidebarDpiFonts(MainWindow* win, int dpi) {
         win->pageThumbs->dpi = dpi;
         SidebarPagesChanged(win);
     }
+    SignaturesCtrlColorsAndDpi(win, dpi);
+    SigBarUpdate(win);
     if (win->tocFilterEdit) {
         win->tocFilterEdit->SetFont(appFont);
     }
@@ -7219,7 +7636,7 @@ static void ApplySidebarDpiFonts(MainWindow* win, int dpi) {
         win->favFilterEdit->SetFont(appFont);
     }
     // re-layout the panels
-    SidebarPanel* panels[] = {win->sidebarTop, win->sidebarBottom, win->favoritesTabPanel};
+    SidebarPanel* panels[] = {win->sidebarTop, win->sidebarMiddle, win->sidebarBottom, win->favoritesTabPanel};
     for (SidebarPanel* p : panels) {
         if (p) {
             SendMessageW(p->hwnd, WM_SIZE, 0, 0);
@@ -7985,7 +8402,7 @@ void AdvanceFocus(MainWindow* win) {
     bool hasToolbar = !win->isFullScreen && !win->presentation && gSettings->showToolbar && win->IsDocLoaded();
     int direction = IsShiftPressed() ? -1 : 1;
 
-    constexpr int kMaxWindows = 6;
+    constexpr int kMaxWindows = 7;
     HWND tabOrder[kMaxWindows] = {win->hwndFrame};
     int nWindows = 1;
     if (hasToolbar && ShowChapterUi(win->ctrl) && win->chapterEdit) {
@@ -7996,9 +8413,12 @@ void AdvanceFocus(MainWindow* win) {
     }
     // note: the find edit is no longer in the toolbar tab order; it lives in the
     // floating findBar and is reached via Ctrl+F / the search toolbar icon
-    // the sidebar panels, top then bottom
+    // the sidebar panels, top to bottom
     if (win->uiState.sidebarTopVisible) {
         tabOrder[nWindows++] = SidebarPanelFocusHwnd(win->sidebarTop);
+    }
+    if (win->uiState.sidebarMiddleVisible) {
+        tabOrder[nWindows++] = SidebarPanelFocusHwnd(win->sidebarMiddle);
     }
     if (win->uiState.sidebarBottomVisible) {
         tabOrder[nWindows++] = SidebarPanelFocusHwnd(win->sidebarBottom);
@@ -8570,13 +8990,9 @@ static void FrameOnChar(MainWindow* win, WPARAM key, LPARAM info = 0) {
     }
 
     switch (key) {
-        // per https://en.wikipedia.org/wiki/Keyboard_layout
-        // almost all keyboard layouts allow to press either
-        // '+' or '=' unshifted (and one of them is also often
-        // close to '-'); the other two alternatives are for
-        // the major exception: the two Swiss layouts
+        // '+' unshifted, or the two Swiss-layout alternatives.
+        // '=' opens the settings palette instead.
         case '+':
-        case '=':
         case 0xE0:
         case 0xE4: {
             HwndSendCommand(win->hwndFrame, CmdZoomIn);
@@ -8598,7 +9014,7 @@ static void FrameOnChar(MainWindow* win, WPARAM key, LPARAM info = 0) {
 
 static bool FrameOnSysChar(MainWindow* win, WPARAM key) {
     // use Alt+1 to Alt+8 for selecting the first 8 tabs and Alt+9 for the last tab
-    if (win->tabsVisible && ('1' <= key && key <= '9')) {
+    if (SettingsUseTabs() && win->TabCount() > 0 && ('1' <= key && key <= '9')) {
         TabsSelect(win, key < '9' ? (int)(key - '1') : win->TabCount() - 1);
         return true;
     }
@@ -8673,6 +9089,33 @@ static void OnPanelsSplitterMove(VirtSplitter::MoveEvent* ev) {
     ScheduleUiUpdate(win, kUiRelayout | kUiNoToolbars | kUiPanelsDrag);
 }
 
+// the splitter between the middle and bottom panels sets the middle one's height
+static void OnMiddleSplitterMove(VirtSplitter::MoveEvent* ev) {
+    MainWindow* win = FindMainWindowByHwnd(ev->w->GetHwnd());
+    if (!win) {
+        return;
+    }
+
+    // both panels are visible while this splitter is, so their rects are current
+    Rect rTop = HwndClientRect(win->sidebarTop->hwnd);
+    Rect rMiddle = HwndClientRect(win->sidebarMiddle->hwnd);
+    Rect rBottom = HwndClientRect(win->sidebarBottom->hwnd);
+    Point pcur = HwndGetCursorPos(win->hwndCanvas);
+    int middleDy = pcur.y - rTop.dy - kSplitterDy;
+
+    int minDy = std::min(kTocMinDy, rMiddle.dy);
+    int maxDy = std::max(rMiddle.dy + rBottom.dy - kTocMinDy, rMiddle.dy);
+    if (middleDy < minDy || middleDy > maxDy) {
+        ev->resizeAllowed = false;
+        return;
+    }
+    if (ev->queryOnly || middleDy == gSettings->sidebarMiddleDy) {
+        return;
+    }
+    gSettings->sidebarMiddleDy = middleDy;
+    ScheduleUiUpdate(win, kUiRelayout | kUiNoToolbars | kUiPanelsDrag);
+}
+
 // the width the sidebar window has now
 int SidebarNativeDx(MainWindow* win) {
     return win->sidebarTop ? HwndClientRect(win->sidebarTop->hwnd).dx : 0;
@@ -8681,6 +9124,10 @@ int SidebarNativeDx(MainWindow* win) {
 // SidebarWindowSize = grow opts in; by default the window keeps its size (#6205)
 static bool FrameCanResizeForSidebar(MainWindow* win) {
     if (!win || !win->hwndFrame || gPluginMode) {
+        return false;
+    }
+    // a floating sidebar takes no space
+    if (gSettings->sidebarAutoHide) {
         return false;
     }
     if (!str::EqI(gSettings->sidebarWindowSize, StrL("grow"))) {
@@ -8778,6 +9225,7 @@ void SetSidebarVisibility(MainWindow* win, bool topVisible, bool bottomVisible, 
     WindowTab* tab = win->CurrentTab();
     ResolveSidebarViews(win);
     SidebarPanel* top = win->sidebarTop;
+    SidebarPanel* middle = win->sidebarMiddle;
     SidebarPanel* bottom = win->sidebarBottom;
 
     bool requestedTop = topVisible;
@@ -8787,23 +9235,31 @@ void SetSidebarVisibility(MainWindow* win, bool topVisible, bool bottomVisible, 
     bool topAvailable = IsSidebarViewAvailable(win, top->view);
     topVisible = topVisible && topAvailable;
     bottomVisible = bottomVisible && IsSidebarViewAvailable(win, bottom->view);
+    // the middle panel shows only with the other two
+    bool middleVisible =
+        gSettings->showSidebarMiddle && topVisible && bottomVisible && IsSidebarViewAvailable(win, middle->view);
 
     if (PM_BLACK_SCREEN == win->presentation || PM_WHITE_SCREEN == win->presentation) {
         topVisible = false;
+        middleVisible = false;
         bottomVisible = false;
     }
 
     // the bookmarks tree is loaded when a panel shows it
     bool bookmarks = (topVisible && top->view == SidebarView::Bookmarks) ||
+                     (middleVisible && middle->view == SidebarView::Bookmarks) ||
                      (bottomVisible && bottom->view == SidebarView::Bookmarks);
     if (bookmarks) {
         LoadTocTree(win);
         if (!win->tocLoaded) {
             topVisible = topVisible && top->view != SidebarView::Bookmarks;
+            middleVisible = middleVisible && middle->view != SidebarView::Bookmarks;
             bottomVisible = bottomVisible && bottom->view != SidebarView::Bookmarks;
         }
     }
+    middleVisible = middleVisible && topVisible && bottomVisible;
     bool favorites = (topVisible && top->view == SidebarView::Favorites) ||
+                     (middleVisible && middle->view == SidebarView::Favorites) ||
                      (bottomVisible && bottom->view == SidebarView::Favorites);
     if (favorites) {
         PopulateFavTreeIfNeeded(win);
@@ -8825,13 +9281,15 @@ void SetSidebarVisibility(MainWindow* win, bool topVisible, bool bottomVisible, 
 
     // a panel going away takes the focus with it
     bool topFocused = SidebarPanelHasFocus(top);
+    bool middleFocused = SidebarPanelHasFocus(middle);
     bool bottomFocused = SidebarPanelHasFocus(bottom);
-    if ((!topVisible && topFocused) || (!bottomVisible && bottomFocused)) {
+    if ((!topVisible && topFocused) || (!middleVisible && middleFocused) || (!bottomVisible && bottomFocused)) {
         HwndSetFocus(win->hwndFrame);
     }
 
     bool wasSidebar = win->uiState.sidebarTopVisible || win->uiState.sidebarBottomVisible;
     win->uiState.sidebarTopVisible = topVisible;
+    win->uiState.sidebarMiddleVisible = middleVisible;
     win->uiState.sidebarBottomVisible = bottomVisible;
     AttachSidebarViews(win);
     bool nowSidebar = topVisible || bottomVisible;
@@ -9041,6 +9499,11 @@ TempStr GetSumatraDataDirTemp() {
     return path::JoinTemp(dir, StrL("SumatraPDF-data"));
 }
 
+// a portable copy keeps the converter and what it produces next to the exe
+TempStr GetConverterDataDirTemp() {
+    return IsRunningInPortableMode() ? GetAppDataDirTemp() : GetSumatraDataDirTemp();
+}
+
 TempStr GetSumatraBuildSpecificDirTemp() {
     TempStr dataDir = GetSumatraDataDirTemp();
     if (len(dataDir) == 0) {
@@ -9069,6 +9532,48 @@ static TempStr GetCrashInfoDirTemp() {
         return {};
     }
     return path::JoinTemp(buildDir, StrL("crashinfo"));
+}
+
+// newest .dmp in dir, empty if none
+static TempStr NewestMiniDumpTemp(Str dir) {
+    if (!dir::Exists(dir)) {
+        return {};
+    }
+    TempStr newest;
+    FILETIME newestTime{};
+    DirIter di{dir};
+    for (DirIterEntry* de : di) {
+        if (!str::EqI(path::GetExtTemp(de->name), StrL(".dmp"))) {
+            continue;
+        }
+        if (newest && CompareFileTime(&de->modificationTime, &newestTime) <= 0) {
+            continue;
+        }
+        newest = str::DupTemp(de->filePath);
+        newestTime = de->modificationTime;
+    }
+    return newest;
+}
+
+// Each build has its own crashinfo folder in the data dir: show every one
+// that has minidumps, with its newest selected.
+static void ShowCrashMiniDumps(MainWindow* win) {
+    TempStr dataDir = GetSumatraDataDirTemp();
+    int nShown = 0;
+    DirIter builds{dataDir};
+    builds.includeFiles = false;
+    builds.includeDirs = true;
+    for (DirIterEntry* de : builds) {
+        TempStr dmp = NewestMiniDumpTemp(path::JoinTemp(de->filePath, StrL("crashinfo")));
+        if (len(dmp) == 0) {
+            continue;
+        }
+        OpenPathInDefaultFileManager(dmp);
+        nShown++;
+    }
+    if (nShown == 0 && win) {
+        ShowTemporaryNotification(win, fmt("No crash minidumps in %s", dataDir), kNotif5SecsTimeOut);
+    }
 }
 
 static void ShowLogFileSmart() {
@@ -9285,7 +9790,8 @@ void ApplyChangedSettingsAndRelayout(const SettingsApplyState& before) {
             }
         }
     }
-    if (before.markdownUseFixedPageUI != p->markdownUI.useFixedPageUI) {
+    if (before.markdownUseFixedPageUI != p->markdownUI.useFixedPageUI ||
+        before.markdownPreserveLineBreaks != p->markdownUI.preserveLineBreaks) {
         for (MainWindow* w : gWindows) {
             if (IsMarkdownTab(w->CurrentTab())) {
                 ReloadDocument(w, false);
@@ -10148,7 +10654,7 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
         case CmdExec: {
             auto filter = GetCommandStringArg(cmd, kCmdArgFilter, {});
             auto cmdLine = GetCommandStringArg(cmd, kCmdArgExe, {});
-            if (len(cmdLine) == 0) {
+            if (len(cmdLine) == 0 || !CanAccessDisk()) {
                 return 0;
             }
             RunWithExe(tab, cmdLine, filter);
@@ -10245,6 +10751,10 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             RenameCurrentFile(win);
             break;
 
+        case CmdCopyTemporaryFileToNonTemporary:
+            CopyTemporaryFileToPermanent(win);
+            break;
+
         case CmdDeleteFile:
             DeleteCurrentFile(win);
             break;
@@ -10266,6 +10776,10 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             // the print dialog with "Selection" pre-selected; the selection
             // can also be printed via CmdPrint by picking that radio button
             uitask::Post(MkFunc0(PrintSelectionDeferred, win), "CmdPrintSelection");
+            break;
+
+        case CmdSumatraOnline:
+            ShowSumatraOnlineDialog(win);
             break;
 
         case CmdCopyFilePath:
@@ -10344,6 +10858,14 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
 
         case CmdShowLog:
             ShowLogFileSmart();
+            break;
+
+        case CmdDebugShowCrashMiniDumps:
+            ShowCrashMiniDumps(win);
+            break;
+
+        case CmdDebugSaveSettings:
+            SaveSettingsNow();
             break;
 
         case CmdScreenshot:
@@ -10560,6 +11082,14 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             ToggleFreePan(win);
             break;
 
+        case CmdToggleCaption:
+            ToggleCaption(cmd);
+            break;
+
+        case CmdToggleSidebarAutoHide:
+            ToggleSidebarAutoHide(cmd);
+            break;
+
         case CmdToggleToolbar:
             if (GetCommandArg(cmd, kCmdArgState)) {
                 // explicit state: on -> show (pinned), off -> hide
@@ -10597,6 +11127,11 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
 
         case CmdChangeBackgroundColor:
             ShowChangeBackgroundColorDialog(win);
+            break;
+
+        case CmdAdjustBrightness:
+        case CmdAdjustContrast:
+            ShowBrightnessContrastDialog(win);
             break;
 
         case CmdChangeEbookSettings:
@@ -10700,6 +11235,12 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             break;
         }
 
+        case CmdShowSignatures:
+            if (win) {
+                ShowSidebarView(win, SidebarView::Signatures);
+            }
+            break;
+
         case CmdSignDocument: {
             bool certify = cmd && GetCommandBoolArg(cmd, kCmdArgCertify, false);
             ShowSignDocumentDialog(win, {}, false, certify ? kPdfCertifyNoChanges : 0);
@@ -10720,7 +11261,7 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
                 if (IsPreviewInstalled()) {
                     UnRegisterPreviewer();
                 } else {
-                    RegisterPreviewer(info.allUsers, info.installationDir);
+                    RegisterPreviewer(info.allUsers, info.installationDir, {kAllPreviewExts, kAllPreviewExts});
                 }
             }
             break;
@@ -10804,9 +11345,9 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             if (!win->IsDocLoaded()) {
                 return 0;
             }
-            int currentPos = GetScrollPos(win->hwndCanvas, SB_VERT);
+            int currentPos = PageScrollPos(win);
             SendMessageW(win->hwndCanvas, WM_VSCROLL, kSbHalfPageUp, 0);
-            if (GetScrollPos(win->hwndCanvas, SB_VERT) == currentPos) {
+            if (PageScrollPos(win) == currentPos) {
                 win->ctrl->GoToPrevPage(true);
                 OnDocumentVerticalScrollIntent(win, false);
             }
@@ -10822,11 +11363,11 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             if (!win->IsDocLoaded()) {
                 return 0;
             }
-            int currentPos = GetScrollPos(win->hwndCanvas, SB_VERT);
+            int currentPos = PageScrollPos(win);
             if (win->ctrl->GetZoomVirtual() != kZoomFitContent) {
                 SendMessageW(win->hwndCanvas, WM_VSCROLL, SB_PAGEUP, 0);
             }
-            if (GetScrollPos(win->hwndCanvas, SB_VERT) == currentPos) {
+            if (PageScrollPos(win) == currentPos) {
                 win->ctrl->GoToPrevPage(true);
                 OnDocumentVerticalScrollIntent(win, false);
             }
@@ -10887,9 +11428,9 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             if (!win->IsDocLoaded()) {
                 return 0;
             }
-            int currentPos = GetScrollPos(win->hwndCanvas, SB_VERT);
+            int currentPos = PageScrollPos(win);
             SendMessageW(win->hwndCanvas, WM_VSCROLL, kSbHalfPageDown, 0);
-            if (GetScrollPos(win->hwndCanvas, SB_VERT) == currentPos) {
+            if (PageScrollPos(win) == currentPos) {
                 win->ctrl->GoToNextPage();
                 OnDocumentVerticalScrollIntent(win, true);
             }
@@ -10904,11 +11445,11 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             if (!win->IsDocLoaded()) {
                 return 0;
             }
-            int currentPos = GetScrollPos(win->hwndCanvas, SB_VERT);
+            int currentPos = PageScrollPos(win);
             if (win->ctrl->GetZoomVirtual() != kZoomFitContent) {
                 SendMessageW(win->hwndCanvas, WM_VSCROLL, SB_PAGEDOWN, 0);
             }
-            if (GetScrollPos(win->hwndCanvas, SB_VERT) == currentPos) {
+            if (PageScrollPos(win) == currentPos) {
                 win->ctrl->GoToNextPage();
                 OnDocumentVerticalScrollIntent(win, true);
             }
@@ -11019,11 +11560,15 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             }
             break;
 
+        case CmdFindHistory:
         case CmdFindFirst:
             if (win->IsCurrentTabAbout()) {
                 HomePageFocusSearch(win);
             } else {
                 FindFirst(win);
+                if (cmdId == CmdFindHistory) {
+                    FindEditShowHistory(win);
+                }
             }
             break;
 
@@ -11142,7 +11687,8 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
                 if (tab->hwndPDFInfo && IsWindow(tab->hwndPDFInfo)) {
                     SetForegroundWindow(tab->hwndPDFInfo);
                 } else {
-                    TempStr info = EngineMupdfGetPdfInfo(tab->filePath);
+                    TempStr info = EngineMupdfGetPdfInfo(tab->filePath,
+                                                         EngineMupdfToolPasswordTemp(tab->GetEngine(), tab->filePath));
                     if (info) {
                         tab->hwndPDFInfo = ShowTextInWindow(StrL("PDF Info"), info, &tab->hwndPDFInfo);
                     }
@@ -11190,6 +11736,14 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
 
         case CmdConvertToPDF:
             ShowConvertToPdfDialog(win);
+            break;
+
+        case CmdConvertEpubToPdf:
+            ShowConvertEpubToPdfDialog(win);
+            break;
+
+        case CmdConvertCajToPDF:
+            ShowConvertCajToPdfDialog(win);
             break;
 
         case CmdConvertPdfToImages:
@@ -11576,6 +12130,10 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             GoToHomeTab(win);
             break;
 
+        case CmdNewTab:
+            AddExtraHomeTab(win);
+            break;
+
         case CmdToggleFavoritesSort:
             ToggleSortFavoritesByName();
             break;
@@ -11926,8 +12484,13 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             }
             if (len(path) == 0) {
                 path = PickImageFilePathTemp(win->hwndFrame);
+                // the dialog's message loop can reload or close the document
+                if (!IsMainWindowValidAndNotClosing(win) || win->CurrentTab() != tab) {
+                    return 0;
+                }
+                dm = win->AsFixed();
             }
-            if (len(path) == 0) {
+            if (len(path) == 0 || !dm) {
                 return 0;
             }
             Str data = file::ReadFile(path);
@@ -12079,6 +12642,9 @@ void OpenSystemMenu(MainWindow* win) {
 }
 
 static int CaptionButtonAt(MainWindow* win, Point pt) {
+    if (!gSettings->showCaption && !win->captionOverlayShown) {
+        return -1;
+    }
     UnmirrorRtl(win->hwndFrame, pt);
     for (int i = CB_BTN_FIRST; i < CB_BTN_COUNT; i++) {
         if (win->captionBtn[i].visible && win->captionBtn[i].rect.Contains(pt)) {
@@ -12089,6 +12655,9 @@ static int CaptionButtonAt(MainWindow* win, Point pt) {
 }
 
 static void RepaintButton(HWND hwnd, int btnIdx, MainWindow* win) {
+    if (win->captionOverlayShown) {
+        HwndInvalidate(win->hwndCaptionOverlay);
+    }
     if (false) {
         HwndInvalidateRect(hwnd, win->captionBtn[btnIdx].rect, false);
         UpdateWindow(hwnd);
@@ -12175,6 +12744,9 @@ static void HandleCaptionClick(MainWindow* win, int btnIdx) {
 
 void RelayoutCaption(MainWindow* win) {
     if (!win->captionLayout || !win->tabsInTitlebar) {
+        return;
+    }
+    if (!gSettings->showCaption && !win->captionOverlayShown) {
         return;
     }
     DpiSetFromHwnd(win->hwndFrame);
@@ -12977,7 +13549,281 @@ static LRESULT CustomCaptionFrameProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
     return 0;
 }
 
+static LRESULT CALLBACK CaptionOverlayProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    MainWindow* win = (MainWindow*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (!win) {
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+    if (msg == WM_TIMER) {
+        UpdateCaptionOverlay(win, CaptionUpdate::Mouse);
+        return 0;
+    }
+    if (msg == WM_MOUSEACTIVATE) {
+        return MA_NOACTIVATE;
+    }
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        HBRUSH bg = CreateSolidBrush(ThemeControlBackgroundColor());
+        HdcFillRect(hdc, HwndClientRect(hwnd), bg);
+        DeleteObject(bg);
+        for (int i = CB_BTN_FIRST; i < CB_BTN_COUNT; i++) {
+            DrawCaptionButton(win, hdc, &win->captionBtn[i]);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) {
+        Point pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (CaptionButtonAt(win, pt) < 0) {
+            return SendMessageW(win->hwndFrame, msg == WM_LBUTTONDBLCLK ? WM_NCLBUTTONDBLCLK : WM_NCLBUTTONDOWN,
+                                HTCAPTION, 0);
+        }
+    }
+    if (msg == WM_RBUTTONUP) {
+        Point screen = HwndClientToScreen(hwnd, Point(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)));
+        return SendMessageW(win->hwndFrame, WM_NCRBUTTONUP, HTCAPTION, MAKELPARAM(screen.x, screen.y));
+    }
+    if (msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_LBUTTONDBLCLK) {
+        return SendMessageW(win->hwndFrame, msg, wp, lp);
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void UpdateCaptionOverlay(MainWindow* win, CaptionUpdate update) {
+    constexpr int kCaptionRevealDy = 8;
+    constexpr int kCaptionPollMs = 50;
+    constexpr int kCaptionTimer = 1;
+    bool overlay = !gSettings->showCaption && win->tabsInTitlebar && !win->isFullScreen && !win->presentation;
+    if (overlay && !win->hwndCaptionOverlay) {
+        WNDCLASSW cls{};
+        cls.lpfnWndProc = CaptionOverlayProc;
+        cls.hInstance = GetModuleHandleW(nullptr);
+        cls.lpszClassName = L"SumatraCaptionOverlay";
+        cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        cls.style = CS_DBLCLKS;
+        RegisterClassW(&cls);
+        win->hwndCaptionOverlay = CreateWindowExW(WS_EX_NOACTIVATE, cls.lpszClassName, L"", WS_CHILD | WS_CLIPSIBLINGS,
+                                                  0, 0, 0, 0, win->hwndFrame, nullptr, cls.hInstance, nullptr);
+        SetWindowLongPtrW(win->hwndCaptionOverlay, GWLP_USERDATA, (LONG_PTR)win);
+    }
+    if (!win->hwndCaptionOverlay) {
+        return;
+    }
+    if (overlay && update == CaptionUpdate::Layout) {
+        SetTimer(win->hwndCaptionOverlay, kCaptionTimer, kCaptionPollMs, nullptr);
+    } else if (!overlay) {
+        KillTimer(win->hwndCaptionOverlay, kCaptionTimer);
+    }
+    POINT cursor;
+    GetCursorPos(&cursor);
+    Point pt = HwndScreenToClient(win->hwndFrame, Point(cursor.x, cursor.y));
+    Rect rc = HwndClientRect(win->hwndFrame);
+    int revealDy = DpiScale(kCaptionRevealDy);
+    int hoverDy = win->captionOverlayShown ? win->captionRect.y + win->captionRect.dy : revealDy;
+    GUITHREADINFO gui{sizeof(gui)};
+    GetGUIThreadInfo(GetCurrentThreadId(), &gui);
+    bool menuUp = gui.hwndActive == win->hwndFrame && (gui.flags & GUI_INMENUMODE) != 0;
+    bool overFrame = GetAncestor(WindowFromPoint(cursor), GA_ROOT) == win->hwndFrame;
+    bool shown = overlay && ((overFrame && pt.x >= 0 && pt.x < rc.dx && pt.y >= 0 && pt.y < hoverDy) || menuUp ||
+                             GetCapture() == win->hwndFrame);
+    if (update == CaptionUpdate::Mouse && shown == win->captionOverlayShown) {
+        return;
+    }
+    win->captionOverlayShown = shown;
+    if (shown) {
+        // Lay out the caption independently so revealing it never resizes the document.
+        SetVis(win->captionLayout, true);
+        win->captionRect = {0, 0, rc.dx, 1};
+        RelayoutCaption(win);
+        SetVis(win->captionLayout, false);
+        SetWindowPos(win->hwndCaptionOverlay, HWND_TOP, 0, 0, rc.dx, win->captionRect.dy,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        if (win->tabsCtrl && win->tabsVisible) {
+            SetWindowPos(win->tabsCtrl->hwnd, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+        if (IsShowingMenuBarRebar(win)) {
+            SetWindowPos(win->hwndMenuReBar, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        }
+        HwndInvalidate(win->hwndCaptionOverlay);
+        return;
+    }
+    ShowWindow(win->hwndCaptionOverlay, SW_HIDE);
+    if (!gSettings->showCaption) {
+        win->captionRect = {};
+        if (win->tabsCtrl) {
+            ShowWindow(win->tabsCtrl->hwnd, SW_HIDE);
+        }
+        ShowWindow(win->hwndMenuReBar, SW_HIDE);
+        return;
+    }
+    // the caption is back: the relayout only moves what the overlay hid
+    if (win->tabsCtrl && win->tabsVisible) {
+        ShowWindow(win->tabsCtrl->hwnd, SW_SHOWNA);
+    }
+    if (IsShowingMenuBarRebar(win)) {
+        ShowWindow(win->hwndMenuReBar, SW_SHOWNA);
+    }
+}
+
 // --- End caption code ---
+
+static LRESULT CALLBACK SidebarOverlayEdgeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        HdcFillRect(hdc, HwndClientRect(hwnd), ThemeEdgeColor());
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    // the mouse goes to the canvas under it
+    if (msg == WM_NCHITTEST) {
+        return HTTRANSPARENT;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static HWND SidebarOverlayEdge(MainWindow* win) {
+    if (win->hwndSidebarOverlayEdge) {
+        return win->hwndSidebarOverlayEdge;
+    }
+    WNDCLASSW cls{};
+    cls.lpfnWndProc = SidebarOverlayEdgeProc;
+    cls.hInstance = GetModuleHandleW(nullptr);
+    cls.lpszClassName = L"SumatraSidebarOverlayEdge";
+    RegisterClassW(&cls);
+    win->hwndSidebarOverlayEdge = CreateWindowExW(WS_EX_NOACTIVATE, cls.lpszClassName, L"", WS_CHILD | WS_CLIPSIBLINGS,
+                                                  0, 0, 0, 0, win->hwndFrame, nullptr, cls.hInstance, nullptr);
+    return win->hwndSidebarOverlayEdge;
+}
+
+// stacks the visible panels in the floating sidebar's column, or hides them
+static void PlaceSidebarOverlay(MainWindow* win) {
+    const MainWindow::UIState& ui = win->uiState;
+    Rect col = win->sidebarOverlayRc;
+    HWND edge = SidebarOverlayEdge(win);
+    if (!win->sidebarOverlayShown) {
+        ShowWindow(edge, SW_HIDE);
+    } else {
+        int edgeDx = std::min(DpiScale(1), col.dx);
+        int edgeX = SidebarOnRightLayout() ? col.x : col.x + col.dx - edgeDx;
+        SetWindowPos(edge, HWND_TOP, edgeX, col.y, edgeDx, col.dy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        HwndInvalidate(edge);
+        col.dx -= edgeDx;
+        if (SidebarOnRightLayout()) {
+            col.x += edgeDx;
+        }
+    }
+    SidebarPanel* panels[] = {win->sidebarTop, win->sidebarMiddle, win->sidebarBottom};
+    bool visible[] = {ui.sidebarTopVisible, ui.sidebarMiddleVisible, ui.sidebarBottomVisible};
+    int dys[] = {win->sidebarOverlayTopDy, win->sidebarOverlayMiddleDy, col.dy};
+    int y = col.y;
+    for (int i = 0; i < 3; i++) {
+        HWND hwnd = panels[i] ? panels[i]->hwnd : nullptr;
+        if (!hwnd || !visible[i]) {
+            continue;
+        }
+        if (!win->sidebarOverlayShown) {
+            ShowWindow(hwnd, SW_HIDE);
+            continue;
+        }
+        // the last visible panel takes the rest of the column
+        int dy = std::min(dys[i], col.y + col.dy - y);
+        SetWindowPos(hwnd, HWND_TOP, col.x, y, col.dx, dy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        y += dy;
+    }
+}
+
+static bool SidebarOverlayContains(MainWindow* win, HWND hwnd) {
+    SidebarPanel* panels[] = {win->sidebarTop, win->sidebarMiddle, win->sidebarBottom};
+    for (SidebarPanel* p : panels) {
+        if (hwnd && p && (hwnd == p->hwnd || IsChild(p->hwnd, hwnd))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// typing into a sidebar's filter box keeps it shown after the mouse leaves
+static bool FocusIsEditBox() {
+    WCHAR cls[16]{};
+    HWND focus = GetFocus();
+    return focus && GetClassNameW(focus, cls, dimof(cls)) > 0 && _wcsicmp(cls, WC_EDITW) == 0;
+}
+
+// frame client point the sidebar poll uses instead of the real cursor; set by
+// tests/issue-5819.ts, which can't move the cursor on a locked desktop
+static Point gSidebarTestCursor{-1, -1};
+
+void SetSidebarTestCursor(Point pt) {
+    gSidebarTestCursor = pt;
+}
+
+// SidebarAutoHide (#5819): a poll shows the floating sidebar when the mouse
+// reaches the canvas edge on the sidebar's side, or the focus moves into it
+// (F12, Tab). It hides when the mouse leaves it, or the focus does when the
+// keyboard showed it.
+void UpdateSidebarOverlay(MainWindow* win, SidebarOverlayUpdate update) {
+    constexpr int kRevealDx = 8;
+    constexpr uint kPollMs = 50;
+    if (!SidebarFloats(win)) {
+        KillTimer(win->hwndCanvas, kSidebarOverlayTimerID);
+        win->sidebarOverlayShown = false;
+        return;
+    }
+    if (update == SidebarOverlayUpdate::Layout) {
+        SetTimer(win->hwndCanvas, kSidebarOverlayTimerID, kPollMs, nullptr);
+    }
+
+    POINT cursor;
+    GetCursorPos(&cursor);
+    Point pt = HwndScreenToClient(win->hwndFrame, Point(cursor.x, cursor.y));
+    bool overFrame = GetAncestor(WindowFromPoint(cursor), GA_ROOT) == win->hwndFrame;
+    if (gSidebarTestCursor.x >= 0) {
+        pt = gSidebarTestCursor;
+        overFrame = true;
+    }
+    Rect col = win->sidebarOverlayRc;
+    Rect strip = col;
+    strip.dx = std::min(DpiScale(kRevealDx), col.dx);
+    if (SidebarOnRightLayout()) {
+        strip.x = col.x + col.dx - strip.dx;
+    }
+    GUITHREADINFO gui{sizeof(gui)};
+    GetGUIThreadInfo(GetCurrentThreadId(), &gui);
+    bool menuUp = gui.hwndActive == win->hwndFrame && (gui.flags & GUI_INMENUMODE) != 0;
+    HWND capture = GetCapture();
+    bool focusIn = SidebarOverlayContains(win, GetFocus());
+
+    if (!win->sidebarOverlayShown) {
+        // a drag on the canvas (selection, pan) passing the edge doesn't reveal it
+        bool byMouse = overFrame && !capture && !menuUp && strip.Contains(pt);
+        if (!byMouse && !focusIn) {
+            return;
+        }
+        win->sidebarOverlayByMouse = byMouse;
+        win->sidebarOverlayShown = true;
+        PlaceSidebarOverlay(win);
+        return;
+    }
+
+    bool keyboardKeeps = focusIn && (!win->sidebarOverlayByMouse || FocusIsEditBox());
+    bool keep = (overFrame && col.Contains(pt)) || menuUp || SidebarOverlayContains(win, capture) || keyboardKeeps;
+    if (keep) {
+        if (update == SidebarOverlayUpdate::Layout) {
+            PlaceSidebarOverlay(win);
+        }
+        return;
+    }
+    win->sidebarOverlayShown = false;
+    // keys must not go to a hidden tree
+    if (focusIn) {
+        HwndSetFocus(win->hwndCanvas);
+    }
+    PlaceSidebarOverlay(win);
+}
 
 HWND gLastActiveFrameHwnd = nullptr;
 
@@ -13057,8 +13903,8 @@ static LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPAR
             // default COLOR_BTNFACE brush puts a bright #f0f0f0 band across a
             // dark sidebar, which reads as a light divider (issue #5893)
             HWND hwndCtl = (HWND)lp;
-            bool isPanel = win && (hwndCtl == win->sidebarTop->hwnd || hwndCtl == win->sidebarBottom->hwnd ||
-                                   hwndCtl == win->favoritesTabPanel->hwnd);
+            bool isPanel = win && (hwndCtl == win->sidebarTop->hwnd || hwndCtl == win->sidebarMiddle->hwnd ||
+                                   hwndCtl == win->sidebarBottom->hwnd || hwndCtl == win->favoritesTabPanel->hwnd);
             if (!isPanel) {
                 break;
             }
@@ -13318,7 +14164,15 @@ static LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPAR
 
         case WM_MOUSEWHEEL:
         case WM_MOUSEHWHEEL:
-            if (!win || !win->IsDocLoaded()) {
+            if (!win) {
+                break;
+            }
+            // the canvas never has focus, so the wheel arrives here. Home is not
+            // a loaded document, but the list still scrolls (#6462)
+            if (win->IsCurrentTabAbout()) {
+                return SendMessageW(win->hwndCanvas, msg, wp, lp);
+            }
+            if (!win->IsDocLoaded()) {
                 break;
             }
             if (win->AsChm()) {
@@ -13987,6 +14841,10 @@ static HACCEL FindAcceleratorsForHwnd(HWND hwnd, HWND* hwndAccel, bool* forwardS
         return editAccTable;
     }
 
+    if (IsHwndInMergePdfWindow(hwnd)) {
+        return nullptr;
+    }
+
     HWND hwndCP = CommandPaletteHwndForAccelerator(hwnd);
     if (hwndCP) {
         *hwndAccel = hwndCP;
@@ -14038,6 +14896,11 @@ static HACCEL FindAcceleratorsForHwnd(HWND hwnd, HWND* hwndAccel, bool* forwardS
 // released. A slow CmdFindFirst (ASan) lets Windows queue a repeat KEYDOWN F
 // after Ctrl is up; F is CmdToggleFullscreen and steals find/search focus.
 static WPARAM gIgnoreRepeatKey = 0;
+
+static bool IsBrowserScrollKey(WPARAM key) {
+    return key == VK_LEFT || key == VK_RIGHT || key == VK_UP || key == VK_DOWN || key == VK_HOME || key == VK_END ||
+           key == VK_PRIOR || key == VK_NEXT;
+}
 
 static bool MaybeTranslateAccelerator(MSG& msg) {
     // TODO: why mouse events?
@@ -14172,6 +15035,17 @@ static bool MaybeTranslateAccelerator(MSG& msg) {
         }
     }
 
+    // In an HTML / Markdown / CHM tab the arrows, Home/End and PageUp/PageDown
+    // scroll the page, as they do when the browser itself has the focus. Their
+    // accelerators flip pages, so let FrameOnKeydown forward them (#6419).
+    if (msg.message == WM_KEYDOWN && !IsCtrlPressed() && !IsShiftPressed() && !IsAltPressed()) {
+        MainWindow* win = FindMainWindowByHwnd(msg.hwnd);
+        bool isFrameOrCanvas = win && (msg.hwnd == win->hwndFrame || msg.hwnd == win->hwndCanvas);
+        if (isFrameOrCanvas && IsBrowserDocController(win->ctrl) && IsBrowserScrollKey(msg.wParam)) {
+            return false;
+        }
+    }
+
     HWND hwndAccel;
     bool forwardSysKeys = false;
     HACCEL accels = FindAcceleratorsForHwnd(msg.hwnd, &hwndAccel, &forwardSysKeys);
@@ -14195,7 +15069,10 @@ static bool MaybeTranslateAccelerator(MSG& msg) {
     // would swallow them. Retarget the system-key messages to the frame so its
     // menu still responds (issue #4614). Retargeting before TranslateMessage()
     // also makes the generated WM_SYSCHAR go to the frame.
-    if (forwardSysKeys && (msg.message == WM_SYSKEYDOWN || msg.message == WM_SYSKEYUP || msg.message == WM_SYSCHAR)) {
+    // Alt+Up / Alt+Down aren't for the menu: they open and close a combo's list.
+    bool isComboKey = msg.message != WM_SYSCHAR && (msg.wParam == VK_DOWN || msg.wParam == VK_UP);
+    if (forwardSysKeys && !isComboKey &&
+        (msg.message == WM_SYSKEYDOWN || msg.message == WM_SYSKEYUP || msg.message == WM_SYSCHAR)) {
         msg.hwnd = hwndAccel;
     }
     return false;
@@ -15004,7 +15881,8 @@ static void DeleteOldPdfPreviewLogs(int keep) {
     }
 }
 
-// Copies of OneNote/Outlook extracts. Delete leftovers from a crash; live
+// Copies of OneNote/Outlook extracts, a folder each (files directly in
+// open-cache are from older versions). Delete leftovers from a crash; live
 // tabs delete their own copy when the tab closes.
 static void DeleteStaleOpenCacheFiles() {
     TempStr dataDir = GetSumatraDataDirTemp();
@@ -15025,9 +15903,10 @@ static void DeleteStaleOpenCacheFiles() {
 
     DirIter di{cacheDir};
     di.includeFiles = true;
-    di.includeDirs = false;
+    di.includeDirs = true;
     for (DirIterEntry* de : di) {
-        FILETIME atime = de->accessTime;
+        // listing a folder updates its access time, writing its copy doesn't
+        FILETIME atime = de->isDir ? de->modificationTime : de->accessTime;
         ULARGE_INTEGER a;
         a.LowPart = atime.dwLowDateTime;
         a.HighPart = atime.dwHighDateTime;
@@ -15035,7 +15914,7 @@ static void DeleteStaleOpenCacheFiles() {
         if (ageSec < kMaxAgeSec) {
             continue;
         }
-        bool ok = file::Delete(de->filePath);
+        bool ok = de->isDir ? dir::RemoveAll(de->filePath) : file::Delete(de->filePath);
         logf("DeleteStaleOpenCacheFiles: delete '%s' (age %lld h) -> %d\n", de->filePath, (long long)(ageSec / 3600),
              (int)ok);
     }
@@ -15044,6 +15923,7 @@ static void DeleteStaleOpenCacheFiles() {
 static void DeleteStaleFilesAsync() {
     DeleteStaleCbxCacheFiles();
     DeleteStaleDviCache();
+    DeleteStaleCajCache();
     DeleteStaleOpenCacheFiles();
     DeleteOldPdfPreviewLogs(32);
 
@@ -15110,7 +15990,7 @@ static void DeleteStaleFilesAsync() {
     di.includeDirs = true;
     for (DirIterEntry* de : di) {
         Str name = de->name;
-        if (str::Eq(name, StrL("cbx-cache")) || str::Eq(name, StrL("dvi-cache"))) {
+        if (str::Eq(name, StrL("cbx-cache")) || str::Eq(name, StrL("dvi-cache")) || str::Eq(name, StrL("caj2pdf"))) {
             continue;
         }
 
@@ -15566,7 +16446,7 @@ static void ShowCrashHandlerMessage() {
         return;
     }
 
-    Str msg = Tr("SumatraPDF crashed.\n\nPress 'Cancel' to see the crash report.");
+    Str msg = Tr("SumatraPDF crashed.\n\nPress 'Cancel' to see how to report the crash.");
     uint flags = MB_ICONERROR | MB_OK | MB_OKCANCEL | MbRtlReadingMaybe();
     flags |= MB_SETFOREGROUND | MB_TOPMOST;
 
@@ -15584,9 +16464,6 @@ static void ShowCrashHandlerMessage() {
 #else
 #define kMinidumpSubmitUrl "https://www.sumatrapdfreader.org/app/sumatrapdf/uploadminidump"
 #endif
-
-// where InstallCrashHandler() writes the .dmp, in the crash arena
-static Str gCrashDumpPath;
 
 // Message from MuPDF's uncaught-throw abort (error.c). Looked up at crash time
 // so we do not need a hard link for every tool that builds CrashHandlerNoOp.
@@ -15624,7 +16501,7 @@ static Str GetCrashComment(Arena* a, Str condStr, Str fileLine, bool isCrash) {
     } else {
         b.Append(StrL("Type: debug report (not crash)\n"));
     }
-    b.Append(str::Format(a, "Minidump: %s\n", gCrashDumpPath));
+    b.Append(str::Format(a, "Minidump: %s\n", CrashHandlerDumpPath()));
     if (condStr) {
         b.Append(str::Format(a, "Cond: %s @ %s\n", condStr, fileLine));
     }
@@ -15697,12 +16574,6 @@ static void InstallSumatraCrashHandler(bool localOnly) {
     if (gIsAsanBuild) {
         return;
     }
-    // a crash report we could never send is not worth the machinery, so this
-    // must run after InitializePolicies()
-    if (!HasPermission(Perm::InternetAccess)) {
-        log(StrL("InstallSumatraCrashHandler: skipping, no Perm::InternetAccess\n"));
-        return;
-    }
 
     TempStr crashInfoDir = GetCrashInfoDirTemp();
 
@@ -15722,16 +16593,20 @@ static void InstallSumatraCrashHandler(bool localOnly) {
         cfg.uploadCrashes = false;
         cfg.uploadDebugReports = false;
     }
+    // a policy without internet access still gets a local .dmp to attach to
+    // an issue; must run after InitializePolicies()
+    if (!HasPermission(Perm::InternetAccess)) {
+        log(StrL("InstallSumatraCrashHandler: no Perm::InternetAccess, not uploading\n"));
+        cfg.submitUrl = {};
+        cfg.uploadCrashes = false;
+        cfg.uploadDebugReports = false;
+    }
     cfg.getCrashComment = GetCrashComment;
     cfg.onCrashBegin = OnCrashBegin;
     cfg.showCrashMessage = ShowCrashHandlerMessage;
     cfg.canEndCrashedThread = TtsOnEngineCrash;
 
     InstallCrashHandler(cfg);
-    Arena* a = CrashHandlerArena();
-    if (a) {
-        gCrashDumpPath = str::Dup(a, cfg.crashDumpPath);
-    }
     CaptureSettings();
 }
 
@@ -16044,7 +16919,14 @@ int APIENTRY WinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIns
     }
 
     if (flags.appdataDir) {
-        SetAppDataDir(flags.appdataDir);
+        // a path we can't create (e.g. pasted with a stray quote) falls back to the default
+        Str dir = path::NormalizeTemp(flags.appdataDir);
+        if (dir::Exists(dir) || dir::CreateAll(dir)) {
+            SetAppDataDir(dir);
+        } else {
+            logf("-appdata: can't create '%s', using the default\n", dir);
+            LogLastError();
+        }
     }
 
 #if IS_DEBUG
@@ -16270,11 +17152,10 @@ ContinueOpenWindow:
 
     restoreSession = SettingsRestoreSession() && (len(*gInitialSessionData) > 0) && !NeedsWindowEmbeddingHacks() &&
                      !flags.quickLook && !flags.configureRestrictedUse;
-    if (!SettingsUseTabs() && (existingInstanceHwnd != nullptr)) {
-        // do not restore a session if tabs are disabled and SumatraPDF is already running
-        // TODO: maybe disable restoring if tabs are disabled?
+    if (existingInstanceHwnd != nullptr) {
+        // the session belongs to the running instance; restoring it would duplicate its documents (#6350)
         restoreSession = false;
-        logf("not restoring a session because the same exe is already running and tabs are disabled\n");
+        logf("not restoring a session because the same exe is already running\n");
     }
 
     showStartPage =
@@ -16292,6 +17173,7 @@ ContinueOpenWindow:
         // each window goes back to the virtual desktop it was on (#6271)
         ISumatraVirtualDesktopManager* vdm = CreateVirtualDesktopManager();
         MainWindow* winOnCurrentDesktop = nullptr;
+        int sessionGen = gInitialSessionDataGen;
         for (SessionData* data : *gInitialSessionData) {
             // create window hidden to avoid flashing the about page
             win = CreateAndShowMainWindow(data, false);
@@ -16359,9 +17241,22 @@ ContinueOpenWindow:
                 // trigger loading of the document
                 ReloadDocument(win, false);
             }
-            ShowMainWindow(win, data->windowState);
-            MoveWindowToVirtualDesktop(vdm, win->hwndFrame, data->virtualDesktopId);
-            if (IsWindowOnCurrentDesktop(vdm, win->hwndFrame)) {
+            int windowState = data->windowState;
+            TempStr desktopId = str::DupTemp(data->virtualDesktopId);
+            HWND hwndFrame = win->hwndFrame;
+            ShowMainWindow(win, windowState);
+            // COM calls to the shell dispatch incoming sent messages: a DDE
+            // [CmdExit] can close win and re-save (free) the session data
+            MoveWindowToVirtualDesktop(vdm, hwndFrame, desktopId);
+            bool onCurrentDesktop = IsWindowOnCurrentDesktop(vdm, hwndFrame);
+            if (!IsMainWindowValid(win) || sessionGen != gInitialSessionDataGen) {
+                logf("WinMain: window closed or session re-saved while restoring, stopping\n");
+                if (!IsMainWindowValid(win)) {
+                    win = nullptr;
+                }
+                break;
+            }
+            if (onCurrentDesktop) {
                 winOnCurrentDesktop = win;
             }
             // Docs were loaded while the frame was hidden (normal windowPos size).
@@ -16369,8 +17264,7 @@ ContinueOpenWindow:
             // final canvas so scroll isn't stuck on the pre-show viewport
             // (related to #5753 / #5823). ShowMainWindow already RelayoutFrame'd
             // a normal window to its restored size.
-            if (win->IsDocLoaded() &&
-                (data->windowState == WIN_STATE_MAXIMIZED || data->windowState == WIN_STATE_FULLSCREEN)) {
+            if (win->IsDocLoaded() && (windowState == WIN_STATE_MAXIMIZED || windowState == WIN_STATE_FULLSCREEN)) {
                 win->canvasRc = {};
                 win->UpdateCanvasSize();
             }
@@ -16380,7 +17274,7 @@ ContinueOpenWindow:
         }
         // the last window shown took the foreground; if it went to another
         // desktop, a window that stayed gets it and the cmd-line files instead
-        if (winOnCurrentDesktop && winOnCurrentDesktop != win) {
+        if (winOnCurrentDesktop && winOnCurrentDesktop != win && IsMainWindowValid(winOnCurrentDesktop)) {
             win = winOnCurrentDesktop;
             SetForegroundWindow(win->hwndFrame);
         }
@@ -16391,7 +17285,8 @@ ContinueOpenWindow:
             auto* tab = FindTabByFile(path);
             if (tab) {
                 tabToSelect = tab;
-                if (flags.forwardSearchOrigin && flags.forwardSearchLine && win->AsFixed() && win->AsFixed()->pdfSync) {
+                if (flags.forwardSearchOrigin && flags.forwardSearchLine && win && win->AsFixed() &&
+                    win->AsFixed()->pdfSync) {
                     int page;
                     Vec<Rect> rects;
                     TempStr srcPath = path::NormalizeTemp(flags.forwardSearchOrigin);
@@ -16491,6 +17386,7 @@ ContinueOpenWindow:
     if (showStartPage && FileHistoryGet(0)) {
         RemoveNonExistentFilesAsync();
     }
+    RegenerateMissingThumbnails();
     // call this once it's clear whether Perm::SavePreferences has been granted
     RegisterSettingsForFileChanges();
 

@@ -42,15 +42,21 @@ void BenchRangeTest();
 void versioncheck_test();
 void hexstrTest();
 void colorTest();
+void PngSizeTest();
 void parseCommandsTest();
 void DocPropertiesTest();
 void ParseFileArgsTest();
 void RestrictedUseConfigTest();
+void ControlFrameActionTest();
+void OpenDdeCmdTest();
+void UpdateCheckDecisionTest();
 
 void CachedObjects_UnitTests();
 void CommandPaletteModel_UnitTests();
 void ImageReader_UnitTests();
 bool RenderCache_UnitTestCookieUnlocked();
+bool RenderCache_UnitTestFullOfOneVisiblePage();
+bool RenderCache_UnitTestFullOfOldZoom();
 
 #if OS_POSIX && !OS_WASM
 static void AIChatProcessTest() {
@@ -315,10 +321,15 @@ static void PageAspectViewTest() {
 
 void SumatraPDF_UnitTests() {
     RestrictedUseConfigTest();
+    ControlFrameActionTest();
+    OpenDdeCmdTest();
+    UpdateCheckDecisionTest();
     CachedObjects_UnitTests();
     CommandPaletteModel_UnitTests();
     ImageReader_UnitTests();
     utassert(RenderCache_UnitTestCookieUnlocked());
+    utassert(RenderCache_UnitTestFullOfOneVisiblePage());
+    utassert(RenderCache_UnitTestFullOfOldZoom());
 #if OS_POSIX && !OS_WASM
     AIChatProcessTest();
 #endif
@@ -332,6 +343,7 @@ void SumatraPDF_UnitTests() {
     PageAspectViewTest();
     parseCommandsTest();
     colorTest();
+    PngSizeTest();
     BenchRangeTest();
 #if OS_WIN
     ParseCommandLineTest();

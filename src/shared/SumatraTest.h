@@ -5,8 +5,12 @@ void EnsureTestSettings();
 TempStr SynctexResultTemp(Str pdfPath, Str srcPath, int line);
 TempStr InverseSearchResultTemp(Str pdfPath, int pageNo, int x, int y);
 TempStr SearchResultTemp(Str pdfPath, Str needle, Str password = Str());
-TempStr FindPageRangeResultTemp(Str pdfPath, Str needle, int first, int last, Str spec = {},
-                                int* exitCodeOut = nullptr);
+enum class FindDirection {
+    Forward,
+    Backward
+};
+TempStr FindPageRangeResultTemp(Str pdfPath, Str needle, int first, int last, Str spec = {}, int* exitCodeOut = nullptr,
+                                FindDirection dir = FindDirection::Forward);
 TempStr DestResultTemp(Str pdfPath, int destNo);
 TempStr NamedDestResultTemp(Str pdfPath, Str destName);
 TempStr ChmResultTemp(Str chmPath, int* exitCodeOut = nullptr);
@@ -14,12 +18,14 @@ TempStr TripleClickLineSelectResultTemp(Str pdfPath, Str clickWord, Str expected
 TempStr ContextMenuSelectionResultTemp(Str word1, Str word2, Str cursorWord, int* exitCodeOut = nullptr);
 TempStr ClickClearsSelectionResultTemp(Str word, int* exitCodeOut = nullptr);
 TempStr RectSelectionDragResultTemp(Str word, int* exitCodeOut = nullptr);
+TempStr DrawRectSelectionResultTemp(Str word, int* exitCodeOut = nullptr);
 TempStr RotatedTextMouseDragResultTemp(Str word, int* exitCodeOut = nullptr);
 TempStr GoToFindMatchResultTemp(Str word, Str typed, int* exitCodeOut = nullptr);
 TempStr ScrollToLinkResultTemp(int minViewportDelta, int* exitCodeOut = nullptr);
 TempStr I18nErrorStringResultTemp(int* exitCodeOut = nullptr);
 TempStr GetTocResultTemp(Str path, int* exitCodeOut = nullptr);
-TempStr PageLinksResultTemp(Str path, int pageNo, int* exitCodeOut = nullptr);
+TempStr PageLinksResultTemp(Str path, int pageNo, int* exitCodeOut = nullptr, const PointF* hit = nullptr);
+TempStr PageImagesResultTemp(Str path, int pageNo, int* exitCodeOut = nullptr);
 TempStr PageCommentsResultTemp(Str path, int pageNo, int* exitCodeOut = nullptr);
 TempStr TocNavigateResultTemp(int destNo, int* exitCodeOut = nullptr);
 TempStr TocSidebarNavResultTemp(int destNo, int* exitCodeOut = nullptr);
@@ -27,6 +33,7 @@ TempStr RenumberSelResultTemp(int layoutChapter, int* exitCodeOut = nullptr);
 TempStr DestZoomNavResultTemp(int destNo, int startZoomPerc, int* exitCodeOut = nullptr);
 TempStr MarkdownTocNavigateResultTemp(int destNo, int minScrollY, int* exitCodeOut = nullptr);
 TempStr MarkdownFollowLinkResultTemp(Str href, bool follow, int* exitCodeOut = nullptr);
+TempStr MarkdownServedResultTemp(int* exitCodeOut = nullptr);
 TempStr CadEnhanceColorsResultTemp(Str path, int pageNo, int zoomPercent, int* exitCodeOut = nullptr);
 TempStr ImageRenderEdgesResultTemp(Str path, int zoomPercent, int clipKind, int* exitCodeOut = nullptr);
 TempStr ImageInsertResultTemp(Str pdfPath, Str imagePath, int* exitCodeOut = nullptr);
@@ -47,6 +54,7 @@ TempStr ToggleFormButtonResultTemp(int pageNo, int idx, int* exitCodeOut = nullp
 void DiscardUnsavedChangesInAllTabs();
 TempStr ResolveUnsavedChangesResultTemp(Str action, Str path, int* exitCodeOut = nullptr);
 TempStr RefHoverResultTemp(Str action, int x, int y, int* exitCodeOut = nullptr);
+TempStr TemporaryFileResultTemp(Str action, int* exitCodeOut = nullptr);
 TempStr PageInfoResultTemp(int* exitCodeOut = nullptr);
 TempStr SidebarThumbnailsResultTemp(int* exitCodeOut = nullptr);
 TempStr FrameNcStripsResultTemp(int* exitCodeOut = nullptr);

@@ -49,6 +49,9 @@ static void OnPaintAbout(MainWindow* win) {
     DrawCanvasKeyboardFocusIfNeeded(win, hdc);
 
     EndPaint(win->hwndCanvas, &ps);
+    if (drawHome) {
+        HomePageRepaintWinScrollbar(win);
+    }
     win->ShowFrameRateDur(TimeSinceInMs(t));
 }
 
@@ -195,6 +198,11 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
             HomePageOnMouseWheel(win, delta);
             return 0;
         }
+
+        // nothing scrolls sideways; DefWindowProc hands it to the frame, which
+        // sends it back here until the stack overflows
+        case WM_MOUSEHWHEEL:
+            return 0;
 
         default:
             return DefWindowProc(hwnd, msg, wp, lp);

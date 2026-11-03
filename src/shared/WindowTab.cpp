@@ -5,6 +5,9 @@
 #include "base/File.h"
 #include "base/FileWatcher.h"
 #include "base/GuessFileType.h"
+#if OS_WIN
+#include "base/Win.h"
+#endif
 
 #include "gui/UIModels.h"
 
@@ -37,9 +40,11 @@ WindowTab::WindowTab(MainWindow* win) {
 
 void WindowTab::SetFilePath(Str path) {
     type = Type::Document;
+    isExtraHome = false;
     bool changed = filePath && !path::IsSame(filePath, path);
-    if (changed && IsOpenCachePath(filePath)) {
-        file::Delete(filePath);
+    if (changed) {
+        DeleteOpenCacheCopy(filePath);
+        temporaryFileNotified = false;
     }
     if (changed) {
         str::FreePtr(&pendingFindText);
@@ -58,7 +63,7 @@ bool WindowTab::IsAboutTab() const {
 
 #if !defined(SUMATRA_NG)
 // the SidebarView / SidebarBottomView settings
-static const char* kSidebarViewNames[kSidebarViewCount] = {"bookmarks", "thumbnails", "favorites"};
+static const char* kSidebarViewNames[kSidebarViewCount] = {"bookmarks", "thumbnails", "favorites", "signatures"};
 
 SidebarView SidebarViewFromStr(Str s, SidebarView def) {
     for (int i = 0; i < kSidebarViewCount; i++) {
@@ -75,6 +80,11 @@ Str SidebarViewToStr(SidebarView v) {
 
 #endif
 
+// the first Home tab: compact and fixed in place. IsAboutTab() is any Home tab
+bool WindowTab::IsPinnedHomeTab() const {
+    return IsAboutTab() && !isExtraHome;
+}
+
 bool WindowTab::IsFavoritesTab() const {
     ReportIf(type == WindowTab::Type::None);
     return type == WindowTab::Type::Favorites;
@@ -87,6 +97,9 @@ bool WindowTab::IsNonDocumentTab() const {
 
 WindowTab::~WindowTab() {
     logf("~WindowTab: 0x%p, dm: 0x%p\n", this, AsFixed());
+#if !defined(SUMATRA_NG)
+    delete signatures;
+#endif
     // Nothing may point at a tab that is going away.
     ReadAloudForgetTab(this);
 #if !defined(SUMATRA_NG)
@@ -144,9 +157,7 @@ WindowTab::~WindowTab() {
     }
     delete pendingLoadArgs;
 #endif
-    if (IsOpenCachePath(filePath)) {
-        file::Delete(filePath);
-    }
+    DeleteOpenCacheCopy(filePath);
     str::Free(filePath);
     filePath = {};
     str::Free(displayName);
@@ -307,7 +318,7 @@ bool SaveDataToFile(HWND hwndParent, Str fileName, Str data) {
     ofn.nFilterIndex = 1;
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
 
-    if (!GetSaveFileNameW(&ofn)) {
+    if (!(TakeTestSaveFileName(&ofn) || GetSaveFileNameW(&ofn))) {
         return false;
     }
     return file::WriteFile(ToUtf8Temp(dstFileName), data);

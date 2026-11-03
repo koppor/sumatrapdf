@@ -279,6 +279,8 @@ function sumatrapdf_files()
     "PDFScriptCommon.*",
     "AdvancedSettingsDialogCommon.*",
     "RestrictedUseConfig.*",
+    "BrightnessContrastDialog.*",
+    "BrightnessContrastDialogCommon.*",
     "ChangeColorDialog.*",
     "ChangeColorDialogCommon.*",
     "ChangeLanguageDialog.*",
@@ -294,9 +296,11 @@ function sumatrapdf_files()
     "GetPasswordDialog.*",
     "GoToPageDialog.*",
     "InverseSearchDialog.*",
+    "SumatraOnlineDialog.*",
     "SettingsDialog.*",
     "AppSettings.*",
     "PagePosition.*",
+    "AppDecisions.cpp",
     "AppTools.*",
     "Canvas.*",
     "CanvasCommon.*",
@@ -304,7 +308,10 @@ function sumatrapdf_files()
     "LaserPointerCursor_win.cpp",
     "OleDragDropCommon.h",
     "OleDragDropCommon_win.cpp",
+    "WebViewCapture.h",
+    "WebViewCapture_win.cpp",
     "PageThumbnails.*",
+    "SignatureUI.*",
     "MergePdf.*",
     "AnnotPlacement.*",
     "AnnotPlacementCursors_win.*",
@@ -635,11 +642,13 @@ function engines_files()
     "EngineMupdfImpl.*",
     "EnginePs.*",
     "EngineDvi.*",
+    "EngineCaj.*",
     "GumboHtmlParser.*",
     "GumboHelpers.*",
     "HtmlFormatter.*",
     "LitDoc.*",
     "MobiDoc.*",
+    "RtfDoc.*",
     "PalmDbReader.*",
     "PdfCad.*",
     "PdfCreator.*",
@@ -664,7 +673,7 @@ function cmark_gfm_files()
     "syntax_extension.c", "utf8.c",
   })
   files_in_dir("ext/cmark-gfm/extensions", {
-    "autolink.c", "core-extensions.c", "ext_scanners.c", "strikethrough.c",
+    "autolink.c", "core-extensions.c", "ext_scanners.c", "highlight.c", "strikethrough.c",
     "table.c", "tagfilter.c", "tasklist.c", "autoheaderid.c",
   })
 end
@@ -995,6 +1004,7 @@ function tesseract_files()
     "dotproduct.cpp",
     "dotproductavx.cpp",
     "dotproductfma.cpp",
+    "dotproductneon.cpp",
     "dotproductsse.cpp",
     "intsimdmatrix.cpp",
     "intsimdmatrixavx2.cpp",
@@ -1319,7 +1329,7 @@ end
 
 function zxing_files()
   files { "ext/zxing-cpp/core/src/*.h", "ext/zxing-cpp/core/src/*/*.h", "ext/zint/backend/*.h" }
-  files { "ext/mupdf/source/fitz/zxingbarcode.cpp", "src/mupdf/zxing-eci.cpp" }
+  files { "ext/mupdf/source/fitz/zxingbarcode.cpp", "src/shared/mupdf/zxing-eci.cpp" }
   files_in_dir("ext/zxing-cpp/core/src", {
     "Barcode.cpp",
     "BarcodeFormat.cpp",
@@ -1539,6 +1549,8 @@ function test_engines_files()
     "src/shared/JxlReader.cpp",
     "src/shared/LitDoc.cpp",
     "src/shared/LitDoc.h",
+    "src/shared/RtfDoc.cpp",
+    "src/shared/RtfDoc.h",
     "src/shared/MobiDoc.cpp",
     "src/shared/PalmDbReader.cpp",
     "src/shared/PdfCad.cpp",

@@ -231,6 +231,14 @@ static MenuDef menuDefContext[] = {
         CmdToggleToolbar,
     },
     {
+        TrN("Show Caption"),
+        CmdToggleCaption,
+    },
+    {
+        TrN("Auto-hide Sidebar"),
+        CmdToggleSidebarAutoHide,
+    },
+    {
         StrL(kMenuSeparator),
         kMenuSeparatorID,
     },
@@ -540,9 +548,11 @@ HMENU BuildMenuFromDef(MenuDef* menuDef, HMENU menu, BuildMenuCtx* ctx) {
 
         // custom selection handlers go before the built-in translate / search submenus
         if (md.idOrSubmenu == (UINT_PTR)menuDefTranslateWith) {
-            if (menuDef == menuDefMainSelection) {
+            // handlers run on selected text; comics and images have none
+            bool canSelectText = !ctx || !ctx->isImageCollection;
+            if (canSelectText && menuDef == menuDefMainSelection) {
                 AppendSelectionHandlersToMenu(menu, true);
-            } else if (menuDef == menuDefSelection) {
+            } else if (canSelectText && menuDef == menuDefSelection) {
                 AppendSelectionHandlersToMenu(menu, ctx ? ctx->hasSelection : false);
             }
         }
@@ -575,10 +585,10 @@ HMENU BuildMenuFromDef(MenuDef* menuDef, HMENU menu, BuildMenuCtx* ctx) {
         }
         if (ctx) {
             removeMenu |= !ctx->isCursorOnPage && (subMenuDef == menuDefCreateAnnotUnderCursor);
-            // these annotations need text to mark up, so a rectangular
-            // selection doesn't count
-            removeMenu |=
-                (!ctx->hasTextSelection || !ctx->supportsAnnots) && (subMenuDef == menuDefCreateAnnotFromSelection);
+            // these annotations need text to mark up, except Highlight, which can
+            // fill a drawn rectangle
+            bool canMarkUp = ctx->hasTextSelection || ctx->hasDrawnRectSelection;
+            removeMenu |= (!canMarkUp || !ctx->supportsAnnots) && (subMenuDef == menuDefCreateAnnotFromSelection);
             // in the context menu only show translate / search items for a text
             // selection (the menubar variant is live-updated via
             // SetMenuStateForSelection instead)
@@ -896,6 +906,8 @@ static void MenuUpdateStateForWindow(MainWindow* win) {
         MenuSetChecked(win->menu, CmdToggleToolbar, toolbarOn);
     }
     MenuSetChecked(win->menu, CmdToggleMenuBar, gSettings->showMenubar);
+    MenuSetChecked(win->menu, CmdToggleCaption, gSettings->showCaption);
+    MenuSetChecked(win->menu, CmdToggleSidebarAutoHide, gSettings->sidebarAutoHide);
     // CmdChangeScrollbar doesn't need a check mark - it opens a dialog
     MenuUpdateDisplayMode(win);
     MenuUpdateZoom(win);
@@ -1370,11 +1382,11 @@ void OnWindowContextMenu(MainWindow* win, int x, int y) {
             }
             IPageDestination* elDest = pageEl->AsLink();
             PageDestination* pd = (PageDestination*)elDest;
-            if (!pd || pd->embedObjNum <= 0) {
+            if (!pd) {
                 return;
             }
             // attachments are arbitrary binary
-            Str data = EngineMupdfLoadAnnotAttachment(engine, pd->embedObjNum);
+            Str data = EngineMupdfLoadEmbedded(engine, pd);
             if (len(data) == 0) {
                 return;
             }

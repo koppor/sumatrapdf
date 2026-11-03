@@ -185,7 +185,16 @@ class EngineImages : public EngineBase {
     void GetImageProperties(int pageNo, Props& propsOut);
 };
 
+// Live engines. Cache trimming holds this lock, so ~EngineImages can't free under it.
+static RecursiveMutex gImageEnginesLock;
+static Vec<EngineImages*> gImageEngines;
+
 EngineImages::EngineImages() {
+    {
+        ScopedRecursiveMutex scope(&gImageEnginesLock);
+        VecAppend(gImageEngines, this);
+    }
+
     kind = kindEngineImage;
 
     preferredLayout = PageLayout();
@@ -222,6 +231,11 @@ EngineImages::~EngineImages() {
     // logged so a leaked engine can be identified: its creation is logged by
     // CreateEngineImageFromFile et al. but this line will be missing
     logf("~EngineImages: '%s'\n", FilePath());
+    {
+        ScopedRecursiveMutex scope(&gImageEnginesLock);
+        VecRemove(gImageEngines, this);
+    }
+
     cacheLock.Lock();
     while (len(pageCache) > 0) {
         ImagePage* lastPage = VecLast(pageCache);
@@ -531,6 +545,8 @@ static void CapFzImageDecodeSize(const fz_image* img, int* w, int* h) {
     }
 }
 
+// MuPDF decodes the image as stored and leaves its orientation to the caller:
+// a JPEG with EXIF orientation 6 came out sideways in its upright page (#6470)
 static Pixmap* FzImageToPixmap(fz_context* ctx, fz_image* img) {
     if (FzImageTooBigToFullyDecode(img)) {
         return nullptr;
@@ -549,7 +565,7 @@ static Pixmap* FzImageToPixmap(fz_context* ctx, fz_image* img) {
     }
     Pixmap* res = FzPixmapToPixmap(ctx, pixmap);
     fz_drop_pixmap(ctx, pixmap);
-    return res;
+    return PixmapApplyExifOrientation(res, FzOrientationToExif(img->orientation));
 }
 
 static inline int ClampInt(int v, int minVal, int maxVal) {
@@ -1028,30 +1044,48 @@ bool EngineImages::SaveFileAs(Str dstPath) {
     return SaveFileOrData(FilePath(), sourceData, dstPath);
 }
 
-static bool ImagePageCanFree(WindowTab* currTab, CachedObject* o) {
-    (void)currTab;
-    auto* page = (ImagePage*)o->id;
-    if (!page || page->loading) {
-        return false;
-    }
-    if (AtomicIntGet(&page->refs) > 1) {
-        return false;
-    }
-    return page->ownPixmap && page->pixmap;
-}
+enum class ImagePageTrim {
+    Check,
+    Free,
+};
 
-static bool ImagePageFree(WindowTab* currTab, CachedObject* o) {
-    (void)currTab;
+// o comes from an unlocked snapshot: don't touch its engine or page until found
+// in the live lists. A page out of pageCache only has refs of its users, not ours.
+// Trimming is best-effort, so busy locks skip the page rather than risk a deadlock.
+static bool TrimImagePage(CachedObject* o, ImagePageTrim action) {
     auto* page = (ImagePage*)o->id;
     auto* eng = (EngineImages*)o->engine;
-    if (!page || !eng) {
+    if (!gImageEnginesLock.TryLock()) {
         return false;
     }
-    if (AtomicIntGet(&page->refs) > 1) {
+    defer {
+        gImageEnginesLock.Unlock();
+    };
+    if (!VecContains(gImageEngines, eng) || !eng->cacheLock.TryLock()) {
         return false;
     }
-    eng->DropPage(page, true);
+    defer {
+        eng->cacheLock.Unlock();
+    };
+
+    if (!VecContains(eng->pageCache, page) || page->loading || AtomicIntGet(&page->refs) > 1) {
+        return false;
+    }
+    if (!page->ownPixmap || !page->pixmap) {
+        return false;
+    }
+    if (action == ImagePageTrim::Free) {
+        eng->DropPage(page, true);
+    }
     return true;
+}
+
+static bool ImagePageCanFree(WindowTab* /*currTab*/, CachedObject* o) {
+    return TrimImagePage(o, ImagePageTrim::Check);
+}
+
+static bool ImagePageFree(WindowTab* /*currTab*/, CachedObject* o) {
+    return TrimImagePage(o, ImagePageTrim::Free);
 }
 
 ImagePage* EngineImages::GetPage(int pageNo, bool tryOnly) {
@@ -2302,6 +2336,7 @@ class EngineCbx : public EngineImages {
     bool tocFromComicInfo = false;
 
   protected:
+    fz_image* LoadFzImageForPage(fz_context* ctx, int pageNo) override;
     Pixmap* LoadPixmapForPage(int pageNo, bool& deleteAfterUse) override;
     RectF LoadMediabox(int pageNo) override;
     Str GetImageData(int pageNo) override;
@@ -2550,7 +2585,8 @@ bool EngineCbx::FinishLoading() {
 
         // an archive member name, not a path on disk: nothing to probe
         FileType kind = GuessFileTypeFromName(fileName, true);
-        if (IsEngineImageSupportedFileType(kind) &&
+        bool isPage = IsEngineImageSupportedFileType(kind) || FileType::Svg == kind;
+        if (isPage &&
             // OS X occasionally leaves metadata with image extensions
             !str::StartsWith(path::GetBaseNameTemp(fileName), StrL("."))) {
             VecAppend(pageFiles, fileInfo);
@@ -2754,6 +2790,34 @@ void EngineCbx::GetProperties(Props& propsOut) {
     AddProp(propsOut, DocProp::Files, str::DupTemp(filesStrView));
 }
 
+// SVG pages become display-list images, so they stay sharp at any zoom (#6364)
+fz_image* EngineCbx::LoadFzImageForPage(fz_context* ctx, int pageNo) {
+    FileType kind = GuessFileTypeFromName(files[pageNo - 1]->name, true);
+    if (FileType::Svg != kind) {
+        return EngineImages::LoadFzImageForPage(ctx, pageNo);
+    }
+    Str data = GetImageData(pageNo);
+    if (len(data) == 0) {
+        return nullptr;
+    }
+    fz_image* img = nullptr;
+    fz_buffer* buf = nullptr;
+    fz_var(buf);
+    fz_var(img);
+    fz_try(ctx) {
+        buf = fz_new_buffer_from_copied_data(ctx, (u8*)data.s, (size_t)data.len);
+        img = fz_new_image_from_svg(ctx, buf, nullptr, nullptr);
+    }
+    fz_always(ctx) {
+        fz_drop_buffer(ctx, buf);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        img = nullptr;
+    }
+    return img;
+}
+
 Pixmap* EngineCbx::LoadPixmapForPage(int pageNo, bool& deleteAfterUse) {
     auto timeStart = TimeGet();
     defer{};
@@ -2803,6 +2867,11 @@ RectF EngineCbx::LoadMediabox(int pageNo) {
             // mupdf decoded the image; use its dimensions
             w = page->img->w;
             h = page->img->h;
+            if (page->img->scalable && page->img->xres > 0 && page->img->yres > 0) {
+                // SVG: mupdf sizes it at 96 dpi; use SVG units, like a standalone .svg
+                w = (int)roundf(w * 72.f / page->img->xres);
+                h = (int)roundf(h * 72.f / page->img->yres);
+            }
             uint8_t orientation = page->img->orientation;
             if (orientation != 0 && (orientation & 1) == 0) {
                 std::swap(w, h);

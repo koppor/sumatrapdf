@@ -206,11 +206,21 @@ static Str MkLitNameLenWrap() {
 
 #if IS_DEBUG
 bool LitDoc_UnitTestManifest();
+bool LitDoc_UnitTestDes();
+bool LitDoc_UnitTestDesThreads();
+bool LitDoc_UnitTestLzxOverrun();
+bool LitDoc_UnitTestZipName();
+bool LitDoc_UnitTestOpfStrayClose();
 #endif
 
 void LitDoc_UnitTests() {
 #if IS_DEBUG
     utassert(LitDoc_UnitTestManifest());
+    utassert(LitDoc_UnitTestDes());
+    utassert(LitDoc_UnitTestDesThreads());
+    utassert(LitDoc_UnitTestLzxOverrun());
+    utassert(LitDoc_UnitTestZipName());
+    utassert(LitDoc_UnitTestOpfStrayClose());
 #endif
     LitMustReject(MkLitHdrLenWrap());
     LitMustReject(MkLitPosOverflow());

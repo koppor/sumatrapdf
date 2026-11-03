@@ -345,6 +345,19 @@ const CommandInfo gCommands[] = {
     {CmdQuickEditSettings, "CmdQuickEditSettings\0", StrL("Quick Edit Settings")},
     {CmdConfigureRestrictedUse, "CmdConfigureRestrictedUse\0", StrL("Configure Restricted Use...")},
     {CmdRunPDFScript, "CmdRunPDFScript\0", StrL("Run PDF Script...")},
+    {CmdToggleCaption, "CmdToggleCaption\0", StrL("Toggle Caption")},
+    {CmdAdjustBrightness, "CmdAdjustBrightness\0", StrL("Adjust Brightness...")},
+    {CmdAdjustContrast, "CmdAdjustContrast\0", StrL("Adjust Contrast...")},
+    {CmdToggleSidebarAutoHide, "CmdToggleSidebarAutoHide\0", StrL("Toggle Sidebar Auto-hide")},
+    {CmdDebugShowCrashMiniDumps, "CmdDebugShowCrashMiniDumps\0", StrL("Debug: Show Crash Minidumps")},
+    {CmdCopyTemporaryFileToNonTemporary, "CmdCopyTemporaryFileToNonTemporary\0", StrL("Copy Temporary File to Permanent Folder")},
+    {CmdConvertEpubToPdf, "CmdConvertEpubToPdf\0", StrL("Convert EPUB to PDF...")},
+    {CmdConvertCajToPDF, "CmdConvertCajToPDF\0", StrL("Convert CAJ to PDF...")},
+    {CmdFindHistory, "CmdFindHistory\0", StrL("Find History")},
+    {CmdSumatraOnline, "CmdSumatraOnline\0", StrL("Sumatra Online...")},
+    {CmdDebugSaveSettings, "CmdDebugSaveSettings\0", StrL("Debug: Save Settings")},
+    {CmdNewTab, "CmdNewTab\0", StrL("New Tab")},
+    {CmdShowSignatures, "CmdShowSignatures\0", StrL("Show Signatures")},
     {CmdRefHoverPushToJabRef, "CmdRefHoverPushToJabRef\0", StrL("Push Reference to JabRef")},
 };
 const int gCommandsCount = dimofi(gCommands);
@@ -408,6 +421,7 @@ static const ArgSpec argSpecs[] = {
     // e.g. [CmdToggleFullscreen on] / [CmdToggleToolbar state=off]
     {CmdToggleContinuousView, kCmdArgState, CommandArg::Type::Bool},   // default
     {CmdToggleToolbar, kCmdArgState, CommandArg::Type::Bool},          // default
+    {CmdToggleCaption, kCmdArgState, CommandArg::Type::Bool},          // default
     {CmdToggleMenuBar, kCmdArgState, CommandArg::Type::Bool},          // default
     {CmdToggleFullscreen, kCmdArgState, CommandArg::Type::Bool},       // default
     {CmdTogglePresentationMode, kCmdArgState, CommandArg::Type::Bool}, // default
@@ -474,6 +488,17 @@ Str GetCommandName(int commandId) {
 }
 
 Str GetCommandDescription(int commandId) {
+#if OS_WASM
+    // the folder is the stored documents (/uploads); same names as MenuDefs.cpp
+    switch (commandId) {
+        case CmdOpenNextFileInFolder:
+            return StrL("Open Next Document");
+        case CmdOpenPrevFileInFolder:
+            return StrL("Open Previous Document");
+        case CmdNavigateFilesInFolder:
+            return StrL("Browse Documents...");
+    }
+#endif
     int idx = FindCommandIndex(commandId);
     return idx < 0 ? Str{} : gCommands[idx].description;
 }

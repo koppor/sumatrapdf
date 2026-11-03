@@ -84,6 +84,15 @@ void FileUtilTest() {
     utassert(!path::IsEphemeralHostFile(StrL("C:\\docs\\paper.pdf")));
     utassert(!path::IsEphemeralHostFile(StrL("C:\\docs\\OneNotePDFs\\a.pdf")));
     utassert(!path::IsEphemeralHostFile(StrL("C:\\docs\\my-onenote-export.pdf")));
+    {
+        WCHAR tempDirW[MAX_PATH + 1];
+        DWORD n = GetTempPathW(dimof(tempDirW), tempDirW);
+        utassert(n > 0 && n <= MAX_PATH);
+        TempStr tempDir = ToUtf8Temp(WStr(tempDirW, (int)n));
+        utassert(path::IsInTempDir(path::JoinTemp(tempDir, StrL("Outlook attachment.pdf"))));
+        utassert(!path::IsInTempDir(tempDir));
+        utassert(!path::IsInTempDir(StrL("C:\\docs\\paper.pdf")));
+    }
     utassert(!path::Match(StrL("C:\\file.pdf"), StrL("f??f.p?f")));
     utassert(!path::Match(StrL("C:\\.pdf"), StrL("?.pdf")));
     {
@@ -284,6 +293,28 @@ static void RemoveAllWorkerFn(RemoveAllWorker* w) {
     }
 }
 #endif
+
+// A failed lookup of a network path must not hide a file created after it (#6398).
+// Uses the loopback admin share; skipped when it isn't reachable.
+void UncExistsTest() {
+#if OS_WIN
+    TempStr local = GetTempFilePathTemp(StrL("unc"));
+    file::Delete(local);
+    if (len(local) < 3 || local.s[1] != ':') {
+        return;
+    }
+    TempStr unc = fmt("\\\\localhost\\%c$%s", local.s[0], Str(local.s + 2, len(local) - 2));
+    TempStr uncRoot = fmt("\\\\localhost\\%c$\\", local.s[0]);
+    if (GetFileAttributesW(CWStrTemp(uncRoot)) == INVALID_FILE_ATTRIBUTES) {
+        return;
+    }
+
+    utassert(!file::Exists(unc));
+    utassert(file::WriteFile(local, StrL("x")));
+    utassert(file::Exists(unc));
+    file::Delete(local);
+#endif
+}
 
 // dir::RemoveAll must remove nested and read-only content and must be safe
 // to call from several threads at once (the shutdown WebView profile removal

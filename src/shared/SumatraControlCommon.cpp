@@ -99,6 +99,10 @@ TempStr PageBoxesResultTemp(int pageNo, int* exitCodeOut) {
         line.Append(fmt(" %s=%.2f,%.2f,%.2f,%.2f", Str(PdfPageBoxName(box.kind)), box.rect.x, box.rect.y, box.rect.dx,
                         box.rect.dy));
     }
+    RectF media = engine->PageMediabox(pageNo);
+    RectF content = engine->PageContentBox(pageNo);
+    line.Append(fmt(" engineMedia=%.2f,%.2f,%.2f,%.2f", media.x, media.y, media.dx, media.dy));
+    line.Append(fmt(" engineContent=%.2f,%.2f,%.2f,%.2f", content.x, content.y, content.dx, content.dy));
     return finish(ToStrTemp(line), 0);
 }
 
@@ -434,32 +438,72 @@ static WStr FullPipeNameOwned(Str pipeName) {
     return ToWStr(fullName);
 }
 
+static WStr gControlPipeName;
+static volatile LONG gControlStop = 0;
+static HANDLE gControlListenerExited = nullptr;
+
+struct ControlConnArg {
+    HANDLE pipe;
+};
+
+// One thread per client: the async client stays connected while tests also
+// make short synchronous requests (scroll position) on a second connection.
+static void ControlConnThread(ControlConnArg* arg) {
+    HANDLE pipe = arg->pipe;
+    delete arg;
+    bool stop = ProcessControlConnection(pipe);
+    // DisconnectNamedPipe discards data the client hasn't read yet; wait
+    // until it has, or the Quit reply is lost and the client sees EPIPE
+    FlushFileBuffers(pipe);
+    DisconnectNamedPipe(pipe);
+    CloseHandle(pipe);
+    if (!stop) {
+        return;
+    }
+    // wake the listener blocked in ConnectNamedPipe so it can exit. It may be
+    // between instances (no pipe to open yet) or all instances busy: retry
+    InterlockedExchange(&gControlStop, 1);
+    for (int i = 0; i < 300; i++) {
+        if (WaitForSingleObject(gControlListenerExited, 0) == WAIT_OBJECT_0) {
+            return;
+        }
+        HANDLE h = CreateFileW(gControlPipeName.s, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            CloseHandle(h);
+        }
+        WaitForSingleObject(gControlListenerExited, 10);
+    }
+}
+
 void SumatraControlThread(ControlThreadArg* arg) {
-    WStr pipeNameW = FullPipeNameOwned(arg->pipeName);
+    gControlPipeName = FullPipeNameOwned(arg->pipeName);
     str::FreePtr(&arg->pipeName);
     delete arg;
+    gControlListenerExited = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 
-    for (;;) {
-        HANDLE pipe = CreateNamedPipeW(pipeNameW.s, PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                                       1, 64 * 1024, 64 * 1024, 0, nullptr);
+    constexpr DWORD kMaxConns = 8;
+    while (!gControlStop) {
+        HANDLE pipe =
+            CreateNamedPipeW(gControlPipeName.s, PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                             kMaxConns, 64 * 1024, 64 * 1024, 0, nullptr);
         if (pipe == INVALID_HANDLE_VALUE) {
-            logf("CreateNamedPipeW failed for control pipe, err=%u\n", (unsigned)GetLastError());
-            return;
+            DWORD err = GetLastError();
+            // all kMaxConns instances connected: wait for one to disconnect
+            if (err == ERROR_PIPE_BUSY) {
+                SleepInMs(50);
+                continue;
+            }
+            logf("CreateNamedPipeW failed for control pipe, err=%u\n", (unsigned)err);
+            break;
         }
         BOOL connected = ConnectNamedPipe(pipe, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
-        bool stop = false;
-        if (connected) {
-            stop = ProcessControlConnection(pipe);
+        if (!connected || gControlStop) {
+            CloseHandle(pipe);
+            continue;
         }
-        // DisconnectNamedPipe discards data the client hasn't read yet; wait
-        // until it has, or the Quit reply is lost and the client sees EPIPE
-        FlushFileBuffers(pipe);
-        DisconnectNamedPipe(pipe);
-        CloseHandle(pipe);
-        if (stop) {
-            return;
-        }
+        RunAsync(MkFunc0(ControlConnThread, new ControlConnArg{pipe}), StrL("SumatraControlConn"));
     }
+    SetEvent(gControlListenerExited);
 }
 
 #endif // OS_WIN
@@ -489,6 +533,36 @@ ControlRequest* ReadControlRequest(ControlConn h) {
     return req;
 }
 
+ControlServeResult ServeControlRequest(ControlConn h, ControlExecFn execOnUi) {
+    ControlServeResult res;
+    ControlRequest* req = ReadControlRequest(h);
+    if (!req) {
+        return res;
+    }
+    res.hadRequest = true;
+    res.isQuit = ControlCmdEndsListener(req->cmd);
+    if (req->cmd == (u16)ControlFrameCmd::CrashMe) {
+        log(StrL("ControlCmd::CrashMe\n"));
+        CrashMe();
+    }
+    switch (ControlFrameActionFor(req->cmd)) {
+        case ControlFrameAction::WaitRenderIdle:
+            RunWaitRenderIdle(req);
+            break;
+        case ControlFrameAction::WaitSessionRestored:
+            RunWaitSessionRestored(req);
+            break;
+        case ControlFrameAction::RunOnUi:
+            if (execOnUi) {
+                execOnUi(req);
+            }
+            break;
+    }
+    res.wrote = WriteControlResponse(h, req);
+    DeleteControlRequest(req);
+    return res;
+}
+
 bool WriteControlResponse(ControlConn h, ControlRequest* req) {
     str::Builder payload;
     AppendU16(payload, req->reqId);
@@ -498,6 +572,19 @@ bool WriteControlResponse(ControlConn h, ControlRequest* req) {
     AppendU32(packet, (u32)len(payload));
     packet.Append(ToStr(payload));
     return WriteExact(h, ToStr(packet));
+}
+
+// "OK page=<n> x=<x> y=<y>": the first window's scroll position, in page units
+TempStr ScrollStateResultTemp(int* exitCodeOut) {
+    *exitCodeOut = 2;
+    MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+    DisplayModel* dm = win && win->IsDocLoaded() ? win->AsFixed() : nullptr;
+    if (!dm) {
+        return fmt("NOTREADY no-doc\n");
+    }
+    ScrollState ss = dm->GetScrollState();
+    *exitCodeOut = 0;
+    return fmt("OK page=%d x=%g y=%g\n", ss.page, ss.x, ss.y);
 }
 
 TempStr FavoriteNavResultTemp(Str action, int pageNo, int* exitCodeOut) {

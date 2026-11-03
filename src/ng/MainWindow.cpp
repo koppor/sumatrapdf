@@ -39,6 +39,8 @@
 #include "AIChatPanel.h"
 #include "OverlayScrollbar.h"
 #include "MainWindow.h"
+#include "Selection.h"
+#include "SearchAndDDECommon.h"
 #include "WindowTab.h"
 #include "gui/AppShell.h"
 #include "gui/DocCanvas.h"
@@ -128,8 +130,10 @@ struct ControllerCallbackHandler : DocControllerCallback {
     }
     void FocusFrame(bool) override {}
     void SaveDownload(Str, Str) override {}
-    void FindResultReceived(int, int, int) override {}
-    void FindAllResultReceived(Str) override {}
+    void FindResultReceived(int gen, int current, int total) override {
+        BrowserFindResultReceived(win, gen, current, total);
+    }
+    void FindAllResultReceived(Str payload) override { BrowserFindAllResultReceived(win, payload); }
     void TocChanged(DocController* ctrl) override;
     void PagesRenumbered(DisplayModel* dm) override {
         if (win->AsFixed() == dm) {
@@ -168,11 +172,8 @@ DocControllerCallback* CreateControllerCallbackHandler(MainWindow* win) {
 // menu destination (orig's TrackPopupMenu at the cursor; the port has no popup
 // it can open from code and wait on). It is marked below.
 static void LaunchEmbeddedDestination(MainWindow* win, PageDestination* pd) {
-    if (pd->embedObjNum <= 0) {
-        return;
-    }
     EngineBase* engine = win->CurrentTab()->AsFixed()->GetEngine();
-    Str data = EngineMupdfLoadAnnotAttachment(engine, pd->embedObjNum);
+    Str data = EngineMupdfLoadEmbedded(engine, pd);
     if (len(data) == 0) {
         return;
     }
@@ -283,15 +284,16 @@ void LinkHandler::LaunchFile(Str pathOrig, IPageDestination* remoteLink) {
         return;
     }
 
+    // remoteLink's page and rect are in the source document: only its name means
+    // something in the target
     Str destName = remoteLink->GetName();
-    if (destName) {
-        CleanRemoteDestNameInPlace(destName);
-        IPageDestination* dest = targetWin->ctrl->GetNamedDest(destName);
-        if (dest) {
-            ((LinkHandler*)targetWin->linkHandler)->ScrollTo(dest);
-        }
-    } else {
-        ((LinkHandler*)targetWin->linkHandler)->ScrollTo(remoteLink);
+    if (len(destName) == 0) {
+        return;
+    }
+    CleanRemoteDestNameInPlace(destName);
+    IPageDestination* dest = targetWin->ctrl->GetNamedDest(destName);
+    if (dest) {
+        ((LinkHandler*)targetWin->linkHandler)->ScrollTo(dest);
     }
 }
 
@@ -307,6 +309,7 @@ MainWindow::MainWindow(gpui::Window* w) {
     gpuiWin = w;
     sidebarBottomContent =
         SidebarContentFromStr(gSettings ? gSettings->sidebarBottomView : Str{}, SidebarContent::Favorites);
+    sidebarMiddleContent = SidebarContent::Thumbnails;
     sidebarDx = gSettings ? gSettings->sidebarDx : 0;
     if (sidebarDx < kSidebarMinDx) {
         sidebarDx = kSidebarMinDx;
@@ -451,26 +454,7 @@ static void PopulateTabCloseFlags(AppCommandCtx& ctx) {
     }
     int nTabs = ctx.win->TabCount();
     ctx.nTabs = nTabs;
-    WindowTab* currTab = ctx.tab;
-    int tabIdx = ctx.win->GetTabIdx(currTab);
-    ctx.canCloseTabsToRight = tabIdx < (nTabs - 1);
-    ctx.canCloseTabsToLeft = false;
-    int nFirstDocTab = 0;
-    for (int i = 0; i < nTabs; i++) {
-        WindowTab* t = ctx.win->GetTab(i);
-        if (t->IsAboutTab()) {
-            nFirstDocTab = 1;
-            continue;
-        }
-        ctx.hasDocTabs = true;
-        if (t == currTab) {
-            if (i > nFirstDocTab) {
-                ctx.canCloseTabsToLeft = true;
-            }
-            continue;
-        }
-        ctx.canCloseOtherTabs = true;
-    }
+    SetTabCloseFlags(ctx);
 }
 
 AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
@@ -502,9 +486,9 @@ AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
             ctx.isImageCollection = true;
         }
         ctx.isReflowable = engine && engine->isReflowable;
+        ctx.isEpub = IsEpubDoc(ctx.tab);
         ctx.engineKind = ctx.tab->GetEngineType();
         ctx.engineHasErrors = engine && engine->HasErrors();
-        ctx.canSendEmail = CanSendAsEmailAttachment(ctx.tab);
 #ifndef DISABLE_DOCUMENT_RESTRICTIONS
         ctx.allowsPrinting = !win->AsFixed() || (engine && engine->AllowsPrinting());
 #endif
@@ -541,12 +525,13 @@ AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
         ctx.isFixedPage = true;
         auto* engine = dm->GetEngine();
         ctx.hasTextSelection = ctx.hasSelection && dm->textSelection->result.len > 0;
+        ctx.hasDrawnRectSelection = ctx.hasSelection && IsDrawnRectSelection(win);
         ctx.supportsAnnots = EngineSupportsAnnotations(engine);
         ctx.hasUnsavedAnnotations = EngineHasUnsavedAnnotations(engine);
-        ctx.hasRedactMarks = EngineHasRedactMarks(engine);
+        ctx.hasRedactMarks = EngineHasRedactMarksNoWait(engine);
         ctx.hasUserRedactMarks = EngineHasUserRedactMarks(engine);
-        ctx.canUndo = EngineMupdfCanUndo(engine);
-        ctx.canRedo = EngineMupdfCanRedo(engine);
+        ctx.canUndo = EngineMupdfCanUndoNoWait(engine);
+        ctx.canRedo = EngineMupdfCanRedoNoWait(engine);
         int pageNoUnderCursor = dm->GetPageNoByPoint(cursorPos);
         if (pageNoUnderCursor > 0) {
             ctx.isCursorOnPage = true;

@@ -31,6 +31,7 @@ struct AppCommandCtx {
     bool isMarkdown = false;
     bool isCbx = false;
     bool isImageCollection = false;
+    bool isEpub = false;
     // reflowable document (epub, mobi, fb2, ...): the ebook settings apply
     bool isReflowable = false;
     bool isFixedPage = false;
@@ -41,6 +42,8 @@ struct AppCommandCtx {
     bool hasSelection = false;
     // selection is text (as opposed to rectangular block selection)
     bool hasTextSelection = false;
+    // rectangle drawn with Ctrl+drag, which Highlight can fill
+    bool hasDrawnRectSelection = false;
     bool isCursorOnPage = false;
     Annotation* annotationUnderCursor = nullptr;
     Annotation* selectedAnnotation = nullptr;
@@ -60,6 +63,8 @@ struct AppCommandCtx {
     bool canRedo = false;
     bool clipboardHasImage = false;
     bool clipboardReadAsync = false;
+    // checked and found signatures; only the Windows app checks
+    bool hasSignatures = false;
 
     int nTabs = 0;
     bool hasDocTabs = false;
@@ -69,7 +74,6 @@ struct AppCommandCtx {
     bool canCloseTabsToRight = false;
     bool canCloseTabsToLeft = false;
 
-    bool canSendEmail = false;
     // the document's own permission (orig's MenuUpdatePrintItem)
     bool allowsPrinting = true;
     bool allowToggleMenuBar = true;

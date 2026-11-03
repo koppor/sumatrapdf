@@ -22,6 +22,18 @@ void TabsOnCloseWindow(MainWindow*);
 void TabsOnChangedDoc(MainWindow*);
 void TabsSelect(MainWindow* win, int tabIndex);
 void GoToHomeTab(MainWindow*);
+void AddExtraHomeTab(MainWindow*);
+void AddStartupHomeTab(MainWindow*);
+enum class HomeTabKind {
+    Pinned,
+    Extra,
+};
+WindowTab* NewHomeTab(MainWindow*, HomeTabKind);
+WindowTab* FindHomeTab(MainWindow*);
+WindowTab* HomeTabToReuse(MainWindow*);
+void CollectClosableTabs(MainWindow*, Vec<WindowTab*>&);
+struct AppCommandCtx;
+void SetTabCloseFlags(AppCommandCtx&);
 void TabsOnCtrlTab(MainWindow* win, bool reverse);
 void RemoveTab(WindowTab*);
 TempStr MakeTabTooltipTemp(Str path, bool dirty = false);

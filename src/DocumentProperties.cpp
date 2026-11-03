@@ -32,12 +32,17 @@
 #include "Theme.h"
 #include "DarkMode.h"
 #include "EutlTrust.h"
+#include "SumatraDialogs.h"
+#include "shared/PdfToolsCommon.h"
 
 #include <wincrypt.h>
 #include "DocumentProperties.h"
 #include "DocumentPropertiesCommon.h"
 
-constexpr int kButtonPadding = 8;
+// The properties as selectable monospaced text on the dialog's background,
+// then the footer: the certificate actions as quiet buttons on the left, the
+// one filled Copy To Clipboard on the right
+constexpr int kPropsPadDy = 14;
 
 struct PropertiesWnd : WindowBase {
     HWND hwndParent = nullptr;
@@ -46,9 +51,15 @@ struct PropertiesWnd : WindowBase {
     VirtButton* btnViewCert = nullptr;
     VirtButton* btnUpdateEutl = nullptr;
     PlatformFont* propsFont = nullptr;
+    HBox* footer = nullptr;
+    Color colTxt = kColorUnset;
+    Color colBg = kColorUnset;
     str::Builder propsText;
     Point initialPos;
     PdfSigCert* certs = nullptr;
+    HWND parentHwnd = nullptr;
+    // kept apart so a rebuilt text can put it back
+    str::Builder fontsText;
 
     ~PropertiesWnd() override;
     bool Create(HWND parent);
@@ -63,10 +74,6 @@ struct PropertiesWnd : WindowBase {
 };
 
 static Vec<PropertiesWnd*> gPropertiesWindows;
-
-static int ButtonPadding() {
-    return DpiScale(kButtonPadding);
-}
 
 PropertiesWnd* FindPropertyWindowByHwnd(HWND hwnd) {
     for (PropertiesWnd* w : gPropertiesWindows) {
@@ -280,7 +287,7 @@ PropertiesWnd::~PropertiesWnd() {
 }
 
 // CryptUIDlgViewContext lives in cryptui.dll, loaded only when a certificate is viewed
-static void ViewCertDer(HWND parent, Str der) {
+void ViewCertDer(HWND parent, Str der) {
     if (len(der) == 0) {
         return;
     }
@@ -339,8 +346,36 @@ void PropertiesWnd::ViewCertificate(VirtMouseEvent*) {
     }
 }
 
+// the signatures' text depends on the list, the fonts part doesn't
+static void RebuildPropsText(PropertiesWnd* w) {
+    MainWindow* win = FindMainWindowByHwnd(w->parentHwnd);
+    if (!win || !win->ctrl) {
+        return;
+    }
+    str::Builder text;
+    GetPropsText(win->ctrl, text);
+    AppendCertsText(text, w->certs);
+    AlignPropertiesText(text);
+    Str props = ToStr(w->propsText);
+    int fonts = len(w->fontsText) > 0 ? str::IndexOf(props, ToStr(w->fontsText)) : -1;
+    EndWithSingleNewline(text);
+    if (fonts >= 0) {
+        text.Append(ToStr(w->fontsText));
+    }
+    w->propsText.Reset();
+    w->propsText.Append(ToStr(text));
+    w->SetPropsText(ToStr(w->propsText));
+}
+
 void OnEutlUpdateDone(EutlUpdateJob* job) {
-    if (job->hwnd && IsWindow(job->hwnd)) {
+    if (job->refreshed) {
+        for (PropertiesWnd* w : gPropertiesWindows) {
+            if (w->certs) {
+                RebuildPropsText(w);
+            }
+        }
+    }
+    if (!job->silent && job->hwnd && IsWindow(job->hwnd)) {
         MessageBoxW(job->hwnd, CWStrTemp(job->msg), L"EU Trusted List",
                     MB_OK | (job->ok ? MB_ICONINFORMATION : MB_ICONWARNING));
     }
@@ -371,6 +406,8 @@ void PropertiesWnd::SetPropsText(Str text) {
     SendMessageW(editProps->hwnd, EM_SETSEL, 0, 0);
 }
 
+// as big as the text, up to 80% of the work area; the scrollbar only when
+// the text doesn't fit
 void PropertiesWnd::SizeToContent() {
     if (!editProps) {
         return;
@@ -387,42 +424,35 @@ void PropertiesWnd::SizeToContent() {
         nLines++;
         off += lineLen + (nl >= 0 ? 1 : 0);
     }
-    maxLineDx += 16;
-
-    int lineHeight = PlatformFontLineHeight(propsFont);
     // a bit of slack so the longest lines don't touch the right edge
     maxLineDx += 4 * PlatformFontMeasureText(propsFont, StrL("x")).dx;
 
-    // add padding for scrollbar, border, window frame
-    int editPadding = DpiGetSystemMetrics(SM_CXVSCROLL) + (2 * DpiGetSystemMetrics(SM_CXEDGE)) + 16;
-    int frameDx = DpiGetSystemMetrics(SM_CXFRAME) * 2;
-    int wantedClientDx = maxLineDx + editPadding;
-    if (btnCopyToClipboard) {
-        Size buttonSize = btnCopyToClipboard->GetIdealSize();
-        wantedClientDx = std::max(wantedClientDx, buttonSize.dx + (2 * ButtonPadding()));
+    int padDx = DpiScale(kToolDlgPadDx);
+    int padDy = DpiScale(kPropsPadDy);
+    int sbDx = DpiGetSystemMetrics(SM_CXVSCROLL);
+    int footerDx = footer->MinIntrinsicWidth(0);
+    int footerDy = footer->MinIntrinsicHeight(footerDx) + (2 * DpiScale(kToolDlgFootPadDy));
+    int textDx = maxLineDx + editProps->GetLeftTextMargin() + sbDx;
+    int wantedDx = std::max(textDx, footerDx) + (2 * padDx);
+
+    Rect wr = HwndWindowRect(hwnd);
+    Rect cr = HwndClientRect(hwnd);
+    Rect work = GetWorkAreaRect(wr, hwnd);
+    int maxDx = (work.dx * 80 / 100) - (wr.dx - cr.dx);
+    int maxDy = (work.dy * 80 / 100) - (wr.dy - cr.dy);
+    auto sizeForLines = [&](int lines) {
+        int wantedDy = ((lines + 1) * PlatformFontLineHeight(propsFont)) + (2 * padDy) + footerDy;
+        ShowScrollBar(editProps->hwnd, SB_VERT, wantedDy > maxDy);
+        ResizeHwndToClientArea(hwnd, std::min(wantedDx, maxDx), std::min(wantedDy, maxDy), false);
+        DoLayout();
+    };
+    sizeForLines(nLines);
+
+    // a value wider than the window (an EPUB description) wraps into more lines
+    int wrappedLines = (int)SendMessageW(editProps->hwnd, EM_GETLINECOUNT, 0, 0);
+    if (wrappedLines > nLines) {
+        sizeForLines(wrappedLines);
     }
-    int wantedDx = wantedClientDx + frameDx;
-
-    // calculate height to fit all lines
-    int editBorderDy = 2 * DpiGetSystemMetrics(SM_CYEDGE);
-    int frameDy = (DpiGetSystemMetrics(SM_CYFRAME) * 2) + DpiGetSystemMetrics(SM_CYCAPTION);
-    int btnAreaDy = DpiScale(40);
-    if (btnCopyToClipboard) {
-        btnAreaDy = std::max(btnAreaDy, btnCopyToClipboard->GetIdealSize().dy + (2 * ButtonPadding()));
-    }
-    int bottomMargin = ButtonPadding();
-    int wantedDy = ((nLines + 3) * lineHeight) + editBorderDy + btnAreaDy + bottomMargin + frameDy;
-
-    // cap at 80% of screen
-    Rect work = GetWorkAreaRect(HwndWindowRect(hwnd), hwnd);
-    int maxDx = (work.dx * 80) / 100;
-    int maxDy = (work.dy * 80) / 100;
-    wantedDx = std::min(wantedDx, maxDx);
-    wantedDy = std::min(wantedDy, maxDy);
-
-    Rect wRc = HwndWindowRect(hwnd);
-    MoveWindow(hwnd, wRc.x, wRc.y, wantedDx, wantedDy, TRUE);
-    DoLayout();
 }
 
 void PropertiesWnd::ApplyDarkMode() {
@@ -487,24 +517,29 @@ static void OnPropertiesDestroy(WindowBase::DestroyEvent* ev) {
 bool PropertiesWnd::Create(HWND parent) {
     hwndParent = parent;
     bool isRtl = IsUIRtl();
+    colTxt = ThemeWindowTextColor();
+    colBg = ThemeWindowControlBackgroundColor();
 
     {
         CreateCustomArgs args;
         args.title = Tr("Document Properties");
         args.visible = false;
         args.style = WS_OVERLAPPEDWINDOW;
-        args.font = GetAppFont();
+        args.font = DlgUiFont(kToolDlgTextFontPx);
         args.isRtl = isRtl;
         args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
+        args.bgColor = colBg;
         CreateCustom(args);
     }
     if (!hwnd) {
         return false;
     }
 
+    SetColors(colTxt, colBg);
     HDC hdc = GetDC(hwnd);
     propsFont = HdcCreateSimpleFont(hdc, StrL("Consolas"), 14);
     ReleaseDC(hwnd, hdc);
+    PlatformFont* fontText = DlgUiFont(kToolDlgTextFontPx);
 
     auto* vbox = new VBox();
     vbox->alignMain = MainAxisAlign::MainStart;
@@ -515,38 +550,39 @@ bool PropertiesWnd::Create(HWND parent) {
         args.parent = hwnd;
         args.font = propsFont;
         args.isMultiLine = true;
-        args.withBorder = true;
         args.isRtl = isRtl;
         editProps = new Edit();
+        editProps->SetColors(colTxt, colBg);
         editProps->Create(args);
         SendMessageW(editProps->hwnd, EM_SETREADONLY, TRUE, 0);
         // multi-line edit default can still cap text; font lists may be large
         SendMessageW(editProps->hwnd, EM_SETLIMITTEXT, 0, 0);
         DWORD tabStop = 16;
         SendMessageW(editProps->hwnd, EM_SETTABSTOPS, 1, (LPARAM)&tabStop);
-        vbox->AddChild(editProps, 1);
+        Insets pad = DpiScaledInsets(kPropsPadDy, 0, kPropsPadDy, kToolDlgPadDx);
+        vbox->AddChild(new Padding(editProps, pad), 1);
     }
 
     {
-        auto* btnRow = new HBox();
-        btnRow->alignMain = MainAxisAlign::MainEnd;
-        btnRow->alignCross = CrossAxisAlign::CrossCenter;
-        btnRow->gap = GetAppFont()->averageCharWidth;
-        btnCopyToClipboard = NewThemedButton(hwnd, Tr("Copy To Clipboard"), GetAppFont(), true);
-        btnCopyToClipboard->onClick = MkMethod1<PropertiesWnd, VirtMouseEvent*, &PropertiesWnd::CopyToClipboard>(this);
-        btnRow->AddChild(new Padding(btnCopyToClipboard, DpiScaledInsets(kButtonPadding, 0, 0, 0)));
+        footer = new HBox();
+        footer->alignCross = CrossAxisAlign::CrossCenter;
+        footer->rtl = isRtl;
+        footer->gap = DpiScale(kToolDlgGapDx);
         if (certs) {
-            btnViewCert = NewThemedButton(hwnd, Tr("View Certificate..."), GetAppFont(), true);
+            btnViewCert = NewDlgButton(hwnd, Tr("View Certificate..."), fontText, DlgButtonStyle::Ghost, false);
             btnViewCert->onClick = MkMethod1<PropertiesWnd, VirtMouseEvent*, &PropertiesWnd::ViewCertificate>(this);
-            btnRow->AddChild(new Padding(btnViewCert, DpiScaledInsets(kButtonPadding, 0, 0, 0)));
-            btnUpdateEutl = NewThemedButton(hwnd, Tr("Update EU Trusted List"), GetAppFont(), true);
+            footer->AddChild(btnViewCert);
+            btnUpdateEutl = NewDlgButton(hwnd, Tr("Update EU Trusted List"), fontText, DlgButtonStyle::Ghost, false);
             btnUpdateEutl->onClick = MkMethod1<PropertiesWnd, VirtMouseEvent*, &PropertiesWnd::UpdateEutl>(this);
-            btnRow->AddChild(new Padding(btnUpdateEutl, DpiScaledInsets(kButtonPadding, 0, 0, 0)));
+            footer->AddChild(btnUpdateEutl);
         }
-        vbox->AddChild(btnRow);
+        footer->AddChild(new Spacer(0, 0), 1);
+        btnCopyToClipboard = NewDlgButton(hwnd, Tr("Copy To Clipboard"), fontText, DlgButtonStyle::Filled, true);
+        btnCopyToClipboard->onClick = MkMethod1<PropertiesWnd, VirtMouseEvent*, &PropertiesWnd::CopyToClipboard>(this);
+        footer->AddChild(btnCopyToClipboard);
+        vbox->AddChild(new Padding(footer, DpiScaledInsets(kToolDlgFootPadDy, kToolDlgPadDx)));
     }
-
-    layout = new Padding(vbox, DpiScaledInsets(0, kButtonPadding, kButtonPadding, kButtonPadding));
+    layout = vbox;
 
     SetPropsText(ToStr(propsText));
     SizeToContent();
@@ -567,6 +603,8 @@ void OnGetFontsFinished(GetFontsResult* result) {
         // fontsText starts with "\n" to separate it with a single empty line
         EndWithSingleNewline(w->propsText);
         w->propsText.Append(ToStr(result->fontsText));
+        w->fontsText.Reset();
+        w->fontsText.Append(ToStr(result->fontsText));
         w->SetPropsText(ToStr(w->propsText));
         w->SizeToContent();
     }
@@ -585,12 +623,22 @@ void ShowProperties(HWND parent, DocController* ctrl) {
     }
 
     auto* wnd = new PropertiesWnd();
+    wnd->parentHwnd = parent;
     VecAppend(gPropertiesWindows, wnd);
     DisplayModel* dm = ctrl->AsFixed();
     EngineBase* engine = dm ? dm->GetEngine() : nullptr;
     if (EngineMupdfIsPdf(engine)) {
         EutlRegisterLookup();
         wnd->certs = EngineMupdfGetSignatureCerts(engine);
+    }
+    if (wnd->certs && !gForTesting && HasPermission(Perm::InternetAccess)) {
+        // both only refresh what the text says: it's there already
+        auto* job = new EutlUpdateJob;
+        job->silent = true;
+        job->update = EutlNeedsUpdate();
+        job->engine = engine;
+        engine->AddRef();
+        RunAsync(MkFunc0<EutlUpdateJob>(EutlUpdateThread, job), StrL("SigOnlineChecks"));
     }
     GetPropsText(ctrl, wnd->propsText);
     AppendCertsText(wnd->propsText, wnd->certs);

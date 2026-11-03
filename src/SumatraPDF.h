@@ -33,6 +33,13 @@ constexpr int kRepaintMessageDelayInMs = 1000;
 
 constexpr int kAutoReloadTimerID = 5;
 
+// polls the mouse for the floating sidebar (SidebarAutoHide)
+constexpr UINT_PTR kSidebarOverlayTimerID = 18;
+enum class SidebarOverlayUpdate {
+    Layout,
+    Mouse
+};
+
 // debounce: coalesce bursts of file-change notifications (a single save can
 // fire several) into one reload. SetTimer() with the same id resets it, so the
 // reload only happens once the file has been quiet for this long (#5690).
@@ -50,6 +57,7 @@ struct FileHistory;
 struct MainWindow;
 extern Func1<MainWindow*> gAfterLayout;
 extern Func0 gOnSessionRestored;
+void ShowWinScrollBar(HWND hwnd, int bar, BOOL show);
 void NotifySessionRestoreFinished();
 bool IsSessionRestoreFinished();
 bool HasPendingDocumentLoads();
@@ -57,6 +65,8 @@ bool AreLoadThreadsActive();
 // tells the frame's virtual tree which splitters exist (they are created
 // with their panes)
 void FrameSyncSplitters(MainWindow*);
+void UpdateSidebarOverlay(MainWindow*, SidebarOverlayUpdate);
+void SetSidebarTestCursor(Point pt);
 void SetAnnotCreateArgs(AnnotCreateArgs&, CustomCommand*);
 void BeginPdfEditOperation(MainWindow*, const char* name);
 void EndPdfEditOperation(MainWindow*);
@@ -303,6 +313,7 @@ struct SettingsApplyState {
     bool disableAntiAlias = false;
     bool chmUseFixedPageUI = false;
     bool markdownUseFixedPageUI = false;
+    bool markdownPreserveLineBreaks = false;
     bool explorerQuickLook = false;
     // owned copy of the ebook layout inputs; ApplyChangedSettingsAndRelayout frees it
     Str ebookLayout;
@@ -331,3 +342,6 @@ void ShowFileInFolder(MainWindow* win, Str path);
 void SmartZoom(MainWindow* win, float factor, Point* pt, bool smartZoom);
 TempStr GetSumatraDataDirTemp();
 TempStr GetSumatraBuildSpecificDirTemp();
+
+extern Kind kNotifTemporaryFile;
+

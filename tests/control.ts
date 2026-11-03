@@ -131,6 +131,33 @@ export enum ControlCommand {
   TestRenameFile = 131,
   // holds background chapter layout (1) or lets it run (0)
   TestChapterLayoutHold = 133,
+  // the path the next Save As takes, without its dialog
+  TestSaveFileName = 134,
+  // places the signature being placed at a canvas point (pixels), as a click does
+  TestPlaceSignature = 135,
+  // orig: Run PDF Script's drawn buttons: examples, pick <idx>, add, remove, run
+  TestPdfScript = 136,
+  // orig: visible virtual controls, or the control under a client point
+  TestVirtTree = 137,
+  // orig: [brightness, contrast] applies them to the current file as the
+  // Brightness / Contrast dialog's OK does; returns the current values
+  TestPageAdjust = 138,
+  // orig: urls the current markdown document's browser view was served
+  TestMarkdownServed = 139,
+  TestTemporaryFile = 140,
+  // orig: [x, y] frame client point the auto-hide sidebar takes as the cursor; x < 0 clears
+  TestSidebarCursor = 141,
+  // [destPath, pageSizeIdx, fontSize]: Convert EPUB to PDF without its dialog
+  TestConvertEpubToPdf = 142,
+  // [path, pageNo]: image element rects of a page
+  TestPageImages = 143,
+  // the first window's page and scroll position
+  TestScrollState = 144,
+  TestDrawRectSelection = 145,
+  TestEutlUpdate = 146,
+  TestFetchRevocation = 147,
+  TestSignatureStatus = 148,
+  TestTabWidths = 149,
 }
 
 export type ControlArg = number | string | Uint8Array | ControlArg[];
@@ -152,6 +179,14 @@ export type HomeSelection = {
   // "<isPromo>,<index>" of the tip shown, and its band
   tip: string;
   tipRect: number[];
+  // a vertical scrollbar is shown for the entries
+  vbar: boolean;
+  // header row: brand (empty when hidden), Open icon + text, view-mode icons;
+  // and the tip's wrap rect
+  logo: number[];
+  open: number[];
+  views: number[];
+  tipText: number[];
   raw: string;
 };
 
@@ -167,6 +202,39 @@ export type ChapterInfo = {
 };
 
 export type LayoutRect = { x: number; y: number; dx: number; dy: number };
+
+export type VirtCtrlInfo = {
+  className: string;
+  hwnd: number;
+  kind: string;
+  // "-" when the control has no name
+  name: string;
+  rect: LayoutRect;
+  text: string;
+};
+
+const virtLineRe =
+  /^virt class=(\S+) hwnd=(-?\d+) kind=(\S+) name=(\S+) rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+) text=(.*)$/;
+
+function parseVirtLine(line: string): VirtCtrlInfo {
+  const m = virtLineRe.exec(line);
+  if (!m) {
+    throw new Error(`TestVirtTree: could not parse '${line}'`);
+  }
+  return {
+    className: m[1],
+    hwnd: parseInt(m[2], 10),
+    kind: m[3],
+    name: m[4],
+    rect: {
+      x: parseInt(m[5], 10),
+      y: parseInt(m[6], 10),
+      dx: parseInt(m[7], 10),
+      dy: parseInt(m[8], 10),
+    },
+    text: m[9],
+  };
+}
 
 export type LayoutItem = {
   visible: boolean;
@@ -569,11 +637,16 @@ export class ControlClient {
         lastCaption: [0, 0, 0, 0],
         tip: "",
         tipRect: [0, 0, 0, 0],
+        vbar: false,
+        logo: [0, 0, 0, 0],
+        open: [0, 0, 0, 0],
+        views: [0, 0, 0, 0],
+        tipText: [0, 0, 0, 0],
         raw,
       };
     }
     const m =
-      /OK sel=(-?\d+) entries=(\d+) searchFocus=(\d) searchBox=(\d) search=(-?\d+),(-?\d+),(-?\d+),(-?\d+) outline=(-?\d+),(-?\d+),(-?\d+),(-?\d+) outlineFull=(-?\d+),(-?\d+),(-?\d+),(-?\d+) path=(.*) listView=(\d) listIcon=(-?\d+),(-?\d+),(-?\d+),(-?\d+) thumbsArea=(-?\d+),(-?\d+),(-?\d+),(-?\d+) lastCaption=(-?\d+),(-?\d+),(-?\d+),(-?\d+) tip=(\d,-?\d+) tipRect=(-?\d+),(-?\d+),(-?\d+),(-?\d+)$/.exec(
+      /OK sel=(-?\d+) entries=(\d+) searchFocus=(\d) searchBox=(\d) search=(-?\d+),(-?\d+),(-?\d+),(-?\d+) outline=(-?\d+),(-?\d+),(-?\d+),(-?\d+) outlineFull=(-?\d+),(-?\d+),(-?\d+),(-?\d+) path=(.*) listView=(\d) listIcon=(-?\d+),(-?\d+),(-?\d+),(-?\d+) thumbsArea=(-?\d+),(-?\d+),(-?\d+),(-?\d+) lastCaption=(-?\d+),(-?\d+),(-?\d+),(-?\d+) tip=(\d,-?\d+) tipRect=(-?\d+),(-?\d+),(-?\d+),(-?\d+) vbar=(\d) logo=(-?\d+),(-?\d+),(-?\d+),(-?\d+) open=(-?\d+),(-?\d+),(-?\d+),(-?\d+) views=(-?\d+),(-?\d+),(-?\d+),(-?\d+) tipText=(-?\d+),(-?\d+),(-?\d+),(-?\d+)$/.exec(
         raw,
       );
     if (!m) {
@@ -595,6 +668,11 @@ export class ControlClient {
       lastCaption: [parseInt(m[27], 10), parseInt(m[28], 10), parseInt(m[29], 10), parseInt(m[30], 10)],
       tip: m[31],
       tipRect: [parseInt(m[32], 10), parseInt(m[33], 10), parseInt(m[34], 10), parseInt(m[35], 10)],
+      vbar: m[36] === "1",
+      logo: m.slice(37, 41).map((v) => parseInt(v, 10)),
+      open: m.slice(41, 45).map((v) => parseInt(v, 10)),
+      views: m.slice(45, 49).map((v) => parseInt(v, 10)),
+      tipText: m.slice(49, 53).map((v) => parseInt(v, 10)),
       raw,
     };
   }
@@ -640,6 +718,38 @@ export class ControlClient {
       nodes,
       raw,
     };
+  }
+
+  // Visible virtual controls. className limits the dump to one window class.
+  // "hit" is the control under a client point of that class, or null.
+  async virtTree(className = ""): Promise<VirtCtrlInfo[]> {
+    const res = await this.request(ControlCommand.TestVirtTree, className ? [className] : []);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const raw = String(res[1] ?? "");
+    if (code !== 0) {
+      throw new Error(`TestVirtTree failed: ${raw.trim() || code}`);
+    }
+    const rows: VirtCtrlInfo[] = [];
+    for (const line of raw.split("\n")) {
+      if (!line || line === "NONE") {
+        continue;
+      }
+      rows.push(parseVirtLine(line));
+    }
+    return rows;
+  }
+
+  async virtHit(className: string, x: number, y: number): Promise<VirtCtrlInfo | null> {
+    const res = await this.request(ControlCommand.TestVirtTree, ["hit", className, x, y]);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const raw = String(res[1] ?? "").trim();
+    if (code !== 0) {
+      throw new Error(`TestVirtTree hit failed: ${raw || code}`);
+    }
+    if (!raw || raw === "NONE") {
+      return null;
+    }
+    return parseVirtLine(raw);
   }
 
   // Notifications are drawn over the document and linger for ~2s, so a test

@@ -15,6 +15,7 @@
 #include "EngineBase.h"
 #include "AppSettings.h"
 #include "LitDoc.h"
+#include "RtfDoc.h"
 
 #include "EngineAll.h"
 
@@ -167,7 +168,8 @@ static TempStr GetOpenCacheDirTemp() {
     return path::JoinTemp(dataDir, StrL("open-cache"));
 }
 
-// Copies we made of OneNote / Outlook extracts live under <dataDir>/open-cache.
+// Copies we made of OneNote / Outlook extracts live under <dataDir>/open-cache,
+// each in a folder of its own: open-cache/<id>/<attachment name>.
 bool IsOpenCachePath(Str path) {
     TempStr dir = GetOpenCacheDirTemp();
     if (len(path) == 0 || len(dir) == 0) {
@@ -218,16 +220,118 @@ TempStr MaybeCopyEphemeralHostFile(Str path) {
         logf("MaybeCopyEphemeralHostFile: dir::CreateAll('%s') failed\n", dir);
         return {};
     }
-    TempStr ext = path::GetExtTemp(path);
-    int seq = AtomicIntInc(&gOpenCacheSeq);
-    TempStr name = fmt("%d%s", seq, ext);
-    TempStr dst = path::JoinTemp(dir, name);
+    // a folder per copy keeps the attachment's name, which Save As suggests
+    // (#6435); the time keeps instances apart, as each counts from 1
+    TempStr copyDir;
+    do {
+        int seq = AtomicIntInc(&gOpenCacheSeq);
+        copyDir = path::JoinTemp(dir, fmt("%d-%d", UnixTimeMsNow(), seq));
+    } while (dir::Exists(copyDir));
+    if (!dir::Create(copyDir)) {
+        logf("MaybeCopyEphemeralHostFile: dir::Create('%s') failed\n", copyDir);
+        return {};
+    }
+    TempStr dst = path::JoinTemp(copyDir, path::GetBaseNameTemp(path));
     if (!CopyUnlockingSource(dst, path)) {
         logf("MaybeCopyEphemeralHostFile: copy '%s' -> '%s' failed\n", path, dst);
+        dir::RemoveAll(copyDir);
         return {};
     }
     logf("MaybeCopyEphemeralHostFile: '%s' -> '%s'\n", path, dst);
     return dst;
+}
+
+// Deletes a copy MaybeCopyEphemeralHostFile() made, with its folder. A copy
+// directly in open-cache is from a version that didn't use folders.
+void DeleteOpenCacheCopy(Str path) {
+    if (!IsOpenCachePath(path)) {
+        return;
+    }
+    TempStr copyDir = path::GetDirTemp(path);
+    if (IsOpenCachePath(copyDir)) {
+        dir::RemoveAll(copyDir);
+        return;
+    }
+    file::Delete(path);
+}
+
+// A file the user can easily lose: in the temporary folder, in a host app's
+// cache (Outlook, OneNote) or our open-cache copy of one (#6437)
+bool IsTemporaryFile(Str path) {
+    return path::IsInTempDir(path) || path::IsEphemeralHostFile(path) || IsOpenCachePath(path);
+}
+
+// TemporaryFileDestDir when it names an existing folder
+TempStr TemporaryFileDestDirTemp() {
+    Str dir = gSettings->temporaryFileDestDir;
+    if (len(dir) == 0 || !dir::Exists(dir)) {
+        return {};
+    }
+    return str::DupTemp(dir);
+}
+
+static bool SameFileContent(Str path1, Str path2) {
+    if (file::GetSize(path1) != file::GetSize(path2)) {
+        return false;
+    }
+    Str d1 = file::ReadFile(path1);
+    Str d2 = file::ReadFile(path2);
+    bool same = len(d1) > 0 && str::Eq(d1, d2);
+    str::Free(d1);
+    str::Free(d2);
+    return same;
+}
+
+// Where src goes in dir: under its own name, or with ".<N>" before the
+// extension when that's taken (report.pdf, report.1.pdf, report.2.pdf). A file
+// there with the same content is used as is: *reuse is set then
+TempStr TemporaryFileCopyPathTemp(Str src, Str dir, bool* reuse) {
+    *reuse = false;
+    TempStr name = path::GetBaseNameTemp(src);
+    TempStr ext = path::GetExtTemp(name);
+    Str stem(name.s, len(name) - len(ext));
+    for (int n = 0;; n++) {
+        TempStr candidate = n == 0 ? name : fmt("%s.%d%s", stem, n, ext);
+        TempStr dst = path::JoinTemp(dir, candidate);
+        if (!file::Exists(dst)) {
+            return dst;
+        }
+        if (SameFileContent(src, dst)) {
+            *reuse = true;
+            return dst;
+        }
+    }
+}
+
+// Copies a temporary file into dir (see TemporaryFileCopyPathTemp). The
+// original stays: the app that made it may still need it. Returns the path
+// to open, {} on failure
+TempStr CopyTemporaryFileTo(Str src, Str dir) {
+    bool reuse = false;
+    TempStr dst = TemporaryFileCopyPathTemp(src, dir, &reuse);
+    if (reuse) {
+        logf("CopyTemporaryFileTo: '%s' is already in '%s'\n", src, dst);
+        return dst;
+    }
+    if (!CopyUnlockingSource(dst, src)) {
+        logf("CopyTemporaryFileTo: copy '%s' -> '%s' failed\n", src, dst);
+        return {};
+    }
+    logf("CopyTemporaryFileTo: '%s' -> '%s'\n", src, dst);
+    return dst;
+}
+
+// TemporaryFileAutoMove: a temporary file opens from its copy in
+// TemporaryFileDestDir. {} when that doesn't apply or the copy failed
+TempStr MaybeAutoCopyTemporaryFile(Str path) {
+    if (!gSettings->temporaryFileAutoMove || !IsTemporaryFile(path) || !file::Exists(path)) {
+        return {};
+    }
+    TempStr dir = TemporaryFileDestDirTemp();
+    if (len(dir) == 0) {
+        return {};
+    }
+    return CopyTemporaryFileTo(path, dir);
 }
 
 /* EngineCreate.cpp */
@@ -237,7 +341,8 @@ bool IsSupportedFileType(FileType kind, bool enableEngineEbooks) {
     }
     if (IsEngineMupdfSupportedFileType(kind) || IsEngineDjVuSupportedFileType(kind) ||
         IsEngineImageSupportedFileType(kind) || IsEngineCbxSupportedFileType(kind) ||
-        IsEnginePsSupportedFileType(kind) || IsEngineDviSupportedFileType(kind) || kind == FileType::Lit) {
+        IsEnginePsSupportedFileType(kind) || IsEngineDviSupportedFileType(kind) || IsEngineCajSupportedFileType(kind) ||
+        kind == FileType::Lit || kind == FileType::Rtf) {
         return true;
     }
     if (!enableEngineEbooks) {
@@ -289,8 +394,14 @@ static EngineBase* CreateEngineForKind(FileType kind, FileType contentHintKind, 
     if (IsEngineDviSupportedFileType(kind)) {
         return CreateEngineDviFromFile(path);
     }
+    if (IsEngineCajSupportedFileType(kind)) {
+        return CreateEngineCajFromFile(path, pwdUI);
+    }
     if (kind == FileType::Lit) {
         return CreateEngineLitFromFile(path, pwdUI);
+    }
+    if (kind == FileType::Rtf) {
+        return CreateEngineRtfFromFile(path, pwdUI);
     }
     if (enableChmEngine && (kind == FileType::Chm)) {
         return CreateEngineChmFromFile(path);
@@ -491,6 +602,13 @@ bool EngineHasRedactMarks(EngineBase* engine) {
         return false;
     }
     return EngineMupdfHasRedactMarks(engine);
+}
+
+bool EngineHasRedactMarksNoWait(EngineBase* engine) {
+    if (!IsEngineMupdf(engine)) {
+        return false;
+    }
+    return EngineMupdfHasRedactMarksNoWait(engine);
 }
 
 bool EngineHasUserRedactMarks(EngineBase* engine) {

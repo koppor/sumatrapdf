@@ -13,7 +13,7 @@ constexpr int kMaxPageRequests = 8;
 // GDI resources/memory when caching many larger bitmaps
 // TODO: this should be based on amount of memory taken by rendered pages
 // i.e. one big page can use as much memory as lots of small pages
-constexpr int kMaxBitmapsCached = 128;
+constexpr int kMaxBitmapsCached = 256;
 
 // predictive rendering renders up to this many pages ahead, one at a time
 // (chained), so they don't flood the render queue
@@ -106,6 +106,9 @@ struct PageRenderRequest {
     AbortCookie* abortCookie = nullptr;
     u32 darkModeEpoch = 0;
     bool grayscale = false;
+    // DisplayModel::brightness / contrast when the render started
+    int brightness = 0;
+    int contrast = 0;
     u64 timestamp = 0;
 
     // set by render thread before calling renderFinishedCb
@@ -224,6 +227,7 @@ struct RenderCache {
     void KeepForDisplayModel(DisplayModel* oldDm, DisplayModel* newDm);
     void RekeyForLayoutChange(DisplayModel* dm);
     void Invalidate(DisplayModel* dm, int pageNo, RectF rect);
+    void InvalidateAll(DisplayModel* dm);
 #if OS_WIN
     int Paint(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, PageInfo* pi, bool* renderOutOfDateCue);
 #endif

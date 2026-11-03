@@ -62,7 +62,7 @@
 
 // --- the image formats the two image dialogs offer --------------------------
 
-// PNG / JPEG / BMP, same core formats as the Save Image dialog
+// PNG / JPEG / BMP / GIF, same core formats as the Save Image dialog
 // ng: orig also carries the GDI+ mime type and the OPENFILENAME default
 // extension; the encoders here are the portable ones of the image editor
 struct ConvertImageFormat {
@@ -74,6 +74,7 @@ static const ConvertImageFormat kConvertImageFormats[] = {
     {StrL("PNG"), StrL(".png")},
     {StrL("JPEG"), StrL(".jpg")},
     {StrL("BMP"), StrL(".bmp")},
+    {StrL("GIF"), StrL(".gif")},
 };
 
 static int ConvertImageFormatCount() {
@@ -157,6 +158,8 @@ enum class PdfToolKind {
     ConvertToImages,
     SaveSelectionAsImage,
     Merge,
+    ConvertEpubToPdf,
+    ConvertCajToPdf,
 };
 
 // orig's three "Pages:" radios of the Convert PDF to Images dialog
@@ -169,19 +172,30 @@ enum class PagesMode {
 // orig's kThumbDx / kThumbDy / kGap and the rest of MergeGrid's constants (dips)
 constexpr int kMergeThumbDx = 140;
 constexpr int kMergeThumbDy = 198;
-constexpr int kMergeGap = 24;
-constexpr int kStripDy = 5;
+constexpr int kMergeGap = 28;
 constexpr int kMergeDialogDx = 1100;
 constexpr int kMergeScrollbarDx = 10;
-constexpr int kMergeCornerBtnDx = 24;
+// the page number (and its file's dot) under a page
+constexpr int kMergeLabelDy = 26;
+constexpr float kMergeDotDx = 7;
+// the selection and hover frame: around a page and its label
+constexpr float kMergeFramePad = 8;
+constexpr float kMergeFrameRadius = 6;
+constexpr int kMergeSelShift = 26;
+constexpr int kMergeHoverShift = 9;
+constexpr int kMergeFocusRingShift = 45;
+constexpr int kMergePageEdgeShift = 22;
+// the remove / restore button in a page's top-right corner
+constexpr int kMergeCornerBtnDx = 22;
 constexpr int kMergeCornerBtnInset = 6;
-constexpr int kMergeDropBarDx = 3;
+constexpr float kMergeCornerGlyphPx = 13;
+constexpr int kMergeDropBarDx = 2;
 constexpr int kMergeAutoScrollMs = 40;
+constexpr u8 kMergeRemovedVeilAlpha = 200;
+constexpr u8 kMergeCornerBtnAlpha = 225;
+constexpr u8 kMergeBandAlpha = 18;
 // ng: orig's SM_CXDRAG
 constexpr float kMergeDragThreshold = 4;
-constexpr Color kDropBarColor = MkRgb(0, 120, 215);
-constexpr Color kRemoveBtnColor = MkRgb(90, 90, 90);
-constexpr Color kRestoreBtnColor = MkRgb(0, 120, 215);
 
 // what the left button went down on in the page grid
 enum class MergePress {
@@ -197,6 +211,9 @@ static const Color kSourceColors[] = {
     MkRgb(0xd6, 0x27, 0x28), MkRgb(0x94, 0x67, 0xbd), MkRgb(0x8c, 0x56, 0x4b),
     MkRgb(0xe3, 0x77, 0xc2), MkRgb(0xbc, 0xbd, 0x22), MkRgb(0x17, 0xbe, 0xcf),
 };
+
+// 0, 90, 180, 270: each has its own thumbnail
+constexpr int kMergeRotations = 4;
 
 struct MergeThumb {
     Pixmap* bitmap = nullptr;
@@ -224,6 +241,8 @@ struct MergeSourceDlg {
 struct MergePageDlg {
     int sourceNo = 0;
     int pageNo = 0;
+    // degrees clockwise: 0, 90, 180 or 270
+    int rotation = 0;
     bool removed = false;
     bool selected = false;
 };
@@ -240,10 +259,12 @@ struct PdfToolDlg {
     bool visible = false;
     PdfToolKind kind = PdfToolKind::Bake;
     Str srcPath;   // owned
-    Str password;  // owned; the password Decrypt re-opens the document with
     Str browseExt; // owned; the default extension of the "..." save dialog
+    // ExistingImageCount() for the inputs in existKey (owned): a frame doesn't
+    // touch the disk
+    Str existKey;
+    int existCount = 0;
     int pageCount = 0;
-    bool onlyWithAnnotations = false;
     PagesMode pagesMode = PagesMode::All;
     // Save Selection As Image
     int pageNo = 0;
@@ -279,6 +300,9 @@ struct PdfToolDlg {
     // the grid's bounds in the window, as of the last frame, and what the
     // layout of that frame was computed for
     gp::Bounds mergeView{};
+    // the files' legend and its entries, as of the last frame
+    gp::Bounds mergeLegendView{};
+    Vec<gp::Bounds> mergeLegendItems;
     float mergeLayoutDx = 0;
     float mergeLayoutDy = 0;
     // width the columns were laid out for; bounds are filled in only while painting
@@ -312,6 +336,10 @@ struct PdfToolDlg {
     MergeInsertAt mergeAskAt = MergeInsertAt::End;
     gp::InputState* mergeAskEdit = nullptr;
     bool mergeAskFocus = false;
+    // the pages last copied or cut; pasted while the system clipboard still
+    // has the text copying them put there (orig: its sequence number)
+    Vec<MergePageDlg> mergeClip;
+    Str mergeClipText; // owned
 };
 
 // Merge PDF (orig has one such window), and the single-purpose tool that is
@@ -370,7 +398,7 @@ struct PdfToolView {
     static void OnAction(PdfToolView* self, gp::Ctx* cx, const gp::ClickEvent*);
     static void OnCancel(PdfToolView* self, gp::Ctx* cx, const gp::ClickEvent*);
     static void OnBrowse(PdfToolView* self, gp::Ctx* cx, const gp::ClickEvent*);
-    static void OnAnnotsOnly(PdfToolView* self, gp::Ctx* cx, const gp::ClickEvent*);
+    static void OnUseNewNames(PdfToolView* self, gp::Ctx* cx, const gp::ClickEvent*);
     static void OnPagesMode(PdfToolView* self, gp::Ctx* cx, const gp::ClickEvent*, int64_t mode);
     static void OnMergeAdd(PdfToolView* self, gp::Ctx* cx, const gp::ClickEvent*);
     static void OnMergeScroll(PdfToolView* self, gp::Ctx* cx, const gp::ScrollEvent* ev);
@@ -424,6 +452,10 @@ static Str ToolTitleFor(PdfToolKind kind) {
             return Tr("Save Selection As Image");
         case PdfToolKind::Merge:
             return Tr("Merge PDF");
+        case PdfToolKind::ConvertEpubToPdf:
+            return Tr("Convert EPUB to PDF");
+        case PdfToolKind::ConvertCajToPdf:
+            return Tr("Convert CAJ to PDF");
     }
     return {};
 }
@@ -463,11 +495,17 @@ static Str (*ToolTitleFn(PdfToolKind kind))() {
             return ToolTitleOf<PdfToolKind::ConvertToImages>;
         case PdfToolKind::SaveSelectionAsImage:
             return ToolTitleOf<PdfToolKind::SaveSelectionAsImage>;
+        case PdfToolKind::ConvertEpubToPdf:
+            return ToolTitleOf<PdfToolKind::ConvertEpubToPdf>;
+        case PdfToolKind::ConvertCajToPdf:
+            return ToolTitleOf<PdfToolKind::ConvertCajToPdf>;
         case PdfToolKind::Merge:
             break;
     }
     return ToolTitleOf<PdfToolKind::Merge>;
 }
+
+static int ExistingImageCount();
 
 static Str ToolActionText() {
     switch (gTool.kind) {
@@ -478,11 +516,14 @@ static Str ToolActionText() {
         case PdfToolKind::ExtractPages:
             return Tr("Extract Pages");
         case PdfToolKind::ConvertToImages:
-            return Tr("Convert");
+            return ExistingImageCount() > 0 ? Tr("Overwrite") : Tr("Convert");
         case PdfToolKind::SaveSelectionAsImage:
             return Tr("Save");
         case PdfToolKind::Merge:
             return Tr("Save");
+        case PdfToolKind::ConvertEpubToPdf:
+        case PdfToolKind::ConvertCajToPdf:
+            return Tr("Convert to PDF");
         default:
             return ToolTitle();
     }
@@ -508,7 +549,7 @@ static int SelectedFormatIdx() {
 }
 
 static bool HasDpiCombo() {
-    return HasFormatDropDown();
+    return HasFormatDropDown() || gTool.kind == PdfToolKind::ConvertEpubToPdf;
 }
 
 // orig's DpiFromComboText: 0 if what is typed is not a usable DPI
@@ -607,12 +648,14 @@ static void FreeToolState(gp::Window* toolWin) {
     }
     VecReset(gTool.mergeSources);
     VecReset(gTool.mergePages);
+    VecReset(gTool.mergeClip);
+    str::FreePtr(&gTool.mergeClipText);
     str::Free(gTool.srcPath);
     gTool.srcPath = {};
-    str::Free(gTool.password);
-    gTool.password = {};
     str::Free(gTool.browseExt);
     gTool.browseExt = {};
+    str::Free(gTool.existKey);
+    gTool.existKey = {};
 }
 
 // the dialog in the frame; a tool in a window of its own is not the frame's
@@ -686,8 +729,9 @@ static void PdfBakeDoIt() {
     logf("PdfBakeDoIt: baking '%s' to '%s'\n", inputPath, destPath);
 
     // build argv for pdfbake_main: "bake" input output
-    char* argv[] = {(char*)"bake", CStrTemp(inputPath), CStrTemp(destPath)};
-    int argc = 3;
+    char* argv[] = {(char*)"bake", (char*)"-p", PdfToolPasswordTemp(win, gTool.srcPath), CStrTemp(inputPath),
+                    CStrTemp(destPath)};
+    int argc = dimofi(argv);
 
     fz_set_optind(0);
     int res = pdfbake_main(argc, argv);
@@ -721,8 +765,10 @@ static void PdfExtractTextDoIt() {
     bool isPdf = tab && IsPdfDoc(tab);
     if (isPdf) {
         // use muconvert for PDF
-        char* argv[] = {(char*)"convert", (char*)"-o", CStrTemp(destPath), CStrTemp(gTool.srcPath), CStrTemp(pages)};
-        int argc = 5;
+        char* argv[] = {(char*)"convert", (char*)"-p",        PdfToolPasswordTemp(win, gTool.srcPath),
+                        (char*)"-o",      CStrTemp(destPath), CStrTemp(gTool.srcPath),
+                        CStrTemp(pages)};
+        int argc = dimofi(argv);
         fz_set_optind(0);
         ok = muconvert_main(argc, argv) == 0;
     } else {
@@ -752,12 +798,14 @@ static void PdfCleanDoIt(bool decompress) {
 
     // compress is: clean -gggg -e 100 -f -i -t -Z input output
     // decompress is: clean -d input output
+    char* pwd = PdfToolPasswordTemp(gTool.win, gTool.srcPath);
     char* compressArgv[] = {
-        (char*)"clean", (char*)"-gggg",          (char*)"-e",       (char*)"100", (char*)"-f", (char*)"-i", (char*)"-t",
-        (char*)"-Z",    CStrTemp(gTool.srcPath), CStrTemp(destPath)};
-    char* decompressArgv[] = {(char*)"clean", (char*)"-d", CStrTemp(gTool.srcPath), CStrTemp(destPath)};
+        (char*)"clean", (char*)"-p", pwd,         (char*)"-gggg",          (char*)"-e",       (char*)"100", (char*)"-f",
+        (char*)"-i",    (char*)"-t", (char*)"-Z", CStrTemp(gTool.srcPath), CStrTemp(destPath)};
+    char* decompressArgv[] = {(char*)"clean",          (char*)"-p",       pwd, (char*)"-d",
+                              CStrTemp(gTool.srcPath), CStrTemp(destPath)};
     char** argv = decompress ? decompressArgv : compressArgv;
-    int argc = decompress ? 4 : 10;
+    int argc = decompress ? dimofi(decompressArgv) : dimofi(compressArgv);
 
     fz_set_optind(0);
     int res = pdfclean_main(argc, argv);
@@ -790,17 +838,6 @@ static void PdfDeletePageDoIt() {
 
     WindowTab* sourceTab = isExtract ? FindTabByFilePath(gTool.srcPath) : nullptr;
     EngineBase* sourceEngine = sourceTab ? sourceTab->GetEngine() : nullptr;
-    if (isExtract && gTool.onlyWithAnnotations) {
-        if (!sourceEngine || !KeepOnlyPagesWithAnnotations(sourceEngine, parsedPages)) {
-            MessageBoxWarning(win, StrL("Failed to read annotations from PDF file."), Tr("Extract Pages From PDF"));
-            return;
-        }
-        if (len(parsedPages) == 0) {
-            MessageBoxWarning(win, StrL("No pages with annotations in the selected range."),
-                              Tr("Extract Pages From PDF"));
-            return;
-        }
-    }
 
     TempStr pageRange;
     if (isExtract) {
@@ -826,14 +863,19 @@ static void PdfDeletePageDoIt() {
         inputPath = tmpPath;
     }
 
+    // the destination folder may not exist yet (issue #6424)
+    dir::CreateForFile(destPath);
+
     // equivalent of: clean -gggg -e 100 -f -i -t -Z input.pdf output.pdf <page-range>
     // use the same compression flags as Compress PDF so the result is re-written
     // compactly; otherwise the kept pages drag along the original's full content
     // and the output is nearly as big as the source
-    char* argv[] = {(char*)"clean",      (char*)"-gggg",     (char*)"-e",        (char*)"100",
-                    (char*)"-f",         (char*)"-i",        (char*)"-t",        (char*)"-Z",
-                    CStrTemp(inputPath), CStrTemp(destPath), CStrTemp(pageRange)};
-    int argc = 11;
+    char* argv[] = {(char*)"clean",     (char*)"-p",         PdfToolPasswordTemp(win, gTool.srcPath),
+                    (char*)"-gggg",     (char*)"-e",         (char*)"100",
+                    (char*)"-f",        (char*)"-i",         (char*)"-t",
+                    (char*)"-Z",        CStrTemp(inputPath), CStrTemp(destPath),
+                    CStrTemp(pageRange)};
+    int argc = dimofi(argv);
 
     fz_set_optind(0);
     int res = pdfclean_main(argc, argv);
@@ -889,24 +931,63 @@ static void PdfDecryptDoIt() {
     }
     MainWindow* win = gTool.win;
 
-    logf("PdfDecryptDoIt: decrypting '%s' to '%s', password len: %d\n", gTool.srcPath, destPath, len(gTool.password));
+    logf("PdfDecryptDoIt: decrypting '%s' to '%s'\n", gTool.srcPath, destPath);
 
-    // equivalent of: clean -p <pwd> -D input output
-    // -p provides the password to open the encrypted input, -D removes encryption from output
-    char* argv[] = {(char*)"clean",          (char*)"-p",       CStrTemp(gTool.password), (char*)"-D",
+    // equivalent of: clean -p <key> -D input output
+    char* argv[] = {(char*)"clean",          (char*)"-p",       PdfToolPasswordTemp(win, gTool.srcPath), (char*)"-D",
                     CStrTemp(gTool.srcPath), CStrTemp(destPath)};
-    int argc = 6;
 
     fz_set_optind(0);
-    int res = pdfclean_main(argc, argv);
+    int res = pdfclean_main(dimofi(argv), argv);
     if (res == 0) {
         logf("PdfDecryptDoIt: decrypted successfully\n");
         CloseAndLoad(destPath);
         return;
     }
-    logf("PdfDecryptDoIt: pdfclean_main failed with %d, src: '%s', password len: %d\n", res, gTool.srcPath,
-         len(gTool.password));
-    MessageBoxWarning(win, StrL("Failed to decrypt PDF file."), Tr("Decrypt PDF"));
+    logf("PdfDecryptDoIt: failed, src: '%s'\n", gTool.srcPath);
+    ShowWarningNotification(win, Tr("Failed to decrypt PDF file."), kNotif5SecsTimeOut);
+}
+
+// orig's ConvertEpubToPdfDialog::DoIt: ddFormat holds the page size and the
+// DPI combo the font size
+static void ConvertEpubToPdfDoIt() {
+    TempStr destPath = DestPathTemp();
+    if (len(destPath) == 0) {
+        return;
+    }
+    MainWindow* win = gTool.win;
+    int fontSize = EbookPdfFontSizeFromText(InputTextTemp(gTool.dpiEdit));
+    if (fontSize == 0) {
+        MessageBoxWarning(win, Tr("Invalid font size"), Tr("Convert EPUB to PDF"));
+        return;
+    }
+    int idx = gTool.ddFormat.sel;
+    if (idx < 0 || idx >= dimofi(kEbookPdfPageSizes)) {
+        idx = 0;
+    }
+    const EbookPdfPageSize& ps = kEbookPdfPageSizes[idx];
+    logf("ConvertEpubToPdf: '%s' -> '%s', %s, %d pt\n", gTool.srcPath, destPath, ps.label, fontSize);
+    int nPages = EngineMupdfEbookToPdf(gTool.srcPath, destPath, ps.dx, ps.dy, (float)fontSize);
+    if (nPages == 0) {
+        MessageBoxWarning(win, Tr("Failed to save a file"), Tr("Convert EPUB to PDF"));
+        return;
+    }
+    logf("ConvertEpubToPdf: wrote %d pages\n", nPages);
+    CloseAndLoad(destPath);
+}
+
+// orig's ConvertCajToPdfDialog::DoIt
+static void ConvertCajToPdfDoIt() {
+    TempStr destPath = DestPathTemp();
+    if (len(destPath) == 0) {
+        return;
+    }
+    logf("ConvertCajToPdf: '%s' -> '%s'\n", gTool.srcPath, destPath);
+    if (!ConvertCajToPdf(gTool.srcPath, destPath)) {
+        MessageBoxWarning(gTool.win, CajErrorReasonTemp(gTool.srcPath), Tr("Convert CAJ to PDF"));
+        return;
+    }
+    CloseAndLoad(destPath);
 }
 
 static void ConvertToPdfDoIt() {
@@ -936,6 +1017,42 @@ static void ConvertToPdfDoIt() {
     MessageBoxWarning(win, Tr("Failed to save a file"), Tr("Convert to PDF"));
 }
 
+// the pages the mode picks; false for a custom range that doesn't parse
+static bool SelectedImagePages(Vec<int>& pages) {
+    VecReset(pages);
+    if (gTool.pagesMode == PagesMode::Current) {
+        DisplayModel* dm = gTool.win ? gTool.win->AsFixed() : nullptr;
+        int cur = dm ? dm->CurrentPageNo() : 0;
+        if (cur < 1 || cur > gTool.pageCount) {
+            return false;
+        }
+        VecAppend(pages, cur);
+        return true;
+    }
+    if (gTool.pagesMode == PagesMode::All) {
+        CollectAllPages(gTool.pageCount, pages);
+        return true;
+    }
+    return ParseDeletePages(InputTextTemp(gTool.pagesEdit), gTool.pageCount, pages);
+}
+
+// how many files Convert would overwrite (#6439)
+static int ExistingImageCount() {
+    if (gTool.kind != PdfToolKind::ConvertToImages) {
+        return 0;
+    }
+    DisplayModel* dm = gTool.win ? gTool.win->AsFixed() : nullptr;
+    int cur = dm ? dm->CurrentPageNo() : 0;
+    TempStr key = fmt("%d %d %s|%s", (int)gTool.pagesMode, cur, InputTextTemp(gTool.pagesEdit), DestPathTemp());
+    if (str::Eq(key, gTool.existKey)) {
+        return gTool.existCount;
+    }
+    str::ReplaceWithCopy(&gTool.existKey, key);
+    Vec<int> pages;
+    gTool.existCount = SelectedImagePages(pages) ? CountExistingImages(DestPathTemp(), pages) : 0;
+    return gTool.existCount;
+}
+
 static void ConvertPdfToImagesDoIt() {
     TempStr destPath = DestPathTemp();
     if (len(destPath) == 0) {
@@ -950,19 +1067,8 @@ static void ConvertPdfToImagesDoIt() {
     }
 
     Vec<int> pages;
-    if (gTool.pagesMode == PagesMode::Current) {
-        int cur = dm->CurrentPageNo();
-        if (cur < 1 || cur > gTool.pageCount) {
-            return;
-        }
-        VecAppend(pages, cur);
-    } else if (gTool.pagesMode == PagesMode::All) {
-        CollectAllPages(gTool.pageCount, pages);
-    } else {
-        TempStr custom = InputTextTemp(gTool.pagesEdit);
-        if (!ParseDeletePages(custom, gTool.pageCount, pages)) {
-            return;
-        }
+    if (!SelectedImagePages(pages)) {
+        return;
     }
 
     int dpi = SelectedDpi();
@@ -1036,6 +1142,7 @@ static void SaveSelectionAsImageDoIt() {
 struct MergeThumbWorkItem {
     int sourceNo = 0;
     int pageNo = 0;
+    int rotation = 0;
     int thumbIdx = 0;
 };
 
@@ -1051,13 +1158,19 @@ struct MergeThumbResult {
     Pixmap* bitmap = nullptr;
 };
 
-static Pixmap* RenderMergeThumb(EngineBase* engine, int pageNo) {
+static int MergeThumbIdx(const MergePageDlg& page) {
+    const MergeSourceDlg& source = gTool.mergeSources[page.sourceNo];
+    return source.thumbStart + ((page.pageNo - 1) * kMergeRotations) + (page.rotation / 90);
+}
+
+static Pixmap* RenderMergeThumb(EngineBase* engine, int pageNo, int rotation) {
     RectF pageRect = engine->PageMediabox(pageNo);
     if (pageRect.IsEmpty()) {
         return nullptr;
     }
+    pageRect = engine->Transform(pageRect, pageNo, 1.0f, rotation);
     float zoom = std::min((float)kMergeThumbDx / pageRect.dx, (float)kMergeThumbDy / pageRect.dy);
-    RenderPageArgs args(pageNo, zoom, 0, nullptr, RenderTarget::View);
+    RenderPageArgs args(pageNo, zoom, rotation, nullptr, RenderTarget::View);
     // kept as opaque 24bpp, like the other thumbnails
     return PixmapToBgr(engine->RenderPage(args));
 }
@@ -1075,6 +1188,8 @@ static void FinishMergeThumb(MergeThumbResult* result) {
     delete result;
 }
 
+static void StartMergeThumbs();
+
 static void FinishMergeThumbWorker(MergeThumbCache* cache) {
     cache->workerRunning = false;
     if (cache->deleteWhenWorkerFinishes) {
@@ -1082,6 +1197,8 @@ static void FinishMergeThumbWorker(MergeThumbCache* cache) {
         return;
     }
     AppShellInvalidate(cache->win);
+    // pages rotated meanwhile
+    StartMergeThumbs();
 }
 
 static void RenderMergeThumbs(MergeThumbWorker* worker) {
@@ -1098,7 +1215,7 @@ static void RenderMergeThumbs(MergeThumbWorker* worker) {
         result->cache = worker->cache;
         result->thumbIdx = item.thumbIdx;
         EngineBase* engine = engines[item.sourceNo];
-        result->bitmap = engine ? RenderMergeThumb(engine, item.pageNo) : nullptr;
+        result->bitmap = engine ? RenderMergeThumb(engine, item.pageNo, item.rotation) : nullptr;
         uitask::Post(MkFunc0<MergeThumbResult>(FinishMergeThumb, result));
     }
     for (EngineBase* engine : engines) {
@@ -1119,14 +1236,12 @@ static void StartMergeThumbs() {
         source.engine->AddRef();
         VecAppend(worker->engines, source.engine);
     }
-    for (int sourceNo = 0; sourceNo < len(gTool.mergeSources); sourceNo++) {
-        const MergeSourceDlg& source = gTool.mergeSources[sourceNo];
-        for (int pageNo = 1; pageNo <= source.pageCount; pageNo++) {
-            int idx = source.thumbStart + pageNo - 1;
-            const MergeThumb& thumb = cache->thumbs[idx];
-            if (!thumb.bitmap && !thumb.failed) {
-                VecAppend(worker->items, MergeThumbWorkItem{sourceNo, pageNo, idx});
-            }
+    // only the rotations the pages have; each page is in the grid once
+    for (const MergePageDlg& page : gTool.mergePages) {
+        int idx = MergeThumbIdx(page);
+        const MergeThumb& thumb = cache->thumbs[idx];
+        if (!thumb.bitmap && !thumb.failed) {
+            VecAppend(worker->items, MergeThumbWorkItem{page.sourceNo, page.pageNo, page.rotation, idx});
         }
     }
     if (len(worker->items) == 0) {
@@ -1157,11 +1272,11 @@ static void MergeMoveSelected(int before);
 // gpui reported for the last frame); "content" coords are local y + scrollY.
 
 static float MergePad() {
-    return (float)(kMergeGap / 2);
+    return (float)(kMergeGap * 3 / 4);
 }
 
 static float MergeItemDy() {
-    return (float)(kMergeThumbDy + kMergeGap);
+    return (float)(kMergeThumbDy + kMergeLabelDy + kMergeGap);
 }
 
 static int MergeRows() {
@@ -1412,6 +1527,16 @@ static void MergeSetRemoved(bool removed) {
     }
 }
 
+// degrees: 90 turns the selected pages clockwise, -90 counterclockwise
+static void MergeRotate(int degrees) {
+    for (MergePageDlg& it : gTool.mergePages) {
+        if (it.selected) {
+            it.rotation = (((it.rotation + degrees) % 360) + 360) % 360;
+        }
+    }
+    StartMergeThumbs();
+}
+
 // every page of the source, selected, in front of item `at`
 static void MergeInsertPages(int sourceNo, int at) {
     Vec<MergePageDlg>& items = gTool.mergePages;
@@ -1429,6 +1554,110 @@ static void MergeInsertPages(int sourceNo, int at) {
     }
     gTool.mergeFocusIdx = at;
     gTool.mergeAnchorIdx = at;
+}
+
+// orig's MergeGrid::CopySelected: the selected pages to our clipboard, their
+// names to the system one
+static void MergeCopySelected() {
+    VecReset(gTool.mergeClip);
+    str::Builder text;
+    for (const MergePageDlg& it : gTool.mergePages) {
+        if (!it.selected) {
+            continue;
+        }
+        VecAppend(gTool.mergeClip, it);
+        Str path = gTool.mergeSources[it.sourceNo].path;
+        text.Append(fmt(Tr("%s, page %d").s, path::GetBaseNameTemp(path), it.pageNo));
+        text.AppendChar('\n');
+    }
+    if (len(gTool.mergeClip) == 0 || !gTool.win) {
+        return;
+    }
+    str::FreePtr(&gTool.mergeClipText);
+    gTool.mergeClipText = str::Dup(ToStrTemp(text));
+    gp::ClipboardSetText(gTool.win->gpuiWin, ToGpui(gTool.mergeClipText));
+}
+
+// copies the selected pages and takes them out; nothing is selected after
+static void MergeCutSelected() {
+    MergeCopySelected();
+    if (len(gTool.mergeClip) == 0) {
+        return;
+    }
+    Vec<MergePageDlg>& items = gTool.mergePages;
+    Vec<MergePageDlg> rest;
+    int first = -1;
+    for (int i = 0; i < len(items); i++) {
+        if (!items[i].selected) {
+            VecAppend(rest, items[i]);
+        } else if (first < 0) {
+            first = i;
+        }
+    }
+    VecReset(items);
+    for (const MergePageDlg& it : rest) {
+        VecAppend(items, it);
+    }
+    gTool.mergeFocusIdx = limitValue(first, 0, std::max(0, len(items) - 1));
+    gTool.mergeAnchorIdx = gTool.mergeFocusIdx;
+}
+
+// copies of the pages last copied or cut, selected, in front of item `at`
+static void MergePastePages(int at) {
+    Vec<MergePageDlg>& items = gTool.mergePages;
+    for (MergePageDlg& it : items) {
+        it.selected = false;
+    }
+    at = limitValue(at, 0, len(items));
+    for (int i = 0; i < len(gTool.mergeClip); i++) {
+        MergePageDlg it = gTool.mergeClip[i];
+        it.selected = true;
+        VecInsertAt(items, at + i, it);
+    }
+    gTool.mergeFocusIdx = at;
+    gTool.mergeAnchorIdx = at;
+    MergeEnsureVisible(at / std::max(1, gTool.mergeCols));
+    StartMergeThumbs();
+}
+
+// the platform's line ends may differ from what we put there
+static bool IsMergeClipText(Str text) {
+    if (len(gTool.mergeClip) == 0 || len(text) == 0) {
+        return false;
+    }
+    return str::Eq(str::ReplaceTemp(text, StrL("\r\n"), StrL("\n")), gTool.mergeClipText);
+}
+
+// PDF files copied in a file manager; ng: also a text of such paths, one a
+// line, where gpui has no file list (Linux, macOS)
+static void MergePdfPathsFromClipboard(const gp::ClipboardItem& item, StrVec& out) {
+    Str all = FromGpui(item.HasExternalPaths() ? item.externalPaths : item.text);
+    StrVec lines;
+    Split(&lines, str::ReplaceTemp(all, StrL("\r"), StrL("")), StrL("\n"), true);
+    for (Str line : lines) {
+        if (str::EndsWithI(line, StrL(".pdf")) && file::Exists(line)) {
+            out.Append(line);
+        }
+    }
+}
+
+static void AddMergeSourcesAt(const StrVec& paths, int at);
+
+// orig's MergePdfWnd::Paste: the pages last copied or cut, else PDF files
+// copied in a file manager; after the last selected page
+static void MergePaste() {
+    if (!gTool.win) {
+        return;
+    }
+    int at = MergeInsertPosition();
+    gp::ClipboardItem item = gp::ClipboardGetItem(gp::GetTempArena(), gTool.win->gpuiWin);
+    if (IsMergeClipText(FromGpui(item.text))) {
+        MergePastePages(at);
+        return;
+    }
+    StrVec paths;
+    MergePdfPathsFromClipboard(item, paths);
+    AddMergeSourcesAt(paths, at);
 }
 
 // arrows move through the pages; with Shift they extend the selection
@@ -1465,12 +1694,12 @@ static bool AddMergeSource(Str filePath, int at) {
     }
     MergeSourceDlg source;
     source.path = str::Dup(filePath);
-    source.password = str::Dup(EngineMupdfGetPassword(engine));
+    source.password = str::Dup(EngineMupdfToolPasswordTemp(engine, filePath));
     source.pageCount = engine->PageCount();
     source.thumbStart = len(gTool.mergeThumbs->thumbs);
     source.color = kSourceColors[len(gTool.mergeSources) % dimofi(kSourceColors)];
     source.engine = engine;
-    for (int i = 0; i < source.pageCount; i++) {
+    for (int i = 0; i < source.pageCount * kMergeRotations; i++) {
         VecAppend(gTool.mergeThumbs->thumbs, MergeThumb{});
     }
     VecAppend(gTool.mergeSources, source);
@@ -1606,7 +1835,7 @@ static bool MergeSaveTo(Str destPath) {
     Vec<PdfMergePage> pages;
     for (const MergePageDlg& page : gTool.mergePages) {
         if (!page.removed) {
-            VecAppend(pages, PdfMergePage{page.sourceNo, page.pageNo});
+            VecAppend(pages, PdfMergePage{page.sourceNo, page.pageNo, page.rotation});
         }
     }
     if (len(destPath) == 0 || len(pages) == 0) {
@@ -1693,9 +1922,10 @@ static void OnMergeSaveAsPicked(SavePathArgs* args) {
 // (arg: a PDF path; asks where to add it, like Add PDF...), "addprompt" (ng:
 // the Add PDF... button), "answer" (ng: n: 1 OK, 0 Cancel of that
 // question), "asktext" (the After page field), "move" (arg: 0-based
-// items like "0,2", n: in front of that item), "remove" / "restore" (arg: items), "select"
-// (ng: arg: items), "save" / "saveas" (arg: the path), "close" or "" (report
-// only). Reports the items as src:page (r: removed, s: selected).
+// items like "0,2", n: in front of that item), "remove" / "restore" (arg: items),
+// "rotate" (arg: items, n: degrees), "select" (ng: arg: items), "save" /
+// "saveas" (arg: the path), "close" or "" (report only). Reports the items as
+// src:page[@rotation] (r: removed, s: selected).
 // ng: for the platforms whose picker answers later (AppShellPickFileAsync)
 static void OnMergePicked(MainWindow* win, Str path) {
     if (!gTool.visible || gTool.win != win || !IsMainWindowValidAndNotClosing(win)) {
@@ -1724,6 +1954,22 @@ static void MergeAddPromptNow(MainWindow* win) {
 
 static void MergeAddPrompt() {
     uitask::Post(MkFunc0(MergeAddPromptNow, gTool.win), "MergeAddPdf");
+}
+
+static TempStr MergeInfoTemp();
+
+// the legend's entries that fit in it, as of the last frame; reported to tests
+static int MergeLegendShownCount() {
+    if (len(gTool.mergeSources) < 2) {
+        return 0;
+    }
+    const gp::Bounds& box = gTool.mergeLegendView;
+    int n = 0;
+    for (const gp::Bounds& b : gTool.mergeLegendItems) {
+        bool fits = b.w > 0 && b.x >= box.x && b.Right() <= box.Right() + 0.5f && b.Bottom() <= box.Bottom() + 0.5f;
+        n += fits ? 1 : 0;
+    }
+    return n;
 }
 
 TempStr MergePdfResultTemp(Str action, Str arg, int n, int* exitCodeOut) {
@@ -1779,6 +2025,18 @@ TempStr MergePdfResultTemp(Str action, Str arg, int n, int* exitCodeOut) {
     } else if (str::Eq(action, StrL("remove")) || str::Eq(action, StrL("restore"))) {
         selectItems();
         MergeSetRemoved(str::Eq(action, StrL("remove")));
+    } else if (str::Eq(action, StrL("rotate"))) {
+        selectItems();
+        MergeRotate(n);
+    } else if (str::Eq(action, StrL("copy"))) {
+        selectItems();
+        MergeCopySelected();
+    } else if (str::Eq(action, StrL("cut"))) {
+        selectItems();
+        MergeCutSelected();
+    } else if (str::Eq(action, StrL("paste"))) {
+        selectItems();
+        MergePaste();
     } else if (str::Eq(action, StrL("save")) || str::Eq(action, StrL("saveas"))) {
         TempStr path = str::DupTemp(str::Eq(action, StrL("save")) ? gTool.srcPath : arg);
         bool ok = MergeSaveTo(path);
@@ -1822,6 +2080,9 @@ TempStr MergePdfResultTemp(Str action, Str arg, int n, int* exitCodeOut) {
     for (int i = 0; i < len(items); i++) {
         const MergePageDlg& it = items[i];
         out.Append(fmt(i == 0 ? "%d:%d" : ",%d:%d", it.sourceNo, it.pageNo));
+        if (it.rotation != 0) {
+            out.Append(fmt("@%d", it.rotation));
+        }
         if (it.removed) {
             out.AppendChar('r');
         }
@@ -1849,6 +2110,9 @@ TempStr MergePdfResultTemp(Str action, Str arg, int n, int* exitCodeOut) {
         ask = InputTextTemp(gTool.mergeAskEdit);
     }
     out.Append(fmt(" asking=%d ask=%s", (int)(len(gTool.mergeAskPaths) > 0), ask));
+    out.Append(fmt(" info=\"%s\"", MergeInfoTemp()));
+    out.Append(
+        fmt(" legend=%d/%d", MergeLegendShownCount(), len(gTool.mergeSources) > 1 ? len(gTool.mergeSources) : 0));
     return finish(0, fmt("OK %s", ToStrTemp(out)));
 }
 
@@ -1857,17 +2121,17 @@ static bool ActionEnabled() {
     if (len(DestPathTemp()) == 0) {
         return false;
     }
-    if (IsPageRangeTool()) {
+    if (IsPageRangeTool() || gTool.kind == PdfToolKind::ExtractText) {
         Vec<int> parsed;
-        if (!ParseDeletePages(InputTextTemp(gTool.pagesEdit), gTool.pageCount, parsed)) {
-            return false;
-        }
-        // for delete mode, can't delete all pages
-        return gTool.kind == PdfToolKind::ExtractPages || len(parsed) < gTool.pageCount;
+        bool isExtract = gTool.kind != PdfToolKind::DeletePages;
+        return PageRangeOk(InputTextTemp(gTool.pagesEdit), gTool.pageCount, isExtract, parsed);
     }
     if (gTool.kind == PdfToolKind::Encrypt) {
         // there is nothing to encrypt with until a password is typed
         return len(InputTextTemp(gTool.passwordEdit)) > 0;
+    }
+    if (gTool.kind == PdfToolKind::ConvertEpubToPdf) {
+        return EbookPdfFontSizeFromText(InputTextTemp(gTool.dpiEdit)) > 0;
     }
     if (gTool.kind == PdfToolKind::ConvertToImages) {
         if (SelectedDpi() < 1) {
@@ -1935,6 +2199,12 @@ static void PdfToolDoIt() {
         case PdfToolKind::ConvertToPdf:
             ConvertToPdfDoIt();
             break;
+        case PdfToolKind::ConvertEpubToPdf:
+            ConvertEpubToPdfDoIt();
+            break;
+        case PdfToolKind::ConvertCajToPdf:
+            ConvertCajToPdfDoIt();
+            break;
         case PdfToolKind::ConvertToImages:
             ConvertPdfToImagesDoIt();
             break;
@@ -1989,13 +2259,6 @@ void PdfToolView::OnInput(PdfToolView*, gp::Ctx* cx, const gp::InputEvent* ev) {
     }
     gp::Notify(cx);
     PdfToolDoIt();
-}
-
-void PdfToolView::OnAnnotsOnly(PdfToolView*, gp::Ctx* cx, const gp::ClickEvent*) {
-    ToolScope scope(ToolForCx(cx));
-    gTool.onlyWithAnnotations = !gTool.onlyWithAnnotations;
-    gp::Notify(cx);
-    AppShellInvalidate(gTool.win);
 }
 
 void PdfToolView::OnPagesMode(PdfToolView*, gp::Ctx* cx, const gp::ClickEvent*, int64_t mode) {
@@ -2133,7 +2396,8 @@ void PdfToolView::OnMergeGridDrag(PdfToolView*, gp::Ctx* cx, const gp::DragMoveE
     const gp::MouseMoveEvent* ev = &dragEv->event;
     float x = ev->x - gTool.mergeView.x;
     float y = ev->y - gTool.mergeView.y;
-    if (gTool.mergePress == MergePress::None) {
+    // orig: SetCapture synthesizes a move at the real cursor: not a gesture
+    if (gTool.mergePress == MergePress::None || !ev->Dragging()) {
         return;
     }
     gTool.mergeLast = {x, y};
@@ -2204,7 +2468,12 @@ void PdfToolView::OnMergeSetRemoved(PdfToolView*, gp::Ctx* cx, const gp::ClickEv
 enum {
     kMenuRemove = 1,
     kMenuRestore,
+    kMenuRotateLeft,
+    kMenuRotateRight,
     kMenuSelectAll,
+    kMenuCut,
+    kMenuCopy,
+    kMenuPaste,
 };
 
 static uint32_t ActMergeMenu() {
@@ -2216,8 +2485,16 @@ void PdfToolView::OnMergeMenu(PdfToolView*, gp::Ctx* cx, const gp::ActionEvent* 
     int cmd = (int)ev->arg;
     if (cmd == kMenuRemove || cmd == kMenuRestore) {
         MergeSetRemoved(cmd == kMenuRemove);
+    } else if (cmd == kMenuRotateLeft || cmd == kMenuRotateRight) {
+        MergeRotate(cmd == kMenuRotateRight ? 90 : -90);
     } else if (cmd == kMenuSelectAll) {
         MergeSelectAll();
+    } else if (cmd == kMenuCut) {
+        MergeCutSelected();
+    } else if (cmd == kMenuCopy) {
+        MergeCopySelected();
+    } else if (cmd == kMenuPaste) {
+        MergePaste();
     }
     gp::Notify(cx);
     AppShellInvalidate(gTool.win);
@@ -2321,6 +2598,12 @@ static bool MergeOnKeyDown(MainWindow* win, int vk, bool ctrl, bool shift) {
         }
         return false;
     }
+    // pasting works without pages too
+    if (ctrl && vk == 'V') {
+        MergePaste();
+        AppShellInvalidate(win);
+        return true;
+    }
     int n = len(gTool.mergePages);
     if (n == 0) {
         return false;
@@ -2356,11 +2639,30 @@ static bool MergeOnKeyDown(MainWindow* win, int vk, bool ctrl, bool shift) {
             // all removed already: restore them
             MergeSetRemoved(MergeSelectedRemovedCount() < MergeSelectedCount());
             break;
+        // [ and ], as in the document window
+        case VK_OEM_4:
+            MergeRotate(-90);
+            break;
+        case VK_OEM_6:
+            MergeRotate(90);
+            break;
         case 'A':
             if (!ctrl) {
                 return false;
             }
             MergeSelectAll();
+            break;
+        case 'C':
+            if (!ctrl) {
+                return false;
+            }
+            MergeCopySelected();
+            break;
+        case 'X':
+            if (!ctrl) {
+                return false;
+            }
+            MergeCutSelected();
             break;
         default:
             return false;
@@ -2403,6 +2705,19 @@ static void OnDestPathPicked(PdfToolDlg* tool, SavePathArgs* args) {
     ToolWindowInvalidate(gTool.dlgTw);
 }
 
+// orig's OnUseNewNames: free names for the files Convert would overwrite
+void PdfToolView::OnUseNewNames(PdfToolView*, gp::Ctx* cx, const gp::ClickEvent*) {
+    ToolScope scope(ToolForCx(cx));
+    gp::Notify(cx);
+    Vec<int> pages;
+    if (!gTool.destEdit || !SelectedImagePages(pages)) {
+        return;
+    }
+    gp::InputSetValue(gTool.destEdit, ToGpui(UniqueImagesTemplateTemp(DestPathTemp(), pages)));
+    AppShellInvalidate(gTool.win);
+    ToolWindowInvalidate(gTool.dlgTw);
+}
+
 void PdfToolView::OnBrowse(PdfToolView*, gp::Ctx* cx, const gp::ClickEvent*) {
     ToolScope scope(ToolForCx(cx));
     gp::Notify(cx);
@@ -2416,7 +2731,7 @@ void PdfToolView::OnBrowse(PdfToolView*, gp::Ctx* cx, const gp::ClickEvent*) {
     args->initialPath = str::Dup(DestPathTemp());
     args->defExt = str::Dup(ext);
     if (HasFormatDropDown()) {
-        args->filter = str::Dup(StrL("PNG\1*.png\1JPEG\1*.jpg;*.jpeg\1BMP\1*.bmp\1All Files\1*.*\1"));
+        args->filter = str::Dup(StrL("PNG\1*.png\1JPEG\1*.jpg;*.jpeg\1BMP\1*.bmp\1GIF\1*.gif\1All Files\1*.*\1"));
         args->filterIndex = SelectedFormatIdx() + 1;
         // < and > are illegal in Windows filenames; show {N} in the save dialog
         TempStr shown = str::ReplaceTemp(DestPathTemp(), StrL("<N>"), StrL("{N}"));
@@ -2459,11 +2774,19 @@ static bool ToolDlgWindowOnKey(MainWindow* win, int vk, bool ctrl, bool shift, b
     return true;
 }
 
-// orig's CalcDlgWidth: wide enough for the source path, at least 480 and at
-// most 80% of the screen (a longer path is cut with an ellipsis)
+// the width (dips) the user last dragged a tool dialog to; the next one
+// opens that wide, as Advanced Settings does
+static float gToolLastDx = 0;
+
+static void ToolDlgOnResized(float clientDx) {
+    gToolLastDx = clientDx;
+}
+
+// orig's CalcDlgWidth: wide enough for the source path, at least kToolDlgMinDx
+// and at most 80% of the screen (a longer path is cut with an ellipsis)
 static float ToolWinClientDx(MainWindow* win, Str srcPath) {
-    constexpr float kMinDx = 480;
-    constexpr float kPathExtraDx = 2 * 10 + 32;
+    constexpr float kMinDx = kToolDlgMinDx;
+    constexpr float kPathExtraDx = 2 * kToolDlgPadDx + 32;
     int dpi = std::max(AppShellWindowDpi(win), 96);
     float pathDx = (float)PlatformFontMeasureText(GetDefaultGuiFont(), srcPath).dx * 96.f / (float)dpi;
     float dx = std::max(pathDx + kPathExtraDx, kMinDx);
@@ -2517,6 +2840,10 @@ static const char* ToolWindowName(PdfToolKind kind) {
             return "pdfdecrypt";
         case PdfToolKind::ConvertToPdf:
             return "converttopdf";
+        case PdfToolKind::ConvertEpubToPdf:
+            return "convertepubtopdf";
+        case PdfToolKind::ConvertCajToPdf:
+            return "convertcajtopdf";
         case PdfToolKind::ConvertToImages:
             return "converttoimages";
         case PdfToolKind::SaveSelectionAsImage:
@@ -2554,7 +2881,6 @@ static bool StartToolDialog(MainWindow* win, PdfToolKind kind, Str destPath, Str
     gTool.srcPath = str::Dup(tab->filePath);
     gTool.browseExt = str::Dup(defExt);
     gTool.pageCount = win->ctrl ? win->ctrl->PageCount() : 0;
-    gTool.onlyWithAnnotations = false;
     gTool.pagesMode = PagesMode::All;
     gTool.destEdit = NewInput(win, destPath);
     gTool.pagesEdit = nullptr;
@@ -2575,8 +2901,11 @@ static bool StartToolDialog(MainWindow* win, PdfToolKind kind, Str destPath, Str
     spec.close = ToolDlgWindowClose;
     spec.onEnter = ToolDlgWindowOnEnter;
     spec.onKey = ToolDlgWindowOnKey;
-    gTool.winDx = ToolWinClientDx(win, gTool.srcPath);
+    gTool.winDx = gToolLastDx > 0 ? std::max(gToolLastDx, (float)kToolDlgMinDx) : ToolWinClientDx(win, gTool.srcPath);
     spec.clientDx = gTool.winDx;
+    spec.resizable = true;
+    spec.minClientDx = kToolDlgMinDx;
+    spec.onResized = ToolDlgOnResized;
     gTool.dlgTw = DlgWindowOpen(spec, win);
     VecAppend(gWinTools, gCurTool);
     if (!gTool.dlgTw) {
@@ -2622,6 +2951,7 @@ void ShowPdfExtractTextDialog(MainWindow* win) {
     }
     int pageCount = win->ctrl ? win->ctrl->PageCount() : 1;
     gTool.pagesEdit = NewInput(win, fmt("1-%d", pageCount));
+    gTool.focusPages = true;
     AppShellInvalidate(win);
 }
 
@@ -2708,11 +3038,11 @@ void ShowMergePdfDialog(MainWindow* win) {
     MergeSourceDlg source;
     source.color = kSourceColors[0];
     source.path = str::Dup(tab->filePath);
-    source.password = str::Dup(EngineMupdfGetPassword(engine));
+    source.password = str::Dup(EngineMupdfToolPasswordTemp(engine, tab->filePath));
     source.pageCount = engine->PageCount();
     source.engine = engine;
     engine->AddRef();
-    for (int i = 0; i < source.pageCount; i++) {
+    for (int i = 0; i < source.pageCount * kMergeRotations; i++) {
         VecAppend(gTool.mergeThumbs->thumbs, MergeThumb{});
     }
     VecAppend(gTool.mergeSources, source);
@@ -2758,16 +3088,10 @@ void ShowPdfDecryptDialog(MainWindow* win) {
         logf("ShowPdfDecryptDialog: '%s' is not encrypted, skipping\n", tab->filePath);
         return;
     }
-    Str pwd = EngineMupdfGetPassword(engine);
-    if (len(pwd) == 0) {
-        logf("ShowPdfDecryptDialog: '%s' is encrypted but no password available\n", tab->filePath);
-        return;
-    }
-    logf("ShowPdfDecryptDialog: opening for '%s', password len: %d\n", tab->filePath, len(pwd));
+    logf("ShowPdfDecryptDialog: opening for '%s'\n", tab->filePath);
     if (!StartToolDialog(win, PdfToolKind::Decrypt, MakeUniqueFilePathTemp(tab->filePath), StrL(".pdf"))) {
         return;
     }
-    gTool.password = str::Dup(pwd);
     AppShellInvalidate(win);
 }
 
@@ -2791,6 +3115,43 @@ void ShowConvertToPdfDialog(MainWindow* win) {
     AppShellInvalidate(win);
 }
 
+static void InitPageSizeDropDown(MainWindow* win);
+static void InitFontSizeCombo(MainWindow* win);
+
+void ShowConvertEpubToPdfDialog(MainWindow* win) {
+    ToolScope scope;
+    if (!CanShowToolDialog(win, false)) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    if (!IsEpubDoc(tab)) {
+        return;
+    }
+    logf("ShowConvertEpubToPdfDialog: opening for '%s'\n", tab->filePath);
+    if (!StartToolDialog(win, PdfToolKind::ConvertEpubToPdf, DefaultPdfDestPathTemp(tab->filePath), StrL(".pdf"))) {
+        return;
+    }
+    InitPageSizeDropDown(win);
+    InitFontSizeCombo(win);
+    AppShellInvalidate(win);
+}
+
+void ShowConvertCajToPdfDialog(MainWindow* win) {
+    ToolScope scope;
+    if (!CanShowToolDialog(win, false)) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    if (!IsCajDoc(tab)) {
+        return;
+    }
+    logf("ShowConvertCajToPdfDialog: opening for '%s'\n", tab->filePath);
+    if (!StartToolDialog(win, PdfToolKind::ConvertCajToPdf, DefaultPdfDestPathTemp(tab->filePath), StrL(".pdf"))) {
+        return;
+    }
+    AppShellInvalidate(win);
+}
+
 // orig's NewDpiCombo
 static void InitDpiCombo(MainWindow* win, int dpi) {
     gp::App* app = win->gpuiWin ? win->gpuiWin->app : nullptr;
@@ -2805,6 +3166,33 @@ static void InitDpiCombo(MainWindow* win, int dpi) {
     }
     gTool.ddDpi.SetItems(dpis, selIdx);
     gTool.dpiEdit = NewInput(win, fmt("%d", dpi));
+}
+
+// orig's NewPageSizeDropDown, in ddFormat
+static void InitPageSizeDropDown(MainWindow* win) {
+    gp::App* app = win->gpuiWin ? win->gpuiWin->app : nullptr;
+    gTool.ddFormat.Init(app);
+    StrVec items;
+    for (const EbookPdfPageSize& ps : kEbookPdfPageSizes) {
+        items.Append(ps.label);
+    }
+    gTool.ddFormat.SetItems(items, 0);
+}
+
+// orig's NewFontSizeCombo, in the DPI combo's fields
+static void InitFontSizeCombo(MainWindow* win) {
+    gp::App* app = win->gpuiWin ? win->gpuiWin->app : nullptr;
+    gTool.ddDpi.Init(app);
+    StrVec sizes;
+    int selIdx = -1;
+    for (int i = 0; i < dimofi(kEbookPdfFontSizes); i++) {
+        sizes.Append(fmt("%d", kEbookPdfFontSizes[i]));
+        if (kEbookPdfFontSizes[i] == kEbookPdfDefaultFontSize) {
+            selIdx = i;
+        }
+    }
+    gTool.ddDpi.SetItems(sizes, selIdx);
+    gTool.dpiEdit = NewInput(win, fmt("%d", kEbookPdfDefaultFontSize));
 }
 
 static void InitFormatDropDown(MainWindow* win, int sel) {
@@ -2824,11 +3212,14 @@ void ShowConvertPdfToImagesDialog(MainWindow* win) {
     }
     Str srcPath = win->CurrentTab()->filePath;
     logf("ShowConvertPdfToImagesDialog: opening for '%s'\n", srcPath);
+    int pageCount = win->ctrl ? win->ctrl->PageCount() : 1;
     TempStr pngPath = str::JoinTemp(path::GetPathNoExtTemp(srcPath), StrL("-<N>.png"));
+    Vec<int> allPages;
+    CollectAllPages(pageCount, allPages);
+    pngPath = UniqueImagesTemplateTemp(pngPath, allPages);
     if (!StartToolDialog(win, PdfToolKind::ConvertToImages, pngPath, StrL(".png"))) {
         return;
     }
-    int pageCount = win->ctrl ? win->ctrl->PageCount() : 1;
     gTool.pagesEdit = NewInput(win, fmt("1-%d", pageCount));
     gTool.pagesMode = PagesMode::All;
     InitFormatDropDown(win, 0);
@@ -2878,9 +3269,6 @@ TempStr PdfToolStateTemp() {
     if (gTool.pagesEdit) {
         s.Append(fmt(" pages '%s' of %d", InputTextTemp(gTool.pagesEdit), gTool.pageCount));
     }
-    if (gTool.kind == PdfToolKind::ExtractPages) {
-        s.Append(fmt(" annotsOnly %d", (int)gTool.onlyWithAnnotations));
-    }
     if (gTool.kind == PdfToolKind::ConvertToImages) {
         s.Append(fmt(" mode %d format %s dpi %d", (int)gTool.pagesMode, gTool.ddFormat.SelText(), SelectedDpi()));
     }
@@ -2893,13 +3281,6 @@ TempStr PdfToolStateTemp() {
 
 // --- building ---------------------------------------------------------------
 
-static gp::El* LabelEl(gp::Ctx* cx, Str s, bool muted) {
-    const gp::Theme& th = gp::ThemeNow(cx->app);
-    return gp::TextEl(cx->a, GpuiDup(cx->a, s))->Font(13)->Fg(muted ? th.mutedFg : th.foreground);
-}
-
-// orig's AddButtonsRow: the optional hint on the left, then the action button
-// (the dialog's default) and Cancel on the right
 // orig's MergeGrid::DrawCell / Paint as gpui elements. Only the rows in view
 // are built; everything is positioned absolutely in a box as tall as the grid.
 static void MergeInvalidateLater() {
@@ -2908,12 +3289,7 @@ static void MergeInvalidateLater() {
     }
 }
 
-// ng: 1 in the frame. Merge PDF's own window sets its rem for orig's 12 px
-// buttons (ToolWindowSetUiFontPx), and the grid's font sizes are in that rem
-static float gMergeFontScale = 1;
-
 static gp::El* MergeGridEl(gp::Ctx* cx, float viewDx, float viewDy) {
-    const gp::Theme& th = gp::ThemeNow(cx->app);
     // Last frame's bounds, or the width the caller already knows: gpui fills
     // bounds while painting, and this window may not be built again.
     float dx = gTool.mergeView.w > 1.f ? gTool.mergeView.w : viewDx;
@@ -2939,70 +3315,109 @@ static gp::El* MergeGridEl(gp::Ctx* cx, float viewDx, float viewDy) {
     float contentDy = (float)MergeRows() * MergeItemDy() + 2 * MergePad();
     gp::El* content = gp::Div(cx->a)->W(gp::kFill)->H(contentDy)->Shrink0();
 
-    gp::Rgba colBg = th.tokens.background.color;
-    auto accent = [&](float pct) { return gp::Lerp(colBg, th.foreground, pct / 100.f); };
+    Color colBg = ThemeWindowControlBackgroundColor();
+    Color colTxt = ThemeWindowTextColor();
+    Color colMuted = ThemeWindowTextDisabledColor();
+    auto withAlpha = [](Color c, u8 a) {
+        gp::Rgba res = ToGpui(c);
+        res.a = a;
+        return res;
+    };
     bool multipleSources = len(gTool.mergeSources) > 1;
     int firstRow = std::max(0, (int)(scrollY / MergeItemDy()) - 1);
     int lastRow = (int)((scrollY + viewDy) / MergeItemDy()) + 1;
     int first = firstRow * cols;
     int last = std::min(n - 1, (lastRow + 1) * cols - 1);
+    float labelDy = (float)kMergeLabelDy;
     for (int i = first; i <= last; i++) {
         const MergePageDlg& page = items[i];
         const MergeSourceDlg& source = gTool.mergeSources[page.sourceNo];
-        MergeThumb& thumb = gTool.mergeThumbs->thumbs[source.thumbStart + page.pageNo - 1];
+        MergeThumb& thumb = gTool.mergeThumbs->thumbs[MergeThumbIdx(page)];
         RectF r = MergeCellRect(i);
         r.y += scrollY;
-
-        // the selection, or the page under the mouse: a frame in the gap around it
-        bool hovered = i == gTool.mergeHoverIdx && gTool.mergePress == MergePress::None;
-        if (page.selected || hovered) {
-            float d = (float)(kMergeGap / 3);
-            content->Child(gp::Div(cx->a)
-                               ->Absolute()
-                               ->Left(r.x - d)
-                               ->Top(r.y - d)
-                               ->W(r.dx + 2 * d)
-                               ->H(r.dy + 2 * d)
-                               ->Radius(d)
-                               ->Bg(accent(page.selected ? 60.f : 15.f)));
+        // the page is the thumbnail's size once rendered: rotated, it's landscape
+        RectF pr = r;
+        if (thumb.bitmap) {
+            pr.dx = std::min((float)thumb.bitmap->width, r.dx);
+            pr.dy = std::min((float)thumb.bitmap->height, r.dy);
+            pr.x = r.x + ((r.dx - pr.dx) / 2);
+            pr.y = r.y + ((r.dy - pr.dy) / 2);
         }
+
+        // the selection and hover: a rounded frame around page and number;
+        // the keyboard's page a ring when it isn't selected
+        bool hovered = i == gTool.mergeHoverIdx && gTool.mergePress == MergePress::None;
+        float pad = kMergeFramePad;
+        gp::El* frame = gp::Div(cx->a)
+                            ->Absolute()
+                            ->Left(r.x - pad)
+                            ->Top(r.y - pad)
+                            ->W(r.dx + 2 * pad)
+                            ->H(r.dy + labelDy + pad)
+                            ->Radius(kMergeFrameRadius);
+        Color colFrame = kColorUnset;
+        if (page.selected) {
+            colFrame = AccentColor(colBg, kMergeSelShift);
+        } else if (hovered) {
+            colFrame = AccentColor(colBg, kMergeHoverShift);
+        }
+        if (colFrame != kColorUnset) {
+            content->Child(frame->Bg(ToGpui(colFrame)));
+        } else if (i == gTool.mergeFocusIdx) {
+            content->Child(frame->Border(1, ToGpui(AccentColor(colBg, kMergeFocusRingShift))));
+        }
+
         // white pages on a white grid need an edge
         gp::El* cell = gp::Div(cx->a)
                            ->Absolute()
-                           ->Left(r.x)
-                           ->Top(r.y)
-                           ->W(r.dx)
-                           ->H(r.dy)
+                           ->Left(pr.x)
+                           ->Top(pr.y)
+                           ->W(pr.dx)
+                           ->H(pr.dy)
                            ->ItemsCenter()
                            ->JustifyCenter()
                            ->Bg(gp::Rgba{0xff, 0xff, 0xff, 0xff})
-                           ->Border(1, accent(30));
+                           ->Border(1, ToGpui(AccentColor(colBg, kMergePageEdgeShift)));
         if (thumb.bitmap) {
             gp::ImageSource image = gp::ImageSource::FromCustom(MergeThumbLoad, &thumb);
             cell->Child(gp::ImageEl(cx->a, image, GStrL(""))->SizeFull()->ObjectFitMode(gp::ObjectFit::Contain));
         }
-        if (multipleSources) {
-            // which file the page comes from
-            cell->Child(
-                gp::Div(cx->a)->Absolute()->Left(0)->Top(0)->W(r.dx)->H((float)kStripDy)->Bg(ToGpui(source.color)));
-        }
         if (page.removed) {
-            gp::Rgba veil = colBg;
-            veil.a = 190;
-            cell->Child(gp::Div(cx->a)->Absolute()->Left(0)->Top(0)->W(r.dx)->H(r.dy)->Bg(veil));
+            Color veil = colFrame != kColorUnset ? colFrame : colBg;
+            cell->Child(gp::Div(cx->a)->Absolute()->Left(0)->Top(0)->W(pr.dx)->H(pr.dy)->Bg(
+                withAlpha(veil, kMergeRemovedVeilAlpha)));
         }
-        // the page number, in a pill at the bottom
-        cell->Child(gp::Div(cx->a)->Absolute()->Left(0)->Bottom(4)->W(r.dx)->FlexRow()->JustifyCenter()->Child(
-            gp::Div(cx->a)->PadX(6)->PadY(2)->Radius(10)->Bg(colBg)->Child(
-                gp::TextEl(cx->a, GpuiDup(cx->a, fmt("%d", page.pageNo)))
-                    ->Font(11 * gMergeFontScale)
-                    ->Fg(th.foreground))));
+
+        // the page number under the page; its file's dot when there are more files
+        gp::El* label = gp::Div(cx->a)
+                            ->Absolute()
+                            ->Left(r.x)
+                            ->Top(r.y + r.dy)
+                            ->W(r.dx)
+                            ->H(labelDy)
+                            ->FlexRow()
+                            ->ItemsCenter()
+                            ->JustifyCenter()
+                            ->Gap(kMergeDotDx);
+        if (multipleSources) {
+            u8 alpha = page.removed ? kMergeBandAlpha * 4 : 255;
+            label->Child(gp::Div(cx->a)
+                             ->W(kMergeDotDx)
+                             ->H(kMergeDotDx)
+                             ->Shrink0()
+                             ->Radius(kMergeDotDx / 2)
+                             ->Bg(withAlpha(source.color, alpha)));
+        }
+        Color colLabel = page.selected && !page.removed ? colTxt : colMuted;
+        label->Child(
+            gp::TextEl(cx->a, GpuiDup(cx->a, fmt("%d", page.pageNo)))->Font(kToolDlgMetaFontPx)->Fg(ToGpui(colLabel)));
+        content->Child(label);
+
         // remove on the page under the mouse, restore on every removed page
         if (page.removed || (i == gTool.mergeHoverIdx && !gTool.mergeDragging)) {
-            gp::Rgba colBtn = ToGpui(page.removed ? kRestoreBtnColor : kRemoveBtnColor);
-            colBtn.a = 230;
             float btnDx = (float)kMergeCornerBtnDx;
             float inset = (float)kMergeCornerBtnInset;
+            Str glyph = page.removed ? StrL("\xe2\x86\xba") : StrL("\xc3\x97");
             cell->Child(
                 gp::Div(cx->a)
                     ->Absolute()
@@ -3013,49 +3428,38 @@ static gp::El* MergeGridEl(gp::Ctx* cx, float viewDx, float viewDy) {
                     ->Radius(btnDx / 2)
                     ->ItemsCenter()
                     ->JustifyCenter()
-                    ->Bg(colBtn)
-                    ->Child(gp::TextEl(cx->a, GpuiDup(cx->a, page.removed ? StrL("\xe2\x86\xba") : StrL("\xc3\x97")))
-                                ->Font(15 * gMergeFontScale)
-                                ->Bold()
-                                ->Fg(gp::Rgba{0xff, 0xff, 0xff, 0xff})));
+                    ->Bg(withAlpha(colTxt, kMergeCornerBtnAlpha))
+                    ->Child(gp::TextEl(cx->a, GpuiDup(cx->a, glyph))->Font(kMergeCornerGlyphPx)->Fg(ToGpui(colBg))));
         }
         content->Child(cell);
-        if (i == gTool.mergeFocusIdx) {
-            // orig's DrawFocusRect
-            content->Child(gp::Div(cx->a)
-                               ->Absolute()
-                               ->Left(r.x - 2)
-                               ->Top(r.y - 2)
-                               ->W(r.dx + 4)
-                               ->H(r.dy + 4)
-                               ->Border(1, th.foreground)
-                               ->Dashed());
-        }
     }
 
     // where dragged pages would go, and the rubber band
-    gp::Rgba colBar = ToGpui(kDropBarColor);
     if (gTool.mergeDropBefore >= 0 && n > 0) {
         bool atEnd = gTool.mergeDropBefore >= n;
         RectF r = MergeCellRect(atEnd ? n - 1 : gTool.mergeDropBefore);
         r.y += scrollY;
         float barDx = (float)kMergeDropBarDx;
         float x = atEnd ? r.x + r.dx + (float)(kMergeGap / 2) : r.x - (float)(kMergeGap / 2);
-        content->Child(gp::Div(cx->a)->Absolute()->Left(x - barDx / 2)->Top(r.y)->W(barDx)->H(r.dy)->Bg(colBar));
+        content->Child(gp::Div(cx->a)
+                           ->Absolute()
+                           ->Left(x - barDx / 2)
+                           ->Top(r.y)
+                           ->W(barDx)
+                           ->H(r.dy)
+                           ->Radius(barDx / 2)
+                           ->Bg(ToGpui(colTxt)));
     }
     if (gTool.mergePress == MergePress::Band) {
         float x0 = std::min(gTool.mergeBandFrom.x, gTool.mergeBandTo.x);
         float y0 = std::min(gTool.mergeBandFrom.y, gTool.mergeBandTo.y);
-        gp::Rgba fill = colBar;
-        fill.a = 40;
         content->Child(gp::Div(cx->a)
                            ->Absolute()
                            ->Left(x0)
                            ->Top(y0)
                            ->W(std::abs(gTool.mergeBandTo.x - gTool.mergeBandFrom.x))
                            ->H(std::abs(gTool.mergeBandTo.y - gTool.mergeBandFrom.y))
-                           ->Bg(fill)
-                           ->Border(1, colBar));
+                           ->Bg(withAlpha(colTxt, kMergeBandAlpha)));
     }
 
     return gp::Div(cx->a)
@@ -3063,8 +3467,7 @@ static gp::El* MergeGridEl(gp::Ctx* cx, float viewDx, float viewDy) {
         ->Click(gp::HashClickId(GStrL("merge-pages")))
         ->W(gp::kFill)
         ->H(viewDy)
-        ->Border(1, th.border)
-        ->Bg(colBg)
+        ->Bg(ToGpui(colBg))
         ->ScrollY(scrollY)
         ->ScrollFromPath()
         ->BoundsOut(&gTool.mergeView)
@@ -3075,23 +3478,6 @@ static gp::El* MergeGridEl(gp::Ctx* cx, float viewDx, float viewDy) {
         ->OnMouseUp(gp::ListenTo(gToolView, &PdfToolView::OnMergeGridUp))
         ->OnMouseUpOut(gp::ListenTo(gToolView, &PdfToolView::OnMergeGridUp))
         ->Child(content);
-}
-
-// orig's MergePdfWnd::PaintInfo: each file's color and name after the page
-// count, when there is more than one file
-static gp::El* MergeLegendEl(gp::Ctx* cx) {
-    const gp::Theme& th = gp::ThemeNow(cx->app);
-    gp::El* legend = gp::Div(cx->a)->FlexRow()->Flex1()->MinW(0)->ItemsCenter()->Gap(6)->ClipX();
-    for (int i = 0; len(gTool.mergeSources) > 1 && i < len(gTool.mergeSources); i++) {
-        const MergeSourceDlg& source = gTool.mergeSources[i];
-        legend->Child(gp::Div(cx->a)->W(10)->H(10)->Shrink0()->Bg(ToGpui(source.color)));
-        legend->Child(gp::TextEl(cx->a, GpuiDup(cx->a, path::GetBaseNameTemp(source.path)))
-                          ->Font(12 * gMergeFontScale)
-                          ->Fg(th.foreground)
-                          ->Shrink0());
-        legend->Child(gp::Div(cx->a)->W(6)->Shrink0());
-    }
-    return legend;
 }
 
 // orig's UpdateSizeLabel: what the selection comes to at the DPI in the box
@@ -3111,55 +3497,6 @@ static TempStr SelectionSizeTextTemp(MainWindow* win) {
     return fmt("%d x %d px", w, h);
 }
 
-static gp::El* ToolFooter(gp::Ctx* cx, Str hint, Str actionText, bool enabled) {
-    gp::El* row = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->ItemsCenter()->Gap(8);
-    if (len(hint) > 0) {
-        row->Child(LabelEl(cx, hint, true));
-    }
-    if (gTool.kind == PdfToolKind::Merge) {
-        row->Child(MergeLegendEl(cx));
-        int nSel = MergeSelectedCount();
-        int nSelRemoved = MergeSelectedRemovedCount();
-        row->Child(gpc::Button::New(cx, GStrL("merge-remove"))
-                       ->Label(ToGpui(Tr("Remove")))
-                       ->WithSize(gp::UiSize::Small)
-                       ->Disabled(nSel <= nSelRemoved)
-                       ->OnClick(gp::ListenTo(gToolView, &PdfToolView::OnMergeSetRemoved, (intptr_t)1))
-                       ->IntoEl());
-        row->Child(gpc::Button::New(cx, GStrL("merge-restore"))
-                       ->Label(ToGpui(Tr("Restore")))
-                       ->WithSize(gp::UiSize::Small)
-                       ->Disabled(nSelRemoved == 0)
-                       ->OnClick(gp::ListenTo(gToolView, &PdfToolView::OnMergeSetRemoved, (intptr_t)0))
-                       ->IntoEl());
-        row->Child(gpc::Button::New(cx, GStrL("merge-saveas"))
-                       ->Label(ToGpui(Tr("Save As...")))
-                       ->Primary()
-                       ->WithSize(gp::UiSize::Small)
-                       ->Disabled(!enabled)
-                       ->OnClick(gp::ListenTo(gToolView, &PdfToolView::OnMergeSaveAs))
-                       ->IntoEl());
-    } else {
-        row->Child(gp::Div(cx->a)->Flex1());
-    }
-    row->Child(gpc::Button::New(cx, GStrL("pdftool-cancel"))
-                   ->Label(ToGpui(Tr("Cancel")))
-                   ->WithSize(gp::UiSize::Small)
-                   ->OnClick(gp::ListenTo(gToolView, &PdfToolView::OnCancel))
-                   ->IntoEl());
-    gpc::Button* action = gpc::Button::New(cx, GStrL("pdftool-action"))
-                              ->Label(GpuiDup(cx->a, actionText))
-                              ->WithSize(gp::UiSize::Small)
-                              ->Disabled(!enabled)
-                              ->OnClick(gp::ListenTo(gToolView, &PdfToolView::OnAction));
-    // orig's Merge PDF: Save As... is the default button, not Save
-    if (gTool.kind != PdfToolKind::Merge) {
-        action->Primary();
-    }
-    row->Child(action->IntoEl());
-    return row;
-}
-
 static gp::El* RadioEl(gp::Ctx* cx, Str id, Str label, PagesMode mode) {
     return gpc::Radio::New(cx, GpuiDup(cx->a, id))
         ->Label(GpuiDup(cx->a, label))
@@ -3175,9 +3512,14 @@ static gp::El* MergeAskRadioEl(gp::Ctx* cx, Str id, Str label, MergeInsertAt at)
         label, gp::ListenTo(gToolView, &PdfToolView::OnMergeAskAt, (intptr_t)at));
 }
 
-// orig's InsertPosWnd
+// orig's InsertPosWnd: the file in the larger font, the choices, a bare
+// underlined page field, Cancel and the filled Add
+constexpr float kMergeAskDx = 340;
+constexpr float kMergeAskPageDx = 48;
+
 static gp::El* MergeAskDialogBuild(gp::Ctx* cx) {
-    const gp::Theme& th = gp::ThemeNow(cx->app);
+    Color colTxt = ThemeWindowTextColor();
+    Color colMuted = ThemeWindowTextDisabledColor();
     int nItems = len(gTool.mergePages);
     Str what = path::GetBaseNameTemp(gTool.mergeAskPaths[0]);
     if (len(gTool.mergeAskPaths) > 1) {
@@ -3185,38 +3527,59 @@ static gp::El* MergeAskDialogBuild(gp::Ctx* cx) {
     }
     gTool.mergeAskEdit->onChange = gp::ListenTo(gToolView, &PdfToolView::OnMergeAskInput);
 
-    gp::El* body = gp::Div(cx->a)->FlexCol()->Gap(8)->W(gp::kFill);
-    body->Child(gp::TextEl(cx->a, GpuiDup(cx->a, fmt(Tr("Insert '%s':").s, what)))->Font(13)->Fg(th.foreground));
-    body->Child(MergeAskRadioEl(cx, StrL("merge-ask-end"), Tr("At the &end"), MergeInsertAt::End));
-    body->Child(MergeAskRadioEl(cx, StrL("merge-ask-start"), Tr("At the &beginning"), MergeInsertAt::Beginning));
-    gp::El* row = gp::Div(cx->a)->FlexRow()->ItemsCenter()->Gap(8);
-    row->Child(MergeAskRadioEl(cx, StrL("merge-ask-after"), Tr("&After page"), MergeInsertAt::AfterPage));
-    row->Child(gp::Div(cx->a)->W(64)->Child(gpc::Input::New(cx, GStrL("merge-ask-page"), gTool.mergeAskEdit)
-                                                ->WithSize(gp::UiSize::Small)
-                                                ->W(gp::kFill)
-                                                ->IntoEl()));
-    row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, fmt(Tr("(of %d)").s, nItems)))->Font(13)->Fg(th.foreground));
-    body->Child(row);
+    gp::El* col = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->Bg(ToGpui(ThemeWindowControlBackgroundColor()));
+    col->Child(gp::Div(cx->a)
+                   ->FlexRow()
+                   ->ItemsCenter()
+                   ->W(gp::kFill)
+                   ->H(kToolDlgLineDy)
+                   ->Shrink0()
+                   ->PadX(kToolDlgPadDx)
+                   ->Child(gp::TextEl(cx->a, GpuiDup(cx->a, fmt(Tr("Insert '%s':").s, what)))
+                               ->Font(kToolDlgQueryFontPx)
+                               ->Fg(ToGpui(colTxt))
+                               ->Truncate()
+                               ->MinW(0)));
+    col->Child(DlgHairline(cx));
 
-    gp::El* footer = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->ItemsCenter()->Gap(8);
+    gp::El* choices = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->Shrink0()->PadX(kToolDlgPadDx)->PadY(kToolDlgFilesPadDy);
+    auto row = [&]() {
+        return gp::Div(cx->a)->FlexRow()->ItemsCenter()->H(kToolDlgRowDy)->Shrink0()->Gap(kToolDlgGapDx);
+    };
+    choices->Child(row()->Child(MergeAskRadioEl(cx, StrL("merge-ask-end"), Tr("At the &end"), MergeInsertAt::End)));
+    choices->Child(
+        row()->Child(MergeAskRadioEl(cx, StrL("merge-ask-start"), Tr("At the &beginning"), MergeInsertAt::Beginning)));
+    gp::El* after = row();
+    after->Child(MergeAskRadioEl(cx, StrL("merge-ask-after"), Tr("&After page"), MergeInsertAt::AfterPage));
+    after->Child(gp::Div(cx->a)
+                     ->W(kMergeAskPageDx)
+                     ->Shrink0()
+                     ->Child(DlgUnderlineInput(cx, GStrL("merge-ask-page"), gTool.mergeAskEdit, kToolDlgTextFontPx,
+                                               ThemeEdgeColor())));
+    after->Child(gp::TextEl(cx->a, GpuiDup(cx->a, fmt(Tr("(of %d)").s, nItems)))
+                     ->Font(kToolDlgMetaFontPx)
+                     ->Fg(ToGpui(colMuted)));
+    choices->Child(after);
+    col->Child(choices);
+
+    // the card's own footer row, so it pads the buttons as it pads the rest
+    gp::El* footer = gp::Div(cx->a)->FlexRow()->ItemsCenter()->W(gp::kFill)->Shrink0()->Gap(kToolDlgGapDx);
     footer->Child(gp::Div(cx->a)->Flex1());
-    footer->Child(gpc::Button::New(cx, GStrL("merge-ask-ok"))
-                      ->Label(ToGpui(Tr("OK")))
-                      ->Primary()
-                      ->WithSize(gp::UiSize::Small)
-                      ->OnClick(gp::ListenTo(gToolView, &PdfToolView::OnMergeAskOk))
-                      ->IntoEl());
     footer->Child(gpc::Button::New(cx, GStrL("merge-ask-cancel"))
                       ->Label(ToGpui(Tr("Cancel")))
+                      ->Outline()
                       ->WithSize(gp::UiSize::Small)
                       ->OnClick(gp::ListenTo(gToolView, &PdfToolView::OnMergeAskCancel))
                       ->IntoEl());
+    footer->Child(
+        DlgFilledButton(cx, GStrL("merge-ask-ok"), Tr("Add"), gp::ListenTo(gToolView, &PdfToolView::OnMergeAskOk)));
+
     gp::El* dlg = gpc::Dialog::New(cx)
                       ->Open(true)
                       ->Title(ToGpui(Tr("Add PDF")))
-                      ->Body(body)
+                      ->Body(col)
                       ->Footer(footer)
-                      ->W(360)
+                      ->W(kMergeAskDx)
                       ->OnClose(gp::ListenTo(gToolView, &PdfToolView::OnMergeAskCancel))
                       ->IntoEl(gp::WindowSize(cx->win));
     if (gTool.mergeAskFocus) {
@@ -3225,16 +3588,6 @@ static gp::El* MergeAskDialogBuild(gp::Ctx* cx) {
         gp::InputSelectAll(gTool.mergeAskEdit, cx->app, cx->win);
     }
     return dlg;
-}
-
-// orig's PaintMergeInfo: how many pages the result has
-static TempStr MergeInfoTemp() {
-    int nRemoved = 0;
-    for (const MergePageDlg& page : gTool.mergePages) {
-        nRemoved += page.removed ? 1 : 0;
-    }
-    return nRemoved > 0 ? fmt(Tr("%d pages, %d removed").s, len(gTool.mergePages) - nRemoved, nRemoved)
-                        : fmt(Tr("%d pages").s, len(gTool.mergePages));
 }
 
 // the page grid with its context menu
@@ -3249,6 +3602,28 @@ static gp::El* MergePagesEl(gp::Ctx* cx, float viewDx, float viewDy) {
     menu->MenuWithAction(GpuiDup(cx->a, ParseMenuAccelTextTemp(Tr("R&estore")).display), ActMergeMenu(),
                          (intptr_t)kMenuRestore);
     menu->Disabled(nSelRemoved == 0);
+    menu->Separator();
+    menu->MenuWithAction(GpuiDup(cx->a, ParseMenuAccelTextTemp(Tr("Rotate &Left")).display), ActMergeMenu(),
+                         (intptr_t)kMenuRotateLeft);
+    menu->Disabled(nSel == 0);
+    menu->Kbd(GStrL("["));
+    menu->MenuWithAction(GpuiDup(cx->a, ParseMenuAccelTextTemp(Tr("Rotate &Right")).display), ActMergeMenu(),
+                         (intptr_t)kMenuRotateRight);
+    menu->Disabled(nSel == 0);
+    menu->Kbd(GStrL("]"));
+    menu->Separator();
+    menu->MenuWithAction(GpuiDup(cx->a, ParseMenuAccelTextTemp(Tr("Cu&t")).display), ActMergeMenu(),
+                         (intptr_t)kMenuCut);
+    menu->Disabled(nSel == 0);
+    menu->Kbd(GStrL("Ctrl+X"));
+    menu->MenuWithAction(GpuiDup(cx->a, ParseMenuAccelTextTemp(Tr("&Copy")).display), ActMergeMenu(),
+                         (intptr_t)kMenuCopy);
+    menu->Disabled(nSel == 0);
+    menu->Kbd(GStrL("Ctrl+C"));
+    // ng: always enabled; reading the clipboard every frame is a round trip on X11
+    menu->MenuWithAction(GpuiDup(cx->a, ParseMenuAccelTextTemp(Tr("&Paste")).display), ActMergeMenu(),
+                         (intptr_t)kMenuPaste);
+    menu->Kbd(GStrL("Ctrl+V"));
     menu->Separator();
     menu->MenuWithAction(GpuiDup(cx->a, ParseMenuAccelTextTemp(Tr("Select &All")).display), ActMergeMenu(),
                          (intptr_t)kMenuSelectAll);
@@ -3265,32 +3640,171 @@ static gp::El* MergePagesEl(gp::Ctx* cx, float viewDx, float viewDy) {
 
 // --- Merge PDF in a window of its own (Windows) ------------------------------
 
-// orig's kDialogPadding, and its themed buttons (the text plus 2 x 12 by
-// 2 x 5, at least 70 wide) in the 12 px app font
-constexpr float kMergeWinPad = 10;
-constexpr float kMergeBtnDy = 25;
-constexpr float kMergeBtnMinDx = 70;
-constexpr float kMergeBtnPadDx = 12;
-constexpr float kMergeBtnGap = 6;
-constexpr float kMergeWinFontPx = 12;
+// orig's PaintMergeInfo: how many pages the result has
+static TempStr MergeInfoTemp() {
+    int nRemoved = 0;
+    for (const MergePageDlg& page : gTool.mergePages) {
+        nRemoved += page.removed ? 1 : 0;
+    }
+    TempStr s = nRemoved > 0 ? fmt(Tr("%d pages, %d removed").s, len(gTool.mergePages) - nRemoved, nRemoved)
+                             : fmt(Tr("%d pages").s, len(gTool.mergePages));
+    int nSel = MergeSelectedCount();
+    if (nSel > 0) {
+        s = fmt("%s, %s", s, fmt(Tr("%d selected").s, nSel));
+    }
+    return s;
+}
+
 constexpr int kMergeWinMinDx = 480;
 constexpr int kMergeWinMinDy = 320;
+// the frame's card: the grid gets what the frame leaves after its title and
+// the footer
+constexpr float kMergeCardChromeDy = 200;
+constexpr float kMergeCardMinViewDy = 240;
+// between the files of the legend
+constexpr float kMergeInfoGap = 24;
 
 static Str MergeToolTitle() {
     return fmt("%s - %s", Tr("Merge PDF"), path::GetBaseNameTemp(gTool.srcPath));
 }
 
-static gp::El* MergeWinButton(gp::Ctx* cx, gp::Str id, Str label, gp::Listener onClick, bool enabled, bool isDefault) {
-    gpc::Button* b = gpc::Button::New(cx, id)->Label(ToGpui(label))->Disabled(!enabled)->OnClick(onClick);
-    if (isDefault) {
-        b->Primary();
-    }
-    return b->IntoEl()->H(kMergeBtnDy)->MinW(kMergeBtnMinDx)->PadX(kMergeBtnPadDx)->Shrink0();
+static gp::El* MergeText(gp::Ctx* cx, Str s, Color col) {
+    return gp::TextEl(cx->a, GpuiDup(cx->a, s))->Font(kToolDlgMetaFontPx)->Fg(ToGpui(col))->Shrink0();
 }
 
-// orig's MergePdfWnd::Create layout: the grid, then one row: Add PDF...,
-// Remove, Restore, the page count and the legend, Save, Save As... (the
-// default), Cancel
+// orig's MergePdfWnd::PaintInfo: the page count
+static gp::El* MergeInfoEl(gp::Ctx* cx) {
+    Color colMuted = ThemeWindowTextDisabledColor();
+    gp::El* info = gp::Div(cx->a)->FlexRow()->Flex1()->MinW(0)->ItemsCenter()->ClipX();
+    info->Child(MergeText(cx, MergeInfoTemp(), colMuted));
+    return info;
+}
+
+// orig's MergePdfWnd::LegendRects: each file's dot and name, in rows that wrap
+// at dx, so every file is named (issue #6397). Relative to the legend
+static void MergeLegendRects(gp::Ctx* cx, float dx, Vec<RectF>& out) {
+    VecReset(out);
+    if (len(gTool.mergeSources) < 2) {
+        return;
+    }
+    gp::PaintCtx* paint = cx->win ? &cx->win->paint : nullptr;
+    float lineDy = ceilf(gp::MeasureText(paint, GStrL("M"), kToolDlgMetaFontPx, 0).h);
+    float x = 0;
+    float y = kToolDlgFootPadDy;
+    for (const MergeSourceDlg& source : gTool.mergeSources) {
+        Str name = path::GetBaseNameTemp(source.path);
+        float nameDx = ceilf(gp::MeasureText(paint, ToGpui(name), kToolDlgMetaFontPx, 0).w);
+        RectF r{0, 0, (2 * kMergeDotDx) + nameDx, lineDy};
+        if (x > 0 && x + r.dx > dx) {
+            x = 0;
+            y += lineDy + (lineDy / 2);
+        }
+        r.x = x;
+        r.y = y;
+        x += r.dx + kMergeInfoGap;
+        VecAppend(out, r);
+    }
+}
+
+// the legend's width: the column's, inside its padding. The card's column is
+// as wide as the grid was the last frame
+static float MergeLegendDx(float viewDx) {
+    float colDx = viewDx > 0 ? viewDx : gTool.mergeView.w;
+    if (colDx <= 1.f) {
+        colDx = (float)kMergeDialogDx;
+    }
+    return std::max(0.f, colDx - (2 * kToolDlgPadDx));
+}
+
+static float MergeLegendDy(gp::Ctx* cx, float dx) {
+    Vec<RectF> rects;
+    MergeLegendRects(cx, dx, rects);
+    return len(rects) > 0 ? VecLast(rects).Bottom() : 0;
+}
+
+// orig's MergeLegend: above the footer, as tall as its rows of files
+static gp::El* MergeLegendEl(gp::Ctx* cx, float dx) {
+    Color colMuted = ThemeWindowTextDisabledColor();
+    Vec<RectF> rects;
+    MergeLegendRects(cx, dx, rects);
+    VecResize(gTool.mergeLegendItems, len(rects));
+    float dy = len(rects) > 0 ? VecLast(rects).Bottom() : 0;
+    gp::El* box = gp::Div(cx->a)->W(gp::kFill)->H(dy)->BoundsOut(&gTool.mergeLegendView);
+    for (int i = 0; i < len(rects); i++) {
+        const MergeSourceDlg& source = gTool.mergeSources[i];
+        RectF r = rects[i];
+        gp::El* file = gp::Div(cx->a)
+                           ->Absolute()
+                           ->Left(r.x)
+                           ->Top(r.y)
+                           ->W(r.dx)
+                           ->H(r.dy)
+                           ->FlexRow()
+                           ->ItemsCenter()
+                           ->Gap(kMergeDotDx)
+                           ->BoundsOut(&gTool.mergeLegendItems[i]);
+        file->Child(gp::Div(cx->a)->W(kMergeDotDx)->H(kMergeDotDx)->Radius(kMergeDotDx / 2)->Bg(ToGpui(source.color)));
+        file->Child(MergeText(cx, path::GetBaseNameTemp(source.path), colMuted));
+        box->Child(file);
+    }
+    return gp::Div(cx->a)->W(gp::kFill)->Shrink0()->PadX(kToolDlgPadDx)->Child(box);
+}
+
+// orig's footer: the quiet page actions and the status on the left, Cancel,
+// Save and the one filled Save As... on the right
+static gp::El* MergeFooterEl(gp::Ctx* cx) {
+    int nSel = MergeSelectedCount();
+    int nSelRemoved = MergeSelectedRemovedCount();
+    bool canSave = ActionEnabled();
+    gp::El* row = gp::Div(cx->a)
+                      ->FlexRow()
+                      ->ItemsCenter()
+                      ->W(gp::kFill)
+                      ->Shrink0()
+                      ->PadX(kToolDlgPadDx)
+                      ->PadY(kToolDlgFootPadDy)
+                      ->Gap(kToolDlgGapDx);
+    row->Child(
+        DlgGhostButton(cx, GStrL("merge-add"), Tr("Add PDF..."), gp::ListenTo(gToolView, &PdfToolView::OnMergeAdd)));
+    row->Child(DlgGhostButton(cx, GStrL("merge-remove"), Tr("Remove"),
+                              gp::ListenTo(gToolView, &PdfToolView::OnMergeSetRemoved, (intptr_t)1),
+                              nSel <= nSelRemoved));
+    row->Child(DlgGhostButton(cx, GStrL("merge-restore"), Tr("Restore"),
+                              gp::ListenTo(gToolView, &PdfToolView::OnMergeSetRemoved, (intptr_t)0), nSelRemoved == 0));
+    row->Child(gp::Div(cx->a)->W(kToolDlgGapDx)->Shrink0());
+    row->Child(MergeInfoEl(cx));
+    auto outline = [&](gp::Str id, Str label, gp::Listener onClick, bool enabled) {
+        return gpc::Button::New(cx, id)
+            ->Label(ToGpui(label))
+            ->Outline()
+            ->WithSize(gp::UiSize::Small)
+            ->Disabled(!enabled)
+            ->OnClick(onClick)
+            ->IntoEl();
+    };
+    row->Child(outline(GStrL("pdftool-cancel"), Tr("Cancel"), gp::ListenTo(gToolView, &PdfToolView::OnCancel), true));
+    row->Child(outline(GStrL("pdftool-action"), Tr("Save"), gp::ListenTo(gToolView, &PdfToolView::OnAction), canSave));
+    row->Child(DlgFilledButton(cx, GStrL("merge-saveas"), Tr("Save As..."),
+                               gp::ListenTo(gToolView, &PdfToolView::OnMergeSaveAs), !canSave));
+    return row;
+}
+
+// the pages edge to edge, then the legend and the footer
+static gp::El* MergeColumn(gp::Ctx* cx, float viewDx, float viewDy) {
+    StartMergeThumbs();
+    return gp::Div(cx->a)
+        ->FlexCol()
+        ->W(gp::kFill)
+        ->Bg(ToGpui(ThemeWindowControlBackgroundColor()))
+        ->Child(MergePagesEl(cx, viewDx, viewDy))
+        ->Child(MergeLegendEl(cx, MergeLegendDx(viewDx)))
+        ->Child(MergeFooterEl(cx));
+}
+
+static float MergeFooterDy() {
+    return 2 * kToolDlgFootPadDy + kDlgBtnDy;
+}
+
 static gp::El* MergeToolBuild(MainWindow* win, gp::Ctx* cx) {
     if (!gTool.visible || !gTool.tw || gTool.win != win || gTool.kind != PdfToolKind::Merge) {
         return nullptr;
@@ -3298,53 +3812,14 @@ static gp::El* MergeToolBuild(MainWindow* win, gp::Ctx* cx) {
     if (!gToolView.IsValid()) {
         gToolView = gp::EntityNewState<PdfToolView>(cx->app);
     }
-    const gp::Theme& th = gp::ThemeNow(cx->app);
     gp::WinSize ws = gp::WindowSize(cx->win);
-    gMergeFontScale = ToolWindowSetUiFontPx(cx, kMergeWinFontPx);
-    StartMergeThumbs();
-    float viewDx = std::max(0.f, ws.dipW - 2 * kMergeWinPad);
-    float viewDy = std::max(100.f, ws.dipH - 3 * kMergeWinPad - kMergeBtnDy);
-
-    int nSel = MergeSelectedCount();
-    int nSelRemoved = MergeSelectedRemovedCount();
-    bool canSave = ActionEnabled();
-    gp::El* bottom =
-        gp::Div(cx->a)->FlexRow()->W(gp::kFill)->H(kMergeBtnDy)->Shrink0()->ItemsCenter()->Gap(kMergeBtnGap);
-    bottom->Child(MergeWinButton(cx, GStrL("merge-add"), Tr("Add PDF..."),
-                                 gp::ListenTo(gToolView, &PdfToolView::OnMergeAdd), true, false));
-    bottom->Child(MergeWinButton(cx, GStrL("merge-remove"), Tr("Remove"),
-                                 gp::ListenTo(gToolView, &PdfToolView::OnMergeSetRemoved, (intptr_t)1),
-                                 nSel > nSelRemoved, false));
-    bottom->Child(MergeWinButton(cx, GStrL("merge-restore"), Tr("Restore"),
-                                 gp::ListenTo(gToolView, &PdfToolView::OnMergeSetRemoved, (intptr_t)0), nSelRemoved > 0,
-                                 false));
-    bottom->Child(gp::TextEl(cx->a, GpuiDup(cx->a, MergeInfoTemp()))
-                      ->Font(kMergeWinFontPx * gMergeFontScale)
-                      ->Fg(th.foreground)
-                      ->Shrink0()
-                      ->PadX(kMergeBtnGap));
-    bottom->Child(MergeLegendEl(cx));
-    bottom->Child(MergeWinButton(cx, GStrL("pdftool-action"), Tr("Save"),
-                                 gp::ListenTo(gToolView, &PdfToolView::OnAction), canSave, false));
-    bottom->Child(MergeWinButton(cx, GStrL("merge-saveas"), Tr("Save As..."),
-                                 gp::ListenTo(gToolView, &PdfToolView::OnMergeSaveAs), canSave, true));
-    bottom->Child(MergeWinButton(cx, GStrL("pdftool-cancel"), Tr("Cancel"),
-                                 gp::ListenTo(gToolView, &PdfToolView::OnCancel), true, false));
-
-    gp::El* col = gp::Div(cx->a)
-                      ->FlexCol()
-                      ->W(gp::kFill)
-                      ->Flex1()
-                      ->MinH(0)
-                      ->Pad(kMergeWinPad)
-                      ->Gap(kMergeWinPad)
-                      ->Child(MergePagesEl(cx, viewDx, viewDy))
-                      ->Child(bottom);
+    float viewDy = std::max(100.f, ws.dipH - MergeFooterDy() - MergeLegendDy(cx, MergeLegendDx(ws.dipW)));
+    gp::El* col = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->Flex1()->MinH(0)->Child(MergeColumn(cx, ws.dipW, viewDy));
     if (len(gTool.mergeAskPaths) == 0) {
         return col;
     }
     // orig's InsertPosWnd is a dialog owned by this window
-    return gp::Div(cx->a)->FlexCol()->W(gp::kFill)->Flex1()->MinH(0)->Child(col)->Child(MergeAskDialogBuild(cx));
+    return col->Child(MergeAskDialogBuild(cx));
 }
 
 // orig's WindowBase::PreTranslateMessage for this window: the grid has the
@@ -3379,7 +3854,8 @@ static bool MergeToolOnKey(MainWindow* win, gp::Ctx* cx, const gp::KeyEvent* ev)
     if (ev->vk == VK_APPS) {
         return MergeContextMenuFromKey(win, cx);
     }
-    return MergeOnKeyDown(win, ev->vk, ev->ctrl, ev->shift);
+    // Cmd on macOS
+    return MergeOnKeyDown(win, ev->vk, ev->ctrl || ev->platform, ev->shift);
 }
 
 // the caption's close box, or the frame went away
@@ -3423,66 +3899,220 @@ static void MergeOpenToolWindow(MainWindow* win) {
     gTool.tw = ToolWindowOpen(MergeToolDesc(), win, MergeToolRect(win));
 }
 
-// --- orig's layout, for a tool in a window of its own -----------------------
+// --- the dialog, drawn like the palette -------------------------------------
 
-// sizes at 96 dpi, as PdfToolDialog has them: 10 around, the rows 6 apart, a
-// label 8 before its field, an average character between the controls of a
-// row
-constexpr float kToolWinPad = 10;
-constexpr float kToolWinRowGap = 6;
-constexpr float kToolWinGap = 8;
-constexpr float kToolWinCtrlGap = kDlgWinBtnGap;
-constexpr float kToolWinComboDx = 69;
-// what BCM_GETIDEALSIZE adds to a radio button's or a checkbox's label
-constexpr float kToolWinCheckExtraDx = 34;
-// the left text margin of an edit, which the source path lines up with
-constexpr float kToolWinPathPadL = 4;
+// what a bare gpui input insets its text by; the source path lines up with it
+constexpr float kToolDlgInputPadDx = 8;
+// The tool's lines (a page range, a password, the DPI), a hairline, the files
+// - the source and the destination over a hairline, with Browse - and the
+// footer with a hint, Cancel and the one filled action button. The same
+// column goes in a window of its own and in the frame.
 
-// one row of the dialog, `dy` high, with the gap that separates it from the
-// row above
-static gp::El* ToolWinRow(gp::Ctx* cx, float dy, float gap = 0) {
+static gp::El* ToolText(gp::Ctx* cx, Str s, float font, Color col) {
+    return gp::TextEl(cx->a, GpuiDup(cx->a, s))->Font(font)->Fg(ToGpui(col));
+}
+
+static gp::El* ToolLabel(gp::Ctx* cx, Str label) {
+    return gp::Div(cx->a)
+        ->MinW(kToolDlgLabelDx)
+        ->Shrink0()
+        ->Child(ToolText(cx, label, kToolDlgTextFontPx, ThemeWindowTextDisabledColor()));
+}
+
+// a line of the top section: its label, then what the caller adds
+static gp::El* ToolLine(gp::Ctx* cx, Str label) {
     return gp::Div(cx->a)
         ->FlexRow()
         ->ItemsCenter()
         ->W(gp::kFill)
-        ->H(dy + kToolWinRowGap)
-        ->PadT(kToolWinRowGap)
-        ->Gap(gap)
-        ->Shrink0();
-}
-
-// a label, as wide as GDI measures it (what orig's layout goes by)
-static gp::El* ToolWinText(gp::Ctx* cx, Str s, float font) {
-    const gp::Theme& th = gp::ThemeNow(cx->app);
-    return gp::Div(cx->a)
-        ->W(DlgWinTextDx(cx, s))
+        ->H(kToolDlgLineDy)
         ->Shrink0()
-        ->Child(gp::TextEl(cx->a, GpuiDup(cx->a, s))->Font(font)->Fg(th.foreground));
+        ->PadX(kToolDlgPadDx)
+        ->Gap(kToolDlgGapDx)
+        ->Child(ToolLabel(cx, label));
 }
 
-static gp::El* ToolWinEdit(gp::Ctx* cx, gp::Str id, gp::InputState* edit, bool masked = false, bool disabled = false) {
-    gpc::Input* in = gpc::Input::New(cx, id, edit)->WithSize(gp::UiSize::Small)->Disabled(disabled)->W(gp::kFill);
-    if (masked) {
-        in->Masked(true);
+// a bare field in the larger font: what the dialog is about
+static gp::El* ToolLineInput(gp::Ctx* cx, gp::Str id, gp::InputState* edit, bool masked = false,
+                             bool disabled = false) {
+    gpc::Input* in = gpc::Input::New(cx, id, edit)
+                         ->Appearance(false)
+                         ->WithSize(gp::UiSize::Small)
+                         ->Masked(masked)
+                         ->Disabled(disabled)
+                         ->W(gp::kFill);
+    return gp::Div(cx->a)->Flex1()->MinW(0)->Child(in->IntoEl()->Font(kToolDlgQueryFontPx));
+}
+
+// the text at a line's right end, lighter while what it describes is not usable
+static gp::El* ToolMeta(gp::Ctx* cx, Str s, bool ok) {
+    Color col = ThemeWindowTextDisabledColor();
+    if (!ok) {
+        col = AccentColor(col, kToolDlgFaintShift);
     }
-    return gp::Div(cx->a)->Flex1()->MinW(0)->H(kDlgWinEditDy)->Child(in->IntoEl()->H(kDlgWinEditDy));
+    return gp::Div(cx->a)->Shrink0()->Child(ToolText(cx, s, kToolDlgMetaFontPx, col));
 }
 
-static gp::El* ToolWinRadio(gp::Ctx* cx, Str id, Str label, PagesMode mode) {
+static gp::El* ToolDpiCombo(gp::Ctx* cx) {
     return gp::Div(cx->a)
-        ->FlexRow()
-        ->ItemsCenter()
-        ->W(DlgWinTextDx(cx, label) + kToolWinCheckExtraDx)
-        ->H(kDlgWinCheckDy)
+        ->W(kToolDlgComboDx)
         ->Shrink0()
-        ->Child(RadioEl(cx, id, label, mode));
+        ->Child(gTool.ddDpi.BuildCombo(cx, StrL("pdftool-dpi"), gTool.dpiEdit, kToolDlgComboDx));
 }
 
-static gp::El* ToolWinDpiCombo(gp::Ctx* cx) {
-    return gp::Div(cx->a)
-        ->W(kToolWinComboDx)
-        ->Shrink0()
-        ->Child(gTool.ddDpi.BuildCombo(cx, StrL("pdftool-dpi"), gTool.dpiEdit, kToolWinComboDx, false, kDlgWinEditDy));
+static gp::El* ToolPagesLine(gp::Ctx* cx, bool isExtract) {
+    gp::El* line = ToolLine(cx, Tr("Pages"));
+    line->Child(ToolLineInput(cx, GStrL("pdftool-pages"), gTool.pagesEdit));
+    TempStr pages = InputTextTemp(gTool.pagesEdit);
+    Vec<int> parsed;
+    bool ok = PageRangeOk(pages, gTool.pageCount, isExtract, parsed);
+    line->Child(ToolMeta(cx, PageRangeCountTemp(pages, gTool.pageCount, isExtract), ok));
+    return line;
+}
+
+// Convert PDF to Images: the mode, the custom range, and the count the mode
+// comes to
+static gp::El* ToolPagesModeLine(gp::Ctx* cx) {
+    gp::El* line = ToolLine(cx, Tr("Pages"));
+    line->Child(RadioEl(cx, StrL("pdftool-cur"), Tr("Current"), PagesMode::Current));
+    line->Child(RadioEl(cx, StrL("pdftool-all"), Tr("All"), PagesMode::All));
+    line->Child(RadioEl(cx, StrL("pdftool-custom"), Tr("Custom"), PagesMode::Custom));
+    bool custom = gTool.pagesMode == PagesMode::Custom;
+    line->Child(ToolLineInput(cx, GStrL("pdftool-pages"), gTool.pagesEdit, false, !custom));
+    if (custom) {
+        TempStr pages = InputTextTemp(gTool.pagesEdit);
+        Vec<int> parsed;
+        bool ok = ParseDeletePages(pages, gTool.pageCount, parsed);
+        line->Child(ToolMeta(cx, PageRangeCountTemp(pages, gTool.pageCount, true), ok));
+    } else {
+        int n = gTool.pagesMode == PagesMode::All ? gTool.pageCount : 1;
+        line->Child(ToolMeta(cx, PageCountTextTemp(n, gTool.pageCount), true));
+    }
+    return line;
+}
+
+// "From" the source - the folder muted, the file name in the text color -
+// and "Save as" the destination over a hairline, with the format drop-down
+// of the image tools and Browse after it
+static gp::El* ToolFilesBlock(gp::Ctx* cx) {
+    Color colText = ThemeWindowTextColor();
+    Color colMuted = ThemeWindowTextDisabledColor();
+    gp::El* box = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->Shrink0()->PadX(kToolDlgPadDx)->PadY(kToolDlgFilesPadDy);
+    auto row = [&](Str label) {
+        gp::El* r = gp::Div(cx->a)
+                        ->FlexRow()
+                        ->ItemsCenter()
+                        ->W(gp::kFill)
+                        ->H(kToolDlgRowDy)
+                        ->Shrink0()
+                        ->Gap(kToolDlgGapDx)
+                        ->Child(ToolLabel(cx, label));
+        box->Child(r);
+        return r;
+    };
+
+    gp::El* from = row(Tr("From"));
+    Str name = path::GetBaseNameTemp(gTool.srcPath);
+    Str dir = Str(gTool.srcPath.s, len(gTool.srcPath) - len(name));
+    gp::El* path = gp::Div(cx->a)->FlexRow()->ItemsCenter()->Flex1()->MinW(0)->PadL(kToolDlgInputPadDx);
+    path->Child(ToolText(cx, dir, kToolDlgTextFontPx, colMuted)->Truncate()->MinW(0));
+    path->Child(ToolText(cx, name, kToolDlgTextFontPx, colText)->Shrink0());
+    from->Child(path);
+
+    gp::El* save = row(Tr("Save as"));
+    save->Child(DlgUnderlineInput(cx, GStrL("pdftool-dest"), gTool.destEdit, kToolDlgTextFontPx, ThemeEdgeColor())
+                    ->Flex1()
+                    ->MinW(0));
+    if (HasFormatDropDown()) {
+        save->Child(gp::Div(cx->a)
+                        ->W(kToolDlgComboDx)
+                        ->Shrink0()
+                        ->Child(gTool.ddFormat.Build(cx, StrL("pdftool-format"), kToolDlgComboDx)));
+    }
+    save->Child(
+        DlgGhostButton(cx, GStrL("pdftool-browse"), Tr("Browse..."), gp::ListenTo(gToolView, &PdfToolView::OnBrowse)));
+    return box;
+}
+
+// the hint on the left, Cancel and the filled action button on the right
+static gp::El* ToolDlgFooter(gp::Ctx* cx, Str hint) {
+    gp::El* row = gp::Div(cx->a)
+                      ->FlexRow()
+                      ->ItemsCenter()
+                      ->W(gp::kFill)
+                      ->Shrink0()
+                      ->PadX(kToolDlgPadDx)
+                      ->PadY(kToolDlgFootPadDy)
+                      ->Gap(kToolDlgGapDx);
+    // files Convert would overwrite replace the hint (#6439)
+    int nExisting = ExistingImageCount();
+    if (nExisting > 0) {
+        row->Child(ToolText(cx, ExistingImagesTextTemp(nExisting), kToolDlgMetaFontPx, ThemeWindowTextColor()));
+        row->Child(DlgGhostButton(cx, GStrL("pdftool-newnames"), Tr("Use New Names"),
+                                  gp::ListenTo(gToolView, &PdfToolView::OnUseNewNames)));
+    } else if (len(hint) > 0) {
+        row->Child(ToolText(cx, hint, kToolDlgMetaFontPx, ThemeWindowTextDisabledColor()));
+    }
+    row->Child(gp::Div(cx->a)->Flex1());
+    row->Child(gpc::Button::New(cx, GStrL("pdftool-cancel"))
+                   ->Label(ToGpui(Tr("Cancel")))
+                   ->Outline()
+                   ->WithSize(gp::UiSize::Small)
+                   ->OnClick(gp::ListenTo(gToolView, &PdfToolView::OnCancel))
+                   ->IntoEl());
+    row->Child(DlgFilledButton(cx, GStrL("pdftool-action"), ToolActionText(),
+                               gp::ListenTo(gToolView, &PdfToolView::OnAction), !ActionEnabled()));
+    return row;
+}
+
+static gp::El* PdfToolColumn(MainWindow* win, gp::Ctx* cx) {
+    gp::El* col = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->Shrink0();
+    Str hint;
+    int nLines = 0;
+    switch (gTool.kind) {
+        case PdfToolKind::ExtractText:
+        case PdfToolKind::DeletePages:
+        case PdfToolKind::ExtractPages:
+            col->Child(ToolPagesLine(cx, gTool.kind != PdfToolKind::DeletePages));
+            nLines++;
+            hint = PageRangeHint();
+            break;
+        case PdfToolKind::Encrypt:
+            col->Child(
+                ToolLine(cx, Tr("Password"))->Child(ToolLineInput(cx, GStrL("pdftool-pwd"), gTool.passwordEdit, true)));
+            nLines++;
+            break;
+        case PdfToolKind::ConvertToImages:
+            col->Child(ToolPagesModeLine(cx));
+            col->Child(ToolLine(cx, Tr("Resolution (DPI)"))->Child(ToolDpiCombo(cx)));
+            nLines += 2;
+            hint = Tr("Use <N> for the page number");
+            break;
+        case PdfToolKind::ConvertEpubToPdf:
+            col->Child(ToolLine(cx, Tr("Page size"))
+                           ->Child(gp::Div(cx->a)
+                                       ->W(kToolDlgComboDx)
+                                       ->Shrink0()
+                                       ->Child(gTool.ddFormat.Build(cx, StrL("pdftool-pagesize"), kToolDlgComboDx))));
+            col->Child(ToolLine(cx, Tr("Font size"))->Child(ToolDpiCombo(cx)));
+            nLines += 2;
+            break;
+        case PdfToolKind::SaveSelectionAsImage:
+            col->Child(ToolLine(cx, Tr("Resolution (DPI)"))
+                           ->Child(ToolDpiCombo(cx))
+                           ->Child(gp::Div(cx->a)->Flex1())
+                           ->Child(ToolMeta(cx, SelectionSizeTextTemp(win), ActionEnabled())));
+            nLines++;
+            break;
+        default:
+            break;
+    }
+    if (nLines > 0) {
+        col->Child(DlgHairline(cx));
+    }
+    col->Child(ToolFilesBlock(cx));
+    col->Child(ToolDlgFooter(cx, hint));
+    return col;
 }
 
 // orig's FinishDialog(focusOn)
@@ -3500,101 +4130,6 @@ static void PdfToolFocusFirst(gp::Ctx* cx) {
     logf("PdfTool: %s\n", PdfToolStateTemp());
 }
 
-static gp::El* PdfToolWinBuild(MainWindow* win, gp::Ctx* cx) {
-    const gp::Theme& th = gp::ThemeNow(cx->app);
-    float font = DlgWinFont(cx);
-    gp::El* col = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->Pad(kToolWinPad);
-
-    // the source path, cut with an ellipsis when the window cannot be as wide
-    col->Child(
-        gp::Div(cx->a)
-            ->FlexRow()
-            ->ItemsCenter()
-            ->W(gp::kFill)
-            ->H(kDlgWinLineDy)
-            ->PadL(kToolWinPathPadL)
-            ->Shrink0()
-            ->Child(gp::TextEl(cx->a, GpuiDup(cx->a, gTool.srcPath))->Font(font)->Fg(th.foreground)->Truncate()));
-
-    gp::El* destRow = ToolWinRow(cx, kDlgWinBtnDy, kToolWinCtrlGap);
-    destRow->Child(ToolWinEdit(cx, GStrL("pdftool-dest"), gTool.destEdit));
-    if (HasFormatDropDown()) {
-        gp::El* sel = gTool.ddFormat.Build(cx, StrL("pdftool-format"), kToolWinComboDx)->H(kDlgWinEditDy);
-        if (sel->first) {
-            sel->first->H(kDlgWinEditDy);
-        }
-        destRow->Child(gp::Div(cx->a)->W(kToolWinComboDx)->Shrink0()->Child(sel));
-    }
-    destRow->Child(
-        DlgWinButton(cx, GStrL("pdftool-browse"), StrL("..."), gp::ListenTo(gToolView, &PdfToolView::OnBrowse), false));
-    col->Child(destRow);
-
-    Str hint;
-    auto labeledEdit = [&](Str label, gp::Str id, gp::InputState* edit, bool masked) {
-        gp::El* row = ToolWinRow(cx, kDlgWinEditDy);
-        row->Child(gp::Div(cx->a)->PadR(kToolWinGap)->Shrink0()->Child(ToolWinText(cx, label, font)));
-        row->Child(ToolWinEdit(cx, id, edit, masked));
-        col->Child(row);
-        return row;
-    };
-    if (gTool.kind == PdfToolKind::ExtractText) {
-        labeledEdit(Tr("Pages:"), GStrL("pdftool-pages"), gTool.pagesEdit, false);
-    } else if (IsPageRangeTool()) {
-        bool isExtract = gTool.kind == PdfToolKind::ExtractPages;
-        gp::El* row = labeledEdit(isExtract ? Tr("Pages To Extract:") : Tr("Pages To Delete:"), GStrL("pdftool-pages"),
-                                  gTool.pagesEdit, false);
-        row->Child(
-            gp::Div(cx->a)->PadL(kToolWinGap)->Shrink0()->Child(ToolWinText(cx, fmt("of %d", gTool.pageCount), font)));
-        if (isExtract) {
-            constexpr float kCheckLabelGap = 2;
-            gp::El* checkRow = ToolWinRow(cx, kDlgWinCheckDy);
-            checkRow->Child(gpc::Checkbox::New(cx, GStrL("pdftool-annots"))
-                                ->Label(ToGpui(Tr("Only with annotations")))
-                                ->Checked(gTool.onlyWithAnnotations)
-                                ->OnClick(gp::ListenTo(gToolView, &PdfToolView::OnAnnotsOnly))
-                                ->IntoEl()
-                                ->Gap(kCheckLabelGap));
-            col->Child(checkRow);
-        }
-        hint = StrL("Syntax: 2,5-7,13-");
-    } else if (gTool.kind == PdfToolKind::Encrypt) {
-        labeledEdit(Tr("Password:"), GStrL("pdftool-pwd"), gTool.passwordEdit, true);
-    } else if (gTool.kind == PdfToolKind::ConvertToImages) {
-        gp::El* row = ToolWinRow(cx, kDlgWinEditDy, kToolWinCtrlGap);
-        row->Child(ToolWinText(cx, Tr("Pages:"), font));
-        row->Child(ToolWinRadio(cx, StrL("pdftool-cur"), Tr("Current"), PagesMode::Current));
-        row->Child(ToolWinRadio(cx, StrL("pdftool-all"), Tr("All"), PagesMode::All));
-        row->Child(ToolWinRadio(cx, StrL("pdftool-custom"), Tr("Custom"), PagesMode::Custom));
-        row->Child(
-            ToolWinEdit(cx, GStrL("pdftool-pages"), gTool.pagesEdit, false, gTool.pagesMode != PagesMode::Custom));
-        col->Child(row);
-        gp::El* dpiRow = ToolWinRow(cx, kDlgWinEditDy, kToolWinCtrlGap);
-        dpiRow->Child(ToolWinText(cx, Tr("Resolution (DPI):"), font));
-        dpiRow->Child(ToolWinDpiCombo(cx));
-        col->Child(dpiRow);
-        hint = Tr("Use <N> for the page number");
-    } else if (gTool.kind == PdfToolKind::SaveSelectionAsImage) {
-        gp::El* dpiRow = ToolWinRow(cx, kDlgWinEditDy, kToolWinCtrlGap);
-        dpiRow->Child(ToolWinText(cx, Tr("Resolution (DPI):"), font));
-        dpiRow->Child(ToolWinDpiCombo(cx));
-        dpiRow->Child(ToolWinText(cx, SelectionSizeTextTemp(win), font));
-        col->Child(dpiRow);
-    }
-
-    // the hint at the left, then the action button (the default) and Cancel
-    gp::El* buttons = ToolWinRow(cx, kDlgWinBtnDy, kToolWinCtrlGap);
-    if (len(hint) > 0) {
-        buttons->Child(ToolWinText(cx, hint, font));
-    }
-    buttons->Child(gp::Div(cx->a)->Flex1());
-    buttons->Child(DlgWinButton(cx, GStrL("pdftool-action"), ToolActionText(),
-                                gp::ListenTo(gToolView, &PdfToolView::OnAction), true, !ActionEnabled()));
-    buttons->Child(DlgWinButton(cx, GStrL("pdftool-cancel"), Tr("Cancel"),
-                                gp::ListenTo(gToolView, &PdfToolView::OnCancel), false));
-    col->Child(buttons);
-    return DlgWinContent(cx, col);
-}
-
 static gp::El* PdfToolBuildCurrent(MainWindow* win, gp::Ctx* cx) {
     if (!gTool.visible || gTool.win != win || gTool.tw) {
         return nullptr;
@@ -3602,7 +4137,6 @@ static gp::El* PdfToolBuildCurrent(MainWindow* win, gp::Ctx* cx) {
     if (gTool.dlgTw && !DlgWindowIsHost(cx)) {
         return nullptr;
     }
-    gMergeFontScale = 1;
     if (!gToolView.IsValid()) {
         gToolView = gp::EntityNewState<PdfToolView>(cx->app);
     }
@@ -3612,135 +4146,47 @@ static gp::El* PdfToolBuildCurrent(MainWindow* win, gp::Ctx* cx) {
     if (HasFormatDropDown() && gTool.ddFormat.PollChanged(cx->app)) {
         SetDestExtFromFormat();
     }
+    if (gTool.kind == PdfToolKind::ConvertEpubToPdf) {
+        gTool.ddFormat.PollChanged(cx->app);
+    }
     if (HasDpiCombo()) {
         gTool.dpiEdit->onChange = gp::ListenTo(gToolView, &PdfToolView::OnInput);
         gTool.ddDpi.TakeComboPicked();
     }
-    const gp::Theme& th = gp::ThemeNow(cx->app);
-    gTool.destEdit->onChange = gp::ListenTo(gToolView, &PdfToolView::OnInput);
-    if (DlgWindowIsHost(cx)) {
-        for (gp::InputState* e : {gTool.pagesEdit, gTool.passwordEdit}) {
-            if (e) {
-                e->onChange = gp::ListenTo(gToolView, &PdfToolView::OnInput);
-            }
+    for (gp::InputState* e : {gTool.destEdit, gTool.pagesEdit, gTool.passwordEdit}) {
+        if (e) {
+            e->onChange = gp::ListenTo(gToolView, &PdfToolView::OnInput);
         }
-        gp::El* content = PdfToolWinBuild(win, cx);
+    }
+    if (DlgWindowIsHost(cx)) {
+        gp::El* content = DlgWinContent(cx, PdfToolColumn(win, cx));
         PdfToolFocusFirst(cx);
         return content;
     }
 
-    gp::El* body = gp::Div(cx->a)->FlexCol()->Gap(6)->W(gp::kFill);
-    // the source path, ellipsized for long paths
-    body->Child(gp::TextEl(cx->a, GpuiDup(cx->a, gTool.srcPath))->Font(12)->Fg(th.mutedFg)->Truncate());
-
-    gp::El* destRow = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->ItemsCenter()->Gap(8);
-    destRow->Child(gp::Div(cx->a)->Flex1()->MinW(0)->Child(gpc::Input::New(cx, GStrL("pdftool-dest"), gTool.destEdit)
-                                                               ->WithSize(gp::UiSize::Small)
-                                                               ->W(gp::kFill)
-                                                               ->IntoEl()));
-    if (HasFormatDropDown()) {
-        destRow->Child(gTool.ddFormat.Build(cx, StrL("pdftool-format"), 84));
-    }
-    destRow->Child(gpc::Button::New(cx, GStrL("pdftool-browse"))
-                       ->Label(GStrL("..."))
-                       ->WithSize(gp::UiSize::Small)
-                       ->OnClick(gp::ListenTo(gToolView, &PdfToolView::OnBrowse))
-                       ->IntoEl());
-    if (gTool.kind != PdfToolKind::Merge) {
-        body->Child(destRow);
-    }
-
-    Str hint;
-    if (gTool.kind == PdfToolKind::Merge) {
-        StartMergeThumbs();
-        // orig's window is 85% of the work area tall; the grid gets what the
-        // frame leaves after the dialog's title and button rows
-        float viewDy = std::max(240.f, gp::WindowSize(cx->win).dipH - 260);
-        body->Child(MergePagesEl(cx, 0, viewDy));
-        body->Child(gpc::Button::New(cx, GStrL("merge-add"))
-                        ->Label(ToGpui(Tr("Add PDF...")))
-                        ->WithSize(gp::UiSize::Small)
-                        ->OnClick(gp::ListenTo(gToolView, &PdfToolView::OnMergeAdd))
-                        ->IntoEl());
-        hint = MergeInfoTemp();
-    } else if (gTool.kind == PdfToolKind::ExtractText) {
-        gTool.pagesEdit->onChange = gp::ListenTo(gToolView, &PdfToolView::OnInput);
-        gp::El* row = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->ItemsCenter()->Gap(8);
-        row->Child(LabelEl(cx, Tr("Pages:"), false));
-        row->Child(gp::Div(cx->a)->Flex1()->Child(gpc::Input::New(cx, GStrL("pdftool-pages"), gTool.pagesEdit)
-                                                      ->WithSize(gp::UiSize::Small)
-                                                      ->W(gp::kFill)
-                                                      ->IntoEl()));
-        body->Child(row);
-    } else if (IsPageRangeTool()) {
-        bool isExtract = gTool.kind == PdfToolKind::ExtractPages;
-        gTool.pagesEdit->onChange = gp::ListenTo(gToolView, &PdfToolView::OnInput);
-        gp::El* row = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->ItemsCenter()->Gap(8);
-        row->Child(LabelEl(cx, isExtract ? Tr("Pages To Extract:") : Tr("Pages To Delete:"), false));
-        row->Child(gp::Div(cx->a)->Flex1()->Child(gpc::Input::New(cx, GStrL("pdftool-pages"), gTool.pagesEdit)
-                                                      ->WithSize(gp::UiSize::Small)
-                                                      ->W(gp::kFill)
-                                                      ->IntoEl()));
-        row->Child(LabelEl(cx, fmt("of %d", gTool.pageCount), true));
-        body->Child(row);
-        if (isExtract) {
-            body->Child(gpc::Checkbox::New(cx, GStrL("pdftool-annots"))
-                            ->Label(ToGpui(Tr("Only with annotations")))
-                            ->Checked(gTool.onlyWithAnnotations)
-                            ->OnClick(gp::ListenTo(gToolView, &PdfToolView::OnAnnotsOnly))
-                            ->IntoEl());
-        }
-        hint = StrL("Syntax: 2,5-7,13-");
-    } else if (gTool.kind == PdfToolKind::Encrypt) {
-        gTool.passwordEdit->onChange = gp::ListenTo(gToolView, &PdfToolView::OnInput);
-        gp::El* row = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->ItemsCenter()->Gap(8);
-        row->Child(LabelEl(cx, Tr("Password:"), false));
-        row->Child(gp::Div(cx->a)->Flex1()->Child(gpc::Input::New(cx, GStrL("pdftool-pwd"), gTool.passwordEdit)
-                                                      ->WithSize(gp::UiSize::Small)
-                                                      ->Masked(true)
-                                                      ->W(gp::kFill)
-                                                      ->IntoEl()));
-        body->Child(row);
-    } else if (gTool.kind == PdfToolKind::ConvertToImages) {
-        gTool.pagesEdit->onChange = gp::ListenTo(gToolView, &PdfToolView::OnInput);
-        gp::El* row = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->ItemsCenter()->Gap(8);
-        row->Child(LabelEl(cx, Tr("Pages:"), false));
-        row->Child(RadioEl(cx, StrL("pdftool-cur"), Tr("Current"), PagesMode::Current));
-        row->Child(RadioEl(cx, StrL("pdftool-all"), Tr("All"), PagesMode::All));
-        row->Child(RadioEl(cx, StrL("pdftool-custom"), Tr("Custom"), PagesMode::Custom));
-        row->Child(gp::Div(cx->a)->Flex1()->Child(gpc::Input::New(cx, GStrL("pdftool-pages"), gTool.pagesEdit)
-                                                      ->WithSize(gp::UiSize::Small)
-                                                      ->Disabled(gTool.pagesMode != PagesMode::Custom)
-                                                      ->W(gp::kFill)
-                                                      ->IntoEl()));
-        body->Child(row);
-        gp::El* dpiRow = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->ItemsCenter()->Gap(8);
-        dpiRow->Child(LabelEl(cx, Tr("Resolution (DPI):"), false));
-        dpiRow->Child(gTool.ddDpi.BuildCombo(cx, StrL("pdftool-dpi"), gTool.dpiEdit, 90));
-        body->Child(dpiRow);
-        hint = Tr("Use <N> for the page number");
-    } else if (gTool.kind == PdfToolKind::SaveSelectionAsImage) {
-        gp::El* row = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->ItemsCenter()->Gap(8);
-        row->Child(LabelEl(cx, Tr("Resolution (DPI):"), false));
-        row->Child(gTool.ddDpi.BuildCombo(cx, StrL("pdftool-dpi"), gTool.dpiEdit, 90));
-        row->Child(LabelEl(cx, SelectionSizeTextTemp(win), true));
-        body->Child(row);
-    }
-
-    gp::El* footer = ToolFooter(cx, hint, ToolActionText(), ActionEnabled());
+    gp::El* body;
+    gp::El* footer = nullptr;
     float dialogDx = 600;
     if (gTool.kind == PdfToolKind::Merge) {
-        // orig's kDialogDx, as far as the window allows: room for the page
-        // grid and for the legend next to the buttons
+        float chromeDy = kMergeCardChromeDy + MergeLegendDy(cx, MergeLegendDx(0));
+        float viewDy = std::max(kMergeCardMinViewDy, gp::WindowSize(cx->win).dipH - chromeDy);
+        body = MergeColumn(cx, 0, viewDy);
+        footer = gp::Div(cx->a)->H(0);
+        // orig's kDialogDx, as far as the window allows
         dialogDx = std::max(dialogDx, std::min((float)kMergeDialogDx, gp::WindowSize(cx->win).dipW - 80));
+    } else {
+        body = PdfToolColumn(win, cx);
     }
-    gp::El* dlg = DlgIntoEl(cx, gpc::Dialog::New(cx)
-                                    ->Open(true)
-                                    ->Title(GpuiDup(cx->a, ToolTitle()))
-                                    ->Body(body)
-                                    ->Footer(footer)
-                                    ->W(dialogDx)
-                                    ->OnClose(gp::ListenTo(gToolView, &PdfToolView::OnCancel)));
+    gpc::Dialog* d = gpc::Dialog::New(cx)
+                         ->Open(true)
+                         ->Title(GpuiDup(cx->a, ToolTitle()))
+                         ->Body(body)
+                         ->W(dialogDx)
+                         ->OnClose(gp::ListenTo(gToolView, &PdfToolView::OnCancel));
+    if (footer) {
+        d->Footer(footer);
+    }
+    gp::El* dlg = DlgIntoEl(cx, d);
 
     PdfToolFocusFirst(cx);
     return dlg;

@@ -14,25 +14,34 @@
 
 import { IS_MAC } from "./host.ts";
 import { macClick } from "./mac-control.ts";
-import { cmdId, drainProcStderr, EXE, setFailureContext, USE_NG } from "./util.ts";
+import { cmdId, drainProcStderr, EXE, SLOW_BUILD_FACTOR, setFailureContext, USE_NG } from "./util.ts";
 import {
   testWindowPos,
+  injectTouch,
+  POINTER_FLAG_DOWN,
+  POINTER_FLAG_UP,
+  POINTER_FLAG_UPDATE,
   waitForWindowIdle,
   enumWindows,
   getClassName,
   findChildWindow,
-  findOwnedWindow,
   findVisibleChildWindow,
   waitForTopWindow,
   packCoords,
+  ngInputTarget,
   sleep,
   sendMessage,
   postMessage,
   sendText,
   captureWindowToPng,
   getSystemMetrics,
+  getWindowOwner,
+  getWindowPid,
+  WM_CLOSE,
   getWindowRect,
+  isWindowVisible,
   readWindowDCColumn,
+  withWindowDC,
   SM_CXVSCROLL,
   WM_LBUTTONDOWN,
   WM_LBUTTONUP,
@@ -43,6 +52,7 @@ import {
   WM_COMMAND,
   MK_LBUTTON,
   VK_RETURN,
+  VK_DOWN,
   VK_TAB,
   VK_ESCAPE,
   ensureModifierKeysUp,
@@ -297,20 +307,11 @@ export function findCanvas(frame: number): number {
   if (IS_MAC) {
     return frame;
   }
-  const canvas = findChildWindow(frame, CANVAS_CLASS);
-  if (canvas) {
-    return canvas;
-  }
-  // ng's frame swapchain has no redirection bitmap, so GetPixel on it is
-  // CLR_INVALID. The page copy is an owned top-level window of this class.
+  // ng draws the page in the frame
   if (USE_NG) {
-    const owned = findOwnedWindow(frame, CANVAS_CLASS);
-    if (owned) {
-      return owned;
-    }
     return frame;
   }
-  return canvas;
+  return findChildWindow(frame, CANVAS_CLASS);
 }
 
 export function findChildByClass(parent: number, className: string): number {
@@ -360,9 +361,15 @@ export async function clickAt(hwnd: number, x: number, y: number, settleMs = 350
   await ensureModifierKeysUp();
   const screen = clientToScreen(hwnd, x, y);
   setCursorPos(screen.x, screen.y);
-  const lp = packCoords(x, y);
-  sendMessage(hwnd, WM_LBUTTONDOWN, MK_LBUTTON | extraMk, lp);
-  sendMessage(hwnd, WM_LBUTTONUP, extraMk, lp);
+  // ng: one click, as on macOS, so no real move lands between down and up
+  const target = ngInputTarget(hwnd);
+  if (target) {
+    macClick(x, y, extraMk, target);
+  } else {
+    const lp = packCoords(x, y);
+    sendMessage(hwnd, WM_LBUTTONDOWN, MK_LBUTTON | extraMk, lp);
+    sendMessage(hwnd, WM_LBUTTONUP, extraMk, lp);
+  }
 
   // someone moving the real mouse (e.g. over RDP) mid-click turns it into a drag.
   // macOS has no GetCursorPos; the click coordinates went out as TestInput.
@@ -477,6 +484,19 @@ export function sendCommand(hwnd: number, cmdId: number): void {
   postMessage(hwnd, WM_COMMAND, cmdId, 0);
 }
 
+// A one-finger vertical swipe from (x, y0) to (x, y1), in screen pixels: a
+// touch pan, which Windows delivers as WM_GESTURE GID_PAN.
+export async function touchSwipe(x: number, y0: number, y1: number, steps = 20): Promise<boolean> {
+  if (!injectTouch(x, y0, POINTER_FLAG_DOWN)) {
+    return false;
+  }
+  for (let i = 1; i <= steps; i++) {
+    await sleep(16);
+    injectTouch(x, Math.round(y0 + ((y1 - y0) * i) / steps), POINTER_FLAG_UPDATE);
+  }
+  return injectTouch(x, y1, POINTER_FLAG_UP);
+}
+
 // A dense pixel sample of the top `dy` rows of a window, straight from its
 // window DC (so it covers the non-client caption row as well as the tab bar and
 // toolbar children). Use it to assert that chrome repainted: capture once in a
@@ -486,9 +506,11 @@ export function topChromePixels(hwnd: number, dy: number): number[] {
   const r = getWindowRect(hwnd);
   const w = r.right - r.left;
   const px: number[] = [];
-  for (let x = 2; x < w - 2; x += 6) {
-    px.push(...readWindowDCColumn(hwnd, x, 0, dy));
-  }
+  withWindowDC(hwnd, () => {
+    for (let x = 2; x < w - 2; x += 6) {
+      px.push(...readWindowDCColumn(hwnd, x, 0, dy));
+    }
+  });
   return px;
 }
 
@@ -559,14 +581,307 @@ export function findSubMenu(items: MenuItem[], label: string): MenuItem | null {
   return null;
 }
 
-// The Command Palette window and its edit, found through the focused control.
+// The Command Palette window and where its keys go. orig: the focused Edit.
+// ng: its gpui window takes the keys itself; set the query with paletteSetText.
 export function findPalette(frame: number): { palette: number; edit: number } {
+  if (USE_NG && !IS_MAC) {
+    const palette = findNgPalette(frame);
+    return { palette, edit: palette };
+  }
   const edit = getFocusedHwnd(frame);
   if (!edit || getClassName(edit) !== "Edit") {
     return { palette: 0, edit: 0 };
   }
+  if (USE_NG) {
+    return { palette: findNgPalette(frame), edit };
+  }
   const palette = getRootWindow(edit);
   return { palette: palette === frame ? 0 : palette, edit };
+}
+
+// The palette once it takes input, polled for up to timeoutMs. ng asks the
+// control channel, which answers once its window is made.
+export async function waitForPalette(
+  client: ControlClient,
+  frame: number,
+  timeoutMs = 8000,
+): Promise<{ palette: number; edit: number }> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const handles = findPalette(frame);
+    let ready = handles.palette !== 0 && handles.edit !== 0;
+    if (ready && USE_NG && !IS_MAC) {
+      ready = (await client.request(ControlCommand.TestCommandPalette, []))[0] === 0;
+    }
+    if (ready) {
+      return handles;
+    }
+    if (Date.now() > deadline) {
+      return { palette: 0, edit: 0 };
+    }
+    await sleep(50);
+  }
+}
+
+// Replaces the palette's query. orig: WM_SETTEXT on its Edit; ng (and mac)
+// through the control channel.
+export async function paletteSetText(
+  client: ControlClient,
+  handles: { palette: number; edit: number },
+  text: string,
+): Promise<void> {
+  if (!USE_NG) {
+    sendText(handles.edit, text);
+    return;
+  }
+  const res = await client.request(ControlCommand.TestInput, ["text", text]);
+  if (res[0] !== 0) {
+    throw new Error(`paletteSetText: ${String(res[1] ?? "")}`);
+  }
+}
+
+export type PaletteState = {
+  open: boolean;
+  sel: number;
+  items: number;
+  querySel: [number, number];
+  queryLen: number;
+  cmd: number;
+  rtl: number;
+  thumb: number;
+  page: number;
+  rendered: number;
+  annots: number;
+  annotPage: number;
+  annotsDone: number;
+  settingHelp: number;
+  selValue: string;
+  selText: string;
+  raw: string;
+};
+
+const closedPalette: PaletteState = {
+  open: false,
+  sel: -1,
+  items: 0,
+  querySel: [0, 0],
+  queryLen: 0,
+  cmd: 0,
+  rtl: 0,
+  thumb: 0,
+  page: 0,
+  rendered: 0,
+  annots: 0,
+  annotPage: 0,
+  annotsDone: 0,
+  settingHelp: 0,
+  selValue: "",
+  selText: "",
+  raw: "",
+};
+
+// Parsed TestCommandPalette state; open is false (other fields zero) when closed.
+export async function paletteState(client: ControlClient): Promise<PaletteState> {
+  const res = await client.request(ControlCommand.TestCommandPalette, []);
+  const out = String(res[1] ?? "").trim();
+  if (res[0] === 2) {
+    return { ...closedPalette, raw: out };
+  }
+  const qs = /querySel=(-?\d+),(-?\d+)/.exec(out);
+  if (res[0] !== 0 || !qs) {
+    throw new Error(`paletteState: TestCommandPalette failed: ${out}`);
+  }
+  const num = (name: string): number => Number(new RegExp(`\\b${name}=(-?\\d+)`).exec(out)?.[1] ?? 0);
+  return {
+    open: true,
+    sel: num("sel"),
+    items: num("items"),
+    querySel: [+qs[1]!, +qs[2]!],
+    queryLen: num("queryLen"),
+    cmd: num("cmd"),
+    rtl: num("rtl"),
+    thumb: num("thumb"),
+    page: num("page"),
+    rendered: num("rendered"),
+    annots: num("annots"),
+    annotPage: num("annotPage"),
+    annotsDone: num("annotsDone"),
+    settingHelp: num("settingHelp"),
+    selValue: /selValue=(.*?) selText=/.exec(out)?.[1] ?? "",
+    selText: /selText=(.*)$/.exec(out)?.[1] ?? "",
+    raw: out,
+  };
+}
+
+// Opens the palette, types query and runs the item whose command is cmdName.
+export async function paletteRun(client: ControlClient, frame: number, query: string, cmdName: string): Promise<void> {
+  const tag = `paletteRun(${cmdName})`;
+  sendCommand(frame, cmdId("CmdCommandPalette"));
+  const handles = await waitForPalette(client, frame, 8_000 * SLOW_BUILD_FACTOR);
+  const focusDeadline = Date.now() + 8_000 * SLOW_BUILD_FACTOR;
+  while (USE_NG && Date.now() < focusDeadline) {
+    const raw = (await paletteState(client)).raw;
+    if (!raw.includes("editFocus=") || raw.includes("editFocus=1")) {
+      break;
+    }
+    await sleep(40);
+  }
+  // not paletteSetText: ng's "text" input goes to a lingering free-text editor first
+  if (USE_NG) {
+    await ngType(client, query);
+  } else {
+    await paletteSetText(client, handles, query);
+  }
+
+  const deadline = Date.now() + 3_000 * SLOW_BUILD_FACTOR;
+  let st: PaletteState;
+  for (;;) {
+    st = await paletteState(client);
+    if (st.open && st.queryLen === query.length) {
+      break;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`${tag}: palette did not filter\n${st.raw}`);
+    }
+    await sleep(40);
+  }
+
+  const want = cmdId(cmdName);
+  for (let i = 0; i < st.items; i++) {
+    st = await paletteState(client);
+    if (st.open && st.cmd === want) {
+      await paletteKey(client, handles, VK_RETURN);
+      return;
+    }
+    await paletteKey(client, handles, VK_DOWN);
+  }
+  throw new Error(`${tag}: command was not in the filtered palette`);
+}
+
+async function paletteKey(client: ControlClient, handles: { edit: number }, vk: number): Promise<void> {
+  if (USE_NG) {
+    await ngKey(client, vk);
+    return;
+  }
+  postMessage(handles.edit, WM_KEYDOWN, vk, 0);
+  await sleep(80);
+}
+
+// ng's find box is a gpui input with no Edit. Drives it through TestFindUiState:
+// action is "set", "caret", "enter" or "state". Returns the state text.
+export async function ngFind(client: ControlClient, action: string, arg = ""): Promise<string> {
+  const res = await client.request(ControlCommand.TestFindUiState, arg ? [action, arg] : [action]);
+  if (res[0] !== 0) {
+    throw new Error(`ngFind: ${action} failed: ${String(res[1] ?? "")}`);
+  }
+  return String(res[1] ?? "");
+}
+
+// ng: CmdFindFirst is posted, so poll until the find box shows
+export async function waitFindOpen(client: ControlClient, timeoutMs = 4000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last = "";
+  for (;;) {
+    last = String((await client.request(ControlCommand.TestFindUiState, ["state"]))[1] ?? "");
+    if (/compact=1/.test(last) || /floating=1/.test(last)) {
+      return;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`waitFindOpen: find bar did not open (${last})`);
+    }
+    await sleep(40);
+  }
+}
+
+export type ToolWinInfo = { hwnd: number; owner: number; title: string; visible: boolean; mainEnabled: boolean };
+
+// ng: one tool window from the TestToolWindow list, or null when it is not up
+export async function ngToolWindow(client: ControlClient, name: string): Promise<ToolWinInfo | null> {
+  const raw = String((await client.request(ControlCommand.TestToolWindow, ["list"]))[1] ?? "");
+  for (const line of raw.split("\n")) {
+    if (!line.startsWith(`${name} made=1 `)) {
+      continue;
+    }
+    const num = (key: string) => Number(new RegExp(`${key}=(-?\\d+)`).exec(line)?.[1] ?? 0);
+    return {
+      hwnd: num("hwnd"),
+      owner: num("owner"),
+      title: /title='(.*)'/.exec(line)?.[1] ?? "",
+      visible: num("visible") === 1,
+      mainEnabled: num("mainEnabled") === 1,
+    };
+  }
+  return null;
+}
+
+export type ToolWinOpts = { title?: string; before?: Set<number>; exclude?: number; timeoutMs?: number };
+
+// Waits for a dialog / tool window. ng: the named tool window of the control
+// channel. Orig: a new visible default-class window, optionally with a title.
+// Returns its hwnd, or 0 on timeout.
+export async function waitToolWindow(
+  client: ControlClient,
+  pid: number,
+  name: string,
+  opts: ToolWinOpts = {},
+): Promise<number> {
+  const deadline = Date.now() + (opts.timeoutMs ?? 5000) * SLOW_BUILD_FACTOR;
+  for (;;) {
+    let found = 0;
+    if (USE_NG) {
+      const tw = await ngToolWindow(client, name);
+      found = tw && tw.visible && (!opts.title || tw.title === opts.title) ? tw.hwnd : 0;
+    } else {
+      enumWindows((hwnd) => {
+        if (
+          hwnd === opts.exclude ||
+          opts.before?.has(hwnd) ||
+          getWindowPid(hwnd) !== pid ||
+          getClassName(hwnd) !== "SumatraWgDefaultWinClass" ||
+          !isWindowVisible(hwnd) ||
+          (opts.title && getWindowText(hwnd) !== opts.title)
+        ) {
+          return true;
+        }
+        found = hwnd;
+        return false;
+      });
+    }
+    if (found) {
+      return found;
+    }
+    if (Date.now() > deadline) {
+      return 0;
+    }
+    await sleep(40);
+  }
+}
+
+// ng: the tool window is closed over the control channel. Orig: WM_CLOSE.
+export async function closeToolWindow(client: ControlClient, name: string, hwnd: number): Promise<void> {
+  if (USE_NG) {
+    await client.request(ControlCommand.TestToolWindow, ["close", name]);
+    return;
+  }
+  postMessage(hwnd, WM_CLOSE, 0, 0);
+}
+
+// ng's palette is the visible GPUI window the frame owns. Posted keys and
+// pixel captures work on it.
+function findNgPalette(frame: number): number {
+  let found = 0;
+  enumWindows((hwnd) => {
+    if (getWindowOwner(hwnd) !== frame || !isWindowVisible(hwnd) || getClassName(hwnd) !== FRAME_CLASS) {
+      return true;
+    }
+    const r = getWindowRect(hwnd);
+    if (r.right - r.left < 100) {
+      return true;
+    }
+    found = hwnd;
+    return false;
+  });
+  return found;
 }
 
 // A posted, unmodified key press that doesn't wait for the app.
@@ -575,7 +890,7 @@ export function pressVKey(hwnd: number, vk: number): void {
   postMessage(hwnd, WM_KEYUP, vk, 0);
 }
 
-async function ngInput(client: ControlClient, args: (string | number)[]): Promise<void> {
+export async function ngInput(client: ControlClient, args: (string | number)[]): Promise<void> {
   const res = await client.request(ControlCommand.TestInput, args);
   const raw = String(res[1] ?? "");
   if (res[0] !== 0 || !raw.startsWith("OK")) {
@@ -618,4 +933,10 @@ export function countPreviewBlue(shot: { w: number; h: number; data: Uint8Array 
     }
   }
   return count;
+}
+
+// A pixel of the filter-match underlay: the accent (yellow) tinted over the
+// row, so it is lighter than the accent but still clearly short of blue.
+export function isFilterMatchTint(r: number, g: number, b: number): boolean {
+  return r > 225 && g > 200 && b < 215 && r - b > 35;
 }

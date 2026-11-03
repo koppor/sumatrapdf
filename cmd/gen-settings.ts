@@ -34,6 +34,8 @@ class Field {
   // saved & deserialized like any setting, but hidden from the advanced
   // settings dialog (app-managed / deprecated-for-migration values)
   Internal = false;
+  // not written by genStructMarkdown or genStructHTML. .internal() does not do this
+  OmitFromDocs = false;
   DocComment: string;
   Version = "2.3";
   StructName = "";
@@ -57,6 +59,10 @@ class Field {
   }
   internal(): this {
     this.Internal = true;
+    return this;
+  }
+  omitFromDocs(): this {
+    this.OmitFromDocs = true;
     return this;
   }
   notSaved(): this {
@@ -329,6 +335,18 @@ const theme: Field[] = [
     "",
     "text color of a highlighted notification tip; if empty, derived from the colors above",
   ).ver("3.7"),
+  field(
+    "HoverPreviewBackgroundColor",
+    Color,
+    "",
+    "background of the citation hover preview's frame; if empty, pale yellow in light themes, HotBackgroundColor in dark ones",
+  ).ver("3.7"),
+  field(
+    "HoverPreviewEdgeColor",
+    Color,
+    "",
+    "border color of the citation hover preview; if empty, uses HotEdgeColor",
+  ).ver("3.7"),
   field("ColorizeControls", Bool, false, "if true, apply the theme colors to Windows controls and window areas too"),
 ];
 
@@ -462,6 +480,12 @@ const pageGrid: Field[] = [
   field("Subdivisions", Int, 4, "minor lines per major cell").ver("3.7"),
   field("OffsetX", Float, 0, "horizontal origin offset from the left of the page, in PDF points").ver("3.7"),
   field("OffsetY", Float, 0, "vertical origin offset from the bottom of the page, in PDF points").ver("3.7"),
+  field(
+    "Slant",
+    Float,
+    90,
+    "angle of the vertical grid lines from the rightward horizontal, in degrees. 90 is upright; 52 to 60 leans right for calligraphy",
+  ).ver("3.7"),
   field("Color", Color, rgb(128, 128, 255), "color of the page grid overlay").ver("3.7"),
   field("Style", Str, "dots", "grid overlay style: dots (marks at intersections), dotted (dotted lines), or solid")
     .enum(["dots", "dotted", "solid"])
@@ -513,7 +537,7 @@ const fixedPageUI: Field[] = [
   struct(
     "PageGrid",
     pageGrid,
-    "measurement grid overlay (View > Page Grid). Spacing and style are saved; showing the grid is session-only",
+    "measurement grid overlay (View > Page Grid). Spacing, slant and style are saved; showing the grid is session-only. Drag a grid line while Configure Page Grid is open, or Alt+drag, to resize cells with equal width and height",
   ).ver("3.7"),
 ];
 
@@ -628,6 +652,12 @@ const markdownUI: Field[] = [
     false,
     "if true, use MuPDF (cmark-gfm) to render markdown; if false, use WebView2 browser view when available",
   ),
+  field(
+    "PreserveLineBreaks",
+    Bool,
+    false,
+    "if true, preserve source line breaks in the Markdown browser view; false uses standard Markdown paragraph wrapping",
+  ).ver("3.7"),
 ];
 
 const htmlUI: Field[] = [
@@ -1016,6 +1046,13 @@ const annotations: Field[] = [
     "image (e.g. a transparent .png of your signature) that Sign With Image stamps on the page. " +
       "If not set, or the file is missing, Sign With Image asks for an image",
   ).ver("3.7"),
+  field(
+    "PopupFontSize",
+    Int,
+    0,
+    "font size of the card that shows an annotation's text when it is clicked, in pixels; " +
+      "0 uses UIFontSize. Not scaled by the display scaling",
+  ).ver("3.7"),
 ];
 
 const favorite: Field[] = [
@@ -1201,6 +1238,18 @@ const fileState: Field[] = [
     false,
     "if true, the view can be panned past the page edges, so any part of a page can be brought to the center of the window",
   ).ver("3.7"),
+  field(
+    "Brightness",
+    Int,
+    0,
+    "brightness of rendered pages, -100 to 100; 0 leaves them unchanged. Set with CmdAdjustBrightness",
+  ).ver("3.7"),
+  field(
+    "Contrast",
+    Int,
+    0,
+    "contrast of rendered pages, -100 to 100; 0 leaves them unchanged. Set with CmdAdjustContrast",
+  ).ver("3.7"),
   field("BgCol", Color, "", "if given, overrides the background color for this document").ver("3.7"),
   field("TabCol", Color, "", "if given, overrides the tab color for this document").ver("3.7"),
   compactArray(
@@ -1243,6 +1292,8 @@ const fileStateLayout = [
   "PageNo",
   "PageCount",
   "Rotation",
+  "Brightness",
+  "Contrast",
   "WindowState",
   "SidebarDx",
   "Index",
@@ -1374,6 +1425,12 @@ const globalPrefs: Field[] = [
   ),
   field("NoHomeTab", Bool, false, "if true, doesn't open Home tab"),
   field(
+    "NoCaj2pdfConverterDownload",
+    Bool,
+    false,
+    "if true, doesn't offer to download the caj2pdf converter. CAJ files open only if it's already downloaded",
+  ),
+  field(
     "HomePageSortByFrequentlyRead",
     Bool,
     false,
@@ -1428,6 +1485,33 @@ const globalPrefs: Field[] = [
     "if true, a document will be reloaded automatically whenever it's changed " +
       "(currently doesn't work for documents shown in the ebook UI)",
   ).ver("2.5"),
+  field(
+    "ShowSignatureStatus",
+    Bool,
+    true,
+    "if true, opening a digitally signed PDF shows whether its signatures are valid",
+  ).ver("3.7"),
+  field(
+    "TemporaryFileShowNotification",
+    Bool,
+    true,
+    "if true, opening a file from a temporary folder (e.g. an Outlook attachment) shows a notification " +
+      "offering to copy it to a permanent folder. Closing that notification sets this to false",
+  ).ver("3.7"),
+  field(
+    "TemporaryFileDestDir",
+    Str,
+    null,
+    "folder that files from a temporary folder are copied to. When empty or not a folder, " +
+      "Copy Temporary File to Permanent Folder asks for one and remembers it here",
+  ).ver("3.7"),
+  field(
+    "TemporaryFileAutoMove",
+    Bool,
+    true,
+    "if true and TemporaryFileDestDir is set, a file from a temporary folder is copied there " +
+      "when it opens, and opened from there",
+  ).ver("3.7"),
   field(
     "RememberOpenedFiles",
     Bool,
@@ -1538,6 +1622,13 @@ const globalPrefs: Field[] = [
     .emptyMeans("favorites")
     .ver("3.7"),
   field(
+    "ShowSidebarMiddle",
+    Bool,
+    false,
+    "if true, and the sidebar's top and bottom panels are visible, show a middle panel between them " +
+      "with the view neither of them shows",
+  ).ver("3.7"),
+  field(
     "SortFavoritesByName",
     Bool,
     false,
@@ -1553,11 +1644,25 @@ const globalPrefs: Field[] = [
       "even one that was closed with it hidden",
   ).ver("3.7"),
   field(
+    "ShowThumbnailsIfNoToc",
+    Bool,
+    false,
+    "if true, a document without bookmarks (and with more than one page) opens with " +
+      "the sidebar showing page thumbnails",
+  ).ver("3.7"),
+  field(
     "SidebarOnRight",
     Bool,
     false,
     "if true, put the bookmarks / favorites sidebar on the right of the window " +
       "(left is the default; right-to-left UI languages already put it on the right)",
+  ).ver("3.7"),
+  field(
+    "SidebarAutoHide",
+    Bool,
+    false,
+    "if true, the bookmarks / favorites sidebar takes no space: it slides over the document " +
+      "when the mouse reaches the window's edge and hides when the mouse leaves it",
   ).ver("3.7"),
   field(
     "SidebarWindowSize",
@@ -1592,6 +1697,13 @@ const globalPrefs: Field[] = [
     false,
     "if true, document links are ignored so you can select and read " +
       "(useful for drawings with many links); if false, clicking a link follows it",
+  ).ver("3.7"),
+  field(
+    "DisableLeftDragPan",
+    Bool,
+    false,
+    "if true, dragging with the left mouse button where there is no text selects text " +
+      "instead of panning the page. Shift + left drag, right drag and the scrollbars still pan",
   ).ver("3.7"),
   field(
     "ExplorerQuickLook",
@@ -1703,6 +1815,12 @@ const globalPrefs: Field[] = [
     "if true, continuous view has extra scroll room after the last page so you can scroll the end of the document to the top of the window",
   ).ver("3.7"),
   field(
+    "ContinuousScrollFollowsRotation",
+    Bool,
+    false,
+    "if true, continuous view stacks the next page where the bottom of a rotated page points: left after Rotate Right, right after Rotate Left, up after a half turn. Off, the next page stays below",
+  ).ver("3.7"),
+  field(
     "IgnoreDestinationZoom",
     Bool,
     false,
@@ -1764,6 +1882,12 @@ const globalPrefs: Field[] = [
     "if true, prevents the screen from turning off when in fullscreen or presentation mode",
   ),
   field("TabWidth", Int, 300, "maximum width of a single tab, in pixels at 100% display scaling (at least 60)"),
+  field(
+    "TabsEqualWidth",
+    Bool,
+    true,
+    "if true, all tabs are equally wide. If false, a tab is as wide as its file name needs, up to TabWidth",
+  ).ver("3.7"),
   // Built-in names must stay in sync with themesTxt in src/Theme.cpp (plus System)
   field(
     "Theme",
@@ -1820,6 +1944,12 @@ const globalPrefs: Field[] = [
     0,
     "if both the favorites and the bookmarks part of the sidebar are visible, this is " +
       "the height of the bookmarks (table of contents) part, in screen pixels",
+  ).internal(),
+  field(
+    "SidebarMiddleDy",
+    Int,
+    0,
+    "if the sidebar's middle panel is visible, this is its height, in screen pixels",
   ).internal(),
   field(
     "ToolbarCustomLayout",
@@ -1894,6 +2024,12 @@ const globalPrefs: Field[] = [
     "if true, use the Windows system colors for the document background and text. Overrides other color settings",
   ),
   field("UseTabs", Bool, true, "if true, documents are opened in tabs instead of new windows").ver("3.0"),
+  field(
+    "ShowCaption",
+    Bool,
+    true,
+    "show the caption; when hidden, hover at the top to reveal it. Toggle with Shift+F8",
+  ).ver("3.7"),
   field(
     "SelectionToolbar",
     Bool,
@@ -2134,6 +2270,19 @@ const globalPrefs: Field[] = [
   // saved & honored, but hidden from the advanced settings dialog (edited via
   // the "Automatically check for updates" checkbox in Options instead)
   field("CheckForUpdates", Bool, true, "if true, check once a day whether an update is available").internal(),
+  field(
+    "OnlineApiKey",
+    Str,
+    null,
+    "API key for Sumatra Online. Set from File / Link Sumatra Online. Do not share the settings file.",
+  )
+    .internal()
+    .ver("3.7")
+    .omitFromDocs(),
+  field("OnlineServer", Str, null, "an empty value means the public Sumatra Online site. The dialog does not edit it.")
+    .internal()
+    .ver("3.7")
+    .omitFromDocs(),
   emptyLine(),
   comment("Settings below are not recognized by the current version"),
 ];
@@ -2198,7 +2347,9 @@ const globalPrefsLayout = [
   "ReadingAutoScrollSpeed",
   "ReadingBar",
   "TabWidth",
+  "TabsEqualWidth",
   "TocDy",
+  "SidebarMiddleDy",
   "ToolbarSize",
   "TreeFontSize",
   "UIFontSize",
@@ -2222,8 +2373,13 @@ const globalPrefsLayout = [
   "FullPathInTitle",
   "LazyLoading",
   "NoHomeTab",
+  "NoCaj2pdfConverterDownload",
   "HomePageSortByFrequentlyRead",
   "ReloadModifiedDocuments",
+  "ShowSignatureStatus",
+  "TemporaryFileShowNotification",
+  "TemporaryFileDestDir",
+  "TemporaryFileAutoMove",
   "RememberOpenedFiles",
   "RememberStatePerDocument",
   "RestoreSession",
@@ -2237,15 +2393,19 @@ const globalPrefsLayout = [
   "ShowToolbar",
   "SearchUIFloating",
   "ShowFavorites",
+  "ShowSidebarMiddle",
   "SortFavoritesByName",
   "ShowToc",
   "AlwaysShowSidebar",
+  "ShowThumbnailsIfNoToc",
   "SidebarOnRight",
+  "SidebarAutoHide",
   "SidebarWindowSize",
   "ShowLinks",
   "HighlightFormFields",
   "ClickEdgeToTurnPage",
   "DisableLinks",
+  "DisableLeftDragPan",
   "ExplorerQuickLook",
   "RememberViewOffsetOnPageTurn",
   "MouseWheelTurnsPage",
@@ -2259,6 +2419,7 @@ const globalPrefsLayout = [
   "ScrollbarInSinglePage",
   "SmoothScroll",
   "PaddingAfterLastPage",
+  "ContinuousScrollFollowsRotation",
   "IgnoreDestinationZoom",
   "HighlightLinkDestination",
   "FastScrollOverScrollbar",
@@ -2268,12 +2429,15 @@ const globalPrefsLayout = [
   "DisableAutoLinks",
   "UseSysColors",
   "UseTabs",
+  "ShowCaption",
   "SelectionToolbar",
   "TabsMru",
   "CtrlTabSimple",
   "MarkdownUI",
   "HtmlUI",
   "CheckForUpdates",
+  "OnlineApiKey",
+  "OnlineServer",
 ];
 
 const globalPrefsStruct = struct("Settings", globalPrefs, "Preferences are persisted in SumatraPDF-settings.txt");
@@ -2763,7 +2927,7 @@ function genStructHTML(struc: Field, indent: string): string {
 
   const fields = struc.Default as Field[];
   for (const field of fields) {
-    if (field.NotSaved || isComment(field)) continue;
+    if (field.NotSaved || field.OmitFromDocs || isComment(field)) continue;
     let comment = docWithEnum(field);
     if (field.Version !== "2.3") {
       comment += ` (introduced in version ${field.Version})`;
@@ -2843,7 +3007,7 @@ function genStructMarkdown(struc: Field, indent: string): string {
 
   const fields = struc.Default as Field[];
   for (const field of fields) {
-    if (field.NotSaved || isComment(field)) continue;
+    if (field.NotSaved || field.OmitFromDocs || isComment(field)) continue;
     let comment = docWithEnum(field);
     if (field.Version !== "2.3") {
       comment += ` (introduced in version ${field.Version})`;

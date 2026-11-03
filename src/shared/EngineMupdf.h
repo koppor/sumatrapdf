@@ -192,6 +192,8 @@ class EngineMupdf : public EngineBase {
     fz_outline* outline = nullptr;
     fz_outline* attachments = nullptr;
     pdf_obj* pdfInfo = nullptr;
+    // from foo.opf next to foo.epub; overrides the EPUB's own metadata
+    Vec<PropValue> epubSidecarProps;
     StrVec* pageLabels = nullptr;
 
     TocTree* tocTree = nullptr;
@@ -208,7 +210,6 @@ class EngineMupdf : public EngineBase {
     int pendingHeadingTocIdCounter = 0;
 
     // password used to decrypt the document (needed for re-encryption/decryption)
-    TempStr pdfPassword;
 
     // used to track "dirty" state of annotations. not perfect because if we add and delete
     // the same annotation, we should be back to 0
@@ -219,6 +220,11 @@ class EngineMupdf : public EngineBase {
     // with the file (which only show up as pages get loaded, see
     // EngineMupdfHasUserRedactMarks)
     bool createdRedactMark = false;
+    // what EngineMupdfHasRedactMarksNoWait last saw, for when a render holds pagesLock
+    bool hasRedactMarksSeen = false;
+    // what UndoPosNoWait last saw, for when a render holds docLock
+    int undoPosSeen = -1;
+    int undoStepsSeen = 0;
 
     // how many journal operations we have open (see EngineMupdfBeginOperation).
     // MuPDF can't undo / redo while one is, e.g. during a resize drag

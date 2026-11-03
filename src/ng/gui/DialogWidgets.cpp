@@ -4,6 +4,7 @@
 #include "gui/GpuiBridge.h"
 
 #include "Menu.h"
+#include "Theme.h"
 #include "gui/DialogWidgets.h"
 
 #include "SumatraLog.h"
@@ -124,6 +125,11 @@ void OpenPopupMenuAt(gp::Ctx* cx, gp::Entity<gp::PopupMenuState> menu, float x, 
     }
     st->x = x;
     st->y = y;
+    // gpui runs a picked item's action from the focus the menu opened with.
+    // The element that opened it took no focus, so the trigger - where the
+    // action's handler is - gets it first. The menu's trap then takes the
+    // keyboard, which is what arrows, Enter and Escape dispatch from.
+    gp::FocusHandleFocus(cx->win, st->triggerFocus);
     gp::PopupMenuOpen(st, cx);
     gFitPopup = menu;
     gFitPopupFrames = 0;
@@ -481,6 +487,10 @@ void DialogComboView::OnKey(DialogComboView* self, gp::Ctx* cx, const gp::KeyEve
     gp::AppInvalidate(cx->win);
 }
 
+void DialogSelect::OpenCombo() {
+    ComboSetOpen(this, true);
+}
+
 bool DialogSelect::TakeComboListPick() {
     bool res = comboListPick;
     comboListPick = false;
@@ -610,7 +620,8 @@ enum class DlgAccelKind {
     None,
     Click,
     Input,
-    Select
+    Select,
+    Focus
 };
 
 struct DlgAccel {
@@ -624,6 +635,7 @@ struct DlgAccel {
     gp::Listener onClick = {};
     gp::InputState* input = nullptr;
     DialogSelect* select = nullptr;
+    int focusId = 0;
 };
 
 // the access keys of the dialogs each window built in its last frame
@@ -737,6 +749,13 @@ gp::Str DlgAccelSelect(gp::Ctx* cx, Str label, DialogSelect* select) {
     return DlgAccelAdd(cx, label, acc);
 }
 
+gp::Str DlgAccelFocus(gp::Ctx* cx, Str label, int focusId) {
+    DlgAccel acc;
+    acc.kind = DlgAccelKind::Focus;
+    acc.focusId = focusId;
+    return DlgAccelAdd(cx, label, acc);
+}
+
 gp::Str DlgAccelNone(gp::Ctx* cx, Str label) {
     DlgAccel acc;
     return DlgAccelAdd(cx, label, acc);
@@ -829,6 +848,9 @@ bool DlgAccelOnKey(gp::Ctx* cx, int vk, bool alt, bool ctrl, bool editFocused) {
                     }
                 }
                 break;
+            case DlgAccelKind::Focus:
+                gp::WindowSetFocusId(cx->win, acc.focusId);
+                break;
             case DlgAccelKind::None:
                 break;
         }
@@ -836,4 +858,104 @@ bool DlgAccelOnKey(gp::Ctx* cx, int vk, bool alt, bool ctrl, bool editFocused) {
         return true;
     }
     return false;
+}
+
+constexpr float kKeyCapFontPx = 11;
+constexpr float kKeyCapPadX = 5;
+constexpr float kKeyCapPadY = 2;
+constexpr float kKeyCapRadius = 3;
+
+gp::El* DlgKeyCap(gp::Ctx* cx, Str key, bool active) {
+    Color col = active ? ThemeWindowTextColor() : ThemeWindowTextDisabledColor();
+    return gp::Div(cx->a)
+        ->FlexRow()
+        ->Shrink0()
+        ->ItemsCenter()
+        ->JustifyCenter()
+        ->PadX(kKeyCapPadX)
+        ->PadY(kKeyCapPadY)
+        ->Radius(kKeyCapRadius)
+        ->Border(1, ToGpui(active ? col : ThemeEdgeColor()))
+        ->Child(gp::TextEl(cx->a, GpuiDup(cx->a, key))->Mono()->Font(kKeyCapFontPx)->Fg(ToGpui(col)));
+}
+
+gp::El* DlgHairline(gp::Ctx* cx) {
+    return gp::Div(cx->a)->W(gp::kFill)->H(1)->Shrink0()->Bg(ToGpui(ThemeEdgeColor()));
+}
+
+// a black fill moved by kDlgBtnShift is still black; hover has to read as a lighter gray
+constexpr int kFilledDarkHoverShift = 48;
+
+// gpui's button variants only tint their color, so it is a plain element
+gp::El* DlgFilledButton(gp::Ctx* cx, gp::Str id, Str label, gp::Listener onClick, bool disabled, float fontPx) {
+    // orig's access key: the '&' goes, the letter is underlined
+    gp::Str text = DlgAccelClick(cx, label, onClick, disabled);
+    Color colText = ThemeWindowTextColor();
+    Color colBg = ThemeWindowControlBackgroundColor();
+    gp::El* b = gp::Div(cx->a)
+                    ->FlexRow()
+                    ->ItemsCenter()
+                    ->JustifyCenter()
+                    ->H(kDlgBtnDy)
+                    ->PadX(kDlgBtnPadDx)
+                    ->Shrink0()
+                    ->Radius(kDlgBtnRadius)
+                    ->Role(gp::AccessibilityRole::Button)
+                    ->AriaLabel(text)
+                    ->AriaDisabled(disabled);
+    if (disabled) {
+        b->Bg(ToGpui(AccentColor(colBg, kDlgBtnShift)));
+        b->Child(gp::TextEl(cx->a, text)->Font(fontPx)->Fg(ToGpui(ThemeWindowTextDisabledColor())));
+        return DlgAccelUnderline(cx, b, text);
+    }
+    int hoverShift = IsLightColor(colText) ? kDlgBtnShift : kFilledDarkHoverShift;
+    b->Bg(ToGpui(colText))
+        ->HoverBg(ToGpui(AccentColor(colText, hoverShift)))
+        ->Cursor(gp::CursorKind::Pointer)
+        ->PathClick(id)
+        ->OnClick(onClick);
+    b->Child(gp::TextEl(cx->a, text)->Font(fontPx)->Fg(ToGpui(colBg)));
+    return DlgAccelUnderline(cx, b, text);
+}
+
+// orig's quiet buttons: muted words that fill on hover, fainter while disabled
+constexpr int kDlgGhostHoverShift = 14;
+constexpr int kDlgGhostDisabledShift = 25;
+
+gp::El* DlgGhostButton(gp::Ctx* cx, gp::Str id, Str label, gp::Listener onClick, bool disabled, float fontPx) {
+    gp::Str text = DlgAccelClick(cx, label, onClick, disabled);
+    Color colBg = ThemeWindowControlBackgroundColor();
+    gp::El* b = gp::Div(cx->a)
+                    ->FlexRow()
+                    ->ItemsCenter()
+                    ->JustifyCenter()
+                    ->H(kDlgBtnDy)
+                    ->PadX(kDlgBtnPadDx)
+                    ->Shrink0()
+                    ->Radius(kDlgBtnRadius)
+                    ->Role(gp::AccessibilityRole::Button)
+                    ->AriaLabel(text)
+                    ->AriaDisabled(disabled);
+    // as orig's VirtButton: faint, but never lost in a dark background
+    Color colText = EnsureContrast(AccentColor(colBg, kDlgGhostDisabledShift), colBg);
+    if (!disabled) {
+        colText = ThemeWindowTextDisabledColor();
+        b->HoverBg(ToGpui(AccentColor(colBg, kDlgGhostHoverShift)))
+            ->Cursor(gp::CursorKind::Pointer)
+            ->PathClick(id)
+            ->OnClick(onClick);
+    }
+    b->Child(gp::TextEl(cx->a, text)->Font(fontPx)->Fg(ToGpui(colText)));
+    return DlgAccelUnderline(cx, b, text);
+}
+
+gp::El* DlgUnderlineInput(gp::Ctx* cx, gp::Str id, gp::InputState* edit, float fontPx, Color underline, bool masked,
+                          bool disabled) {
+    gpc::Input* in = gpc::Input::New(cx, id, edit)
+                         ->Appearance(false)
+                         ->WithSize(gp::UiSize::Small)
+                         ->Masked(masked)
+                         ->Disabled(disabled)
+                         ->W(gp::kFill);
+    return gp::Div(cx->a)->BorderB(1, ToGpui(underline))->Child(in->IntoEl()->Font(fontPx));
 }

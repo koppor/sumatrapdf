@@ -65,6 +65,8 @@ struct ToolWindowDesc {
     ToolWinModal modal = ToolWinModal::No;
     // smallest client size (dips) a resizable one can be dragged to
     Size minClient;
+    // largest; a 0 side is unbounded
+    Size maxClient;
     // files can be dropped on it: an OLE drop target on its HWND (Windows)
     bool dropFiles = false;
     // the content; fills the window
@@ -144,8 +146,10 @@ Size ToolWindowOuterSize(const ToolWindowDesc& desc, MainWindow* owner, Size cli
 Rect ToolWindowCenteredRect(const ToolWindowDesc& desc, MainWindow* owner, Size clientDip);
 // the same for a window size in screen pixels
 Rect ToolWindowCenteredOuter(MainWindow* owner, Size outer);
-// what desc.minClient was at the start; for content whose minimum changes
+// what desc.minClient / maxClient were at the start; for content whose
+// limits change
 void ToolWindowSetMinClient(ToolWindow* tw, Size minClientDip);
+void ToolWindowSetMaxClient(ToolWindow* tw, Size maxClientDip);
 // screen pixels; empty until the window was made
 Rect ToolWindowRect(ToolWindow* tw);
 // sizes the client area (dips) where the window is, as orig's
@@ -188,8 +192,7 @@ void ToolWindowsCloseFor(MainWindow* win);
 // NativeWindow.cpp claims gpui windows by class name; these are not frames
 bool ToolWindowOwnsHwnd(HWND hwnd);
 HWND ToolWindowHwnd(ToolWindow* tw);
-// the SumatraWgDefaultWinClass window tests post to, or the tool window
-HWND ToolWindowOrigHwnd(ToolWindow* tw);
+ToolWindow* ToolWindowFromHwnd(HWND hwnd);
 // the main window of the tool window with this handle
 MainWindow* ToolWindowOwnerFromHwnd(HWND hwnd);
 #endif

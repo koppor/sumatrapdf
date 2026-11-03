@@ -61,6 +61,21 @@ MenuDef menuDefFileOpen[] = {
         StrL(kMenuSeparator),
         0,
     },
+#if OS_WASM
+    // the folder is the stored documents (/uploads)
+    {
+        TrN("&Next Document"),
+        CmdOpenNextFileInFolder,
+    },
+    {
+        TrN("&Previous Document"),
+        CmdOpenPrevFileInFolder,
+    },
+    {
+        TrN("&Browse Documents..."),
+        CmdNavigateFilesInFolder,
+    },
+#else
     {
         TrN("&Next File In Folder"),
         CmdOpenNextFileInFolder,
@@ -73,6 +88,7 @@ MenuDef menuDefFileOpen[] = {
         TrN("&Browse Files In Folder..."),
         CmdNavigateFilesInFolder,
     },
+#endif
     {
         {},
         0,
@@ -127,6 +143,10 @@ MenuDef menuDefFile[] = {
     {
         TrN("&Print..."),
         CmdPrint,
+    },
+    {
+        TrN("Lin&k Sumatra Online..."),
+        CmdSumatraOnline,
     },
     {
         StrL(kMenuSeparator),
@@ -294,6 +314,10 @@ MenuDef menuDefView[] = {
     {
         TrN("Sh&ow Toolbar"),
         CmdToggleToolbar,
+    },
+    {
+        TrN("Show Caption"),
+        CmdToggleCaption,
     },
     {
         TrN("&Highlight Form Fields"),
@@ -651,6 +675,10 @@ MenuDef menuDefDebug[] = {
     {
         StrL("Show notification"),
         CmdDebugShowNotif,
+    },
+    {
+        StrL("Show crash minidumps"),
+        CmdDebugShowCrashMiniDumps,
     },
     {
         {},
@@ -1081,6 +1109,14 @@ MenuDef menuDefDocumentOperations[] = {
     {
         TrN("Convert PDF to Images..."),
         CmdConvertPdfToImages,
+    },
+    {
+        TrN("Convert EPUB to PDF..."),
+        CmdConvertEpubToPdf,
+    },
+    {
+        TrN("Convert CAJ to PDF..."),
+        CmdConvertCajToPDF,
     },
     {
         TrN("Show in fo&lder"),

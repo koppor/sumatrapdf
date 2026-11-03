@@ -15,6 +15,7 @@
 
 #include "WebView2EnvironmentOptions.h"
 #include "gui/win/WebView.h"
+#include "WebViewCapture.h"
 
 static Kind kindWebView = "webView";
 
@@ -1766,6 +1767,10 @@ void WebviewWnd::ShowFindUI() {
 
 // The host API's system dialog can switch printers; window.print() cannot in
 // some WebView2 runtimes (#6323). Older runtimes fall back at the call site.
+bool WebviewWnd::CapturePreviewPng(const Func1<Str>& done) {
+    return WebView2CapturePng(webview, hwnd, done);
+}
+
 bool WebviewWnd::ShowPrintUI() {
     if (!webview) {
         return false;

@@ -11,6 +11,7 @@ constexpr int kTabMinDx = 100;
 struct TabsCtrl;
 struct TabInfo;
 struct TabCtrl;
+struct TabsPlusBtn;
 struct VirtRoot;
 struct VirtCloseButton;
 struct VirtMouseEvent;
@@ -26,6 +27,8 @@ struct TabInfo {
     bool isDirty = false;
     // document failed to load: the title paints in red
     bool isError = false;
+    // as wide as its label plus margins, with no room for a close button (Home)
+    bool fitToLabel = false;
     UINT_PTR userData = 0;
     Color tabColor = (Color)0xfeffffff; // kColorUnset; use default tab color
 
@@ -42,6 +45,7 @@ struct TabsCtrl : VirtCtrl {
         bool withToolTips = false;
         int ctrlID = 0;
         int tabDefaultDx = 300;
+        bool equalWidth = true;
         bool isRtl = false;
     };
 
@@ -99,12 +103,16 @@ struct TabsCtrl : VirtCtrl {
     bool draggingTab = false;
     // dx of tab if there's more space available
     int tabDefaultDx = 300;
+    // false: a tab is as wide as its name, up to tabDefaultDx
+    bool equalWidth = true;
 
     Vec<TabInfo*> tabs;
     // VirtRoot over this control on `hwnd`; does not own us
     VirtRoot* vroot = nullptr;
     // in tab order (children are reversed when the UI is RTL)
     Vec<TabCtrl*> tabCtrls;
+    // the "+" after the tabs, always there
+    TabsPlusBtn* plusBtn = nullptr;
     int selectedIdx = -1;
 
     // tracking state of which tab is highlighted etc.
@@ -127,6 +135,8 @@ struct TabsCtrl : VirtCtrl {
     SelectionChangedHandler onSelectionChanged;
     MigrationHandler onTabMigration;
     DraggedHandler onTabDragged;
+    // must not change the tabs directly: that deletes the button being clicked
+    Func0 onPlusClick;
 
     // colors: kColTab* (the unselected and hovered shades are derived from
     // kColTabBg; a tab with a TabInfo::tabColor of its own overrides it)
@@ -151,6 +161,7 @@ struct TabsCtrl : VirtCtrl {
 
     int InsertTab(int idx, TabInfo*, bool update = true);
     TabInfo* GetTab(int idx);
+    int TabDx(int idx);
     void SwapTabs(int idx1, int idx2);
 
     void SetTextAndTooltip(int idx, Str text, Str tooltip);

@@ -126,8 +126,10 @@ TempStr SearchResultTemp(Str pdfPath, Str needle, Str password) {
 }
 
 // Headless search restricted to pages first..last (0 = unbounded). Reports
-// every match page in document order. Used by tests/issue-5694.ts.
-TempStr FindPageRangeResultTemp(Str pdfPath, Str needle, int first, int last, Str spec, int* exitCodeOut) {
+// every match page in the order found: document order, or reversed for a
+// backward search. Used by tests/issue-5694.ts and tests/issue-6434.ts.
+TempStr FindPageRangeResultTemp(Str pdfPath, Str needle, int first, int last, Str spec, int* exitCodeOut,
+                                FindDirection dir) {
     str::Builder out;
     auto finish = [&](int code) -> TempStr {
         if (exitCodeOut) {
@@ -141,8 +143,9 @@ TempStr FindPageRangeResultTemp(Str pdfPath, Str needle, int first, int last, St
         out.Append(fmt("ERROR engine-create-failed pdf=%s\n", pdfPath));
         return finish(1);
     }
+    bool backward = dir == FindDirection::Backward;
     auto* ts = new TextSearch(engine);
-    ts->SetDirection(TextSearch::Direction::Forward);
+    ts->SetDirection(backward ? TextSearch::Direction::Backward : TextSearch::Direction::Forward);
     ts->SetMatchCase(false);
     Vec<bool> allowed;
     if (spec) {
@@ -162,7 +165,7 @@ TempStr FindPageRangeResultTemp(Str pdfPath, Str needle, int first, int last, St
     }
     ts->SetAllowedPages(allowed);
     int n = 0;
-    Vec<TextSel>* sel = ts->FindFirst(ts->RestrictFirst(), needle);
+    Vec<TextSel>* sel = ts->FindFirst(backward ? ts->RestrictLast() : ts->RestrictFirst(), needle);
     while (sel && len(*sel) > 0) {
         out.Append(fmt("page=%d\n", (*sel)[0].pageNo));
         n++;
@@ -477,6 +480,42 @@ TempStr GoToFindMatchResultTemp(Str word, Str typed, int* exitCodeOut) {
     return ToStrTemp(out);
 }
 
+// Draws a rectangle around `word` through the Ctrl+drag code path, for tests:
+// a real Ctrl key state can't be injected.
+TempStr DrawRectSelectionResultTemp(Str word, int* exitCodeOut) {
+    auto finish = [&](Str msg, int code) -> TempStr {
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        return str::DupTemp(msg);
+    };
+    MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    if (!dm) {
+        return finish(StrL("NOTREADY no-doc"), 1);
+    }
+    const int pageNo = 1;
+    double wx = 0, wy = 0;
+    if (!FindWordCenter(dm->GetEngine(), pageNo, word, &wx, &wy)) {
+        return finish(StrL("ERROR word-not-found"), 1);
+    }
+    Point center = dm->CvtToScreen(pageNo, PointF((float)wx, (float)wy));
+    const int half = 40;
+    int x = center.x - half;
+    int y = center.y - (half / 2);
+#if defined(SUMATRA_NG)
+    OnSelectionStart(win, x, y, true);
+#else
+    OnSelectionStart(win, x, y, 0, true);
+#endif
+    OnSelectionStop(win, center.x + half, center.y + (half / 2), false);
+    win->mouseAction = MouseAction::None;
+    if (!IsDrawnRectSelection(win)) {
+        return finish(StrL("ERROR not-drawn-rect"), 1);
+    }
+    return finish(StrL("OK"), 0);
+}
+
 bool FindWordCenter(EngineBase* engine, int pageNo, Str word, double* xOut, double* yOut) {
     if (!engine || len(word) == 0 || !xOut || !yOut) {
         return false;
@@ -715,6 +754,27 @@ TempStr MarkdownFollowLinkResultTemp(Str href, bool follow, int* exitCodeOut) {
     return ToStrTemp(out);
 }
 
+// Urls the current markdown document's browser view was served, one per line,
+// so a test can see what the page loaded. Used by tests/issue-6380.ts.
+TempStr MarkdownServedResultTemp(int* exitCodeOut) {
+    MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+    MarkdownModel* mm = win && win->ctrl ? win->ctrl->AsMarkdown() : nullptr;
+    if (exitCodeOut) {
+        *exitCodeOut = mm ? 0 : 2;
+    }
+    if (!mm) {
+        return str::DupTemp(StrL("NOTREADY no-markdown\n"));
+    }
+    StrVec urls;
+    mm->GetCachedUrls(urls);
+    str::Builder out;
+    out.Append(StrL("OK\n"));
+    for (Str url : urls) {
+        out.Append(fmt("%s\n", url));
+    }
+    return ToStrTemp(out);
+}
+
 static void AppendTocItems(str::Builder& out, TocItem* item, int depth = 0) {
     for (; item; item = item->next) {
         if (item->title) {
@@ -756,9 +816,38 @@ TempStr GetTocResultTemp(Str path, int* exitCodeOut) {
     return ToStrTemp(out);
 }
 
+// Headless test for page image elements. Returns one line per image:
+// "image rect=<x>,<y>,<dx>,<dy>". Used by tests/issue-6441.ts.
+TempStr PageImagesResultTemp(Str path, int pageNo, int* exitCodeOut) {
+    *exitCodeOut = 1;
+    EngineBase* engine = CreateEngineFromFile(path, nullptr, false);
+    if (!engine) {
+        return fmt("ERROR engine-create-failed path=%s\n", path);
+    }
+    if (!engine->BenchLoadPage(pageNo)) {
+        SafeEngineRelease(&engine);
+        return fmt("ERROR page-load-failed page=%d\n", pageNo);
+    }
+
+    str::Builder out;
+    Vec<IPageElement*> els = engine->GetElements(pageNo);
+    for (IPageElement* el : els) {
+        if (!el || !el->Is(kindPageElementImage)) {
+            continue;
+        }
+        RectF r = el->GetRect();
+        out.Append(fmt("image rect=%g,%g,%g,%g\n", r.x, r.y, r.dx, r.dy));
+    }
+    *exitCodeOut = 0;
+    SafeEngineRelease(&engine);
+    return ToStrTemp(out);
+}
+
 // Headless test for page link elements. Returns one line per link:
-// "kind=<kind> value=<value>". Used by tests/ad-hoc-md-links.ts.
-TempStr PageLinksResultTemp(Str path, int pageNo, int* exitCodeOut) {
+// "kind=<kind> value=<value>". With hit, also "hit=<kind>" for the element at
+// that page point, "hit=none" if there is none (tests/issue-6472.ts).
+// Used by tests/ad-hoc-md-links.ts.
+TempStr PageLinksResultTemp(Str path, int pageNo, int* exitCodeOut, const PointF* hit) {
     str::Builder out;
     EngineBase* engine = CreateEngineFromFile(path, nullptr, false);
     if (!engine) {
@@ -792,11 +881,20 @@ TempStr PageLinksResultTemp(Str path, int pageNo, int* exitCodeOut) {
         Str value = dest->GetValue();
         TempStr valueShown = str::ReplaceTemp(value, StrL("\r\n"), StrL("|"));
         valueShown = str::ReplaceTemp(valueShown, StrL("\n"), StrL("|"));
+        if (dest->GetKind() == kindDestinationLaunchEmbedded) {
+            Str data = EngineMupdfLoadEmbedded(engine, (PageDestination*)dest);
+            valueShown = fmt("%s size=%d", valueShown, len(data));
+            str::Free(data);
+        }
         RectF src = el->GetRect();
         RectF destRc = dest->GetRect();
         out.Append(fmt("kind=%s page=%d src=%g,%g,%g,%g dest=%g,%g,%g,%g value=%s\n", Str(dest->GetKind()),
                        PageDestGetPageNo(dest), src.x, src.y, src.dx, src.dy, destRc.x, destRc.y, destRc.dx, destRc.dy,
                        valueShown));
+    }
+    if (hit) {
+        IPageElement* el = engine->GetElementAtPos(pageNo, *hit);
+        out.Append(fmt("hit=%s\n", el ? Str(el->GetKind()) : StrL("none")));
     }
     if (nLinks == 0) {
         if (exitCodeOut) {
@@ -1549,6 +1647,8 @@ TempStr PageRenderViewPrintResultTemp(Str path, int* exitCodeOut) {
         return fail(StrL("ERROR page-load-failed\n"));
     }
 
+    // print renders without AA; match it so only the OCGs differ
+    engine->disableAntiAlias = true;
     RenderPageArgs viewArgs(1, 1.f, 0, nullptr, RenderTarget::View);
     RenderPageArgs printArgs(1, 1.f, 0, nullptr, RenderTarget::Print);
     Pixmap* viewRaw = engine->RenderPage(viewArgs);

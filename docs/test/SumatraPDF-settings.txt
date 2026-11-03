@@ -10,10 +10,14 @@ FullPathInTitle = false
 LazyLoading = false
 MainWindowBackground = #80fff200
 NoHomeTab = false
+NoCaj2pdfConverterDownload = false
 HomePageSortByFrequentlyRead = false
 HomePageViewMode = thumbnails
 ThumbnailsType = full
 ReloadModifiedDocuments = true
+ShowSignatureStatus = true
+TemporaryFileShowNotification = true
+TemporaryFileAutoMove = true
 RememberOpenedFiles = true
 RememberStatePerDocument = true
 RestoreSession = true
@@ -29,14 +33,18 @@ Toolbar = show
 ToolbarPosition = top
 SearchUIFloating = false
 ShowFavorites = false
+ShowSidebarMiddle = false
 SortFavoritesByName = false
 ShowToc = true
 AlwaysShowSidebar = false
+ShowThumbnailsIfNoToc = false
 SidebarOnRight = false
+SidebarAutoHide = false
 ShowLinks = false
 HighlightFormFields = true
 ClickEdgeToTurnPage = false
 DisableLinks = false
+DisableLeftDragPan = false
 ExplorerQuickLook = false
 RememberViewOffsetOnPageTurn = false
 MouseWheelTurnsPage = false
@@ -55,6 +63,7 @@ SmoothScroll = true
 ScrollLineAmount = 16
 SaveMemory = 50
 PaddingAfterLastPage = false
+ContinuousScrollFollowsRotation = false
 IgnoreDestinationZoom = false
 HighlightLinkDestination = false
 CitationHoverDelay = -1
@@ -72,6 +81,7 @@ Theme = Light
 HelpTheme = app
 DocumentColorsFollowTheme = off
 TocDy = 0
+SidebarMiddleDy = 0
 ToolbarShowReadAloud = false
 ToolbarSize = 18
 TreeFontName = automatic
@@ -82,6 +92,7 @@ EngineeringDrawingEnhance = off
 DisableAutoLinks = false
 UseSysColors = false
 UseTabs = true
+ShowCaption = true
 SelectionToolbar = true
 TabsMru = false
 CtrlTabSimple = false
@@ -101,6 +112,7 @@ FixedPageUI [
 		Subdivisions = 4
 		OffsetX = 0
 		OffsetY = 0
+		Slant = 90
 		Color = #8080ff
 		Style = dots
 		Units = in
@@ -138,6 +150,7 @@ ChmUI [
 
 MarkdownUI [
 	UseFixedPageUI = false
+	PreserveLineBreaks = false
 ]
 
 HtmlUI [
@@ -172,6 +185,13 @@ AntiGravity [
 	BgColor = #ffffff
 ]
 
+AIChat [
+	FontSize = 0
+	LineSpacing = 0
+	MessagePadding = -1
+	Bubbles = true
+]
+
 AIChatSidebarDx = 0
 
 
@@ -188,6 +208,7 @@ Annotations [
 	InkColor = #66ffff00
 	InkColors = #66ffff00 #668bf05d #6699defa #66f199d2 #66e24745
 	InkBorderWidth = 16
+	PopupFontSize = 0
 ]
 
 ExternalViewers [

@@ -528,6 +528,13 @@ bool ShouldUseBrowserView(FileType kind) {
     return false;
 }
 
+// html shown in the browser view gets its thumbnail from a picture of the page
+// (SetThumbnailFromImage): MuPDF lays html out differently and drops images
+static bool IsBrowserCapturedThumbnail(Str path) {
+    FileType kind = GuessFileTypeFromName(path);
+    return MarkdownModel::IsHtmlFileType(kind) && ShouldUseBrowserView(kind);
+}
+
 bool showTocByDefault(Str path, EngineBase* engine) {
     if (gSettings->alwaysShowSidebar) {
         return true;
@@ -546,7 +553,8 @@ bool showTocByDefault(Str path, EngineBase* engine) {
 
 bool IsEbookFileType(FileType ft) {
     return ft == FileType::Epub || ft == FileType::Mobi || ft == FileType::Fb2 || ft == FileType::Fb2z ||
-           ft == FileType::PalmDoc || ft == FileType::HTML || ft == FileType::Txt || ft == FileType::Lit;
+           ft == FileType::PalmDoc || ft == FileType::HTML || ft == FileType::Txt || ft == FileType::Lit ||
+           ft == FileType::Rtf;
 }
 
 // Per-type DefaultDisplayMode (empty = inherit the global DefaultDisplayMode).
@@ -711,9 +719,11 @@ bool AppendFileFilterForDoc(DocController* ctrl, str::Builder& fileFilter) {
         fileFilter.Append(fmt(Tr("Image files (*.%s)").s, imgDefExt));
     } else if (type == kindEngineImageDir) {
         return false; // only show "All files"
-    } else if (type == kindEnginePostScript || type == kindEngineDvi) {
+    } else if (type == kindEnginePostScript || type == kindEngineDvi || type == kindEngineCaj) {
         // also offer the PDF the converter produced (SaveFileAs writes it)
-        if (type == kindEngineDvi) {
+        if (type == kindEngineCaj) {
+            fileFilter.Append(Tr("CAJ documents"));
+        } else if (type == kindEngineDvi) {
             fileFilter.Append(Tr("DVI documents"));
         } else {
             fileFilter.Append(Tr("PostScript documents"));
@@ -1299,10 +1309,20 @@ bool WindowHasDocumentLoading(MainWindow* win) {
     return false;
 }
 
-// an image next to the document with the same base name (Calibre puts a
+// ebook and comic formats, where a same-named image is a cover; next to a PDF
+// it's often unrelated (a plot exported as "a.pdf" and "a.png", #6414)
+static bool HasSiblingCover(FileType ft) {
+    return ft == FileType::Epub || ft == FileType::Mobi || ft == FileType::Fb2 || ft == FileType::Fb2z ||
+           ft == FileType::PalmDoc || ft == FileType::Lit || IsEngineCbxSupportedFileType(ft);
+}
+
+// an image next to an ebook with the same base name (Calibre puts a
 // "Title.jpg" cover next to "Title.epub") beats page 1 as the thumbnail
 TempStr FindCoverImageTemp(Str docPath) {
     static const char* kCoverExts[] = {".jpg", ".jpeg", ".png"};
+    if (!HasSiblingCover(GuessFileTypeFromName(docPath, true))) {
+        return {};
+    }
     TempStr noExt = path::GetPathNoExtTemp(docPath);
     for (const char* ext : kCoverExts) {
         TempStr cover = str::JoinTemp(noExt, Str(ext));
@@ -1967,7 +1987,7 @@ bool OpenFileExternally(Str path) {
 }
 
 void CreateThumbnailForFile(MainWindow* win, FileState* ds) {
-    if (!ds || !ShouldSaveThumbnail(ds)) {
+    if (!ds || !ShouldSaveThumbnail(ds) || IsBrowserCapturedThumbnail(ds->filePath)) {
         return;
     }
 
@@ -1995,8 +2015,9 @@ void CreateThumbnailForFile(MainWindow* win, FileState* ds) {
     EngineBase* clone = nullptr;
     DisplayModel* dm = win->IsDocLoaded() ? win->AsFixed() : nullptr;
     EngineBase* engine = dm ? dm->GetEngine() : nullptr;
-    if (engine && (engine->kind == kindEnginePostScript || engine->kind == kindEngineDvi) &&
-        str::Eq(engine->FilePath(), ds->filePath)) {
+    bool isConverted = engine && (engine->kind == kindEnginePostScript || engine->kind == kindEngineDvi ||
+                                  engine->kind == kindEngineCaj);
+    if (isConverted && str::Eq(engine->FilePath(), ds->filePath)) {
         clone = engine->Clone();
     }
 
@@ -2214,11 +2235,11 @@ Annotation* MakeAnnotationsFromSelection(WindowTab* tab, AnnotCreateArgs* args) 
     if (!ok) {
         return nullptr;
     }
-    // highlight / underline / squiggly / strike out mark up runs of *text*. A
-    // rectangular selection (Ctrl+drag, Select All) isn't one - marking up its
-    // bounding boxes produced bars over whitespace - so do nothing.
+    // underline / squiggly / strike out mark up runs of *text*. Highlight can also
+    // fill a Ctrl+drag area (#6467), but not Select All's whole pages.
     bool isTextSelection = dm->textSelection && dm->textSelection->result.len > 0;
-    if (!isTextSelection) {
+    bool isHighlightArea = args->annotType == AnnotationType::Highlight && IsDrawnRectSelection(win);
+    if (!isTextSelection && !isHighlightArea) {
         return nullptr;
     }
 
@@ -2462,8 +2483,9 @@ void OpenUsingDDE(HWND targetHwnd, Str path, Flags& i, bool isFirstWin) {
         cmd.Append(fmt("[ForwardSearch(\"%s\", \"%s\", %d, 0, 0, 1)]", fullPath, srcPath, i.forwardSearchLine));
     }
     if (i.search) {
-        // TODO: quote if i.search has '"' in it
-        cmd.Append(fmt("[Search(\"%s\",\"%s\")]", fullPath, i.search));
+        // HandleSearchCmd unescapes "" to "
+        TempStr term = str::ReplaceTemp(i.search, StrL("\""), StrL("\"\""));
+        cmd.Append(fmt("[Search(\"%s\",\"%s\")]", fullPath, term));
     }
     if ((i.enterPresentation || i.enterFullScreen) && isFirstWin) {
         Str name = i.enterPresentation ? StrL("Presentation") : StrL("FullScreen");
@@ -2570,10 +2592,32 @@ void OnFrameKeyB(MainWindow* win, bool isShift) {
     }
 }
 
-// the cover, or else the first page, of d->filePath as the home page shows it:
-// ThumbnailsType legacy is the top of the page as wide as the frame, full the
-// whole page scaled to fit the frame. Releases d->engine
+// page 1 as the home page shows it: ThumbnailsType legacy is the top of the
+// page as wide as the frame, full the whole page scaled to fit the frame
+static Pixmap* RenderEngineThumbnail(EngineBase* engine) {
+    RectF pageRect = engine->PageMediabox(1);
+    if (pageRect.IsEmpty()) {
+        return nullptr;
+    }
+    pageRect = engine->Transform(pageRect, 1, 1.0f, 0);
+    Size frame = ThumbnailFrameSize();
+    float zoom = (float)frame.dx / pageRect.dx;
+    if (ThumbnailsAreFullPage()) {
+        zoom = std::min(zoom, (float)frame.dy / pageRect.dy);
+    } else {
+        pageRect.dy = std::min(pageRect.dy, (float)frame.dy / zoom);
+    }
+    pageRect = engine->Transform(pageRect, 1, 1.0f, 0, true);
+    RenderPageArgs args(1, zoom, 0, &pageRect);
+    return engine->RenderPage(args);
+}
+
+// the cover, or else the first page, of d->filePath. Releases d->engine
 static Pixmap* RenderFileThumbnail(CreateThumbnailFromFileData* d) {
+    if (IsBrowserCapturedThumbnail(d->filePath)) {
+        SafeEngineRelease(&d->engine);
+        return nullptr;
+    }
     EngineBase* engine = d->engine;
     TempStr cover = FindCoverImageTemp(d->filePath);
     if (len(cover) > 0) {
@@ -2596,29 +2640,57 @@ static Pixmap* RenderFileThumbnail(CreateThumbnailFromFileData* d) {
     if (!engine) {
         return nullptr;
     }
-    Pixmap* bmp = nullptr;
-    RectF pageRect = engine->PageMediabox(1);
-    if (!pageRect.IsEmpty()) {
-        pageRect = engine->Transform(pageRect, 1, 1.0f, 0);
-        Size frame = ThumbnailFrameSize();
-        float zoom = (float)frame.dx / pageRect.dx;
-        if (ThumbnailsAreFullPage()) {
-            zoom = std::min(zoom, (float)frame.dy / pageRect.dy);
-        } else {
-            pageRect.dy = std::min(pageRect.dy, (float)frame.dy / zoom);
-        }
-        pageRect = engine->Transform(pageRect, 1, 1.0f, 0, true);
-        RenderPageArgs args(1, zoom, 0, &pageRect);
-        bmp = engine->RenderPage(args);
-    }
+    Pixmap* bmp = RenderEngineThumbnail(engine);
     engine->Release();
     d->engine = nullptr;
     return bmp;
 }
 
+// imageData is a picture of the document (a png, ...), e.g. a screenshot of the browser view
+void SetThumbnailFromImage(Str filePath, Str imageData) {
+    FileState* fs = FileHistoryFindByPath(filePath);
+    if (!fs || !ShouldSaveThumbnail(fs) || len(imageData) == 0) {
+        return;
+    }
+    EngineBase* engine = CreateEngineImageFromData(imageData);
+    if (!engine) {
+        return;
+    }
+    Pixmap* bmp = RenderEngineThumbnail(engine);
+    engine->Release();
+    SetThumbnail(fs, bmp);
+}
+
+// thumbnail threads read gSettings and file history, so a settings reload
+// waits for them like for load threads; only touched on the UI thread
+static int gThumbnailThreadsActive = 0;
+
+bool AreThumbnailThreadsActive() {
+    return gThumbnailThreadsActive > 0;
+}
+
+static void ThumbnailThreadStarted() {
+    gThumbnailThreadsActive++;
+}
+
+static void ThumbnailThreadFinished() {
+    gThumbnailThreadsActive--;
+    ReportIf(gThumbnailThreadsActive < 0);
+#if !defined(SUMATRA_NG)
+    if (gThumbnailThreadsActive == 0) {
+        uitask::Post(MkFunc0Void(ReloadDeferredSettings), "ReloadDeferredSettings");
+    }
+#endif
+}
+
+static void CreateThumbnailFromFileDone(CreateThumbnailFromFileData* d) {
+    CreateThumbnailFromFileFinish(d);
+    ThumbnailThreadFinished();
+}
+
 static void CreateThumbnailFromFileThread(CreateThumbnailFromFileData* d) {
     d->bmp = RenderFileThumbnail(d);
-    auto fn = MkFunc0<CreateThumbnailFromFileData>(CreateThumbnailFromFileFinish, d);
+    auto fn = MkFunc0<CreateThumbnailFromFileData>(CreateThumbnailFromFileDone, d);
     uitask::Post(fn, "SetThumbnailFromFile");
     DestroyTempArena();
 }
@@ -2631,24 +2703,8 @@ void CreateThumbnailFromFileAsync(FileState* ds, EngineBase* engine) {
     d->engine = engine;
     d->fileEBookUI = CopyFileEBookUI(ds->eBookUI);
     auto fn = MkFunc0<CreateThumbnailFromFileData>(CreateThumbnailFromFileThread, d);
+    ThumbnailThreadStarted();
     RunAsync(fn, StrL("CreateThumbnailFromFile"));
-}
-
-// the history entries whose files still exist, in the order the home page shows them
-static void CollectThumbnailFiles(Vec<FileState*>& list) {
-    Vec<FileState*> all;
-    if (gSettings->homePageSortByFrequentlyRead) {
-        FileHistoryGetFrequencyOrder(all);
-    } else {
-        FileHistoryGetRecentlyOpenedOrder(all);
-    }
-    for (FileState* fs : all) {
-        Str path = fs->filePath;
-        if (len(path) == 0 || path::IsCloudPlaceholder(path) || !DocumentPathExists(path)) {
-            continue;
-        }
-        VecAppend(list, fs);
-    }
 }
 
 static CreateThumbnailFromFileData* NewThumbnailData(FileState* fs) {
@@ -2658,9 +2714,64 @@ static CreateThumbnailFromFileData* NewThumbnailData(FileState* fs) {
     return d;
 }
 
+enum class ThumbnailsToMake {
+    All,
+    Missing,
+};
+
 struct RegenerateThumbnailsData {
     Vec<CreateThumbnailFromFileData*> files;
+    ThumbnailsToMake which = ThumbnailsToMake::All;
 };
+
+// The history entries, in the order the home page shows them. Only copies: the
+// thumbnail thread finds out which files still exist, because checking a file on
+// a network share that's away waits out a network timeout (#6474)
+static RegenerateThumbnailsData* NewRegenerateThumbnailsData(ThumbnailsToMake which) {
+    Vec<FileState*> all;
+    if (gSettings->homePageSortByFrequentlyRead) {
+        FileHistoryGetFrequencyOrder(all);
+    } else {
+        FileHistoryGetRecentlyOpenedOrder(all);
+    }
+    auto* data = new RegenerateThumbnailsData();
+    data->which = which;
+    for (FileState* fs : all) {
+        if (len(fs->filePath) > 0) {
+            VecAppend(data->files, NewThumbnailData(fs));
+        }
+    }
+    return data;
+}
+
+// whether it's in our thumbnail cache, a local folder: cheap to check up front
+static bool HasCachedThumbnail(Str path) {
+    TempStr thumbPath = GetThumbnailPathTemp(path);
+    return len(thumbPath) == 0 || file::Exists(thumbPath);
+}
+
+// can be slow: a drive that's away (unplugged, offline share) waits out a timeout
+// once, then is known to be away, so the files after it aren't held up
+static bool DocumentIsThere(Str path) {
+    return path::IsOnAvailableDrive(path) && !path::IsCloudPlaceholder(path) && DocumentPathExists(path);
+}
+
+// on the thumbnail thread: drop the files whose thumbnails are cached
+static void DropCachedThumbnailFiles(RegenerateThumbnailsData* data) {
+    if (data->which != ThumbnailsToMake::Missing) {
+        return;
+    }
+    Vec<CreateThumbnailFromFileData*> missing;
+    for (CreateThumbnailFromFileData* d : data->files) {
+        if (HasCachedThumbnail(d->filePath)) {
+            delete d;
+        } else {
+            VecAppend(missing, d);
+        }
+    }
+    data->files = missing;
+    ResetTempArena();
+}
 
 struct ThumbnailProgress {
     Str name;
@@ -2678,6 +2789,7 @@ static void ShowThumbnailProgress(ThumbnailProgress* p) {
         NotificationCreateArgs args;
         args.win = win;
         args.groupId = kNotifThumbnailProgress;
+        args.corner = NotifCorner::BottomLeft;
         args.plainText = true;
         args.msg = msg;
         ShowNotification(args);
@@ -2692,15 +2804,28 @@ static void HideThumbnailProgress() {
     }
 }
 
+static void RegenerateThumbnailsDone() {
+    HideThumbnailProgress();
+    ThumbnailThreadFinished();
+}
+
 // renders one file at a time; each finished thumbnail is set and shown on
 // the UI thread before the next file starts
 static void RegenerateThumbnailsThread(RegenerateThumbnailsData* data) {
+    DropCachedThumbnailFiles(data);
+    logf("RegenerateThumbnailsThread: %d files\n", len(data->files));
     int total = len(data->files);
     int done = 0;
     for (CreateThumbnailFromFileData* d : data->files) {
+        done++;
+        if (!DocumentIsThere(d->filePath)) {
+            delete d;
+            ResetTempArena();
+            continue;
+        }
         auto* p = new ThumbnailProgress();
         p->name = str::Dup(path::GetBaseNameTemp(d->filePath));
-        p->done = ++done;
+        p->done = done;
         p->total = total;
         uitask::Post(MkFunc0<ThumbnailProgress>(ShowThumbnailProgress, p), "ThumbnailProgress");
         d->bmp = RenderFileThumbnail(d);
@@ -2708,7 +2833,7 @@ static void RegenerateThumbnailsThread(RegenerateThumbnailsData* data) {
         uitask::Post(fn, "SetThumbnailFromFile");
         ResetTempArena();
     }
-    uitask::Post(MkFunc0Void(HideThumbnailProgress), "ThumbnailProgressDone");
+    uitask::Post(MkFunc0Void(RegenerateThumbnailsDone), "ThumbnailProgressDone");
     delete data;
     DestroyTempArena();
 }
@@ -2731,13 +2856,29 @@ void OnThumbnailsTypeChanged() {
         return;
     }
 
-    Vec<FileState*> list;
-    CollectThumbnailFiles(list);
-    auto* data = new RegenerateThumbnailsData();
-    for (FileState* fs : list) {
-        VecAppend(data->files, NewThumbnailData(fs));
+    auto* data = NewRegenerateThumbnailsData(ThumbnailsToMake::All);
+    auto fn = MkFunc0<RegenerateThumbnailsData>(RegenerateThumbnailsThread, data);
+    ThumbnailThreadStarted();
+    RunAsync(fn, StrL("RegenerateThumbnails"));
+}
+
+// Home-page files that still exist but have no cached thumbnail.
+void RegenerateMissingThumbnails() {
+    // -for-testing launches constantly and must not render the user's history
+    if (gForTesting || gPluginMode || !HasPermission(Perm::SavePreferences)) {
+        return;
+    }
+#if OS_WASM
+    // StartThread runs inline, so a batch of renders would freeze startup
+    return;
+#endif
+    auto* data = NewRegenerateThumbnailsData(ThumbnailsToMake::Missing);
+    if (len(data->files) == 0) {
+        delete data;
+        return;
     }
     auto fn = MkFunc0<RegenerateThumbnailsData>(RegenerateThumbnailsThread, data);
+    ThumbnailThreadStarted();
     RunAsync(fn, StrL("RegenerateThumbnails"));
 }
 
@@ -2764,9 +2905,24 @@ SettingsApplyState GetSettingsApplyState() {
     s.disableAntiAlias = p->disableAntiAlias;
     s.chmUseFixedPageUI = p->chmUI.useFixedPageUI;
     s.markdownUseFixedPageUI = p->markdownUI.useFixedPageUI;
+    s.markdownPreserveLineBreaks = p->markdownUI.preserveLineBreaks;
     s.explorerQuickLook = p->explorerQuickLook;
     s.ebookLayout = EbookLayoutSnapshot();
     s.aiChatStyle = AIChatStyleSnapshot();
     s.thumbnailsType = str::Dup(p->thumbnailsType);
     return s;
+}
+
+void ToggleCaption(CustomCommand* cmd) {
+    bool show = GetCommandBoolArg(cmd, kCmdArgState, !gSettings->showCaption);
+    if (show != gSettings->showCaption) {
+        ToggleSettingsBool(&gSettings->showCaption);
+    }
+}
+
+void ToggleSidebarAutoHide(CustomCommand* cmd) {
+    bool on = GetCommandBoolArg(cmd, kCmdArgState, !gSettings->sidebarAutoHide);
+    if (on != gSettings->sidebarAutoHide) {
+        ToggleSettingsBool(&gSettings->sidebarAutoHide);
+    }
 }

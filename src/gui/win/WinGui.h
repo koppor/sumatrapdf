@@ -683,7 +683,6 @@ void TooltipRemoveAll(HWND hwnd);
 using TextChangedHandler = Func0;
 
 void PostDelayedEditSelectAll(HWND);
-void PostDelayedEditCtrlBack(HWND);
 
 // The base/Win.h edit helpers, taking the control rather than its HWND, so a
 // caller that holds an Edit* can pass it straight in. A null control is the
@@ -708,6 +707,8 @@ struct Edit : ControlBase {
         bool isMultiLine = false;
         // multi-line: ES_AUTOHSCROLL so long lines scroll instead of wrapping
         bool noWrap = false;
+        // multi-line: scrolls with the caret and the wheel, but shows no bars
+        bool noScrollBars = false;
         bool withBorder = false;
         // 1px NC underline under the client area (no WS_EX_CLIENTEDGE)
         bool withBottomBorder = false;

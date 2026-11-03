@@ -112,7 +112,8 @@ function genAllDocsMd(outDir: string): void {
     if (!existsSync(path)) {
       throw new Error(`all-docs: '${fileName}' not found`);
     }
-    const content = readFileSync(path, "utf-8");
+    // ```svg diagrams are markup, noise for the full-text search
+    const content = readFileSync(path, "utf-8").replace(/^```svg[ \t]*\r?\n[\s\S]*?^```[ \t]*\r?$\n?/gm, "");
     parts.push(`::${fileName}\n${content}`);
   }
   const outPath = join(outDir, kAllDocsFile);
@@ -322,7 +323,7 @@ export async function main(opts: GenDocsOptions = {}) {
   }
 
   // the build's prebuild (cmd/pack-embedded-prebuild.cmd) stages .work/docs
-  // with translations + marked/mermaid under out/<cfg>/embedded[-static]
+  // with translations + marked/pele under out/<cfg>/embedded[-static]
   // and packs IDR_EMBEDDED_PAK, so rebuild the exe to pick up the new manual
   console.log(
     `To preview on-demand rendering, open: file://${resolve(join(manualOutDir, "manual.shell.html"))} (needs a local server or in-app help)`,

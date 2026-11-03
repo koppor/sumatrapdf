@@ -212,6 +212,13 @@ struct DisplayModel : DocController {
     void ScrollXBy(int dx);
     void ScrollYTo(int yOff);
     void ScrollYBy(int dy, bool changePage);
+    bool ScrollFollowsRotation() const;
+    bool ContentScrollHorizontal() const;
+    int ContentScrollSign() const;
+    int ContentScrollPos() const;
+    bool AtContentEdge(int forward) const;
+    void ScrollContentBy(int forward, bool changePage);
+    void ScrollContentToEdge(bool toEnd);
 
     int yOffset();
 
@@ -254,6 +261,7 @@ struct DisplayModel : DocController {
     bool GetTrimEmptyMargins() const;
     void SetFreePan(bool enable);
     bool GetFreePan() const;
+    void SetPageAdjust(int brightness, int contrast);
     Size PanSlack() const;
     bool EnsureTrimEmptyMarginsForVisiblePages();
     bool GoToPageHorizontal(bool toRight);
@@ -380,6 +388,9 @@ struct DisplayModel : DocController {
     bool uniformPageWidth = false;
     bool trimEmptyMargins = false;
     bool inTrimMarginsUpdate = false;
+    // -100..100, applied to rendered pages (see AdjustPagePixmap)
+    int brightness = 0;
+    int contrast = 0;
     bool freePan = false;
     // set while SetScrollState() restores a view exactly: GoToPage() may then
     // land in free pan's slack past the page edges
@@ -399,6 +410,7 @@ struct DisplayModel : DocController {
     bool pauseRendering = false;
 
     bool pendingRelayout = false;
+    bool inSetViewPortSize = false;
     bool hasPendingScroll = false;
     ScrollState pendingScroll;
 

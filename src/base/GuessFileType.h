@@ -54,8 +54,11 @@ enum class FileType : u8 {
     Pptx = 42,
 
     Dvi = 43,
+    Rtf = 44,
+    // CNKI: CAJ, KDH, HN, C8, TEB
+    Caj = 45,
 };
-constexpr int kFileTypeCount = (int)FileType::Dvi + 1;
+constexpr int kFileTypeCount = (int)FileType::Caj + 1;
 
 // embedded PDF files have paths like "c:/foo.pdf:${pdfStreamNo}"
 // or "c:/foo.pdf:${pdfStreamNo}:attachname=${hexUtf8Name}"

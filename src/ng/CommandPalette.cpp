@@ -20,7 +20,6 @@
 
 #include "gui/UIModels.h"
 
-#define INCLUDE_SETTINGSSTRUCTS_METADATA
 #include "Settings.h"
 #include "AppSettings.h"
 #include "DisplayMode.h"
@@ -54,6 +53,7 @@
 #include "TableOfContents.h"
 #include "gui/AppShell.h"
 #include "gui/ToolWindow.h"
+#include "gui/DialogWidgets.h"
 #include "gui/DocCanvas.h"
 #include "gui/Sidebar.h"
 #include "SumatraDialogs.h"
@@ -62,7 +62,21 @@
 
 #include "SumatraLog.h"
 
-constexpr float kPaletteRowDy = 22;
+// the palette: a query line over a hairline, the mode switches, the rows on
+// an inset with a rounded selection, and the key hints
+constexpr float kPaletteRowDy = 24;
+constexpr float kPaletteQueryDy = 40;
+constexpr float kPaletteSwitchRowDy = 30;
+constexpr float kPaletteFootDy = 33;
+constexpr float kPaletteInsetDx = 8;
+constexpr float kPalettePadDx = 16;
+constexpr float kPaletteQueryFontPx = 15;
+constexpr float kPaletteTextFontPx = 13;
+constexpr float kPaletteMetaFontPx = 12;
+constexpr float kPaletteHintFontPx = 11;
+constexpr float kPaletteSelectionRadius = 4;
+constexpr float kPaletteSwatchDx = 12;
+constexpr float kPaletteSwatchGap = 8;
 constexpr float kPaletteTopMargin = 42;
 constexpr int kPaletteMinDx = 640;
 constexpr int kPaletteMaxDx = 1024;
@@ -98,7 +112,7 @@ struct ThumbnailCache {
     bool deleteWhenWorkerFinishes = false;
 };
 
-struct CommandPaletteWnd {
+struct CommandPaletteWnd : PaletteSources {
     MainWindow* win = nullptr;
     bool visible = false;
     Point cursorPos;
@@ -109,24 +123,11 @@ struct CommandPaletteWnd {
     // orig's popup window, where the platform can have one; null: an overlay
     // in the frame
     ToolWindow* tw = nullptr;
-#if OS_WIN
-    // tests look for a focused Edit whose root is not the frame
-    HWND queryEdit = nullptr;
-#endif
 
-    StrVecCP tabs;
-    StrVecCP fileHistory;
-    StrVecCP commands;
-    StrVecCP toc;
-    StrVecCP favorites;
-    StrVecCP annotations;
-    StrVecCP settings;
     // what the list shows: the filtered rows
     StrVecCP items;
     int sel = -1;
     float scrollOff = 0;
-
-    StrVec filterWords;
 
     int currTabIdx = 0;
     int currTocIdx = 0;
@@ -160,14 +161,12 @@ struct PaletteView {
 
 static gp::Entity<PaletteView> gPaletteView;
 
-static void FilterStringsForQuery(Str filter, StrVecCP& strings);
 static void CollectStrings(MainWindow* mainWin);
 static void QueryChanged();
 static bool ShowsSettingHelp(CommandPaletteWnd* wnd);
 static void ExecuteCurrentSelection();
 static void StartThumbnailRendering();
 static void ThumbSelectPage(int pageNo);
-static ItemDataCP* FindSetting(Str path, Str& foundPath);
 
 // clang-format off
 static i32 gCommandsNoActivate[] = {
@@ -264,6 +263,7 @@ struct ThumbRenderWorker {
     Vec<int> pages;
     Vec<Location> locs;
     int rotation = 0;
+    int next = 0; // pages[next] is rendered next
 };
 
 static void FinishThumbRender(ThumbRenderTask* task) {
@@ -300,27 +300,31 @@ static void FinishThumbWorker(ThumbnailCache* cache) {
     StartThumbnailRendering();
 }
 
+// Without threads (see kUiSliceMs) this runs in slices, each posting the next
 static void RenderThumbsInBackground(ThumbRenderWorker* worker) {
     ThumbnailCache* cache = worker->cache;
+    u64 sliceStart = GetTickCount64();
     if (worker->sourceEngine) {
         cache->renderEngine = worker->sourceEngine->Clone();
         worker->sourceEngine->Release();
         worker->sourceEngine = nullptr;
     }
     EngineBase* engine = cache->renderEngine;
-    if (engine) {
-        int n = len(worker->pages);
-        for (int i = 0; i < n; i++) {
-            if (AtomicIntGet(&cache->cancelRendering) != 0) {
-                break;
-            }
-            Location loc = i < len(worker->locs) ? worker->locs[i] : kInvalidLocation;
-            auto* task = new ThumbRenderTask;
-            task->cache = cache;
-            task->pageNo = worker->pages[i];
-            task->bitmap = RenderPageThumbnail(engine, worker->pages[i], loc, worker->rotation);
-            uitask::Post(MkFunc0<ThumbRenderTask>(FinishThumbRender, task));
+    while (engine && worker->next < len(worker->pages)) {
+        if (AtomicIntGet(&cache->cancelRendering) != 0) {
+            break;
         }
+        if (!kHasThreads && GetTickCount64() - sliceStart >= (u64)kUiSliceMs) {
+            uitask::Post(MkFunc0<ThumbRenderWorker>(RenderThumbsInBackground, worker), "CommandPaletteThumbnailRender");
+            return;
+        }
+        int i = worker->next++;
+        Location loc = i < len(worker->locs) ? worker->locs[i] : kInvalidLocation;
+        auto* task = new ThumbRenderTask;
+        task->cache = cache;
+        task->pageNo = worker->pages[i];
+        task->bitmap = RenderPageThumbnail(engine, worker->pages[i], loc, worker->rotation);
+        uitask::Post(MkFunc0<ThumbRenderTask>(FinishThumbRender, task));
     }
     uitask::Post(MkFunc0<ThumbnailCache>(FinishThumbWorker, cache));
     delete worker;
@@ -418,7 +422,12 @@ static void StartThumbnailRendering() {
     }
     AtomicIntSet(&cache->cancelRendering, 0);
     cache->workerRunning = true;
-    RunAsync(MkFunc0<ThumbRenderWorker>(RenderThumbsInBackground, worker), StrL("CommandPaletteThumbnailRender"));
+    auto fn = MkFunc0<ThumbRenderWorker>(RenderThumbsInBackground, worker);
+    if (kHasThreads) {
+        RunAsync(fn, StrL("CommandPaletteThumbnailRender"));
+    } else {
+        uitask::Post(fn, "CommandPaletteThumbnailRender");
+    }
 }
 
 static void SetThumbnailMode(bool enabled) {
@@ -472,13 +481,6 @@ void CloseCommandPalette() {
     }
     gCommandPaletteWnd = nullptr;
     MainWindow* win = wnd->win;
-#if OS_WIN
-    if (wnd->queryEdit) {
-        HWND edit = wnd->queryEdit;
-        wnd->queryEdit = nullptr;
-        DestroyWindow(edit);
-    }
-#endif
     if (wnd->tw) {
         ToolWindowClose(wnd->tw);
         wnd->tw = nullptr;
@@ -738,7 +740,7 @@ static TempStr EditedSettingPathTemp() {
     Str filter = CommandPaletteSkipWS(QueryTemp());
     str::TrimPrefix(filter, Str(kPalettePrefixBoolSettings));
     Str path, value, foundPath;
-    if (!SplitSettingValueQuery(filter, path, value) || !FindSetting(path, foundPath)) {
+    if (!SplitSettingValueQuery(filter, path, value) || !FindPaletteSetting(*gCommandPaletteWnd, path, foundPath)) {
         return {};
     }
     return str::DupTemp(foundPath);
@@ -850,14 +852,6 @@ static void ExecuteCurrentSelection() {
 }
 
 // what the palette shows for Delete; macOS has Cmd+Backspace instead
-static TempStr RestoreDefaultHelpTemp() {
-#if OS_DARWIN
-    return str::DupTemp(Tr("Cmd+Backspace restore default"));
-#else
-    return str::DupTemp(Tr("Del restore default"));
-#endif
-}
-
 // Delete on a removable row: a file-history entry, an open tab or a favorite.
 // Commands and TOC entries are not removable.
 static bool RemoveSelectedItem() {
@@ -898,15 +892,11 @@ static bool RemoveSelectedItem() {
         return true;
     }
     CollectStrings(host);
-    FilterStringsForQuery(CommandPaletteSkipWS(QueryTemp()), wnd->items);
+    FilterPaletteStrings(*wnd, CommandPaletteSkipWS(QueryTemp()), wnd->items);
     int n = len(wnd->items);
     SetCurrentSelection(n == 0 ? -1 : std::min(currSel, n - 1));
     return true;
 }
-
-#if OS_WIN
-static void PaletteAttachQueryEdit(CommandPaletteWnd* wnd);
-#endif
 
 // orig's list-box dump. exit 2 when the palette is not open.
 TempStr CommandPaletteStateTemp(int* exitCodeOut) {
@@ -922,21 +912,11 @@ TempStr CommandPaletteStateTemp(int* exitCodeOut) {
         out.Append(StrL("NOTREADY no-palette\n"));
         return finish(2);
     }
-#if OS_WIN
-    // the query Edit appears with the tool window, after this state is first visible
-    if (!wnd->queryEdit) {
-        PaletteAttachQueryEdit(wnd);
-    }
-    if (!wnd->queryEdit) {
+    // in a window of its own: ready once that window is made
+    if (!wnd->editQuery || (wnd->tw && !ToolWindowGpui(wnd->tw))) {
         out.Append(StrL("NOTREADY no-palette\n"));
         return finish(2);
     }
-#else
-    if (!wnd->editQuery) {
-        out.Append(StrL("NOTREADY no-palette\n"));
-        return finish(2);
-    }
-#endif
     int sel = wnd->sel;
     int n = len(wnd->items);
     int selectedCmdId = 0;
@@ -1090,6 +1070,14 @@ static TempStr UpdateCommandNameTemp(MainWindow* win, int cmdId, Str s) {
             bool visible = SettingsUseTabs() ? gSettings->showMenubarWithTabs : gSettings->showMenubar;
             newIsOn = !visible;
         } break;
+        case CmdToggleCaption: {
+            isToggle = true;
+            newIsOn = !gSettings->showCaption;
+        } break;
+        case CmdToggleSidebarAutoHide: {
+            isToggle = true;
+            newIsOn = !gSettings->sidebarAutoHide;
+        } break;
         case CmdToggleBookmarks:
         case CmdToggleTableOfContents: {
             isToggle = true;
@@ -1174,7 +1162,7 @@ static TempStr UpdateCommandNameTemp(MainWindow* win, int cmdId, Str s) {
         } break;
         case CmdFavoriteToggle: {
             isToggle = true;
-            newIsOn = !gSettings->showFavorites;
+            newIsOn = !SidebarContentVisible(win, SidebarContent::Favorites);
         } break;
         case CmdTogglePageInfo: {
             isToggle = true;
@@ -1466,138 +1454,6 @@ static void CollectStrings(MainWindow* mainWin) {
 
 // --- filtering --------------------------------------------------------------
 
-// The setting at a full dotted path, or an unambiguous leaf ("Units" for
-// "FixedPageUI.PageGrid.Units") so the name can be typed by hand
-static ItemDataCP* FindSetting(Str path, Str& foundPath) {
-    CommandPaletteWnd* wnd = gCommandPaletteWnd;
-    ItemDataCP* found = nullptr;
-    int nLeaf = 0;
-    for (int i = 0; i < len(wnd->settings); i++) {
-        Str s = wnd->settings[i];
-        if (str::EqI(s, path)) {
-            found = wnd->settings.AtData(i);
-            foundPath = s;
-            nLeaf = 1;
-            break;
-        }
-        Str leaf = str::SliceFromCharLast(s, '.');
-        if (len(leaf) > 1 && str::EqI(Str(leaf.s + 1, leaf.len - 1), path)) {
-            nLeaf++;
-            found = wnd->settings.AtData(i);
-            foundPath = s;
-        }
-    }
-    if (nLeaf != 1) {
-        return nullptr;
-    }
-    return found;
-}
-
-// Rows for the value stage: an enum offers its allowed values, anything else
-// offers the one value being typed. Enter on a row applies it (see
-// ExecuteCurrentSelection).
-static void FillSettingValueRows(Str path, Str value, StrVecCP& out) {
-    CommandPaletteWnd* wnd = gCommandPaletteWnd;
-    Str foundPath;
-    ItemDataCP* found = FindSetting(path, foundPath);
-    if (!found || found->settingType == SettingType::Bool) {
-        return;
-    }
-    ItemDataCP data = *found;
-    data.settingPath = foundPath;
-    const char** enumValues = GetSettingsEnumValues(foundPath);
-    if (!enumValues) {
-        // clearing a string is meaningful, an empty number is not
-        bool isStr = found->settingType != SettingType::Int && found->settingType != SettingType::Float;
-        if (len(value) > 0 || isStr) {
-            out.Append(value, data);
-        }
-        return;
-    }
-    for (const char** v = enumValues; *v; v++) {
-        Str s(*v);
-        // the empty choice means "unset"; it can't be a row you pick, so leave
-        // it to the advanced settings dialog
-        if (len(s) == 0 || (len(value) > 0 && !FilterMatches(s, wnd->filterWords))) {
-            continue;
-        }
-        out.Append(s, data);
-    }
-}
-
-static void FilterStringsForQuery(Str filter, StrVecCP& strings) {
-    CommandPaletteWnd* wnd = gCommandPaletteWnd;
-    strings.Reset();
-    if (len(filter) == 0) {
-        filter = StrL("");
-    }
-
-    PaletteMode mode = ParsePaletteMode(filter);
-    if (mode == PaletteMode::Thumbnails) {
-        return;
-    }
-    bool searchTabs = mode == PaletteMode::Tabs || mode == PaletteMode::Everything;
-    bool searchHistory = mode == PaletteMode::FileHistory || mode == PaletteMode::Everything;
-    bool searchCommands = mode == PaletteMode::Commands || mode == PaletteMode::Everything;
-    bool searchToc = mode == PaletteMode::Toc;
-    bool searchFavorites = mode == PaletteMode::Favorites;
-    bool searchAnnotations = mode == PaletteMode::Annotations;
-    bool searchSettings = mode == PaletteMode::Settings;
-
-    wnd->filterWords.Reset();
-    if (searchSettings) {
-        Str path, value;
-        if (SplitSettingValueQuery(filter, path, value)) {
-            SplitFilterToWords(value, wnd->filterWords);
-            FillSettingValueRows(path, value, strings);
-            // the rows are the values themselves: nothing to highlight
-            wnd->filterWords.Reset();
-            return;
-        }
-    }
-    if (searchAnnotations) {
-        AnnotMatchOpts opts;
-        if (!ParseAnnotSearch(filter, opts)) {
-            opts.Reset();
-            StrVec words;
-            SplitFilterToWords(filter, words);
-            for (Str w : words) {
-                AnnotSearchAddContentWord(opts, w);
-            }
-        }
-        AnnotSearchContentWords(opts, wnd->filterWords);
-        int n = len(wnd->annotations);
-        for (int i = 0; i < n; i++) {
-            ItemDataCP* data = wnd->annotations.AtData(i);
-            if (data && AnnotMatches(data->annot, opts)) {
-                strings.AppendFrom(&wnd->annotations, i);
-            }
-        }
-        return;
-    }
-
-    SplitFilterToWords(filter, wnd->filterWords);
-
-    if (searchTabs) {
-        FilterStrings(wnd->tabs, wnd->filterWords, strings);
-    }
-    if (searchHistory) {
-        FilterStrings(wnd->fileHistory, wnd->filterWords, strings);
-    }
-    if (searchCommands) {
-        FilterStrings(wnd->commands, wnd->filterWords, strings);
-    }
-    if (searchToc) {
-        FilterStrings(wnd->toc, wnd->filterWords, strings);
-    }
-    if (searchFavorites) {
-        FilterStrings(wnd->favorites, wnd->filterWords, strings);
-    }
-    if (searchSettings) {
-        FilterStrings(wnd->settings, wnd->filterWords, strings);
-    }
-}
-
 // the document's annotations changed while the palette is up: re-collect them
 // and re-filter, but only when the query is still in annotation mode
 void CommandPaletteOnAnnotationsChanged() {
@@ -1610,7 +1466,7 @@ void CommandPaletteOnAnnotationsChanged() {
     if (!str::StartsWith(filter, Str(kPalettePrefixAnnotations))) {
         return;
     }
-    FilterStringsForQuery(filter, wnd->items);
+    FilterPaletteStrings(*wnd, filter, wnd->items);
     AppShellInvalidate(wnd->win);
 }
 
@@ -1623,7 +1479,7 @@ void CommandPaletteOnSettingsReloaded() {
     }
     int currSel = wnd->sel;
     CollectStrings(wnd->win);
-    FilterStringsForQuery(CommandPaletteSkipWS(QueryTemp()), wnd->items);
+    FilterPaletteStrings(*wnd, CommandPaletteSkipWS(QueryTemp()), wnd->items);
     int n = len(wnd->items);
     SetCurrentSelection(n == 0 ? -1 : std::min(currSel, n - 1));
     AppShellInvalidate(wnd->win);
@@ -1696,7 +1552,7 @@ static void QueryChanged() {
         wnd->stickyMode = true;
         currSelIdx = wnd->sel;
     }
-    FilterStringsForQuery(filter, wnd->items);
+    FilterPaletteStrings(*wnd, filter, wnd->items);
     int nItems = len(wnd->items);
     if (nItems == 0) {
         SetCurrentSelection(-1);
@@ -1739,7 +1595,7 @@ void RunCommandPalette(MainWindow* win, Str prefix, int smartTabAdvance) {
     wnd->wantFocus = true;
 
     CollectStrings(win);
-    FilterStringsForQuery(prefix, wnd->items);
+    FilterPaletteStrings(*wnd, prefix, wnd->items);
     if (str::StartsWith(prefix, Str(kPalettePrefixThumbnails))) {
         SetThumbnailMode(true);
     }
@@ -1763,8 +1619,11 @@ void PaletteView::OnInput(PaletteView*, gp::Ctx* cx, const gp::InputEvent* ev) {
         return;
     }
     if (ev->kind == gp::InputEventKind::PressEnter) {
-        ExecuteCurrentSelection();
-        gp::Notify(cx);
+        // in the frame the key goes on to CommandPaletteOnKeyDown, which runs the row
+        if (ToolWindowsAvailable()) {
+            ExecuteCurrentSelection();
+            gp::Notify(cx);
+        }
         return;
     }
     if (ev->kind != gp::InputEventKind::Change) {
@@ -1833,53 +1692,10 @@ void PaletteView::OnThumbScroll(PaletteView*, gp::Ctx* cx, const gp::ScrollEvent
     gp::Notify(cx);
 }
 
-// a key drawn as a key cap: light fill, darker rounded border
-static gp::El* KeyCap(gp::Ctx* cx, gp::El* text) {
-    constexpr float kKeyCapMinDx = 22;
-    constexpr float kKeyCapPadX = 5;
-    constexpr float kKeyCapPadY = 1;
-    constexpr float kKeyCapRadius = 4;
-    const gp::Theme& th = gp::ThemeNow(cx->app);
-    return gp::Div(cx->a)
-        ->FlexRow()
-        ->Shrink0()
-        ->ItemsCenter()
-        ->JustifyCenter()
-        ->MinW(kKeyCapMinDx)
-        ->PadX(kKeyCapPadX)
-        ->PadY(kKeyCapPadY)
-        ->Radius(kKeyCapRadius)
-        ->Bg(th.tokens.muted)
-        ->Border(1, th.border)
-        ->Child(text);
-}
-
-static TempStr RightColumnTemp(ItemDataCP* data) {
-    if (data->cmdId != 0) {
-        return CommandPaletteShortcutTemp(data->cmdId);
-    }
-    if (IsSettingRow(data) && len(data->settingPath) == 0) {
-        return FormatSettingValueTemp(data->settingType, SettingRowPtr(data));
-    }
-    if (data->annot) {
-        return fmt("p%d", data->pageNo);
-    }
-    if (data->pageNo > 0) {
-        // toc entry: show the destination page number on the right, e.g. "p33"
-        return fmt("p%d", data->pageNo);
-    }
-    if (data->tocItem && data->tocItem->loc.chapter >= 1) {
-        // chaptered doc: destination unresolved until clicked, show the chapter
-        return fmt("ch%d", data->tocItem->loc.chapter);
-    }
-    if (data->filePath) {
-        return path::GetDirTemp(data->filePath);
-    }
-    return {};
-}
-
 static gp::El* BuildList(CommandPaletteWnd* wnd, gp::Ctx* cx, float listDy) {
-    const gp::Theme& th = gp::ThemeNow(cx->app);
+    Color colBg = ThemeWindowControlBackgroundColor();
+    Color colText = ThemeWindowTextColor();
+    Color colMuted = ThemeWindowTextDisabledColor();
     // keep the selected row visible; gpui has no EnsureVisible for a plain box
     int visibleRows = std::max((int)(listDy / kPaletteRowDy), 1);
     if (wnd->sel >= 0) {
@@ -1895,7 +1711,7 @@ static gp::El* BuildList(CommandPaletteWnd* wnd, gp::Ctx* cx, float listDy) {
     wnd->scrollOff = limitValue(wnd->scrollOff, 0.f, maxOff);
     (void)visibleRows;
 
-    gp::El* list = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->H(listDy)->ScrollY(wnd->scrollOff);
+    gp::El* list = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->H(listDy)->PadX(kPaletteInsetDx)->ScrollY(wnd->scrollOff);
     int n = len(wnd->items);
     for (int i = 0; i < n; i++) {
         ItemDataCP* data = wnd->items.AtData(i);
@@ -1906,11 +1722,12 @@ static gp::El* BuildList(CommandPaletteWnd* wnd, gp::Ctx* cx, float listDy) {
                           ->H(kPaletteRowDy)
                           ->Shrink0()
                           ->ItemsCenter()
-                          ->PadX(6)
+                          ->PadX(kPaletteInsetDx)
+                          ->Radius(kPaletteSelectionRadius)
                           ->PathClick(GpuiDup(cx->a, fmt("palette-row-%d", i)))
                           ->OnClick(gp::ListenTo(gPaletteView, &PaletteView::OnRowClick, (intptr_t)i));
         if (i == wnd->sel) {
-            row->Bg(th.selection);
+            row->Bg(ToGpui(AccentColor(colBg, 28)));
         }
         if (data->indent > 0) {
             row->Child(gp::Div(cx->a)->W((float)(data->indent * 16))->Shrink0());
@@ -1923,42 +1740,56 @@ static gp::El* BuildList(CommandPaletteWnd* wnd, gp::Ctx* cx, float listDy) {
         } else {
             left->Flex1()->MinW(0);
         }
-        left->Child(FilterHighlightText(cx, itemText, wnd->filterWords, th.foreground, 13));
+        left->Child(FilterHighlightText(cx, itemText, wnd->filterWords, ToGpui(colText), kPaletteTextFontPx));
         if (data->annot) {
             Str contents = Contents(data->annot);
             if (len(contents) > 0) {
                 left->Child(gp::TextEl(cx->a, GpuiDup(cx->a, str::JoinTemp(StrL("  "), contents)))
-                                ->Font(13)
-                                ->Fg(th.mutedFg)
+                                ->Font(kPaletteTextFontPx)
+                                ->Fg(ToGpui(colMuted))
                                 ->Truncate());
             }
         }
         row->Child(left);
-        TempStr right = RightColumnTemp(data);
+        // a color setting shows its color before the value, as in advanced settings
+        Color swatch;
+        if (PaletteRowColor(data, itemText, &swatch)) {
+            row->Child(gp::Div(cx->a)->W(kPaletteSwatchGap)->Shrink0());
+            row->Child(gp::Div(cx->a)
+                           ->W(kPaletteSwatchDx)
+                           ->H(kPaletteSwatchDx)
+                           ->Shrink0()
+                           ->Bg(ToGpui(swatch))
+                           ->Border(1, ToGpui(ThemeEdgeColor())));
+        }
+        TempStr right = PaletteRightColumnTemp(data);
         if (len(right) > 0) {
-            bool emphasized = IsSettingRow(data) && len(data->settingPath) == 0 && SettingDiffersFromDefault(data);
-            gp::Rgba rightFg = emphasized ? th.foreground : th.mutedFg;
+            // a setting's value reads as part of the row; one off its default is bold
+            bool settingValue = IsSettingRow(data) && len(data->settingPath) == 0;
+            bool emphasized = settingValue && SettingDiffersFromDefault(data);
+            gp::Rgba rightFg = ToGpui(settingValue ? colText : colMuted);
             int boldLen = emphasized ? len(right) : 0;
-            gp::El* rightEl = FilterHighlightText(cx, right, wnd->filterWords, rightFg, 12, 0, boldLen);
+            gp::El* rightEl = FilterHighlightText(cx, right, wnd->filterWords, rightFg, kPaletteMetaFontPx, 0, boldLen);
             if (fileRow) {
                 rightEl->Flex1()->MinW(0)->ClipX();
             } else {
                 rightEl->Shrink0();
             }
-            row->Child(gp::Div(cx->a)->W(8)->Shrink0());
-            if (data->cmdId != 0) {
-                rightEl = KeyCap(cx, rightEl);
-            }
+            row->Child(gp::Div(cx->a)->W(kPalettePadDx)->Shrink0());
             row->Child(rightEl);
         }
         list->Child(row);
     }
     if (n == 0) {
-        list->Child(gp::Div(cx->a)
-                        ->W(gp::kFill)
-                        ->H(kPaletteRowDy)
-                        ->PadX(6)
-                        ->Child(gp::TextEl(cx->a, ToGpui(Tr("No result found")))->Font(13)->Fg(th.mutedFg)));
+        list->Child(
+            gp::Div(cx->a)
+                ->W(gp::kFill)
+                ->H(kPaletteRowDy)
+                ->PadX(kPaletteInsetDx)
+                ->FlexRow()
+                ->ItemsCenter()
+                ->Child(
+                    gp::TextEl(cx->a, ToGpui(Tr("No result found")))->Font(kPaletteTextFontPx)->Fg(ToGpui(colMuted))));
     }
     return list;
 }
@@ -2072,117 +1903,73 @@ static gp::El* BuildThumbnails(CommandPaletteWnd* wnd, gp::Ctx* cx, float listDx
 }
 
 // the "# History" / "> Commands" switches in the top row
+// the mode switches: the one the query is in takes the text color, the others
+// are muted
 static gp::El* BuildSwitchRow(CommandPaletteWnd* wnd, gp::Ctx* cx) {
-    const gp::Theme& th = gp::ThemeNow(cx->app);
-    gp::El* row = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->JustifyCenter()->ItemsCenter()->Gap(4)->Shrink0();
-    auto addSwitch = [&](Str label, int prefixIdx) {
+    Color colText = ThemeWindowTextColor();
+    Color colMuted = ThemeWindowTextDisabledColor();
+    TempStr filter = CommandPaletteSkipWS(QueryTemp());
+    gp::El* row = gp::Div(cx->a)
+                      ->FlexRow()
+                      ->W(gp::kFill)
+                      ->H(kPaletteSwitchRowDy)
+                      ->PadX(kPalettePadDx)
+                      ->JustifyCenter()
+                      ->ItemsCenter()
+                      ->Gap(18)
+                      ->Shrink0();
+    PaletteSwitch switches[kPaletteMaxSwitches];
+    int n = PaletteSwitches(*wnd, wnd->win->AsFixed() != nullptr, switches);
+    for (int i = 0; i < n; i++) {
+        PaletteSwitch& sw = switches[i];
+        int prefixIdx = -1;
+        for (int k = 0; k < dimofi(gSwitchPrefixes); k++) {
+            if (str::Eq(sw.prefix, Str(gSwitchPrefixes[k]))) {
+                prefixIdx = k;
+            }
+        }
+        bool active = PaletteSwitchIsActive(filter, sw.prefix);
         gp::El* el = gp::Div(cx->a)
                          ->FlexRow()
                          ->ItemsCenter()
-                         ->Gap(4)
-                         ->PadX(8)
-                         ->H(20)
-                         ->Radius(4)
+                         ->Gap(6)
                          ->Cursor(gp::CursorKind::Pointer)
                          ->PathClick(GpuiDup(cx->a, fmt("palette-switch-%d", prefixIdx)))
                          ->OnClick(gp::ListenTo(gPaletteView, &PaletteView::OnSwitchClick, (intptr_t)prefixIdx));
-        // the leading character is the prefix: draw it as a key cap, as orig does
-        el->Child(KeyCap(cx, gp::TextEl(cx->a, GpuiDup(cx->a, Str(label.s, 1)))->Font(12)->Fg(th.foreground)));
-        el->Child(gp::TextEl(cx->a, GpuiDup(cx->a, Str(label.s + 1, len(label) - 1)))->Font(12)->Fg(th.mutedFg));
+        el->Child(DlgKeyCap(cx, sw.prefix, active));
+        el->Child(gp::TextEl(cx->a, GpuiDup(cx->a, PaletteSwitchLabel(sw.label, sw.prefix)))
+                      ->Font(kPaletteMetaFontPx)
+                      ->Fg(ToGpui(active ? colText : colMuted)));
         row->Child(el);
-    };
-    addSwitch(Tr("> Commands"), 0);
-    addSwitch(Tr("@ Tabs"), 1);
-    addSwitch(Tr("# History"), 2);
-    if (len(wnd->favorites) > 0) {
-        addSwitch(Tr("$ Favorites"), 3);
     }
-    if (len(wnd->toc) > 0) {
-        addSwitch(Tr("% TOC"), 4);
-    }
-    if (wnd->win->AsFixed()) {
-        addSwitch(Tr("& Thumbnails"), 5);
-    }
-    if (len(wnd->annotations) > 0) {
-        addSwitch(Tr("* Annotations"), 6);
-    }
-    addSwitch(Tr("= Settings"), 7);
     return row;
 }
 
+// the footer: the key hints on the left, "26 of 212" on the right
 static gp::El* BuildHelpRow(CommandPaletteWnd* wnd, gp::Ctx* cx) {
-    const gp::Theme& th = gp::ThemeNow(cx->app);
+    Color colMuted = ThemeWindowTextDisabledColor();
     TempStr filter = CommandPaletteSkipWS(QueryTemp());
     int kind = PaletteHelpKind(filter, wnd->smartTabMode);
-    Str strings[4];
-    // "Release Ctrl select": the key is the first 2 words
-    int keyWords[4] = {1, 1, 1, 1};
-    int nHelp = 0;
-    switch (kind) {
-        case kHelpSmartTab:
-            strings[nHelp++] = Tr("Ctrl+Tab navigate");
-            keyWords[nHelp] = 2;
-            strings[nHelp++] = Tr("Release Ctrl select");
-            strings[nHelp++] = Tr("Space for sticky mode");
-            strings[nHelp++] = Tr("Del close tab");
-            break;
-        case kHelpHistory:
-            strings[nHelp++] = Tr("Enter open file");
-            strings[nHelp++] = Tr("Del remove from history");
-            strings[nHelp++] = Tr("Esc close");
-            break;
-        case kHelpTabs:
-            strings[nHelp++] = Tr("Enter switch to tab");
-            strings[nHelp++] = Tr("Del close tab");
-            strings[nHelp++] = Tr("Esc close");
-            break;
-        case kHelpFavorites:
-            strings[nHelp++] = Tr("Enter go to favorite");
-            strings[nHelp++] = Tr("Del remove favorite");
-            strings[nHelp++] = Tr("Esc close");
-            break;
-        case kHelpAnnotations:
-        case kHelpThumbnails:
-        case kHelpToc:
-            strings[nHelp++] = Tr("Enter go to");
-            strings[nHelp++] = Tr("Esc close");
-            break;
-        case kHelpSettings:
-            strings[nHelp++] = Tr("Enter change");
-            strings[nHelp++] = RestoreDefaultHelpTemp();
-            strings[nHelp++] = Tr("Esc close");
-            break;
-        case kHelpSettingValue:
-            strings[nHelp++] = Tr("Enter apply");
-            strings[nHelp++] = RestoreDefaultHelpTemp();
-            strings[nHelp++] = Tr("Esc go back");
-            break;
-        case kHelpEverything:
-            strings[nHelp++] = Tr("Enter select");
-            strings[nHelp++] = Tr("Esc close");
-            break;
-        default:
-            strings[nHelp++] = Tr("Enter run command");
-            strings[nHelp++] = Tr("Esc close");
-            break;
-    }
-    gp::El* row = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->JustifyCenter()->ItemsCenter()->Gap(12)->Shrink0();
+    PaletteHint hints[kPaletteMaxHints];
+    int nHelp = PaletteHelpHints(kind, hints);
+    gp::El* row = gp::Div(cx->a)
+                      ->FlexRow()
+                      ->W(gp::kFill)
+                      ->H(kPaletteFootDy)
+                      ->Shrink0()
+                      ->PadX(kPalettePadDx)
+                      ->ItemsCenter()
+                      ->Gap(18);
     for (int i = 0; i < nHelp; i++) {
-        Str s = strings[i];
-        int keyLen = 0;
-        for (int w = 0; w < keyWords[i] && keyLen < len(s); w++) {
-            keyLen += (w > 0);
-            while (keyLen < len(s) && s.s[keyLen] != ' ') {
-                keyLen++;
-            }
-        }
-        Str key = Str(s.s, keyLen);
-        Str desc = keyLen < len(s) ? Str(s.s + keyLen + 1, len(s) - keyLen - 1) : Str();
-
-        gp::El* hint = gp::Div(cx->a)->FlexRow()->ItemsCenter()->Gap(4);
-        hint->Child(KeyCap(cx, gp::TextEl(cx->a, GpuiDup(cx->a, key))->Font(11)->Fg(th.foreground)));
-        hint->Child(gp::TextEl(cx->a, GpuiDup(cx->a, desc))->Font(11)->Fg(th.mutedFg));
+        gp::El* hint = gp::Div(cx->a)->FlexRow()->ItemsCenter()->Gap(6);
+        hint->Child(DlgKeyCap(cx, hints[i].key));
+        hint->Child(gp::TextEl(cx->a, GpuiDup(cx->a, hints[i].desc))->Font(kPaletteMetaFontPx)->Fg(ToGpui(colMuted)));
         row->Child(hint);
+    }
+    TempStr count = PaletteCountTemp(len(wnd->items), PaletteSourceCount(*wnd, filter));
+    if (len(count) > 0) {
+        row->Child(gp::Div(cx->a)->Flex1());
+        row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, count))->Font(kPaletteMetaFontPx)->Fg(ToGpui(colMuted)));
     }
     return row;
 }
@@ -2206,14 +1993,19 @@ static gp::El* BuildSettingHelp(CommandPaletteWnd* wnd, gp::Ctx* cx) {
     if (idx >= 0 && idx < len(wnd->items)) {
         comment = wnd->items.AtData(idx)->settingComment;
     }
+    (void)th;
     return gp::Div(cx->a)
         ->W(gp::kFill)
         ->H(kSettingHelpDy)
         ->Shrink0()
         ->Pad(6)
-        ->Border(1, th.border)
+        ->Border(1, ToGpui(ThemeEdgeColor()))
         ->ClipY()
-        ->Child(gp::TextEl(cx->a, GpuiDup(cx->a, comment))->Font(12)->Fg(th.foreground)->Wrap()->W(gp::kFill));
+        ->Child(gp::TextEl(cx->a, GpuiDup(cx->a, comment))
+                    ->Font(kPaletteMetaFontPx)
+                    ->Fg(ToGpui(ThemeWindowTextColor()))
+                    ->Wrap()
+                    ->W(gp::kFill));
 }
 
 static RectF PaletteBounds(MainWindow* win, CommandPaletteWnd* wnd) {
@@ -2260,57 +2052,6 @@ static Size PaletteWindowSize(MainWindow* win, CommandPaletteWnd* wnd) {
     return Size(dx, dy);
 }
 
-#if OS_WIN
-constexpr UINT_PTR kPaletteQuerySubclassId = 7;
-
-// WM_SETTEXT and the keys tests post at the query Edit. The box they see is
-// this control; the text they filter is the gpui input.
-static LRESULT CALLBACK PaletteQueryProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR dw) {
-    auto* win = (MainWindow*)dw;
-    if (msg == WM_SETTEXT && lp) {
-        CommandPaletteSetText(win, (const WCHAR*)lp);
-    }
-    if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
-        bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-        bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        if (CommandPaletteOnKeyDown(win, (int)wp, ctrl, shift)) {
-            return 0;
-        }
-    }
-    if (msg == WM_KEYUP) {
-        CommandPaletteOnKeyUp(win, (int)wp);
-    }
-    if (msg == WM_NCDESTROY) {
-        RemoveWindowSubclass(hwnd, PaletteQueryProc, kPaletteQuerySubclassId);
-    }
-    return DefSubclassProc(hwnd, msg, wp, lp);
-}
-
-static void PaletteAttachQueryEdit(CommandPaletteWnd* wnd) {
-    if (!wnd || wnd->queryEdit) {
-        return;
-    }
-    HWND parent = wnd->tw ? ToolWindowOrigHwnd(wnd->tw) : nullptr;
-    if (!parent) {
-        return;
-    }
-    HWND edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 1, 1, parent, nullptr,
-                                GetModuleHandleW(nullptr), nullptr);
-    if (!edit) {
-        return;
-    }
-    SetWindowSubclass(edit, PaletteQueryProc, kPaletteQuerySubclassId, (DWORD_PTR)wnd->win);
-    wnd->queryEdit = edit;
-}
-
-static void PaletteFocusQueryEdit(CommandPaletteWnd* wnd) {
-    if (!wnd || !wnd->queryEdit || GetFocus() == wnd->queryEdit) {
-        return;
-    }
-    SetFocus(wnd->queryEdit);
-}
-#endif
-
 static gp::El* PaletteToolBuild(MainWindow* win, gp::Ctx* cx) {
     CommandPaletteWnd* wnd = gCommandPaletteWnd;
     if (!wnd || !wnd->visible || wnd->win != win || !wnd->tw || ToolWindowGpui(wnd->tw) != cx->win) {
@@ -2319,23 +2060,13 @@ static gp::El* PaletteToolBuild(MainWindow* win, gp::Ctx* cx) {
     // orig's WA_INACTIVE: the palette goes when another window is activated.
     // The query Edit lives on the orig-class window, so focus there is still us.
     bool active = gp::WindowIsActive(cx);
-#if OS_WIN
-    if (!active && wnd->queryEdit && GetFocus() == wnd->queryEdit) {
-        active = true;
-    }
-#endif
     if (wnd->wasActive && !active) {
         CloseCommandPalette();
         return nullptr;
     }
     wnd->wasActive = active;
     gp::WinSize ws = gp::WindowSize(cx->win);
-    gp::El* card = PaletteCard(wnd, cx, RectF(0, 0, ws.dipW, ws.dipH));
-#if OS_WIN
-    PaletteAttachQueryEdit(wnd);
-    PaletteFocusQueryEdit(wnd);
-#endif
-    return card;
+    return PaletteCard(wnd, cx, RectF(0, 0, ws.dipW, ws.dipH));
 }
 
 static bool PaletteToolOnKey(MainWindow* win, gp::Ctx*, const gp::KeyEvent* ev) {
@@ -2425,34 +2156,44 @@ static gp::El* PaletteCard(CommandPaletteWnd* wnd, gp::Ctx* cx, RectF bounds) {
     const gp::Theme& th = gp::ThemeNow(cx->app);
     wnd->editQuery->onChange = gp::ListenTo(gPaletteView, &PaletteView::OnInput);
 
+    (void)th;
     gp::El* card = gp::Div(cx->a)
                        ->FlexCol()
                        ->W(bounds.dx)
                        ->H(bounds.dy)
-                       ->Gap(6)
-                       ->Pad(8)
-                       ->Bg(th.tokens.popover)
-                       ->Border(1, th.border);
-    card->Child(gpc::Input::New(cx, GStrL("palette-query"), wnd->editQuery)
-                    ->WithSize(gp::UiSize::Small)
+                       ->Bg(ToGpui(ThemeWindowControlBackgroundColor()))
+                       ->Border(1, ToGpui(ThemeEdgeColor()));
+    // the query line: a bare input over a hairline
+    card->Child(gp::Div(cx->a)
+                    ->FlexRow()
                     ->W(gp::kFill)
-                    ->IntoEl());
+                    ->H(kPaletteQueryDy)
+                    ->Shrink0()
+                    ->ItemsCenter()
+                    ->PadX(kPalettePadDx - kPaletteInsetDx)
+                    ->Child(gpc::Input::New(cx, GStrL("palette-query"), wnd->editQuery)
+                                ->Appearance(false)
+                                ->W(gp::kFill)
+                                ->IntoEl()
+                                ->Font(kPaletteQueryFontPx)));
+    card->Child(DlgHairline(cx));
     if (!wnd->smartTabMode) {
         card->Child(BuildSwitchRow(wnd, cx));
     }
-    float listDy = bounds.dy - (wnd->smartTabMode ? 74.f : 100.f);
+    float listDy = bounds.dy - kPaletteQueryDy - 1 - kPaletteFootDy - (wnd->smartTabMode ? 0 : kPaletteSwitchRowDy);
     bool settingHelp = !wnd->thumbnailMode && ShowsSettingHelp(wnd);
     if (settingHelp) {
         listDy -= kSettingHelpDy + kPaletteGapDy;
     }
     listDy = std::max(listDy, kPaletteRowDy);
     if (wnd->thumbnailMode) {
-        card->Child(BuildThumbnails(wnd, cx, bounds.dx - 16, listDy));
+        card->Child(BuildThumbnails(wnd, cx, bounds.dx - (2 * kPaletteInsetDx), listDy));
     } else {
         card->Child(BuildList(wnd, cx, listDy));
     }
     if (settingHelp) {
-        card->Child(BuildSettingHelp(wnd, cx));
+        card->Child(
+            gp::Div(cx->a)->W(gp::kFill)->PadX(kPaletteInsetDx)->PadB(kPaletteGapDy)->Child(BuildSettingHelp(wnd, cx)));
     }
     card->Child(BuildHelpRow(wnd, cx));
 

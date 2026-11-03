@@ -292,6 +292,14 @@ int ToolbarDy(MainWindow* win) {
     return AnnotRowVisible(win) ? (2 * tb->rowDy) : tb->rowDy;
 }
 
+// The row a document tab gets, for sizing a document while Home is current.
+int ToolbarDocTabDy(MainWindow* win) {
+    if (win->presentation || win->isQuickLook || ToolbarModeForWindow(win) != kToolbarShow) {
+        return 0;
+    }
+    return Tb(win)->rowDy;
+}
+
 // ng: every button's state is recomputed while the row is built, so these are
 // only a repaint request. They keep orig's names so the callers stay unchanged.
 void ToolbarUpdateStateForWindow(MainWindow* win, bool) {
@@ -1035,12 +1043,9 @@ static gp::El* BuildAnnotColorStrip(MainWindow* win, gp::Ctx* cx) {
 
 // --- the row ----------------------------------------------------------------
 
+// a separator is a gap between button groups, not a line
 static gp::El* ToolbarSeparator(gp::Ctx* cx, int rowDy) {
-    int inset = DpiScale(6);
-    gp::El* box =
-        gp::Div(cx->a)->FlexRow()->W((float)DpiScale(8))->H((float)rowDy)->Shrink0()->ItemsCenter()->JustifyCenter();
-    box->Child(gp::Div(cx->a)->W(1)->H((float)(rowDy - 2 * inset))->Bg(ToGpui(TbEdgeColor())));
-    return box;
+    return gp::Div(cx->a)->W((float)DpiScale(12))->H((float)rowDy)->Shrink0();
 }
 
 static gp::El* ToolbarIcon(gp::Ctx* cx, Str svg, int iconSize, Color col) {
@@ -1313,44 +1318,6 @@ static void SyncLocationEdits(MainWindow* win) {
     SetEditText(tb->pageEdit, ctrl->GetPageLabeTemp(ctrl->CurrentPageNo()));
 }
 
-// ng: orig dumps the toolbar for its -dbg-control tests
-// (ToolbarButtonsResultTemp); the log is where this port's tests read it. Only
-// when it changed: this runs on every frame.
-static Str gLoggedButtons;
-
-static void LogToolbarButtons(MainWindow* win, const Vec<bool>& hidden, AppCommandCtx* ctx) {
-    str::Builder b;
-    int n = TotalButtonsCount();
-    for (int i = 0; i < n; i++) {
-        const ToolbarButtonInfo& bi = GetToolbarButtonInfoByIdx(i);
-        if (hidden[i]) {
-            continue;
-        }
-        b.AppendNonEmpty(len(b) == 0 ? StrL("") : StrL(" "));
-        if (bi.cmdId == 0) {
-            b.Append(StrL("|"));
-            continue;
-        }
-        if (bi.cmdId == PageInfoId) {
-            b.Append(StrL("PageInfo"));
-            continue;
-        }
-        Str name = GetCommandName(bi.cmdId);
-        b.Append(len(name) > 0 ? name : StrL("Custom"));
-        if (!IsCmdEnabled(win, bi.cmdId, ctx)) {
-            b.Append(StrL("(off)"));
-        } else if (IsCmdChecked(win, bi.cmdId)) {
-            b.Append(StrL("(checked)"));
-        }
-    }
-    Str s = b.TakeStr();
-    if (!str::Eq(s, gLoggedButtons)) {
-        str::ReplaceWithCopy(&gLoggedButtons, s);
-        logf("ToolbarButtons: %s\n", s);
-    }
-    str::Free(s);
-}
-
 gp::El* ToolbarBuild(MainWindow* win, gp::Ctx* cx) {
     Toolbar* tb = Tb(win);
     ToolbarUI* ui = Ui(win);
@@ -1461,7 +1428,6 @@ gp::El* ToolbarBuild(MainWindow* win, gp::Ctx* cx) {
     if (!floating) {
         row->Child(gp::Div(cx->a)->Flex1()->H(gp::kFill)->Click(gp::ClickWinCaption));
     }
-    LogToolbarButtons(win, hidden, ctx);
 
     if (tb->wantPageFocus) {
         tb->wantPageFocus = false;

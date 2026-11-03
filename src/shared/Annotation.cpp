@@ -192,6 +192,8 @@ static bool UpdateAnnotIf(Annotation* annot, Update update) {
             changed = update(access.ctx, access.annot);
             if (changed) {
                 pdf_update_annot(access.ctx, access.annot);
+                // e.g. a border width change moves /Rect
+                annot->bounds = PdfAnnotBounds(access.ctx, access.annot);
             }
         }
         fz_catch(access.ctx) {
@@ -1146,19 +1148,7 @@ static bool IsCssItalic(Str v) {
 // "bold 12pt Georgia" or, the way Acrobat writes it, "Helvetica,sans-serif 12.0pt"
 static void ParseCssFontShorthand(Str v, Str& family, int& style) {
     str::Builder names;
-    int i = 0;
-    while (i < len(v)) {
-        while (i < len(v) && str::IsWs(v.s[i])) {
-            i++;
-        }
-        int start = i;
-        while (i < len(v) && !str::IsWs(v.s[i])) {
-            i++;
-        }
-        Str token(v.s + start, i - start);
-        if (len(token) == 0) {
-            break;
-        }
+    while (Str token = str::NextWord(v)) {
         if (IsCssBold(token)) {
             style |= kFreeTextBold;
             continue;
@@ -2069,6 +2059,8 @@ struct AnnotationClipboard {
     // the annotation's /Rect, not GetBounds(): the bound is expanded by the
     // border width, so a copy -> paste -> copy round trip would grow it
     RectF rect{};
+    // /RD: mupdf gives new shapes 0.5, which would widen /Rect and the border
+    fz_rect rectDiff{};
     Str contents;
     Str iconName;
     Str fontFamily;
@@ -2108,6 +2100,7 @@ static void ClearAnnotationClipboard() {
     gAnnotClipboard.valid = false;
     gAnnotClipboard.type = AnnotationType::Unknown;
     gAnnotClipboard.rect = {};
+    gAnnotClipboard.rectDiff = {};
     gAnnotClipboard.color = 0;
     gAnnotClipboard.hasColor = false;
     gAnnotClipboard.interiorColor = 0;
@@ -2242,6 +2235,39 @@ static RectF GetAnnotRect(Annotation* annot) {
     return ToRectF(rc);
 }
 
+// The annotation's /RD, all zeros when it has none. Read through the local
+// xref, like pdf_annot_rect(): a synthesized appearance can set /RD only there.
+static fz_rect GetRectDiff(Annotation* annot) {
+    return ReadAnnot(annot, fz_rect{}, [](fz_context* ctx, pdf_annot* a) {
+        fz_rect rd{};
+        pdf_annot_push_local_xref(ctx, a);
+        fz_try(ctx) {
+            pdf_obj* obj = pdf_dict_get(ctx, pdf_annot_obj(ctx, a), PDF_NAME(RD));
+            if (pdf_is_array(ctx, obj)) {
+                rd.x0 = pdf_array_get_real(ctx, obj, 0);
+                rd.y0 = pdf_array_get_real(ctx, obj, 1);
+                rd.x1 = pdf_array_get_real(ctx, obj, 2);
+                rd.y1 = pdf_array_get_real(ctx, obj, 3);
+            }
+        }
+        fz_always(ctx) {
+            pdf_annot_pop_local_xref(ctx, a);
+        }
+        fz_catch(ctx) {
+            fz_rethrow(ctx);
+        }
+        return rd;
+    });
+}
+
+// Set /RD, then re-set the design rect so /Rect = rect + RD.
+static void SetRectAndDiff(Annotation* annot, RectF rect, fz_rect rd) {
+    UpdateAnnot(annot, [rect, rd](fz_context* ctx, pdf_annot* a) {
+        pdf_dict_put_rect(ctx, pdf_annot_obj(ctx, a), PDF_NAME(RD), rd);
+        pdf_set_annot_rect(ctx, a, ToFzRect(rect));
+    });
+}
+
 // Snapshot the annotation and remember it as the one to delete on paste. A cut
 // is a copy plus a delete of the original once the copy lands, so nothing is
 // lost if the paste fails.
@@ -2279,6 +2305,7 @@ bool CopyAnnotation(Annotation* annot) {
     gAnnotClipboard.valid = true;
     gAnnotClipboard.type = annot->type;
     gAnnotClipboard.rect = GetAnnotRect(annot);
+    gAnnotClipboard.rectDiff = GetRectDiff(annot);
     gAnnotClipboard.contents = str::Dup(Contents(annot));
     gAnnotClipboard.iconName = str::Dup(IconName(annot));
     gAnnotClipboard.opacity = Opacity(annot);
@@ -2421,6 +2448,10 @@ Annotation* PasteCopiedAnnotation(EngineBase* engine, int pageNo, PointF topLeft
     }
     if (AnnotationSupportsBorder(clip.type) && clip.borderWidth >= 0) {
         SetBorderWidth(annot, clip.borderWidth);
+    }
+    // after SetBorderWidth: it grows /Rect and /RD by the width change
+    if (useRect) {
+        SetRectAndDiff(annot, newRect, clip.rectDiff);
     }
     if (len(quads) > 0) {
         SetQuadPointsAsRect(annot, quads);

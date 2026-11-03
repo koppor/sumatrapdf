@@ -344,6 +344,8 @@ bool EpubDoc::Load() {
     }
 
     Str content(contentFi->data, contentFi->fileSizeUncompressed);
+    // first value wins, so the sidecar overrides the package
+    EpubGetSidecarMetadata(fileName, props);
     ParseMetadata(content, props);
     GumboDoc contentDoc(content, GumboMode::XmlFragment);
     const GumboNode* node = GumboFindDescendantByTag(contentDoc.Document(), StrL("manifest"), HtmlNameMatch::Local);
@@ -463,6 +465,10 @@ static SeqStrNum epubPropsMap =
     "dcterms:modified\0" "\x0c"
     "dc:description\0" "\x08"
     "dc:rights\0" "\x06"
+    "dc:publisher\0" "\x6c"
+    "dc:identifier\0" "\x6e"
+    "dc:source\0" "\x70"
+    "dc:language\0" "\x72"
     "\0";
 // clang-format on
 // @gen-end docprop-epub
@@ -471,11 +477,37 @@ static bool IsTokPropName(HtmlToken* tok, Str name) {
     if (tok->NameIs(name)) {
         return true;
     }
+    // <description xmlns="http://purl.org/dc/elements/1.1/"> has no dc: prefix
+    Str dcPrefix = StrL("dc:");
+    if (str::StartsWith(name, dcPrefix) && tok->NameIs(Str(name.s + len(dcPrefix), len(name) - len(dcPrefix)))) {
+        return true;
+    }
     if (Tag_Meta != tok->tag) {
         return false;
     }
     AttrInfo attr = tok->GetAttrByName(StrL("property"));
     return attr && attr.ValIs(name);
+}
+
+// publishers store descriptions as escaped HTML: "<b>Bold</b><BR>Next &#8212; end"
+static TempStr HtmlDescriptionToTextTemp(Str html) {
+    GumboHtmlParser parser(html);
+    str::Builder text;
+    HtmlToken* tok;
+    while ((tok = parser.Next()) != nullptr) {
+        if (tok->IsText()) {
+            text.Append(ResolveHtmlEntitiesTemp(tok->s));
+            continue;
+        }
+        bool isBreak =
+            tok->NameIs(StrL("br")) || tok->NameIs(StrL("p")) || tok->NameIs(StrL("div")) || tok->NameIs(StrL("li"));
+        if (isBreak) {
+            text.AppendChar(' ');
+        }
+    }
+    TempStr res = str::DupTemp(ToStr(text));
+    res.len -= str::NormalizeWSInPlace(res);
+    return res;
 }
 
 static void ParseMetadata(Str content, Props& props) {
@@ -509,6 +541,9 @@ static void ParseMetadata(Str content, Props& props) {
             tok = pullParser.Next();
             if (tok && tok->IsText()) {
                 TempStr val = ResolveHtmlEntitiesTemp(tok->s);
+                if ((DocProp)propNo == DocProp::Subject) {
+                    val = HtmlDescriptionToTextTemp(val);
+                }
                 AddPropOwned(props, (DocProp)propNo, val);
             }
             break;
@@ -702,6 +737,32 @@ EpubReadingDirection EpubGetReadingDirection(Str path) {
     GumboDoc doc(Str(contentFi->data, contentFi->fileSizeUncompressed), GumboMode::XmlFragment);
     const GumboNode* spine = GumboFindDescendantByTag(doc.Document(), StrL("spine"), HtmlNameMatch::Local);
     return EpubSpineDirection(spine);
+}
+
+// Metadata from foo.opf next to foo.epub. Free with FreeProps.
+void EpubGetSidecarMetadata(Str epubPath, Props& props) {
+    if (len(epubPath) == 0) {
+        return;
+    }
+    TempStr opfPath = str::JoinTemp(path::GetPathNoExtTemp(epubPath), StrL(".opf"));
+    Str data = file::ReadFile(opfPath);
+    if (len(data) > 0) {
+        ParseMetadata(data, props);
+    }
+    str::Free(data);
+}
+
+// The package's metadata, without building a whole EpubDoc. Free with FreeProps.
+void EpubGetMetadata(Str path, Props& props) {
+    AutoDelete archive(OpenArchiveFromFile(path, false, gArchiveProgressCb));
+    if (!archive) {
+        return;
+    }
+    TempStr contentPath;
+    auto* contentFi = GetEpubPackage(archive, contentPath);
+    if (contentFi) {
+        ParseMetadata(Str(contentFi->data, contentFi->fileSizeUncompressed), props);
+    }
 }
 
 EpubDoc* EpubDoc::CreateFromFile(Str path) {
@@ -1061,7 +1122,7 @@ static Str HandleTealDocTag(str::Builder& builder, StrVec& tocEntries, Str text)
     if (len(text) < 9) {
     Fallback:
         builder.Append(StrL("&lt;"));
-        return text;
+        return Str(text.s + 1, len(text) - 1);
     }
     if (!str::StartsWithI(text, StrL("<BOOKMARK")) && !str::StartsWithI(text, StrL("<HEADER")) &&
         !str::StartsWithI(text, StrL("<HRULE")) && !str::StartsWithI(text, StrL("<LABEL")) &&

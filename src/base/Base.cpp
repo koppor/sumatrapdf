@@ -165,6 +165,25 @@ int setMinMax(int& v, int minVal, int maxVal) {
     return v;
 }
 
+// The cap c for which the sum of min(dx[i], c) fits availDx: the width equal
+// items would each get, except the ones needing less keep their own.
+// e.g. dx {50, 200, 300}, availDx 400 -> 175 (50 + 175 + 175)
+int FairShareCap(const Vec<int>& dx, int availDx) {
+    Vec<int> sorted;
+    VecAppendVec(sorted, dx);
+    int n = len(sorted);
+    std::sort(sorted.els, sorted.els + n);
+    int rest = availDx;
+    for (int i = 0; i < n; i++) {
+        int share = rest / (n - i);
+        if (sorted[i] > share) {
+            return share;
+        }
+        rest -= sorted[i];
+    }
+    return n > 0 ? sorted[n - 1] : 0;
+}
+
 //--- Geom.cpp ----------------------------------------------------------------
 
 bool QuadF::IsEmpty() const {
@@ -521,12 +540,21 @@ ThreadHandle StartThread(const Func0& fn, Str threadName) {
 #endif
 }
 
+#if OS_WASM
+ThreadHandle NewSlicedJobHandle() {
+    return new ThreadHandlePosix();
+}
+#endif
+
 bool SafeCloseThreadHandle(ThreadHandle* hPtr) {
     ThreadHandle h = *hPtr;
     if (!h) {
         return false;
     }
 #if OS_WASM
+    if (h != &gInlineThread) {
+        delete h;
+    }
     *hPtr = nullptr;
     return true;
 #else
@@ -639,7 +667,7 @@ bool JoinThread(ThreadHandle* hPtr, int timeoutMs) {
     }
 #if OS_WASM
     // it already ran to completion inside StartThread()
-    *hPtr = nullptr;
+    SafeCloseThreadHandle(hPtr);
     return true;
 #else
     pthread_mutex_lock(&h->mutex);
@@ -2357,12 +2385,11 @@ bool ContainsCharAny(Str s, Str chars) {
 }
 
 Str SliceFromCharLast(Str str, char c) {
-    for (int i = str.len - 1; i >= 0; i--) {
-        if (str.s[i] == c) {
-            return Str(str.s + i, str.len - i);
-        }
+    int i = LastIndexOfChar(str, c);
+    if (i < 0) {
+        return {};
     }
-    return {};
+    return Str(str.s + i, str.len - i);
 }
 
 int IndexOf(Str buf, Str toFind) {
@@ -4189,6 +4216,23 @@ int utf8StrLen(const u8* s) {
 }
 
 // --- end of Unicode, Inc. utf8 code
+
+void str::AppendBase64(str::Builder& out, const u8* data, size_t size) {
+    static constexpr char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (size_t i = 0; i < size; i += 3) {
+        u32 value = (u32)data[i] << 16;
+        if (i + 1 < size) {
+            value |= (u32)data[i + 1] << 8;
+        }
+        if (i + 2 < size) {
+            value |= data[i + 2];
+        }
+        out.AppendChar(table[(value >> 18) & 63]);
+        out.AppendChar(table[(value >> 12) & 63]);
+        out.AppendChar(i + 1 < size ? table[(value >> 6) & 63] : '=');
+        out.AppendChar(i + 2 < size ? table[value & 63] : '=');
+    }
+}
 
 void str::Utf8Encode(char* buf, int& off, int c) {
     u8* tmp = (u8*)(buf + off);

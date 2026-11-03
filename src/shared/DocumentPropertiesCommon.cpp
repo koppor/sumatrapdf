@@ -394,6 +394,10 @@ static const PropLabel propToName[] = {
     {DocProp::SceneType, TrN("Scene Type:")},
     {DocProp::ImageFileSize, TrN("Image File Size:")},
     {DocProp::ImagePath, TrN("Path:")},
+    {DocProp::Publisher, TrN("Publisher:")},
+    {DocProp::Identifier, TrN("Identifier:")},
+    {DocProp::Source, TrN("Source:")},
+    {DocProp::Language, TrN("Language:")},
     {DocProp::None, {}},
 };
 
@@ -447,7 +451,7 @@ void GetPropsText(DocController* ctrl, str::Builder& out) {
     ReportIf(!ctrl);
 
     Str path = gPluginMode ? gPluginURL : Str(ctrl->GetFilePath());
-    AppendProp(out, Tr("File:"), len(path) == 0 ? StrL("(not available)") : path);
+    AppendProp(out, Tr("File:"), len(path) == 0 ? StrL("(not available)") : PathForDisplayTemp(path));
 
     DisplayModel* dm = ctrl->AsFixed();
     i64 fileSize = file::GetSize(path); // can be gPluginURL
@@ -474,8 +478,14 @@ void GetPropsText(DocController* ctrl, str::Builder& out) {
     AppendPropTranslated(out, DocProp::Subject, GetPropValueTemp(props, DocProp::Subject));
     AppendPropTranslated(out, DocProp::Author, GetPropValueTemp(props, DocProp::Author));
     AppendPropTranslated(out, DocProp::Copyright, GetPropValueTemp(props, DocProp::Copyright));
+    AppendPropTranslated(out, DocProp::Publisher, GetPropValueTemp(props, DocProp::Publisher));
+    AppendPropTranslated(out, DocProp::Identifier, GetPropValueTemp(props, DocProp::Identifier));
+    AppendPropTranslated(out, DocProp::Source, GetPropValueTemp(props, DocProp::Source));
+    AppendPropTranslated(out, DocProp::Language, GetPropValueTemp(props, DocProp::Language));
 
-    bool isPdfDate = dm && kindEngineMupdf == dm->engineType;
+    // EngineMupdf also renders EPUB, whose dates are ISO 8601
+    bool isEpub = GuessFileTypeFromName(path) == FileType::Epub;
+    bool isPdfDate = dm && kindEngineMupdf == dm->engineType && !isEpub;
     Str val = GetPropValueTemp(props, DocProp::CreationDate);
     AppendDateProp(out, Tr("Created:"), val, isPdfDate);
     val = GetPropValueTemp(props, DocProp::ModificationDate);
@@ -520,6 +530,7 @@ void GetPropsText(DocController* ctrl, str::Builder& out) {
         DocProp::CreatorApp, DocProp::PdfProducer, DocProp::PdfVersion,
         DocProp::PdfFileStructure, DocProp::Files,
         DocProp::UnsupportedFeatures, DocProp::FontList,
+        DocProp::Publisher, DocProp::Identifier, DocProp::Source, DocProp::Language,
         DocProp::None,
     };
     // clang-format on
@@ -597,9 +608,9 @@ static void AppendOneCert(str::Builder& out, PdfSigCert* c) {
     if (CertGetCertificateContextProperty(cert, CERT_HASH_PROP_ID, hash, &hashLen) && hashLen > 0) {
         AppendProp(out, Tr("SHA-1:"), HexBytesTemp(hash, (int)hashLen, false));
     }
-    Str trust = EutlCertIsEuTrusted((const u8*)c->der.s, len(c->der)) ? StrL("European Union Trusted List (EUTL)")
-                                                                      : StrL("Windows Certificate Store");
-    AppendProp(out, Tr("Trust:"), trust);
+    if (EutlCertIsListed((const u8*)c->der.s, len(c->der))) {
+        AppendProp(out, Tr("Trust:"), StrL("European Union Trusted List (EUTL)"));
+    }
     CertFreeCertificateContext(cert);
 }
 
@@ -623,7 +634,15 @@ void AppendCertsText(str::Builder& out, PdfSigCert* certs) {
 #if OS_WIN
 void EutlUpdateThread(EutlUpdateJob* job) {
     Str err;
-    job->ok = EutlUpdate(&err);
+    if (job->update) {
+        job->ok = EutlUpdate(&err);
+    }
+    if (job->engine) {
+        EngineMupdfFetchRevocation(job->engine);
+        job->engine->Release();
+        job->engine = nullptr;
+    }
+    job->refreshed = job->ok || job->silent;
     TempStr msg = job->ok ? EutlCacheInfoTemp() : (err ? str::DupTemp(err) : StrL("update failed"));
     job->msg = str::Dup(msg);
     str::Free(err);

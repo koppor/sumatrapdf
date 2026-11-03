@@ -27,6 +27,7 @@
 #include "TableOfContents.h"
 #include "FileHistory.h"
 #include "Translations.h"
+#include "AppTools.h"
 #include "Tabs.h"
 #include "TabsCommon.h"
 
@@ -41,9 +42,9 @@ TempStr MakeTabTooltipTemp(Str path, bool dirty) {
     TempStr tip;
     i64 size = file::GetSize(path);
     if (size >= 0) {
-        tip = fmt("%s  %s", path, str::FormatSizeShortTemp(size, nullptr));
+        tip = fmt("%s  %s", PathForDisplayTemp(path), str::FormatSizeShortTemp(size, nullptr));
     } else {
-        tip = path;
+        tip = PathForDisplayTemp(path);
     }
     if (dirty) {
         tip = str::JoinTemp(tip, StrL(" "), Tr("(unsaved annotations)"));
@@ -92,12 +93,55 @@ void CloseCollectedTabs(MainWindow* win, const Vec<WindowTab*>& toClose) {
 // orig's CloseWindowIfNoDocuments: a window whose last document tab was
 // dragged out goes away
 void CloseWindowIfNoDocuments(MainWindow* win) {
-    for (WindowTab* tab : win->Tabs()) {
-        if (!tab->IsAboutTab()) {
-            return;
-        }
+    if (HasOpenedDocuments(win)) {
+        return;
     }
     CloseWindow(win, true, false);
+}
+
+WindowTab* NewHomeTab(MainWindow* win, HomeTabKind kind) {
+    auto* tab = new WindowTab(win);
+    tab->type = WindowTab::Type::About;
+    tab->isExtraHome = kind == HomeTabKind::Extra;
+    tab->canvasRc = win->canvasRc;
+    return tab;
+}
+
+WindowTab* FindHomeTab(MainWindow* win) {
+    for (WindowTab* tab : win->Tabs()) {
+        if (tab->IsAboutTab()) {
+            return tab;
+        }
+    }
+    return nullptr;
+}
+
+// the current tab if a file should open in it instead of in a new tab: an extra
+// Home tab is replaced, like a browser's new tab. The pinned Home tab stays
+WindowTab* HomeTabToReuse(MainWindow* win) {
+    WindowTab* tab = win->CurrentTab();
+    return (tab && tab->IsAboutTab() && tab->isExtraHome) ? tab : nullptr;
+}
+
+// every tab "close all" takes: all but the pinned Home tab
+void CollectClosableTabs(MainWindow* win, Vec<WindowTab*>& out) {
+    for (WindowTab* tab : win->Tabs()) {
+        if (!tab->IsPinnedHomeTab()) {
+            VecAppend(out, tab);
+        }
+    }
+}
+
+// what the close commands can act on, relative to ctx.tab
+void SetTabCloseFlags(AppCommandCtx& ctx) {
+    Vec<WindowTab*> other;
+    Vec<WindowTab*> right;
+    Vec<WindowTab*> left;
+    CollectTabsToClose(ctx.win, ctx.tab, other, right, left);
+    ctx.canCloseOtherTabs = len(other) > 0;
+    ctx.canCloseTabsToRight = len(right) > 0;
+    ctx.canCloseTabsToLeft = ctx.tab && len(left) > 0;
+    ctx.hasDocTabs = HasOpenedDocuments(ctx.win);
 }
 
 // create a new window if win==nullptr
@@ -107,11 +151,11 @@ void CollectTabsToClose(MainWindow* win, WindowTab* currTab, Vec<WindowTab*>& to
     bool seenCurrent = false;
     for (int i = 0; i < nTabs; i++) {
         WindowTab* tab = win->GetTab(i);
-        if (tab->IsAboutTab()) {
-            continue;
-        }
         if (currTab == tab) {
             seenCurrent = true;
+            continue;
+        }
+        if (tab->IsPinnedHomeTab()) {
             continue;
         }
         VecAppend(toCloseOther, tab);

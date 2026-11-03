@@ -663,7 +663,11 @@ static bool ProbeDriveRootAccessible(Str driveKey) {
         root = str::JoinTemp(driveKey, StrL("\\"));
     }
     WIN32_FILE_ATTRIBUTE_DATA data{};
-    return GetFileAttributesExW(CWStrTemp(root), GetFileExInfoStandard, &data) != 0;
+    if (GetFileAttributesExW(CWStrTemp(root), GetFileExInfoStandard, &data)) {
+        return true;
+    }
+    // a share whose root the user can't read is online: files below may be readable (#6398)
+    return GetLastError() == ERROR_ACCESS_DENIED;
 }
 
 // Like GetFileAttributesExW(..., GetFileExInfoStandard, ...). Network paths
@@ -767,11 +771,8 @@ bool GetCachedAttributesEx(Str path, WIN32_FILE_ATTRIBUTE_DATA* out) {
         }
     }
 
-    if (network) {
-        //      data.dwFileAttributes);
-        AutoUnlockMutex lock(&gAttrsCacheMutex);
-        StoreAttrsCache(path, GetTickCount64(), false, data);
-    }
+    // failures aren't cached: a file created later must be found (#6398).
+    // Offline shares already fail fast via the drive availability cache.
     return false;
 }
 
@@ -835,6 +836,10 @@ static TempWStr NormalizeTemp(WStr path) {
     if (cch > 0) {
         WCHAR* longBuf = AllocArrayTemp<WCHAR>((int)cch);
         DWORD nLong = GetLongPathNameW(fullPath.s, longBuf, cch);
+        // 0 or a bigger size if the file was deleted or renamed since the size query
+        if (nLong == 0 || nLong >= cch) {
+            return LongPathTemp(fullPath);
+        }
         normPath = WStr(longBuf, (int)nLong);
         if (cch <= MAX_PATH) {
             return normPath;
@@ -845,7 +850,9 @@ static TempWStr NormalizeTemp(WStr path) {
     if (cch && cch <= MAX_PATH) {
         WCHAR* shortBuf = AllocArrayTemp<WCHAR>((int)cch);
         DWORD nShort = GetShortPathNameW(fullPath.s, shortBuf, cch);
-        return WStr(shortBuf, (int)nShort);
+        if (nShort > 0 && nShort < cch) {
+            return WStr(shortBuf, (int)nShort);
+        }
     }
     return LongPathTemp(normPath);
 }
@@ -1089,6 +1096,38 @@ bool IsEphemeralHostFile(Str path) {
         start = i + 1;
     }
     return false;
+}
+
+// long form of an existing path: GetTempPath() can return an 8.3 short one
+// (C:\Users\JOHNDO~1\AppData\Local\Temp)
+static TempStr LongPathTemp(Str path) {
+    WCHAR buf[MAX_PATH * 2];
+    DWORD n = GetLongPathNameW(CWStrTemp(path), buf, dimof(buf));
+    if (n == 0 || n >= dimof(buf)) {
+        return str::DupTemp(path);
+    }
+    return ToUtf8Temp(WStr(buf, (int)n));
+}
+
+// Is path inside the user's temporary folder (%TEMP%)? Files there get deleted
+// by whatever put them there, or by Disk Cleanup (#6437)
+bool IsInTempDir(Str path) {
+    if (len(path) == 0) {
+        return false;
+    }
+    WCHAR dirW[MAX_PATH + 1];
+    DWORD n = GetTempPathW(dimof(dirW), dirW);
+    if (n == 0 || n > MAX_PATH) {
+        return false;
+    }
+    TempStr dir = LongPathTemp(ToUtf8Temp(WStr(dirW, (int)n)));
+    if (len(dir) > 0 && !IsSep(dir.s[len(dir) - 1])) {
+        dir = str::JoinTemp(dir, StrL("\\"));
+    }
+    // long form of the parent: GetLongPathName() fails for a file that doesn't exist
+    TempStr p = NormalizeTemp(path);
+    p = path::JoinTemp(LongPathTemp(path::GetDirTemp(p)), path::GetBaseNameTemp(p));
+    return len(p) > len(dir) && str::StartsWithI(p, dir);
 }
 
 bool IsOnFixedDrive(Str path) {

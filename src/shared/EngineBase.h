@@ -42,6 +42,7 @@ extern Kind kindEngineImageDir;
 extern Kind kindEngineComicBooks;
 extern Kind kindEnginePostScript;
 extern Kind kindEngineDvi;
+extern Kind kindEngineCaj;
 extern Kind kindEngineEpub;
 extern Kind kindEngineFb2;
 extern Kind kindEngineMobi;
@@ -120,6 +121,8 @@ struct IPageDestination : KindBase {
     float zoom = 0.f;
     // chapter-aware equivalent of pageNo; invalid until resolved
     Location loc;
+    // an EPUB footnote reference: a click shows the note in a popup
+    bool isNoteRef = false;
 
     virtual ~IPageDestination() = default;
 
@@ -295,6 +298,9 @@ struct PageElementComment : IPageElement {
 struct PageElementDestination : IPageElement {
     IPageDestination* dest;
     bool destOwned = true; // false if dest is engine-owned (GetNamedDest)
+    // a PDF link's /QuadPoints, in page coordinates: when there are any, only
+    // these areas within rect are the link (a link broken over two lines)
+    Vec<QuadF> quads;
 
     PageElementDestination(IPageDestination* d, bool owned = true) {
         kind = kindPageElementDest;
@@ -678,6 +684,8 @@ extern Func1<EngineBase*> gOnEngineDestroyed;
 
 struct PasswordUI {
     virtual Str GetPassword(Str path, u8* fileDigest, u8 decryptionKeyOut[32], bool* saveKey) = 0;
+    // whether caj2pdf may be downloaded; a load nobody is watching can't ask
+    virtual bool ConfirmCaj2pdfDownload() { return false; }
     virtual ~PasswordUI() = default;
 };
 

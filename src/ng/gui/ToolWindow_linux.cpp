@@ -33,6 +33,10 @@ static XWin RootWin(Display* dpy) {
     return DefaultRootWindow(dpy);
 }
 
+// the last frame a window manager reported, so ToolWinNativeChrome adds what
+// ToolWinNativeSetFrame takes off (e.g. WSLg's frame is ~76 x 97, not a guess)
+static Size gSeenChrome;
+
 // left, right, top, bottom. Zero until the window manager has set them.
 static void FrameExtents(Display* dpy, XWin xw, int* left, int* right, int* top, int* bottom) {
     *left = *right = *top = *bottom = 0;
@@ -54,6 +58,9 @@ static void FrameExtents(Display* dpy, XWin xw, int* left, int* right, int* top,
         *right = (int)v[1];
         *top = (int)v[2];
         *bottom = (int)v[3];
+        if (*top > 0 || *left > 0) {
+            gSeenChrome = Size(*left + *right, *top + *bottom);
+        }
     }
     if (data) {
         XFree(data);
@@ -164,6 +171,9 @@ Size ToolWinNativeChrome(bool titled, bool, bool) {
     if (!titled) {
         return {};
     }
+    if (gSeenChrome.dy > 0 || gSeenChrome.dx > 0) {
+        return gSeenChrome;
+    }
     return Size(2 * kBorderGuess, kTitleGuess + kBorderGuess);
 }
 
@@ -258,6 +268,24 @@ void ToolWinNativeSetMinClient(gp::Window* gw, int dx, int dy) {
     hints.flags = PMinSize;
     hints.min_width = dx;
     hints.min_height = dy;
+    XSetWMNormalHints(dpy, xw, &hints);
+    XFlush(dpy);
+}
+
+// a window keeps the size hints it has, so a 0 side stays as it was
+void ToolWinNativeSetMaxClient(gp::Window* gw, int dx, int dy) {
+    Display* dpy = Dpy();
+    XWin xw = XOf(gw);
+    if (!dpy || !xw) {
+        return;
+    }
+    XSizeHints hints{};
+    long supplied = 0;
+    XGetWMNormalHints(dpy, xw, &hints, &supplied);
+    constexpr int kUnbounded = 1 << 20;
+    hints.flags |= PMaxSize;
+    hints.max_width = dx > 0 ? dx : kUnbounded;
+    hints.max_height = dy > 0 ? dy : kUnbounded;
     XSetWMNormalHints(dpy, xw, &hints);
     XFlush(dpy);
 }

@@ -20,8 +20,10 @@
 #include "TextSearch.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "Selection.h"
 #include "AnnotPlacement.h"
 #include "WindowTab.h"
+#include "Tabs.h"
 #include "Commands.h"
 #include "CommandAvailability.h"
 #include "Menu.h"
@@ -113,6 +115,8 @@ int OriginalCommandId(int cmdId) {
 
 TempStr ToolbarTipTemp(int cmdId, Str tip, bool translate) {
     TempStr s = translate ? trans::GetTranslation(tip) : TempStr(tip);
+    // some tips are menu strings: "Rotate &Left" shows as "Rotate Left" (#6469)
+    s = ParseMenuAccelTextTemp(s).display;
     TempStr accelStr = AppendAccelKeyToMenuStringTemp({}, cmdId);
     if (accelStr) {
         Str accel = accelStr.len > 1 ? Str(accelStr.s + 1, accelStr.len - 1) : accelStr;
@@ -386,7 +390,10 @@ bool CanCreateAnnotFromSelection(MainWindow* win, int cmdId) {
         return false;
     }
     DisplayModel* dm = win->AsFixed();
-    return dm && dm->textSelection && dm->textSelection->result.len > 0;
+    if (dm && dm->textSelection && dm->textSelection->result.len > 0) {
+        return true;
+    }
+    return cmdId == CmdCreateAnnotHighlight && IsDrawnRectSelection(win);
 }
 
 // alpha 0 and 0xff both mean opaque, so a palette color matches an
@@ -532,6 +539,12 @@ bool ShouldShowToolbar(MainWindow* win) {
     if (win->presentation || win->isQuickLook) {
         return false;
     }
+#if OS_WASM
+    // the tab strip and its menu button replace the toolbar on Home
+    if (win->IsCurrentTabAbout() && TabsAreVisible(win)) {
+        return false;
+    }
+#endif
     int mode = ToolbarModeForWindow(win);
     return mode == kToolbarShow;
 }

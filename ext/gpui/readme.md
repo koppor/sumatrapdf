@@ -64,7 +64,7 @@ extras/              the ported library crates as standalone amalgams, one
                      gpui.cpp: the editor example (and the tests) compile
                      and link it beside gpui.cpp
   taffy/             the flexbox/grid/block layout engine, crate taffy
-                     0.13.0. Also inside gpui.cpp — this copy is
+                     0.15.0. Also inside gpui.cpp — this copy is
                      for using the library without gpui
   markdown/          the CommonMark + GFM parser, crate markdown
                      1.0.0. Also inside gpui.cpp — this copy
@@ -161,7 +161,7 @@ No other dependencies, no nested build system, no STL containers.
 
 ## This copy
 
-Amalgamated from gpui-kit-cpp [`2ed39782f7c5d325f08a5e197397c6b5e395544c`](https://github.com/kjk/gpui-kit-cpp/commit/2ed39782f7c5d325f08a5e197397c6b5e395544c).
+Amalgamated from gpui-kit-cpp [`5c1661b02b59ae3cfc3b62c56531198e8a9fbc73`](https://github.com/kjk/gpui-kit-cpp/commit/5c1661b02b59ae3cfc3b62c56531198e8a9fbc73).
 
-[What has changed in gpui-kit-cpp since](https://github.com/kjk/gpui-kit-cpp/compare/2ed39782f7c5d325f08a5e197397c6b5e395544c...main)
+[What has changed in gpui-kit-cpp since](https://github.com/kjk/gpui-kit-cpp/compare/5c1661b02b59ae3cfc3b62c56531198e8a9fbc73...main)
 shows every commit this copy is behind by; if that page is empty, it is current.

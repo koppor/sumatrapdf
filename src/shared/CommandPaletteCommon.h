@@ -56,6 +56,7 @@ void CollectTocRec(StrVecCP& toc, TocItem* ti, int indent, int currPageNo, int& 
 void AppendFavoritesForFile(StrVecCP& favorites, FileState* fs, bool isCurrent);
 TempStr FormatSettingValueTemp(SettingType type, const u8* p);
 bool SettingDiffersFromDefault(const ItemDataCP* d);
+bool PaletteRowColor(const ItemDataCP* d, Str rowText, Color* colOut);
 void CollectSettingRows(StrVecCP& out);
 TempStr RestorePaletteSettingDefault(const ItemDataCP* d, Str rowText);
 TempStr CommandPaletteShortcutTemp(i32 cmdId);
@@ -63,5 +64,42 @@ void FilterStrings(StrVecCP& strs, const StrVec& words, StrVecCP& matchedOut);
 bool SplitSettingValueQuery(Str query, Str& path, Str& value);
 
 void AppendTab(StrVecCP& tabs, WindowTab* tab, WindowTab* currTab, int& currTabIdx);
+
+// what the palette filters: the rows of each mode, and the words of the query
+// the list underlays in the rows it shows
+struct PaletteSources {
+    StrVecCP tabs;
+    StrVecCP fileHistory;
+    StrVecCP commands;
+    StrVecCP toc;
+    StrVecCP favorites;
+    StrVecCP annotations;
+    StrVecCP settings;
+    StrVec filterWords;
+};
+ItemDataCP* FindPaletteSetting(PaletteSources& src, Str path, Str& foundPath);
+void FillSettingValueRows(PaletteSources& src, Str path, Str value, StrVecCP& out);
+void FilterPaletteStrings(PaletteSources& src, Str filter, StrVecCP& out);
+int PaletteSourceCount(PaletteSources& src, Str filter);
+TempStr PaletteCountTemp(int shown, int total);
+
+// one "> Commands" switch in the row under the query
+struct PaletteSwitch {
+    Str label; // the prefix character, a space, the name
+    Str prefix;
+};
+constexpr int kPaletteMaxSwitches = 8;
+int PaletteSwitches(PaletteSources& src, bool hasPageThumbnails, PaletteSwitch* out);
+bool PaletteSwitchIsActive(Str filter, Str prefix);
+
+// one "Enter run command" hint in the row under the list
+struct PaletteHint {
+    Str key;
+    Str desc;
+};
+constexpr int kPaletteMaxHints = 4;
+int PaletteHelpHints(int kind, PaletteHint* out);
+
+TempStr PaletteRightColumnTemp(ItemDataCP* data);
 
 bool CmdUsesCursorPos(int cmdId);

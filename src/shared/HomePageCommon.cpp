@@ -4,6 +4,7 @@
 #include "base/Base.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
+#include "base/UITask.h"
 
 #include "gui/UIModels.h"
 
@@ -11,6 +12,8 @@
 #include "AppSettings.h"
 #include "DisplayMode.h"
 #include "DocController.h"
+#include "PagePosition.h"
+#include "Theme.h"
 #include "EngineBase.h"
 #include "EngineAll.h"
 #include "FileHistory.h"
@@ -116,12 +119,169 @@ int CountHomePageFiles() {
     return n;
 }
 
+// lays the header out in a row, the brand at its start: false if the search
+// box would be narrower than searchMinDx (unless `force`)
+static bool PlaceHomeHeader(const HomeHeaderIn& in, int rowX, int rowDx, HomeHeaderOut& out, bool force) {
+    int leftDx = out.showBrand ? in.brandDx + in.gapX : 0;
+    int openDx = in.openIconDx + (out.showOpenText ? in.openTextGap + in.openTextDx : 0);
+    int rightDx = in.gapX + openDx + in.gapX + in.viewIconsDx;
+    int availDx = rowDx - leftDx - rightDx;
+    if (availDx < in.searchMinDx && !force) {
+        return false;
+    }
+    out.rowX = rowX;
+    out.rowDx = rowDx;
+    out.brandX = rowX;
+    out.viewIconsX = rowX + rowDx - in.viewIconsDx;
+    out.openX = out.viewIconsX - in.gapX - openDx;
+    out.searchDx = std::min(std::max(availDx, in.searchMinDx / 2), in.searchMaxDx);
+    // centered on the row unless a flank is in the way
+    int x = rowX + ((rowDx - out.searchDx) / 2);
+    x = std::min(x, out.openX - in.gapX - out.searchDx);
+    out.searchX = std::max(x, rowX + leftDx);
+    return true;
+}
+
+// The brand ends on the first column's right edge, the Open link and view
+// icons on the last column's, the search box is centered. When the grid is too
+// narrow for that (one or two columns, issue #6367), the row spans the page
+// and drops the "Open..." text, then the brand, before anything overlaps.
+void LayoutHomeHeader(const HomeHeaderIn& in, HomeHeaderOut& out) {
+    out = {};
+    int openDx = in.openIconDx + in.openTextGap + in.openTextDx;
+    int leftDx = std::max(in.brandDx, in.firstColDx) + in.gapX;
+    int rightDx = in.gapX + openDx + in.gapX + in.viewIconsDx;
+    int flankDx = std::max(leftDx, rightDx);
+    int searchDx = std::min(in.gridDx - (2 * flankDx), in.searchMaxDx);
+    if (searchDx >= in.searchMinDx) {
+        out.rowX = in.gridX;
+        out.rowDx = in.gridDx;
+        out.brandX = in.gridX + std::max(in.firstColDx - in.brandDx, 0);
+        out.viewIconsX = in.gridX + in.gridDx - in.viewIconsDx;
+        out.openX = out.viewIconsX - in.gapX - openDx;
+        out.searchDx = searchDx;
+        out.searchX = in.gridX + ((in.gridDx - searchDx) / 2);
+        return;
+    }
+    if (PlaceHomeHeader(in, in.gridX, in.gridDx, out, false)) {
+        return;
+    }
+    if (PlaceHomeHeader(in, in.pageX, in.pageDx, out, false)) {
+        return;
+    }
+    out.showOpenText = false;
+    if (PlaceHomeHeader(in, in.pageX, in.pageDx, out, false)) {
+        return;
+    }
+    out.showBrand = false;
+    PlaceHomeHeader(in, in.pageX, in.pageDx, out, true);
+}
+
+// "Page 24 of 47" while a document is being read, otherwise its page count;
+// a chapter position ("3:12") is shown as stored
+TempStr HomeThumbnailMetaTemp(FileState* fs, float* progressOut) {
+    *progressOut = 0;
+    bool showProgress = gSettings && gSettings->showHomePageReadingProgress;
+    StoredPagePos pos = ParseStoredPagePos(fs->pageNo);
+    if (showProgress && len(pos.bookmark) > 0) {
+        return FormatFileStateProgressTemp(fs);
+    }
+    if (fs->pageCount <= 0) {
+        return {};
+    }
+    if (showProgress && pos.pageNo > 1 && pos.pageNo <= fs->pageCount) {
+        *progressOut = (float)pos.pageNo / (float)fs->pageCount;
+        return fmt(Tr("Page %d of %d").s, pos.pageNo, fs->pageCount);
+    }
+    if (fs->pageCount == 1) {
+        return str::DupTemp(Tr("1 page"));
+    }
+    return fmt(Tr("%d pages").s, fs->pageCount);
+}
+
+// Sizes of files whose lookup can block, found on a thread: a file on a share
+// that's away waits out a network timeout (#6474). UI thread only
+struct HomeFileSizeEntry {
+    Str path;
+    i64 size = kHomeFileSizePending;
+    u64 lookedUpMs = 0;
+    bool lookingUp = false;
+};
+static Vec<HomeFileSizeEntry> gHomeFileSizes;
+// re-looked up after this, so a file that changed shows its new size
+constexpr u64 kHomeFileSizeTtlMs = 60 * 1000;
+
+struct HomeFileSizeLookup {
+    Str path;
+    i64 size = -1;
+};
+
+static HomeFileSizeEntry* FindHomeFileSize(Str path) {
+    for (HomeFileSizeEntry& e : gHomeFileSizes) {
+        if (str::Eq(e.path, path)) {
+            return &e;
+        }
+    }
+    return nullptr;
+}
+
+static void HomeFileSizeDone(HomeFileSizeLookup* res) {
+    HomeFileSizeEntry* e = FindHomeFileSize(res->path);
+    if (e) {
+        e->size = res->size;
+        e->lookedUpMs = GetTickCount64();
+        e->lookingUp = false;
+    }
+    str::Free(res->path);
+    delete res;
+    MaybeRedrawHomePage();
+}
+
+static void HomeFileSizeThread(HomeFileSizeLookup* res) {
+    res->size = file::GetSize(res->path);
+    uitask::Post(MkFunc0<HomeFileSizeLookup>(HomeFileSizeDone, res), "HomeFileSizeDone");
+}
+
+static bool SizeLookupMayBlock(Str path) {
+#if OS_WIN
+    // decided from the path shape and a cached drive type, without I/O
+    return path::IsOnNetworkDrive(path);
+#elif OS_WASM
+    (void)path;
+    return false;
+#else
+    // telling a network mount apart takes statfs, which a dead mount blocks too
+    (void)path;
+    return true;
+#endif
+}
+
+// size of a file the Home page lists: -1 if unknown, kHomeFileSizePending while
+// being looked up
+i64 GetHomeFileSize(Str path) {
+    if (!SizeLookupMayBlock(path)) {
+        return file::GetSize(path);
+    }
+    HomeFileSizeEntry* e = FindHomeFileSize(path);
+    if (!e) {
+        e = VecAppendBlanks(gHomeFileSizes, 1);
+        e->path = str::Dup(path);
+        e->size = kHomeFileSizePending;
+    }
+    bool stale = e->size == kHomeFileSizePending || GetTickCount64() - e->lookedUpMs > kHomeFileSizeTtlMs;
+    if (stale && !e->lookingUp) {
+        e->lookingUp = true;
+        auto* res = new HomeFileSizeLookup{str::Dup(path), -1};
+        RunAsync(MkFunc0<HomeFileSizeLookup>(HomeFileSizeThread, res), StrL("HomeFileSize"));
+    }
+    return e->size;
+}
+
 // one tip per line; cmd/trans-dl.ts extracts each line for translation
 Str sumatraTips = StrL(R"tips(You can [customize scrollbar](CmdChangeScrollbar).
 You can [customize keyboard shortcuts](Help/Customize-keyboard-shortcuts).
 You can [customize toolbar](Help/Customize-toolbar).
 Press (Kbd/(Key/CmdCommandPalette)) to open [command palette](CmdCommandPalette).
-To open file from history open [command palette](CmdCommandPalette) with (Kbd/(Key/CmdCommandPalette)) and type (Kbd/#).
 You can [extract text from PDF file](Help/Tool-x-extract-text-from-pdf).
 You can [toggle menu bar](CmdToggleMenuBar) with (Kbd/(Key/CmdToggleMenuBar)).
 You can [toggle toolbar](CmdToggleToolbar) with (Kbd/(Key/CmdToggleToolbar)).
@@ -141,4 +301,17 @@ You can [chat with AI about a document](Help/AI-Chat-with-document).
 You can [customize theme colors](Help/Customize-theme-colors).
 You can [save a page region as an image](Help/Save-page-region-as-image).
 You can [print selected pages](Help/Print-selected-pages).
+Press (Kbd/@) to quickly switch between tabs.
+Press (Kbd/#) to navigate file history.
+Press (Kbd/$) to navigate via favorites.
+Press (Kbd/%) to navigate via table of contents.
+Press (Kbd/&) to navigate via thumbnails.
+Press (Kbd/(Key/CmdToggleAutomaticallyScroll)) to [scroll automatically](Help/Scrolling-and-zooming#scroll-automatically).
+You can keep your place with the [reading bar](Help/Scrolling-and-zooming#keep-your-place-with-a-reading-bar).
+Press (Kbd/=) to [change a setting](CmdQuickEditSettings) without opening Advanced Settings.
+You can [browse files in the current folder](CmdNavigateFilesInFolder). [Learn more](Help/Scrolling-and-zooming#browse-files-in-the-folder)
+You can overlay a [page grid](Help/Scrolling-and-zooming#overlay-a-page-grid) for measurement and calligraphy.
+You can [zoom to fit the page content](Help/Scrolling-and-zooming#fit-the-page-content).
+You can [paste an image from the clipboard](Help/Add-an-image-to-a-PDF#insert-an-image-from-the-clipboard).
+You can [translate selected text](Help/Customize-search-translation-services#search-or-translate-the-selection).
 )tips");

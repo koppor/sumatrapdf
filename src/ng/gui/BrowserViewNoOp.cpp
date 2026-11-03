@@ -69,6 +69,10 @@ void BrowserViewSelectAll(BrowserView*) {}
 
 void BrowserViewCopySelection(BrowserView*) {}
 
+bool BrowserViewCapturePng(BrowserView*, const Func1<Str>&) {
+    return false;
+}
+
 void BrowserViewPrint(BrowserView*, bool) {}
 
 void BrowserViewFindInPageUI(BrowserView*) {}
@@ -89,10 +93,13 @@ LRESULT BrowserViewPassUIMsg(BrowserView*, UINT, WPARAM, LPARAM) {
     return 0;
 }
 
-gpui::El* BrowserViewBuild(BrowserView*, gpui::Ctx*) {
+void BrowserViewScrollKey(BrowserView*, int) {}
+
+gpui::El* BrowserViewBuild(BrowserView*, gpui::Ctx*, int) {
     return nullptr;
 }
 
 void BrowserViewCreatePending(MainWindow*, gpui::Ctx*) {}
 void BrowserViewSetOwnHost(BrowserView*) {}
 void BrowserViewCreatePendingIn(BrowserView*, gpui::Ctx*) {}
+void BrowserViewSetBackground(BrowserView*, Color) {}

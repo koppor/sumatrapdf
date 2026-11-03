@@ -30,6 +30,12 @@ struct EutlUpdateJob {
     HWND hwnd = nullptr;
     MainWindow* win = nullptr;
     bool ok = false;
+    // started by itself: says nothing to the user, the text just gets refreshed
+    bool silent = false;
+    bool update = true;
+    bool refreshed = false;
+    // also ask the CAs about its signatures
+    EngineBase* engine = nullptr;
     Str msg;
 };
 void EutlUpdateThread(EutlUpdateJob* job);

@@ -1201,6 +1201,18 @@ void SleepInMs(int ms);
 // immediately. RenderCache checks this and drains on the main thread instead.
 constexpr bool kHasThreads = OS_WASM == 0;
 
+// Without threads, long work runs on the UI thread in slices of about this
+// long, each posted with uitask::Post(), so the browser paints and handles
+// input in between
+constexpr int kUiSliceMs = 20;
+
+#if OS_WASM
+// A job that runs in slices stands in for a thread. This gives it a handle of
+// its own, so a slice can tell that its job was aborted or replaced. Close it
+// with SafeCloseThreadHandle(). WaitThread() doesn't wait for the job.
+ThreadHandle NewSlicedJobHandle();
+#endif
+
 void RunAsync(const Func0&, Str threadName = {});
 ThreadHandle StartThread(const Func0&, Str threadName = {});
 // ng: number of logical processors (was CpuCoreCount() in the win32-only Win.h)
@@ -1570,6 +1582,8 @@ int VecFind(const Vec<T>& v, const T& el, int startAt = 0);
 
 template <typename T>
 bool VecContains(const Vec<T>& v, const T& el);
+
+int FairShareCap(const Vec<int>& dx, int availDx);
 
 //--- the vec itself ---------------------------------------------------------
 
@@ -2220,6 +2234,7 @@ int utf8RuneLen(const u8* s);
 
 namespace str {
 void Utf8Encode(char* buf, int& off, int c);
+void AppendBase64(str::Builder& out, const u8* data, size_t size);
 int VsnprintfUtf8(Str buf, const char* fmt, va_list args);
 } // namespace str
 

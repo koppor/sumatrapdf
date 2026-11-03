@@ -90,75 +90,24 @@ PortableZip32: https://www.sumatrapdfreader.org/dl/prerel/14276/SumatraPDF-prere
 */
 
 static bool ShouldCheckForUpdate(UpdateCheck updateCheckType) {
-    if (gUpdateCheckInProgress) {
-        logf("CheckForUpdate: skipping because gUpdateCheckInProgress\n");
-        return false;
-    }
-
-    // when forcing, we download pre-release, which shows greater version than our build
-    // so we don't want to download during automatic check, only when user initiated
-
+    UpdateCheckFacts f;
+    f.inProgress = gUpdateCheckInProgress;
+    // when forcing, we download pre-release, which shows a greater version
+    // than our build, so only a user-initiated check may download it
 #ifdef FORCE_AUTO_UPDATE
-    if (updateCheckType == UpdateCheck::UserInitiated) {
-        logf("CheckForUpdate: checking, user initiated (FORCE_AUTO_UPDATE)\n");
-        return true;
-    } else {
-        logf("CheckForUpdate: skipping auto check, FORCE_AUTO_UPDATE downloads pre-release\n");
-        return false;
-    }
+    f.forcePreReleaseOnly = true;
 #endif
-
-    if (!HasPermission(Perm::InternetAccess)) {
-        logf("CheckForUpdate: skipping because no internet access\n");
-        return false;
-    }
-
-    if (updateCheckType == UpdateCheck::UserInitiated) {
-        logf("CheckForUpdate: checking, user initiated\n");
-        return true;
-    }
-
-    // don't check if the timestamp or version to skip can't be updated
-    // (mainly in plugin mode, stress testing and restricted settings)
-    if (!HasPermission(Perm::SavePreferences)) {
-        logf("CheckForUpdate: skipping auto check because no prefs access\n");
-        return false;
-    }
-
-    // only applies to automatic update check
-    if (!gSettings->checkForUpdates) {
-        logf("CheckForUpdate: skipping auto check because CheckForUpdates is false\n");
-        return false;
-    }
-
-    // don't check for updates at the first start, so that privacy
-    // sensitive users can disable the update check in time
+    f.userInitiated = updateCheckType == UpdateCheck::UserInitiated;
+    f.hasInternet = HasPermission(Perm::InternetAccess);
+    f.canSavePrefs = HasPermission(Perm::SavePreferences);
+    f.checkForUpdates = gSettings->checkForUpdates;
     FILETIME never{};
-    if (FileTimeEq(gSettings->timeOfLastUpdateCheck, never)) {
-        logf("CheckForUpdate: skipping auto check, first start (TimeOfLastUpdateCheck not set)\n");
-        return false;
-    }
-
-    // pre-release builds check on every startup (testers want the newest build);
-    // skip the daily/weekly throttle below
-    if (gIsPreReleaseBuild) {
-        logf("CheckForUpdate: checking, pre-release build checks on every startup\n");
-        return true;
-    }
-
-    // only check if at least a day passed since last check
+    f.firstStart = FileTimeEq(gSettings->timeOfLastUpdateCheck, never);
+    f.isPreRelease = gIsPreReleaseBuild;
     FILETIME currentTimeFt;
     GetSystemTimeAsFileTime(&currentTimeFt);
-    int secsSinceLastUpdate = FileTimeDiffInSecs(currentTimeFt, gSettings->timeOfLastUpdateCheck);
-
-    constexpr int kSecondsInDay = 60 * 60 * 24;
-    constexpr int kSecondsInWeek = 7 * 60 * 60 * 24;
-
-    int secsBetweenChecks = gIsPreReleaseBuild ? kSecondsInWeek : kSecondsInDay;
-    bool checkUpdate = secsSinceLastUpdate > secsBetweenChecks;
-    logf("CheckForUpdate: %s auto check, %d secs since the last one, %d secs between checks\n",
-         checkUpdate ? StrL("doing") : StrL("skipping"), secsSinceLastUpdate, secsBetweenChecks);
-    return checkUpdate;
+    f.secsSinceLast = FileTimeDiffInSecs(currentTimeFt, gSettings->timeOfLastUpdateCheck);
+    return DecideUpdateCheck(f) == UpdateCheckChoice::Check;
 }
 
 void StartInstallerAutoUpgrade(Str installerPath) {
@@ -169,21 +118,10 @@ void StartInstallerAutoUpgrade(Str installerPath) {
         logf("StartInstallerAutoUpgrade: refusing an update with an untrusted signature\n");
         return;
     }
-    str::Builder cmd;
-    if (IsOurExeInstalled()) {
-        // no need for sleep because it shows the installer dialog anyway
-        if (gIsPreReleaseBuild) {
-            cmd.Append(StrL(" -fast-install"));
-        } else {
-            cmd.Append(StrL(" -install"));
-        }
-    } else {
-        // we're asking to over-write over ourselves, so also wait 2 secs to allow
-        // our process to exit
-        cmd.Append(fmt(R"( -sleep-ms 2000 -exit-when-done -update-self-to "%s")", GetSelfExePathTemp()));
-    }
-    logf("StartInstallerAutoUpgrade: installer cmd: '%s'\n", ToStr(cmd));
-    CreateProcessHelper(installerPath, ToStr(cmd));
+    // installed: setup UI. Portable: wait, then overwrite this exe.
+    TempStr cmd = InstallerUpgradeArgsTemp(IsOurExeInstalled(), gIsPreReleaseBuild, GetSelfExePathTemp());
+    logf("StartInstallerAutoUpgrade: installer cmd: '%s'\n", cmd);
+    CreateProcessHelper(installerPath, cmd);
 }
 
 static void ExitAfterStartingUpdater() {
@@ -433,19 +371,14 @@ void DownloadAndInstallPendingUpdate(MainWindow* win) {
 }
 
 static bool ShouldDownloadUpdate(UpdateInfo* updateInfo) {
-    if (gIsStoreBuild) {
-        // I assume store will take care of updates
-        return false;
-    }
-    Str latestVer = updateInfo->latestVer;
     Str myVer = StrL(UPDATE_CHECK_VERA);
     if (gIsDebugBuild) {
         // in debug build we compare against pre-rel version, like "17616"
         // but our version is like "3.6" so it triggers update
         myVer = StrL("50000");
     }
-    bool hasUpdate = CompareProgramVersion(latestVer, myVer) > 0;
-    return hasUpdate;
+    // a store build lets the store install updates
+    return ShouldOfferProgramUpdate(updateInfo->latestVer, myVer, gIsStoreBuild);
 }
 
 static HRESULT CALLBACK TaskDialogHyperlinkCallback(HWND /*hwnd*/, UINT msg, WPARAM /*wParam*/, LPARAM lParam,
@@ -564,29 +497,22 @@ static DWORD MaybeStartUpdateDownload(HWND hwndParent, HttpRsp* rsp, UpdateCheck
 #endif
 
     Str url = rsp->url;
-
-    if (rsp->error != 0) {
+    str::Builder* data = &rsp->data;
+    UpdateInfoFetch kind = ClassifyUpdateInfoFetch(url, (int)rsp->error, (int)rsp->httpStatusCode, len(*data),
+                                                   updateInfoURLs, dimof(updateInfoURLs));
+    if (kind == UpdateInfoFetch::TransportError) {
         logf("ShowAutoUpdateDialog: http get of '%s' failed with %d\n", url, (int)rsp->error);
         return rsp->error;
     }
-    if (rsp->httpStatusCode != 200) {
+    if (kind == UpdateInfoFetch::BadStatus) {
         logf("ShowAutoUpdateDialog: http get of '%s' failed with code %d\n", url, (int)rsp->httpStatusCode);
         return ERROR_INTERNET_INVALID_URL;
     }
-
-    bool isValidURL = false;
-    for (auto updateInfoURL : updateInfoURLs) {
-        if (str::StartsWith(url, updateInfoURL)) {
-            isValidURL = true;
-            break;
-        }
-    }
-    if (!isValidURL) {
+    if (kind == UpdateInfoFetch::UnlistedUrl) {
         logf("ShowAutoUpdateDialog: '%s' is not a valid url\n", url);
         return ERROR_INTERNET_INVALID_URL;
     }
-    str::Builder* data = &rsp->data;
-    if (0 == len(*data)) {
+    if (kind == UpdateInfoFetch::EmptyBody) {
         logf("ShowAutoUpdateDialog: empty response from url '%s'\n", url);
         return ERROR_INTERNET_CONNECTION_ABORTED;
     }
@@ -772,34 +698,6 @@ void StartAsyncUpdateCheck(MainWindow* win, UpdateCheck updateCheckType) {
     data->updateCheckType = updateCheckType;
     auto fn = MkFunc0<UpdateCheckAsyncData>(UpdateCheckAsync, data);
     RunAsync(fn, StrL("UpdateCheckAsync"));
-}
-
-// the assumption is that this is a portable version downloaded to temp directory
-// we should copy ourselves over the existing file, launch ourselves and
-// tell our new copy to delete ourselves
-void UpdateSelfTo(Str dstPath, int sleepMs) {
-    ReportIf(len(dstPath) == 0);
-    if (!file::Exists(dstPath)) {
-        logf("UpdateSelfTo: failed because destination doesn't exist\n");
-        return;
-    }
-
-    logf("UpdateSelfTo: '%s', sleep for %d ms\n", dstPath, sleepMs);
-    // sleeping for a bit to make sure that the program that launched us
-    // had time to exit so that we can overwrite it
-    ::Sleep(sleepMs);
-
-    // OverwriteAtomicRetry(dst, src): copy this process (new build) onto dstPath
-    TempStr srcPath = GetSelfExePathTemp();
-    bool ok = file::OverwriteAtomicRetry(dstPath, srcPath, 20, 250);
-    if (!ok) {
-        logf("UpdateSelfTo: failed to overwrite '%s' with '%s'\n", dstPath, srcPath);
-        return;
-    }
-    logf("UpdateSelfTo: copied self to '%s'\n", dstPath);
-
-    TempStr args = fmt(R"(-sleep-ms 500 -delete-file "%s")", srcPath);
-    CreateProcessHelper(dstPath, args);
 }
 
 #if IS_DEBUG

@@ -17,6 +17,7 @@ extern void CryptoUtilTest();
 extern void CssParser_UnitTests();
 extern void DictTest();
 extern void DirRemoveAllTest();
+extern void UncExistsTest();
 extern void FileUtilTest();
 extern void GuessFileTypeTest();
 extern void JsonTest();
@@ -30,6 +31,7 @@ extern bool AnnotSearch_UnitTests();
 extern void ChapterTable_UnitTests();
 extern void MobiDoc_UnitTests();
 extern void LitDoc_UnitTests();
+extern void RtfDoc_UnitTests();
 extern void PdfSync_UnitTests();
 extern void TextSelection_UnitTests();
 extern void PagePosition_UnitTests();
@@ -53,11 +55,13 @@ extern bool MarkdownModel_UnitTestBrowserNavigationUrl();
 extern bool MarkdownToc_UnitTestHtmlLinks();
 extern bool MarkdownToc_UnitTestHtmlHeadings();
 extern bool MarkdownToc_UnitTestMermaid();
+extern bool MarkdownToc_UnitTestHighlightWikilinks();
 #if IS_DEBUG
 extern bool PdfDarkModeImageStats_UnitTest();
 extern bool EbookDoc_UnitTestLoading();
 bool GumboHtmlParser_UnitTest();
 bool DisplayMode_UnitTestZoom();
+bool Translations_UnitTestUnescape();
 extern bool Accelerators_UnitTestFolderNavIsSafe();
 extern bool NavFiles_UnitTestHidden();
 #if !OS_WIN
@@ -150,6 +154,7 @@ int main(int argc, char** argv) {
     CssParser_UnitTests();
     DictTest();
     DirRemoveAllTest();
+    UncExistsTest();
     FileUtilTest();
     GuessFileTypeTest();
     JsonTest();
@@ -163,6 +168,7 @@ int main(int argc, char** argv) {
     ChapterTable_UnitTests();
     MobiDoc_UnitTests();
     LitDoc_UnitTests();
+    RtfDoc_UnitTests();
     PdfSync_UnitTests();
     TextSelection_UnitTests();
     PagePosition_UnitTests();
@@ -185,12 +191,14 @@ int main(int argc, char** argv) {
     utassert(MarkdownToc_UnitTestHtmlLinks());
     utassert(MarkdownToc_UnitTestHtmlHeadings());
     utassert(MarkdownToc_UnitTestMermaid());
+    utassert(MarkdownToc_UnitTestHighlightWikilinks());
 #if IS_DEBUG
     utassert(PdfDarkModeImageStats_UnitTest());
     utassert(Accelerators_UnitTestFolderNavIsSafe());
     utassert(EbookDoc_UnitTestLoading());
     utassert(GumboHtmlParser_UnitTest());
     utassert(DisplayMode_UnitTestZoom());
+    utassert(Translations_UnitTestUnescape());
     utassert(NavFiles_UnitTestHidden());
 #if !OS_WIN
     utassert(MeasurementSystem_UnitTests());

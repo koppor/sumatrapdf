@@ -117,6 +117,9 @@
     <ClInclude Include="..\ext\darkmodelib\src\Version.h">
       <Filter>ext\darkmodelib\src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\BrightnessContrastDialog.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\Canvas.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -166,6 +169,9 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\SidebarPanel.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\SignatureUI.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\SimpleBrowserWindow.h">
@@ -283,6 +289,9 @@
       <Filter>src\shared</Filter>
     </ClInclude>
     <ClInclude Include="..\src\shared\AvifReader.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\shared\BrightnessContrastDialogCommon.h">
       <Filter>src\shared</Filter>
     </ClInclude>
     <ClInclude Include="..\src\shared\BrowserViewCommon.h">
@@ -552,6 +561,9 @@
     <ClInclude Include="..\src\shared\RestrictedUseConfig.h">
       <Filter>src\shared</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\shared\RtfDoc.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\shared\Screenshot.h">
       <Filter>src\shared</Filter>
     </ClInclude>
@@ -657,6 +669,9 @@
     <ClInclude Include="..\src\shared\VirtualDesktop.h">
       <Filter>src\shared</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\shared\WebViewCapture.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\shared\WebpReader.h">
       <Filter>src\shared</Filter>
     </ClInclude>
@@ -750,6 +765,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\BasePch.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\BrightnessContrastDialog.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Canvas.cpp">
@@ -911,6 +929,9 @@
     <ClCompile Include="..\src\SignDocumentDialog.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\SignatureUI.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\SimpleBrowserWindow.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -918,6 +939,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\SumatraDialogs.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\SumatraOnlineDialog.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\SumatraPDF.cpp">
@@ -1151,6 +1175,9 @@
     <ClCompile Include="..\src\shared\Annotation.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\shared\AppDecisions.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\shared\AppHelpersCommon.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
@@ -1161,6 +1188,9 @@
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\AvifReader.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\shared\BrightnessContrastDialogCommon.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\BrowserViewCommon.cpp">
@@ -1227,6 +1257,9 @@
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\EngineBase.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\shared\EngineCaj.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\EngineCreate.cpp">
@@ -1451,6 +1484,9 @@
     <ClCompile Include="..\src\shared\RestrictedUseConfig.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\shared\RtfDoc.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\shared\ScreenshotCommon.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
@@ -1532,6 +1568,9 @@
     <ClCompile Include="..\src\shared\UpdateTemp.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\shared\WebViewCapture_win.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\shared\WebpReader.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
@@ -1578,6 +1617,9 @@
       <Filter>src\shared\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\tests\RenderCache_ut.cpp">
+      <Filter>src\shared\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\shared\tests\RtfDoc_ut.cpp">
       <Filter>src\shared\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\tests\SimpleLog_ut.cpp">

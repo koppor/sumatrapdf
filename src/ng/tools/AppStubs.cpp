@@ -36,6 +36,10 @@ TempStr GetSumatraDataDirTemp() {
     return {};
 }
 
+TempStr GetConverterDataDirTemp() {
+    return {};
+}
+
 bool IsStressTesting() {
     return false;
 }
@@ -101,8 +105,8 @@ RenderCache* gRenderCache;
 
 int ScrollbarModeFromPrefs() {
     int idx = SeqStrIndexIS(gScrollbarModeNames, gSettings->scrollbars);
-    if (idx < 0) {
-        idx = kScrollbarWindows;
+    if (idx < 0 || idx == kScrollbarWindows) {
+        idx = kScrollbarSmart;
     }
     return idx;
 }
@@ -151,6 +155,7 @@ void HomePageInvalidateLayoutCache() {}
 
 struct FileState;
 void HomePageThumbnailChanged(FileState*) {}
+void SetThumbnailFromImage(Str, Str) {}
 
 // SumatraPDFCommon.cpp, which only the app builds
 void OnThumbnailsTypeChanged() {}
@@ -204,6 +209,10 @@ bool HasKnownExternalViewerForCmd(int) {
 }
 
 bool CanViewWithKnownExternalViewer(WindowTab*, int) {
+    return false;
+}
+
+bool CanSendAsEmailAttachment(WindowTab*) {
     return false;
 }
 

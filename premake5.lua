@@ -558,7 +558,7 @@ workspace "SumatraPDF"
     disablewarnings { "4018", "4244", "4267", "4456", "4996" }
     files { "ext/chmdec/*.c", "ext/chmdec/*.h" }
 
-  -- msdes: public domain d3des, used by LitDoc.cpp to unseal .lit DRM1.
+  -- msdes: d3des with GPL tables from openclit, used by LitDoc.cpp to unseal .lit DRM1.
   -- Linked into libsumatrapdf.dll (and the static EXE); dynamic consumers
   -- import the required functions through libsumatrapdf.def.
   project "msdes"
@@ -788,10 +788,10 @@ workspace "SumatraPDF"
     kind "StaticLib"
     language "C"
     optimized_conf()
-    disablewarnings { "4100", "4201" }
+    disablewarnings { "4100", "4201", "4456" }
     includedirs { "ext/a-brotli" }
     files {
-      "ext/a-brotli/brotli.c", "ext/a-brotli/brotli/*.h",
+      "ext/a-brotli/brotli.c", "ext/a-brotli/*.h", "ext/a-brotli/brotli/*.h",
       "ext/a-brotli/version.txt", "ext/a-brotli/LICENSE",
     }
 
@@ -1442,7 +1442,7 @@ workspace "SumatraPDF"
     filter "platforms:x64_asan"
     linkoptions { "/INFERASANLIBS" }
     filter {}
-    -- stage translations + marked/mermaid + manual under out/<cfg>/embedded-static
+    -- stage translations + marked/pele + manual under out/<cfg>/embedded-static
     -- and pack them into out/<cfg>/embedded-static.lzsa (IDR_EMBEDDED_PAK, path
     -- passed via the EMBEDDED_PAK resdefine). Uses cmd so MSBuild need not have
     -- bun on PATH.
@@ -1551,7 +1551,7 @@ workspace "SumatraPDF"
     -- delay-loaded libsumatrapdf.dll which LoadLibsumatrapdf() loads by full path
     linkoptions { "/DEPENDENTLOADFLAG:0x800" }
     dependson { "PdfFilter", "PdfPreview", "sumatrapdf-tool" }
-    -- stage translations + marked/mermaid + manual under out/<cfg>/embedded and
+    -- stage translations + marked/pele + manual under out/<cfg>/embedded and
     -- pack them plus the installer payload into out/<cfg>/embedded.lzsa
     -- (IDR_EMBEDDED_PAK, path passed via the EMBEDDED_PAK resdefine above).
     -- Always re-packed: MakeLZSA reuses unchanged entries, and signed release

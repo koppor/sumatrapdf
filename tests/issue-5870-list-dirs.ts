@@ -10,9 +10,8 @@
 import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ControlClient, ControlCommand } from "./control";
-import { IS_MAC } from "./host";
-import { ROOT, runStandalone, SLOW_BUILD_FACTOR, tmpPath } from "./util";
-import { getWindowRect, postMessage, readWindowDCColumn, sleep, waitForWindowIdle } from "./winapi";
+import { ROOT, runStandalone, SLOW_BUILD_FACTOR, tmpPath, USE_NG } from "./util";
+import { getWindowRect, postMessage, readWindowDCColumn, sleep, waitForWindowIdle, withWindowDC } from "./winapi";
 import { findCanvas, launchControlled, launchSumatra, waitForFrame, killAndWait } from "./win-automation";
 
 const WM_VSCROLL = 0x0115;
@@ -35,9 +34,11 @@ function dirColumnTextPixels(hwnd: number, yFrac: number, h: number): number {
   const dx = r.right - r.left;
   const dy = r.bottom - r.top;
   const px: number[] = [];
-  for (let x = Math.floor(dx * 0.45); x < Math.floor(dx * 0.72); x += 2) {
-    px.push(...readWindowDCColumn(hwnd, x, Math.floor(dy * yFrac), h));
-  }
+  withWindowDC(hwnd, () => {
+    for (let x = Math.floor(dx * 0.45); x < Math.floor(dx * 0.72); x += 2) {
+      px.push(...readWindowDCColumn(hwnd, x, Math.floor(dy * yFrac), h));
+    }
+  });
   const counts = new Map<number, number>();
   for (const p of px) {
     counts.set(p, (counts.get(p) ?? 0) + 1);
@@ -86,7 +87,7 @@ async function homeRows(client: ControlClient): Promise<ListRow[] | null> {
   return parseListRows(String(res[1] ?? ""));
 }
 
-async function macListDirs(dir: string, dirPath: string): Promise<void> {
+async function ngListDirs(dir: string, dirPath: string): Promise<void> {
   const { proc, client, frame } = await launchControlled([...WINDOW_POS, "-appdata", dir]);
   try {
     const deadline = Date.now() + 8000 * SLOW_BUILD_FACTOR;
@@ -143,8 +144,9 @@ export async function testit(): Promise<void> {
   );
 
   const dirPath = join(dir, "sub");
-  if (IS_MAC) {
-    await macListDirs(dir, dirPath);
+  // ng's frame is a swapchain: no GDI pixels to read, so ask the app for the rows
+  if (USE_NG) {
+    await ngListDirs(dir, dirPath);
     return;
   }
 
@@ -175,7 +177,9 @@ export async function testit(): Promise<void> {
     const deadline2 = Date.now() + 4000;
     let atBottom = 0;
     while (Date.now() < deadline2) {
-      atBottom = dirColumnTextPixels(frame, 0.86, 60) + dirColumnTextPixels(frame, 0.9, 60);
+      // the lower third of the window: the last rows of the band, wherever
+      // the header above leaves them
+      atBottom = dirColumnTextPixels(frame, 0.7, 150);
       if (atBottom >= kMinTextPixels) {
         break;
       }

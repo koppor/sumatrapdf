@@ -1177,7 +1177,7 @@ void NavFilesView::OnClose(NavFilesView*, gp::Ctx* cx, const gp::ClickEvent*) {
 // what the panel may take without leaving the canvas less than kMinDocCanvasDx
 static int NavMaxDx(MainWindow* win) {
     int sidebarDx = 0;
-    if (win->uiState.tocVisible || win->uiState.favVisible) {
+    if ((win->uiState.tocVisible || win->uiState.favVisible) && !AppShellSidebarFloats(win)) {
         sidebarDx = win->sidebarDx + kSplitterDx;
     }
     int avail = win->frameRc.dx - sidebarDx - AIChatPanelDx(win) - kMinDocCanvasDx - kSplitterDx;
@@ -1746,6 +1746,21 @@ TempStr NavFilesInFolderStateTemp(Str action, int idx, int* exitCodeOut) {
             *exitCodeOut = 0;
         }
         return fmt("OK %d %d %d %d", (int)r.x, (int)r.y, (int)r.w, (int)r.h);
+    } else if (str::Eq(action, StrL("list-screen-rect"))) {
+        // where a test must touch to pan the list (screen pixels)
+        if (exitCodeOut) {
+            *exitCodeOut = 0;
+        }
+        gp::Bounds r = gNav.listBounds;
+#if OS_WIN
+        HWND hwnd = gNavTw ? ToolWindowHwnd(gNavTw) : AppShellNativeHwnd(gNav.win);
+        float scale = (float)DpiGetForHwnd(hwnd) / 96.f;
+        POINT pt{(int)(r.x * scale), (int)(r.y * scale)};
+        ClientToScreen(hwnd, &pt);
+        return fmt("OK %d %d %d %d", (int)pt.x, (int)pt.y, (int)(r.w * scale), (int)(r.h * scale));
+#else
+        return fmt("OK %d %d %d %d", (int)r.x, (int)r.y, (int)r.w, (int)r.h);
+#endif
     } else if (str::Eq(action, StrL("edit-path")) || str::TrimPrefix(action, StrL("path-"))) {
         // path editing: edit-path, path-text:<text>, path-commit, path-cancel,
         // path-state (report only)
@@ -1805,7 +1820,7 @@ TempStr NavFilesInFolderStateTemp(Str action, int idx, int* exitCodeOut) {
     int filterFocused = IsNavInputFocused(gNav.filterEdit);
     return fmt(
         "OK scan=%d sel=%d items=%d back=%d fwd=%d dir=\"%s\" name=\"%s\" keyboard=%d dx=%d filter=\"%s\" "
-        "filterFocused=%d",
+        "filterFocused=%d scrollY=%d",
         (int)gNav.scanInFlight, sel, len(gNav.entries), canBack, canFwd, gNav.currDir, name, (int)gNav.hasKeyboard,
-        NavFilesPanelDx(gNav.win), filter, filterFocused);
+        NavFilesPanelDx(gNav.win), filter, filterFocused, (int)gNav.scrollY);
 }
