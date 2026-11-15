@@ -51,6 +51,7 @@
     V(".pdf", FileType::PDF)           \
     V(".ai", FileType::PDF)            \
     V(".xps", FileType::Xps)           \
+    V(".ofd", FileType::Ofd)           \
     V(".oxps", FileType::Xps)          \
     V(".xod", FileType::Xps)           \
     V(".dwfx", FileType::Xps)          \
@@ -1256,7 +1257,7 @@ static const FileType gImageTypes[] = {
     FileType::Ico
 };
 
-static const char* gImageFormatExts =
+static constexpr SeqStrings gImageFormatExts =
     ".png\0"
     ".jpg\0"
     ".jpeg\0"
@@ -1273,6 +1274,8 @@ static const char* gImageFormatExts =
     ".ico\0"
     "\0";
 // clang-format on
+// GfxFileExtFromTypeTemp() maps an index in one to the same index in the other
+static_assert(SeqStrCount(gImageFormatExts) == dimof(gImageTypes));
 
 TempStr GfxFileExtFromTypeTemp(FileType ft) {
     int idx = FileTypeIndexOf(gImageTypes, dimofi(gImageTypes), ft);
@@ -1355,6 +1358,8 @@ static bool IsFb2Archive(Archive* archive) {
     return nFb2 == 1;
 }
 
+static FileType GuessArchiveType(Archive* archive);
+
 FileType GuessFileTypeFromFile(Str path) {
     ReportIf(len(path) == 0);
     if (path::IsDirectory(path)) {
@@ -1381,6 +1386,24 @@ FileType GuessFileTypeFromFile(Str path) {
     if (!archive) {
         return res;
     }
+    res = GuessArchiveType(archive);
+    delete archive;
+    return res;
+}
+
+// For zip data: the format the zip holds (e.g. Ofd for a .zip with OFD.xml), else Zip
+FileType GuessFileTypeFromZipData(Str data) {
+    Archive* archive = OpenArchiveFromData(data);
+    if (!archive) {
+        return FileType::Zip;
+    }
+    FileType res = GuessArchiveType(archive);
+    delete archive;
+    return res;
+}
+
+static FileType GuessArchiveType(Archive* archive) {
+    FileType res = FileType::Zip;
     if (IsXpsArchive(archive)) {
         res = FileType::Xps;
         FileType office = OfficeArchiveType(archive);
@@ -1394,48 +1417,14 @@ FileType GuessFileTypeFromFile(Str path) {
     if (IsFb2Archive(archive)) {
         res = FileType::Fb2z;
     }
-    delete archive;
+    // an encrypted OFD has only Encryptions.xml in the clear
+    if (archive->GetFileId(StrL("OFD.xml")) >= 0 || archive->GetFileId(StrL("Encryptions.xml")) >= 0) {
+        res = FileType::Ofd;
+    }
     return res;
 }
 
 FileType GuessFileType(Str path, bool sniff) {
     FileType ft = sniff ? GuessFileTypeFromFile(path) : FileType::Unknown;
     return ft != FileType::Unknown ? ft : GuessFileTypeFromName(path);
-}
-
-// compares the guessed type's canonical extension (the first extension
-// registered for it, e.g. ".pdf" for sample.ai) to expectedExt
-// Headless test helper: compare GuessFileTypeFromName's canonical extension
-// to an expected one (e.g. "sample.ai" -> ".pdf").
-TempStr FileKindResultTemp(Str path, Str expectedExt, int* exitCodeOut) {
-    str::Builder out;
-    auto fail = [&](Str msg) -> Str {
-        out.Append(msg);
-        out.AppendChar('\n');
-        if (exitCodeOut) {
-            *exitCodeOut = 1;
-        }
-        return ToStrTemp(out);
-    };
-
-    if (len(path) == 0 || len(expectedExt) == 0) {
-        return fail(StrL("ERROR missing path or expectedExt"));
-    }
-    FileType ft = GuessFileTypeFromName(path);
-    if (ft == FileType::Unknown) {
-        return fail(StrL("ERROR unknown-kind"));
-    }
-    TempStr ext = GetExtForFileTypeTemp(ft);
-    if (!str::EqI(ext, expectedExt)) {
-        out.Append(fmt("FAIL path=%s got=%s expected=%s\n", path, ext, expectedExt));
-        if (exitCodeOut) {
-            *exitCodeOut = 1;
-        }
-        return ToStrTemp(out);
-    }
-    out.Append(fmt("OK path=%s ext=%s\n", path, ext));
-    if (exitCodeOut) {
-        *exitCodeOut = 0;
-    }
-    return ToStrTemp(out);
 }

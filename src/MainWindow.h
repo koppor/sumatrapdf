@@ -2,6 +2,7 @@
    License: GPLv3 */
 
 struct DoubleBuffer;
+struct TabGroup;
 struct Edit;
 struct WebviewWnd;
 struct LinkHandler;
@@ -14,7 +15,9 @@ struct VirtText;
 struct VirtCloseButton;
 struct PageThumbnailsCtrl;
 struct SignaturesCtrl;
+struct LayersCtrl;
 struct SigBar;
+struct PageInfoBar;
 struct SidebarPanel;
 struct VirtRoot;
 struct VirtSplitter;
@@ -41,6 +44,7 @@ struct TocItem;
 struct FindBarWnd;
 struct FindWindowWnd;
 struct ToolbarVirt;
+struct MeasurementToolbar;
 
 constexpr int kMaxKeyboardLinkHintLength = 9;
 
@@ -97,6 +101,7 @@ struct DocController;
 struct DocControllerCallback;
 struct ChmModel;
 struct MarkdownModel;
+struct BrowserDocController;
 struct DisplayModel;
 struct WindowTab;
 
@@ -135,11 +140,14 @@ enum class SelectionDragEdge {
     Move,
 };
 
-enum PresentationMode {
-    PM_DISABLED = 0,
-    PM_ENABLED,
-    PM_BLACK_SCREEN,
-    PM_WHITE_SCREEN
+// One mode at a time: fullscreen and presentation used to be two fields, so
+// both could be set. The PresentationBlack / White modes hide the page.
+enum class WindowMode {
+    Normal,
+    FullScreen,
+    Presentation,
+    PresentationBlack,
+    PresentationWhite,
 };
 
 // WM_GESTURE handling
@@ -244,6 +252,7 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     DisplayModel* AsFixed() const;
     ChmModel* AsChm() const;
     MarkdownModel* AsMarkdown() const;
+    BrowserDocController* AsBrowser() const;
 
     // TODO: use CurrentTab()->ctrl instead
     DocController* ctrl = nullptr; // owned by CurrentTab()
@@ -293,7 +302,11 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     // the Thumbnails view: the document's page thumbnails
     PageThumbnailsCtrl* pageThumbs = nullptr;
     SignaturesCtrl* signaturesCtrl = nullptr;
+    // the Layers view: the PDF's optional content groups
+    LayersCtrl* layersCtrl = nullptr;
     SigBar* sigBar = nullptr;
+    // PageInfoLocation = bottom / bottom-overlay
+    PageInfoBar* pageInfoBar = nullptr;
     TocTree* tocFilteredTree = nullptr;
 
     // whether the current tab's ToC has been loaded into the tree
@@ -405,12 +418,15 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     bool textDragPending = false;  // true when mouse down on selected text, waiting for drag
     bool imageDragPending = false; // true when mouse down on image, waiting for drag
     IPageElement* imageDragElement = nullptr;
-    int imageDragPageNo = -1; // page of imageDragElement for screen-rect / hotspot
+    int imageDragElementGen = 0; // engine's elementsGeneration when it was taken
+    int imageDragPageNo = -1;    // page of imageDragElement for screen-rect / hotspot
 
     /* when dragging the document around, this is previous position of the
        cursor. A delta between previous and current is by how much we
        moved */
     Point dragPrevPos;
+    // presentation just started: the next mouse move hides the cursor at once
+    bool hideCursorOnNextMove = false;
     /* when dragging, mouse x/y position when dragging was started */
     Point dragStart;
 
@@ -518,6 +534,7 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     HwndSlot* menuSlot = nullptr;
     HwndSlot* toolbarTopSlot = nullptr;
     HwndSlot* toolbarBottomSlot = nullptr;
+    HwndSlot* pageInfoBarSlot = nullptr;
     // tabs-in-titlebar caption: VirtCtrl buttons + HwndSlots for tabs/menu
     VBox* captionLayout = nullptr;
     HBox* captionRow1 = nullptr;
@@ -533,6 +550,8 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
 
     // home page thumbnail scrolling
     int homePageScrollY = 0;
+    // "Open in hex view" on the load error page; empty when not shown
+    Rect loadErrorHexLinkRc;
     // keyboard-selected home page entry (index into the filtered list),
     // -1 when there's nothing to select. Enter opens it (issue #1136)
     int homePageSelIdx = 0;
@@ -556,10 +575,9 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     bool toolbarOverlayShown = false;
     // a hide of the overlay toolbar is scheduled (after kDelayToolbarHide)
     bool toolbarOverlayHidePending = false;
-    bool isFullScreen = false;
     // chrome-less always-on-top preview from Explorer Space (issue #2568)
     bool isQuickLook = false;
-    PresentationMode presentation = PM_DISABLED;
+    WindowMode windowMode = WindowMode::Normal;
     int windowStateBeforePresentation = 0;
     bool suppressFrameRedraw = false;
     // whether BeginFrameRedrawSuppression sent WM_SETREDRAW FALSE (it doesn't
@@ -579,9 +597,8 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     struct UIState {
         struct Layout {
             Rect rc;
-            int presentation = 0;
+            WindowMode windowMode = WindowMode::Normal;
             bool tabsInTitlebar = false;
-            bool isFullScreen = false;
             bool tabsVisible = false;
             bool isToolbarVisible = false;
             bool isToolbarOverlay = false;
@@ -591,6 +608,8 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
             // full-window Favorites tab vs. sidebar panel: different geometry
             bool favoritesAsTab = false;
             bool sigBarVisible = false;
+            // 0: no page info bar, else 1 + PageInfoBarMode
+            int pageInfoBar = 0;
             bool showMenuBarRebar = false;
             bool aiChatVisible = false;
             int aiChatDx = 0;
@@ -640,10 +659,12 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     UINT_PTR delayedRepaintTimer = 0;
 
     ThreadHandle printThread = nullptr;
-    bool printCanceled = false;
+    // set on the UI thread, read by the print thread
+    AtomicBool printCanceled = 0;
 
     ThreadHandle findThread = nullptr;
-    bool findCancelled = false;
+    // set on the UI thread, read by the find thread
+    AtomicBool findCancelled = 0;
     bool findMatchCase = false;
     bool findMatchWholeWord = false;
     // find-as-you-type is debounced: a WM_TIMER on hwndFrame fires the actual
@@ -711,6 +732,7 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     int textSelectAnchorGlyph = 0;
 
     IPageElement* linkOnLastButtonDown = nullptr;
+    int linkOnLastButtonDownGen = 0; // engine's elementsGeneration when it was taken
     Str urlOnLastButtonDown;
     Annotation* annotationUnderCursor = nullptr;
     // a gesture that writes to the PDF as it goes (a resize drag) has a journal
@@ -773,6 +795,7 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
 
     // compact property row under the selected annotation in Edit PDF mode
     AnnotEditToolbar* annotEditToolbar = nullptr;
+    MeasurementToolbar* measurementToolbar = nullptr;
     // filter box on the Edit PDF toolbar and its dropdown list
     AnnotFilterToolbar* annotFilterToolbar = nullptr;
     // session-only: pop the annotation list into a floating window (not saved)
@@ -789,6 +812,8 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     // processing commands while closing (e.g. reentrancy
     // via modal dialogs pumping messages)
     bool isBeingClosed = false;
+    // the AutoSync tab group that follows this window's tabs; not owned
+    TabGroup* syncedTabGroup = nullptr;
     // CloseAllTabs is already on the stack (nested DDE CmdCloseAllTabs)
     bool inCloseAllTabs = false;
 
@@ -803,8 +828,14 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     // no-op unless gShowFrameRate is set
     void ShowFrameRateDur(double durMs);
 
-    void ChangePresentationMode(PresentationMode mode);
+    void ChangePresentationMode(WindowMode mode);
     bool InPresentation() const;
+    bool IsFullScreen() const { return windowMode == WindowMode::FullScreen; }
+    bool IsFullScreenOrPresentation() const { return windowMode != WindowMode::Normal; }
+    // presentation with the page hidden behind a black / white screen
+    bool InBlankPresentation() const {
+        return windowMode == WindowMode::PresentationBlack || windowMode == WindowMode::PresentationWhite;
+    }
 
     void Focus() const;
 
@@ -837,6 +868,8 @@ bool IsMainWindowValid(MainWindow*);
 bool IsMainWindowValidAndNotClosing(MainWindow*);
 bool IsCurrentTab(MainWindow* win, WindowTab* tab);
 bool IsWindowTabValid(WindowTab*);
+void PostForWindow(MainWindow*, void (*fn)(MainWindow*), Kind kind);
+void PostForTab(WindowTab*, void (*fn)(WindowTab*), Kind kind);
 extern Vec<MainWindow*> gWindows;
 extern bool gShowFrameRate;
 void HighlightTab(MainWindow*, WindowTab*);

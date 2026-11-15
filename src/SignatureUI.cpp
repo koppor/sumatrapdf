@@ -23,6 +23,7 @@
 #include "EngineAll.h"
 #include "DisplayModel.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Theme.h"
 #include "SumatraConfig.h"
@@ -270,11 +271,11 @@ static void OnSigBarPanel(MainWindow* win) {
 
 // posted: both change what the bar's tree holds, and a click comes from inside it
 static void OnSigBarCloseClick(MainWindow* win, VirtMouseEvent*) {
-    uitask::Post(MkFunc0<MainWindow>(OnSigBarClose, win), "SigBarClose");
+    PostForWindow(win, OnSigBarClose, "SigBarClose");
 }
 
 static void OnSigBarPanelClick(MainWindow* win, VirtMouseEvent*) {
-    uitask::Post(MkFunc0<MainWindow>(OnSigBarPanel, win), "SigBarPanel");
+    PostForWindow(win, OnSigBarPanel, "SigBarPanel");
 }
 
 bool SigBarWanted(MainWindow* win) {
@@ -282,7 +283,7 @@ bool SigBarWanted(MainWindow* win) {
     if (!res || res->sum.nSigned == 0 || res->barDismissed || !gSettings->showSignatureStatus) {
         return false;
     }
-    return !win->isFullScreen && win->presentation == PM_DISABLED;
+    return !win->IsFullScreenOrPresentation();
 }
 
 int SigBarDy(MainWindow* win) {
@@ -392,16 +393,18 @@ struct SignatureWnd : WindowBase {
 
 static SignatureWnd* gSignatureWnd = nullptr;
 
-static void OnSignatureWndClose(WindowBase::CloseEvent*) {
+static void ScheduleSignatureDelete() {
     if (gSignatureWnd) {
         gSignatureWnd->ScheduleDelete();
     }
 }
 
+static void OnSignatureWndClose(WindowBase::CloseEvent*) {
+    ScheduleSignatureDelete();
+}
+
 static void OnSignatureWndDestroy(WindowBase::DestroyEvent*) {
-    if (gSignatureWnd) {
-        gSignatureWnd->ScheduleDelete();
-    }
+    ScheduleSignatureDelete();
 }
 
 static void ClearSignatureWnd() {
@@ -452,22 +455,9 @@ bool SignatureWnd::Create(MainWindow* w, const PdfSigEntry* e) {
     PlatformFont* fontText = DlgUiFont(kToolDlgTextFontPx);
     SetFont(fontText);
     bool isRtl = IsUIRtl();
-    {
-        CreateCustomArgs args;
-        args.owner = win->hwndFrame;
-        args.title = Tr("Signature Properties");
-        args.visible = false;
-        args.style = WS_POPUPWINDOW | WS_CAPTION;
-        args.font = fontText;
-        args.isRtl = isRtl;
-        args.bgColor = colBg;
-        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
-        CreateCustom(args);
-    }
-    if (!hwnd) {
+    if (!CreateToolDialog(this, win->hwndFrame, Tr("Signature Properties"), fontText, colTxt, colBg)) {
         return false;
     }
-    SetColors(colTxt, colBg);
 
     auto* vbox = new VBox();
     vbox->alignCross = CrossAxisAlign::Stretch;
@@ -514,9 +504,7 @@ bool SignatureWnd::Create(MainWindow* w, const PdfSigEntry* e) {
     vbox->AddChild(NewDlgFooter(nullptr, close, cert));
     layout = vbox;
 
-    LayoutAndSizeToContent(layout, DpiScale(kSigDialogDx), DpiScale(kSigDialogDy), hwnd);
-    DoLayout(HwndClientRect(hwnd).Size());
-    HwndCenterDialog(hwnd, win->hwndFrame);
+    SizeToLayout(this, layout, DpiScale(kSigDialogDx), DpiScale(kSigDialogDy), win->hwndFrame);
     UpdateTheme();
     SetIsVisible(true);
     return true;

@@ -145,7 +145,7 @@ static void FinishSavePathDialog(Str path) {
     gSave.confirmingOverwrite = false;
     MainWindow* win = args ? args->win : nullptr;
     if (win && win->gpuiWin && gSave.nameEdit) {
-        gp::InputBlur(gSave.nameEdit, win->gpuiWin->app, win->gpuiWin);
+        InputBlurWhereFocused(gSave.nameEdit, win->gpuiWin);
     }
     delete gSave.nameEdit;
     gSave.nameEdit = nullptr;
@@ -180,14 +180,11 @@ void CloseSavePathDialog() {
     }
 }
 
-// ng: the automation channel's stand-in for typing a name and pressing Save.
-// An empty path is Cancel. Returns false when no dialog is up.
-bool TestFinishSavePathDialog(Str path) {
-    if (!gSave.visible) {
-        return false;
+// cancel it while its window, about to close, is still valid
+void CloseSavePathDialogFor(MainWindow* win) {
+    if (gSave.args && gSave.args->win == win) {
+        CloseSavePathDialog();
     }
-    FinishSavePathDialog(str::DupTemp(path));
-    return true;
 }
 
 void ShowSavePathDialog(SavePathArgs* args) {

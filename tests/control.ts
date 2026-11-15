@@ -21,9 +21,7 @@ export enum ControlCommand {
   TestInverseSearch = 22,
   TestImageResizeArrowKey = 23,
   TestFindResultPageColumnClip = 24,
-  TestFileKind = 25,
   TestScrollToLink = 26,
-  TestI18nErrorString = 27,
   TestPageInfoOverlay = 28,
   TestGetToc = 29,
   TestPageLinks = 30,
@@ -72,7 +70,6 @@ export enum ControlCommand {
   TestSelectionToolbar = 73,
   TestMarkupAnnots = 74,
   TestCmykImageSave = 75,
-  TestContextMenuPoint = 76,
   TestFindWindowContents = 77,
   TestFindUiState = 78,
   TestRenderViewPrint = 79,
@@ -97,7 +94,6 @@ export enum ControlCommand {
   TestReadingBar = 98,
   TestSeedTextSelection = 99,
   TestTtsEngineCrash = 100,
-  StartPerfLog = 101,
   StopPerfLog = 102,
   WaitSessionRestored = 103,
   TestNavFiles = 104,
@@ -158,6 +154,25 @@ export enum ControlCommand {
   TestFetchRevocation = 147,
   TestSignatureStatus = 148,
   TestTabWidths = 149,
+  TestOpenFromUrl = 150,
+  TestMigrateTab = 151,
+  TestLayers = 152,
+  TestSelectWordEdges = 153,
+  TestWordCount = 154,
+  TestPageInfoText = 155,
+  TestPageInfoBar = 156,
+  TestSelectedText = 157,
+  TestTocRows = 158,
+  TestMeasurement = 159,
+  TestImageReplace = 160,
+  // ng only: performance snapshot (cmd/port-perf.ts)
+  TestPerfStats = 161,
+  // ng only: the state of the canvas overlays
+  TestOverlayState = 162,
+  // [timeoutMs]: blocks until the home page painted after startup
+  WaitHomePainted = 163,
+  // [idx]: select tab idx; idx < 0 only reports the current tab and count
+  TestSelectTab = 164,
 }
 
 export type ControlArg = number | string | Uint8Array | ControlArg[];
@@ -592,6 +607,31 @@ export class ControlClient {
     return info;
   }
 
+  async waitForHomePainted(timeoutMs = 15000): Promise<string> {
+    const res = await this.request(ControlCommand.WaitHomePainted, [timeoutMs * SLOW_BUILD_FACTOR]);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const info = String(res[1] ?? "");
+    if (code !== 0) {
+      throw new Error(`WaitHomePainted failed: ${info || code}`);
+    }
+    return info;
+  }
+
+  // Selects tab idx (none when idx < 0) and reports the selected tab and count.
+  async selectTab(idx = -1): Promise<{ idx: number; count: number }> {
+    const res = await this.request(ControlCommand.TestSelectTab, [idx]);
+    const code = typeof res[0] === "number" ? res[0] : -1;
+    const info = String(res[1] ?? "");
+    if (code !== 0) {
+      throw new Error(`TestSelectTab failed: ${info || code}`);
+    }
+    const m = /idx=(-?\d+) count=(\d+)/.exec(info);
+    if (!m) {
+      throw new Error(`TestSelectTab: unexpected result '${info}'`);
+    }
+    return { idx: parseInt(m[1]!, 10), count: parseInt(m[2]!, 10) };
+  }
+
   async waitForSessionRestored(timeoutMs = 15000): Promise<string> {
     const res = await this.request(ControlCommand.WaitSessionRestored, [timeoutMs * SLOW_BUILD_FACTOR]);
     const code = typeof res[0] === "number" ? res[0] : -1;
@@ -721,7 +761,6 @@ export class ControlClient {
   }
 
   // Visible virtual controls. className limits the dump to one window class.
-  // "hit" is the control under a client point of that class, or null.
   async virtTree(className = ""): Promise<VirtCtrlInfo[]> {
     const res = await this.request(ControlCommand.TestVirtTree, className ? [className] : []);
     const code = typeof res[0] === "number" ? res[0] : -1;
@@ -737,19 +776,6 @@ export class ControlClient {
       rows.push(parseVirtLine(line));
     }
     return rows;
-  }
-
-  async virtHit(className: string, x: number, y: number): Promise<VirtCtrlInfo | null> {
-    const res = await this.request(ControlCommand.TestVirtTree, ["hit", className, x, y]);
-    const code = typeof res[0] === "number" ? res[0] : -1;
-    const raw = String(res[1] ?? "").trim();
-    if (code !== 0) {
-      throw new Error(`TestVirtTree hit failed: ${raw || code}`);
-    }
-    if (!raw || raw === "NONE") {
-      return null;
-    }
-    return parseVirtLine(raw);
   }
 
   // Notifications are drawn over the document and linger for ~2s, so a test

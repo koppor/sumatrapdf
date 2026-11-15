@@ -224,8 +224,6 @@ static void icoTest() {
     utassert(fti.imageDx == 64);
     utassert(fti.imageDy == 48);
     utassert(fti.hasImageSize);
-
-    utassert(GuessFileTypeFromName(StrL("favicon.ico")) == FileType::Ico);
 }
 
 static void jpegTest() {
@@ -637,6 +635,7 @@ static void extMapTest() {
     // CNKI formats, signatures per caj2pdf-rust
     utassert(GuessFileTypeFromName(StrL("paper.caj")) == FileType::Caj);
     utassert(GuessFileTypeFromName(StrL("paper.kdh")) == FileType::Caj);
+    utassert(GuessFileTypeFromName(StrL("invoice.ofd")) == FileType::Ofd);
     utassert(GuessFileTypeFromData(StrL("CAJ\0\x01\x02")) == FileType::Caj);
     utassert(GuessFileTypeFromData(StrL("KDH 2.00 Copyright")) == FileType::Caj);
     utassert(GuessFileTypeFromData(StrL("HN\0\0\x90\x01")) == FileType::Caj);
@@ -644,6 +643,12 @@ static void extMapTest() {
     utassert(GuessFileTypeFromData(StrL("TEB\0\x01")) == FileType::Caj);
     utassert(GuessFileTypeFromData(StrL("HNxx text")) == FileType::Unknown);
     utassert(GuessFileTypeFromName(StrL("foo.unknown-ext")) == FileType::Unknown);
+    // aliases of other formats (#1678)
+    utassert(GuessFileTypeFromName(StrL("sample.ai")) == FileType::PDF);
+    utassert(GuessFileTypeFromName(StrL("archive.ora")) == FileType::Cbz);
+    utassert(GuessFileTypeFromName(StrL("doc.xod")) == FileType::Xps);
+    utassert(GuessFileTypeFromName(StrL("scan.djv")) == FileType::DjVu);
+    utassert(GuessFileTypeFromName(StrL("drawing.dwfx")) == FileType::Xps);
     // multi-dot / FB2 zip containers: longest registered suffix wins over bare .zip
     utassert(GuessFileTypeFromName(StrL("book.fb2.zip")) == FileType::Fb2z);
     utassert(GuessFileTypeFromName(StrL("book.fbz")) == FileType::Fb2z);

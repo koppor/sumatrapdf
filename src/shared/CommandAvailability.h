@@ -22,6 +22,7 @@ struct AppCommandCtx {
     WindowTab* tab = nullptr;
 
     bool isDocLoaded = false;
+    bool isHexTab = false;
     Str filePath;
     Kind engineKind = nullptr;
     int pageCount = 0;
@@ -32,6 +33,7 @@ struct AppCommandCtx {
     bool isCbx = false;
     bool isImageCollection = false;
     bool isEpub = false;
+    bool isOfd = false;
     // reflowable document (epub, mobi, fb2, ...): the ebook settings apply
     bool isReflowable = false;
     bool isFixedPage = false;
@@ -54,6 +56,8 @@ struct AppCommandCtx {
     bool supportsAnnots = false;
     bool hideAnnotations = false;
     bool hasUnsavedAnnotations = false;
+    // Trim Pages To Selection or Trim Empty Margins is on
+    bool hasTrimmedPages = false;
     // any redaction mark in the loaded pages, including marks that came with
     // the file
     bool hasRedactMarks = false;
@@ -65,6 +69,7 @@ struct AppCommandCtx {
     bool clipboardReadAsync = false;
     // checked and found signatures; only the Windows app checks
     bool hasSignatures = false;
+    bool hasLayers = false;
 
     int nTabs = 0;
     bool hasDocTabs = false;

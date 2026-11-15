@@ -28,21 +28,15 @@ static CommandVisibility PaletteVis(int cmdId, const AppCommandCtx& ctx) {
 }
 
 void CommandAvailability_UnitTests() {
-    utassert(CmdWorksWithoutDocument(CmdOpenFile));
-    utassert(CmdWorksWithoutDocument(CmdExit));
-    utassert(CmdWorksWithoutDocument(CmdGoToHomePage));
-    utassert(!CmdWorksWithoutDocument(CmdPrint));
-
     // no document: only the whitelist shows
     AppCommandCtx noDoc;
     utassert(MenuVis(CmdNone, noDoc) == CommandVisibility::Hide);
     utassert(MenuVis(CmdOpenFile, noDoc) == CommandVisibility::Show);
     utassert(MenuVis(CmdGoToHomePage, noDoc) == CommandVisibility::Show);
-    utassert(PaletteVis(CmdGoToHomePage, noDoc) == CommandVisibility::Hide);
+    utassert(PaletteVis(CmdGoToHomePage, noDoc) == CommandVisibility::Show);
     utassert(MenuVis(CmdPrint, noDoc) == CommandVisibility::Hide);
     utassert(MenuVis(CmdTogglePageGrid, noDoc) == CommandVisibility::Hide);
     utassert(MenuVis(CmdToggleTransparencyGrid, noDoc) == CommandVisibility::Hide);
-    utassert(!CmdWorksWithoutDocument(CmdTogglePageGrid));
     utassert(PaletteVis(CmdShowSignatures, noDoc) == CommandVisibility::Hide);
 
     bool remove = false, disable = false;

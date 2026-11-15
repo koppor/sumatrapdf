@@ -9,9 +9,11 @@ struct Edit;
 struct Gfx;
 struct Checkbox;
 struct PlatformFont;
+struct WindowBase;
 enum class VirtButtonStyle;
 
 void ShowAddFavoriteDialog(MainWindow* win, Str filePath, int pageNo, Str pageLabel, Str name);
+void ShowEditFavoritesDialog(MainWindow* win);
 void ShowAdvancedSettingsDialog(MainWindow* win);
 void ShowConfigureRestrictedUseDialog(MainWindow* win);
 void OpenSettingsFileInEditor();
@@ -56,7 +58,7 @@ void ShowEbookSettingsDialog(MainWindow* win);
 Str ShowGetPasswordDialog(HWND hwndParent, Str fileName, bool* rememberPassword, bool* showPassword);
 void ShowGoToPageDialog(MainWindow* win);
 void ShowInverseSearchDialog(MainWindow* win);
-void ShowSumatraOnlineDialog(MainWindow* win);
+void ShowSumatraPDFWebDialog(MainWindow* win);
 void ShowSettingsDialog(MainWindow* win);
 
 enum class PrintRangeAdv {
@@ -112,7 +114,6 @@ struct Print_Advanced_Data {
           extraRotation(extraRotation) {}
 };
 
-HPROPSHEETPAGE CreatePrintAdvancedPropSheet(Print_Advanced_Data* data);
 void ShowPDFScriptDialog(MainWindow* win);
 TempStr PDFScriptTestTemp(Str action, int idx, int* exitCodeOut);
 
@@ -124,12 +125,13 @@ VirtButton* NewDlgButton(HWND hwndForDpi, Str text, PlatformFont* font, DlgButto
 void SetDlgButtonEnabled(VirtButton* b, DlgButtonStyle style, bool enabled);
 // the dialogs' UI font at `px`
 PlatformFont* DlgUiFont(int px);
+bool CreateToolDialog(WindowBase* w, HWND owner, Str title, PlatformFont* font, Color txt, Color bg);
+void SizeToLayout(WindowBase* w, ILayout* layout, int minDx, int minDy, HWND centerOn);
 VirtText* NewDlgLabel(Str s, PlatformFont* font, Color col, int dy, bool prefix = false);
 VirtText* NewDlgCaption(Str s, PlatformFont* font, Color col);
 ILayout* NewDlgUnderlined(ILayout* field);
 HBox* NewDlgRow();
 ILayout* NewDlgFooter(VirtButton* cancel, VirtButton* ok, VirtButton* extra = nullptr);
-void SetDlgButtonColors(VirtButton* b, DlgButtonStyle style);
 VirtListBox* NewDlgList(int dpi, PlatformFont* font);
 void SetDlgListColors(VirtListBox* lb);
 ILayout* NewDlgListBox(VirtListBox* lb);

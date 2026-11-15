@@ -35,6 +35,8 @@
 #include "MainWindow.h"
 #include "AnnotPlacement.h"
 #include "Canvas.h"
+#include "Tabs.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "TextSelection.h"
 #include "Selection.h"
@@ -64,15 +66,18 @@
 #include "EngineAll.h"
 #include "EutlTrust.h"
 #include "SignatureUI.h"
+#include "LayersUI.h"
 #include "CommandPalette.h"
 #include "PdfTools.h"
 #include "MergePdf.h"
 #include "ReadAloud.h"
 #include "ReadingAutoScroll.h"
 #include "ReadingBar.h"
+#include "MeasurementToolbar.h"
 #include "NavFilesInFolder.h"
 #include "PerfLog.h"
 #include "BrightnessContrastDialogCommon.h"
+#include "OpenFromUrlCommon.h"
 #include "SumatraControl.h"
 #include "SumatraControlCommon.h"
 
@@ -235,14 +240,6 @@ static TempStr SidebarLayoutResultTemp(int* exitCodeOut) {
                   0);
 }
 
-static LayoutProbeState gLayoutProbe;
-
-static void LayoutProbeAfterLayout(MainWindow* win) {
-    if (gLayoutProbe.active && gLayoutProbe.win == win) {
-        gLayoutProbe.count++;
-    }
-}
-
 static void AppendHwndLayoutRect(str::Builder& out, MainWindow* win, Str name, HWND hwnd) {
     Rect rect;
     if (hwnd) {
@@ -286,7 +283,7 @@ static TempStr LayoutInfoResultTemp(Str action, int* exitCodeOut) {
         gLayoutProbe.win = win;
         gLayoutProbe.count = 0;
         gLayoutProbe.active = true;
-        gAfterLayout = MkFunc1Void(LayoutProbeAfterLayout);
+        gAfterLayout = MkFunc1Void(LayoutProbeNote);
     } else if (str::EqI(action, StrL("stop"))) {
         if (gLayoutProbe.active) {
             gAfterLayout = {};
@@ -517,8 +514,8 @@ static TempStr MarkupAnnotsResultTemp(Str action, int x, int y, int* exitCodeOut
         }
         out.Append(fmt("page1text=%s\n", ToStrTemp(collapsed)));
     }
-    int canUndo = EngineMupdfCanUndo(engine) ? 1 : 0;
-    int canRedo = EngineMupdfCanRedo(engine) ? 1 : 0;
+    int canUndo = EngineCanUndoRedo(engine, UndoDir::Undo, EngineWait::Wait) ? 1 : 0;
+    int canRedo = EngineCanUndoRedo(engine, UndoDir::Redo, EngineWait::Wait) ? 1 : 0;
     int modified = EngineHasUnsavedAnnotations(engine) ? 1 : 0;
     out.Append(fmt("undo canUndo=%d canRedo=%d modified=%d\n", canUndo, canRedo, modified));
     bool hasNotification = GetNotificationForGroup(gWindows[0]->hwndCanvas, kNotifAnnotation) != nullptr;
@@ -552,9 +549,7 @@ enum class ControlCmd : u16 {
     TestInverseSearch = 22,
     TestImageResizeArrowKey = 23,
     TestFindResultPageColumnClip = 24,
-    TestFileKind = 25,
     TestScrollToLink = 26,
-    TestI18nErrorString = 27,
     TestPageInfoOverlay = 28,
     TestGetToc = 29,
     TestPageLinks = 30,
@@ -603,7 +598,6 @@ enum class ControlCmd : u16 {
     TestSelectionToolbar = 73,
     TestMarkupAnnots = 74,
     TestCmykImageSave = 75,
-    TestContextMenuPoint = 76,
     TestFindWindowContents = 77,
     TestFindUiState = 78,
     TestRenderViewPrint = 79,
@@ -628,7 +622,6 @@ enum class ControlCmd : u16 {
     TestReadingBar = 98,
     TestSeedTextSelection = 99,
     TestTtsEngineCrash = 100,
-    StartPerfLog = 101,
     StopPerfLog = 102,
     WaitSessionRestored = 103,
     TestNavFiles = 104,
@@ -677,6 +670,35 @@ enum class ControlCmd : u16 {
     TestSignatureStatus = 148,
     // the first window's tab widths, one "dx=<n> text=<title>" line per tab
     TestTabWidths = 149,
+    // [url, dir]: Open from URL as the dialog's Download starts it
+    TestOpenFromUrl = 150,
+    // [srcWin, tabIdx, dstWin]: move a tab as a drag does (-1 = new window);
+    // tabIdx < 0 only lists every window's tabs
+    TestMigrateTab = 151,
+    // [action]: "toggle <row>" or "show", then the Layers view's rows
+    TestLayers = 152,
+    // [word]: drag-select it from edge to edge, then the selected text
+    TestSelectWordEdges = 153,
+    // the word count notification's text
+    TestWordCount = 154,
+    // the page info tip's text
+    TestPageInfoText = 155,
+    // the page info bar: where it is, the canvas, its text
+    TestPageInfoBar = 156,
+    // the Show Selected Text notification's text
+    TestSelectedText = 157,
+    // the bookmarks tree's visible rows and their heights
+    TestTocRows = 158,
+    // [action, pageNo, x, y, ...]: drives the Measure tool
+    TestMeasurement = 159,
+    // [action, pageNo, imageIdx, path]: replace / edit an image embedded in the PDF
+    TestImageReplace = 160,
+    // 161, 162: ng only (TestPerfStats, TestOverlayState); tests/lint-control-ids.ts
+    // checks ids mean the same command in both apps and tests/control.ts
+    // [timeoutMs]: blocks until the home page painted after startup
+    WaitHomePainted = 163,
+    // [idx]: select tab idx; idx < 0 only reports the current tab and count
+    TestSelectTab = 164,
 };
 
 static_assert((u16)ControlCmd::Quit == (u16)ControlFrameCmd::Quit);
@@ -1017,6 +1039,27 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestOpenFromUrl: {
+            MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+            bool ok = win && StartOpenFromUrl(win, StringArg(req, 0), StringArg(req, 1));
+            AppendTestResult(req, ok ? 0 : 1, ok ? StrL("OK") : StrL("FAIL"));
+            break;
+        }
+
+        case ControlCmd::TestMigrateTab: {
+            i32 srcWin = 0;
+            i32 tabIdx = 0;
+            i32 dstWin = 0;
+            if (!IntArg(req, 0, srcWin) || !IntArg(req, 1, tabIdx) || !IntArg(req, 2, dstWin)) {
+                AppendError(req, StrL("TestMigrateTab expects int srcWin, int tabIdx, int dstWin"));
+                break;
+            }
+            int exitCode = 0;
+            Str res = MigrateTabResultTemp(srcWin, tabIdx, dstWin, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestTabWidths: {
             MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
             TabsCtrl* tabs = win ? win->tabsCtrl : nullptr;
@@ -1035,6 +1078,12 @@ static void ExecuteControlRequest(ControlRequest* req) {
         case ControlCmd::TestSignatureStatus: {
             MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
             AppendTestResult(req, 0, win ? SignatureUiStateTemp(win, StringArg(req, 0)) : TempStr{});
+            break;
+        }
+
+        case ControlCmd::TestLayers: {
+            MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+            AppendTestResult(req, 0, win ? LayersStateTemp(win, StringArg(req, 0)) : TempStr{});
             break;
         }
 
@@ -1095,31 +1144,11 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
-        case ControlCmd::TestFileKind: {
-            Str path = StringArg(req, 0);
-            Str expectedKind = StringArg(req, 1);
-            if (len(path) == 0 || len(expectedKind) == 0) {
-                AppendError(req, StrL("TestFileKind expects string path, string expectedKind"));
-                break;
-            }
-            int exitCode = 0;
-            Str res = FileKindResultTemp(path, expectedKind, &exitCode);
-            AppendTestResult(req, exitCode, res);
-            break;
-        }
-
         case ControlCmd::TestScrollToLink: {
             i32 minDelta = 50;
             IntArg(req, 0, minDelta);
             int exitCode = 0;
             Str res = ScrollToLinkResultTemp(minDelta, &exitCode);
-            AppendTestResult(req, exitCode, res);
-            break;
-        }
-
-        case ControlCmd::TestI18nErrorString: {
-            int exitCode = 0;
-            Str res = I18nErrorStringResultTemp(&exitCode);
             AppendTestResult(req, exitCode, res);
             break;
         }
@@ -1361,6 +1390,41 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestTocRows: {
+            int exitCode = 0;
+            Str res = TocRowsResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestSelectedText: {
+            int exitCode = 0;
+            Str res = SelectedTextResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestPageInfoBar: {
+            int exitCode = 0;
+            Str res = PageInfoBarResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestPageInfoText: {
+            int exitCode = 0;
+            Str res = PageInfoTextResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestWordCount: {
+            int exitCode = 0;
+            Str res = WordCountResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestDisplayMode: {
             Str action = StringArg(req, 0);
             int exitCode = 0;
@@ -1482,6 +1546,13 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestSelectWordEdges: {
+            int exitCode = 0;
+            Str res = SelectWordEdgesResultTemp(StringArg(req, 0), &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestRotatedTextMouseDrag: {
             Str word = StringArg(req, 0);
             if (len(word) == 0) {
@@ -1532,18 +1603,6 @@ static void ExecuteControlRequest(ControlRequest* req) {
             int exitCode = 0;
             Str res = FindWindowContentsResultTemp(&exitCode);
             AppendTestResult(req, exitCode, res);
-            break;
-        }
-
-        case ControlCmd::TestContextMenuPoint: {
-            Str name = StringArg(req, 0);
-            int cmdId = GetCommandIdByName(name);
-            if (cmdId <= 0) {
-                AppendError(req, StrL("TestContextMenuPoint expects a command name"));
-                break;
-            }
-            Str res = CommandUsesContextMenuPoint(cmdId) ? StrL("1") : StrL("0");
-            AppendTestResult(req, 0, res);
             break;
         }
 
@@ -1702,6 +1761,27 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestSelectTab: {
+            if (len(gWindows) == 0 || !gWindows[0]) {
+                AppendTestResult(req, 2, StrL("NOTREADY no-window"));
+                break;
+            }
+            MainWindow* win = gWindows[0];
+            i32 idx = -1;
+            IntArg(req, 0, idx);
+            int nTabs = len(win->Tabs());
+            if (idx >= nTabs) {
+                AppendTestResult(req, 1, fmt("bad tab index %d, count=%d", idx, nTabs));
+                break;
+            }
+            if (idx >= 0) {
+                TabsSelect(win, idx);
+            }
+            int curr = win->tabsCtrl ? win->tabsCtrl->GetSelected() : -1;
+            AppendTestResult(req, 0, fmt("idx=%d count=%d", curr, nTabs));
+            break;
+        }
+
         case ControlCmd::TestCurrentTab: {
             if (len(gWindows) == 0 || !gWindows[0]) {
                 AppendTestResult(req, 2, StrL("NOTREADY no-window"));
@@ -1786,22 +1866,8 @@ static void ExecuteControlRequest(ControlRequest* req) {
         }
 
         case ControlCmd::TestVirtTree: {
-            Str action = StringArg(req, 0);
             str::Builder out;
-            if (str::Eq(action, StrL("hit"))) {
-                Str cls = StringArg(req, 1);
-                i32 x = 0;
-                i32 y = 0;
-                if (len(cls) == 0 || !IntArg(req, 2, x) || !IntArg(req, 3, y)) {
-                    AppendError(req, StrL("TestVirtTree hit expects string class, int x, int y"));
-                    break;
-                }
-                if (!AppendVirtHit(out, cls, x, y)) {
-                    out.Append(StrL("NONE\n"));
-                }
-            } else {
-                AppendVirtTreeDump(out, action);
-            }
+            AppendVirtTreeDump(out, StringArg(req, 0));
             AppendTestResult(req, 0, ToStrTemp(out));
             break;
         }
@@ -1951,7 +2017,7 @@ static void ExecuteControlRequest(ControlRequest* req) {
                 if (PageGrid* pg = PageGridPrefs()) {
                     pg->slant = PageGridClampSlant((float)deg);
                 }
-                RedrawPageGridWindows();
+                RedrawAllWindows();
             } else if (str::EqI(action, StrL("probe-grid"))) {
                 MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
                 AppendTestResult(req, 0, PageGridProbeTemp(win ? win->AsFixed() : nullptr));
@@ -1979,6 +2045,27 @@ static void ExecuteControlRequest(ControlRequest* req) {
                 }
             }
             AppendTestResult(req, 0, PageGridStateTemp());
+            break;
+        }
+
+        case ControlCmd::TestImageReplace: {
+            i32 pageNo = 0, imageIdx = 0;
+            IntArg(req, 1, pageNo);
+            IntArg(req, 2, imageIdx);
+            MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+            AppendTestResult(req, 0, TestImageReplace(win, StringArg(req, 0), pageNo, imageIdx, StringArg(req, 3)));
+            break;
+        }
+
+        case ControlCmd::TestMeasurement: {
+            i32 pageNo = 0, x = 0, y = 0;
+            IntArg(req, 1, pageNo);
+            IntArg(req, 2, x);
+            IntArg(req, 3, y);
+            MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+            Str res = TestMeasurement(win, StringArg(req, 0), pageNo, PointF((float)x, (float)y), StringArg(req, 1),
+                                      StringArg(req, 2));
+            AppendTestResult(req, 0, res);
             break;
         }
 
@@ -2204,11 +2291,6 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
-        case ControlCmd::StartPerfLog:
-            StartPerfLog();
-            AppendTestResult(req, 0, StrL("OK"));
-            break;
-
         case ControlCmd::StopPerfLog:
             StopPerfLog();
             AppendTestResult(req, 0, StrL("OK"));
@@ -2323,7 +2405,47 @@ void SnapshotSessionRestore(ControlRequest* req) {
     req->done.Set();
 }
 
+// Snapshot for WaitHomePainted: the home page has been painted at least once
+// after startup finished.
+static void SnapshotHomePainted(ControlRequest* req) {
+    req->idleState = RenderIdleState::NotReady;
+    int n = gHomePagePaintCount;
+    Str why = gIsStartup ? StrL("startup") : (n == 0 ? StrL("not-painted") : StrL("painted"));
+    if (!gIsStartup && n > 0) {
+        req->idleState = RenderIdleState::Idle;
+    }
+    str::BufSet(Str(req->idleInfo, dimof(req->idleInfo)), fmt("%s n=%d", why, n));
+    req->done.Set();
+}
+
+// Block on the control thread until the home page's first paint. Optional
+// first int arg is the timeout.
+static void RunWaitHomePainted(ControlRequest* req) {
+    i32 timeoutMs = 15000;
+    IntArg(req, 0, timeoutMs);
+    u64 start = GetTickCount64();
+    u64 deadline = start + (u64)std::max(timeoutMs, 1);
+    for (;;) {
+        req->done.Reset();
+        uitask::Post(MkFunc0<ControlRequest>(SnapshotHomePainted, req), "WaitHomePainted");
+        req->done.Wait();
+        if (req->idleState == RenderIdleState::Idle) {
+            AppendTestResult(req, 0, Str(req->idleInfo));
+            return;
+        }
+        if (GetTickCount64() >= deadline) {
+            AppendTestResult(req, 1, fmt("timeout %s", Str(req->idleInfo)));
+            return;
+        }
+        ControlPollSleep(start);
+    }
+}
+
 static void RunControlOnUi(ControlRequest* req) {
+    if ((ControlCmd)req->cmd == ControlCmd::WaitHomePainted) {
+        RunWaitHomePainted(req);
+        return;
+    }
     uitask::Post(MkFunc0<ControlRequest>(ExecuteControlRequest, req), "SumatraControl");
     req->done.Wait();
 }

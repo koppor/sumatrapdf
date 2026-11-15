@@ -100,10 +100,6 @@ static bool gUpdateAutoInstall = false;
 // the bottom-left "update available" notification (with the download link)
 static Kind kNotifUpdateAvailable = "notifUpdateAvailable";
 
-static void CurrentFileTime(FILETIME* ft) {
-    GetSystemTimeAsFileTime(ft);
-}
-
 /*
 The format of update information downloaded from the server:
 
@@ -119,22 +115,6 @@ browser should open instead:
 DownloadPage: https://www.sumatrapdfreader.org/dlng/mac/14276/SumatraPDF-mac-arm64.zip
 */
 
-static bool ShouldCheckForUpdate(UpdateCheck updateCheckType) {
-    UpdateCheckFacts f;
-    f.inProgress = gUpdateCheckInProgress;
-    f.userInitiated = updateCheckType == UpdateCheck::UserInitiated;
-    f.hasInternet = HasPermission(Perm::InternetAccess);
-    f.canSavePrefs = HasPermission(Perm::SavePreferences);
-    f.checkForUpdates = gSettings->checkForUpdates;
-    FILETIME never{};
-    f.firstStart = FileTimeEq(gSettings->timeOfLastUpdateCheck, never);
-    f.isPreRelease = gIsPreReleaseBuild;
-    FILETIME currentTimeFt;
-    CurrentFileTime(&currentTimeFt);
-    f.secsSinceLast = FileTimeDiffInSecs(currentTimeFt, gSettings->timeOfLastUpdateCheck);
-    return DecideUpdateCheck(f) == UpdateCheckChoice::Check;
-}
-
 static void OpenWebPage(Str url) {
     logf("UpdateCheck: opening '%s'\n", url);
     SumatraLaunchBrowser(url);
@@ -142,18 +122,23 @@ static void OpenWebPage(Str url) {
 
 #if OS_WIN
 
-void StartInstallerAutoUpgrade(Str installerPath) {
+// true when the installer started; only then may we exit for it to replace us
+bool StartInstallerAutoUpgrade(Str installerPath) {
     TempStr expectedSigner = GetExecutableSignerTemp(GetSelfExePathTemp());
     TempStr installerSigner = GetExecutableSignerTemp(installerPath);
     if (len(expectedSigner) == 0 || len(installerSigner) == 0 || !str::Eq(expectedSigner, installerSigner) ||
         !IsPEFileSigned(installerPath)) {
         logf("StartInstallerAutoUpgrade: refusing an update with an untrusted signature\n");
-        return;
+        return false;
     }
     // orig asks the installer (IsOurExeInstalled()). Here "not portable" means installed.
     TempStr cmd = InstallerUpgradeArgsTemp(!IsRunningInPortableMode(), gIsPreReleaseBuild, GetSelfExePathTemp());
     logf("StartInstallerAutoUpgrade: installer cmd: '%s'\n", cmd);
-    CreateProcessHelper(installerPath, cmd);
+    bool ok = CreateProcessHelper(installerPath, cmd);
+    if (!ok) {
+        logf("StartInstallerAutoUpgrade: starting the installer failed\n");
+    }
+    return ok;
 }
 
 static void ExitAfterStartingUpdater() {
@@ -164,7 +149,9 @@ static void ExitAfterStartingUpdater() {
 #else
 
 // no installer off Windows: the user is sent to the download page instead
-void StartInstallerAutoUpgrade(Str) {}
+bool StartInstallerAutoUpgrade(Str) {
+    return false;
+}
 
 static void ExitAfterStartingUpdater() {}
 
@@ -180,6 +167,7 @@ static void OpenDownloadPage(UpdateInfo* updateInfo) {
 }
 
 static void OnInstallAnswer(UpdateInfo* updateInfo, int res) {
+    gUpdateCheckInProgress = false;
     AutoDelete delInfo(updateInfo);
     Str installerPath = updateInfo->installerPath;
     bool didDownloadInstaller = file::Exists(installerPath);
@@ -196,8 +184,11 @@ static void OnInstallAnswer(UpdateInfo* updateInfo, int res) {
         OpenDownloadPage(updateInfo);
         return;
     }
-    StartInstallerAutoUpgrade(installerPath);
-    ExitAfterStartingUpdater();
+    if (StartInstallerAutoUpgrade(installerPath)) {
+        ExitAfterStartingUpdater();
+    } else {
+        OpenDownloadPage(updateInfo);
+    }
 }
 
 // ng: orig's TaskDialog with "Don't install" / "Install and relaunch" buttons;
@@ -211,8 +202,11 @@ static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
         ScheduleSaveSettings();
         FlushScheduledSaveSettings();
         if (installerPathAuto && file::Exists(installerPathAuto)) {
-            StartInstallerAutoUpgrade(installerPathAuto);
-            ExitAfterStartingUpdater();
+            if (StartInstallerAutoUpgrade(installerPathAuto)) {
+                ExitAfterStartingUpdater();
+            } else {
+                OpenDownloadPage(updateInfo);
+            }
         } else {
             logf("NotifyUserOfUpdate: auto-install requested but installer not downloaded\n");
             OpenDownloadPage(updateInfo);
@@ -227,6 +221,8 @@ static void NotifyUserOfUpdate(UpdateInfo* updateInfo) {
     TempStr content = fmt("%s\n\n%s", mainInstr, fmt(fmtStr.s, currentVersion, ver));
     logf("NotifyUserOfUpdate: %s -> %s\n", currentVersion, ver);
 
+    // as orig's modal dialog: no other check starts until this is answered
+    gUpdateCheckInProgress = true;
     uint flags = MbYesNo | MbIconInformation;
     MsgBox(updateInfo->win, content, Tr("SumatraPDF Update"), flags,
            MkFunc1<UpdateInfo, int>(OnInstallAnswer, updateInfo));
@@ -335,6 +331,12 @@ static void ShowUpdateAvailableNotification(MainWindow* win, UpdateInfo* updateI
 // download + install the update surfaced by the pre-release update notification
 void DownloadAndInstallPendingUpdate(MainWindow* win) {
     if (!win || !gPendingUpdate) {
+        return;
+    }
+    // a check or download is running: it offers the update itself. Starting
+    // a second one ran two downloads, and the first to finish installed
+    // without asking
+    if (gUpdateCheckInProgress) {
         return;
     }
     UpdateInfo* updateInfo = gPendingUpdate;
@@ -664,7 +666,7 @@ static void UpdateCheckAsync(UpdateCheckAsyncData* data) {
 // start auto-update check by downloading auto-update information from url
 // on a background thread and processing the retrieved data on ui thread
 void StartAsyncUpdateCheck(MainWindow* win, UpdateCheck updateCheckType) {
-    if (!ShouldCheckForUpdate(updateCheckType)) {
+    if (!ShouldCheckForUpdate(updateCheckType, gUpdateCheckInProgress)) {
         return;
     }
 
@@ -678,7 +680,7 @@ void StartAsyncUpdateCheck(MainWindow* win, UpdateCheck updateCheckType) {
         args.groupId = kNotifUpdateCheckInProgress;
         ShowNotification(args);
     }
-    CurrentFileTime(&gSettings->timeOfLastUpdateCheck);
+    GetSystemTimeAsFileTime(&gSettings->timeOfLastUpdateCheck);
     gUpdateCheckInProgress = true;
 
     // data freed in UpdateCheckFinish()

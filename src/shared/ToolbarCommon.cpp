@@ -22,6 +22,7 @@
 #include "MainWindow.h"
 #include "Selection.h"
 #include "AnnotPlacement.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Tabs.h"
 #include "Commands.h"
@@ -127,7 +128,7 @@ TempStr ToolbarTipTemp(int cmdId, Str tip, bool translate) {
 
 // toolbar mode for this window: Fullscreen.Toolbar in fullscreen, else Toolbar
 int ToolbarModeForWindow(MainWindow* win) {
-    if (win->isFullScreen) {
+    if (win->IsFullScreen()) {
         return FullscreenToolbarModeFromPrefs();
     }
     return ToolbarModeFromPrefs();
@@ -365,6 +366,13 @@ Str* AnnotPresetColorList(int cmdId) {
     return (cmdId == CmdCreateAnnotInk) ? &a.inkColors : &a.presetColors;
 }
 
+// the color the button's next annotation is made in
+Color AnnotColorForCmd(int cmdId) {
+    ParsedColor* setting = AnnotPresetColorSetting(cmdId);
+    Color col = setting ? GetParsedColor(*setting, kColorUnset) : kColorUnset;
+    return col != kColorUnset ? col : AnnotDefaultColor(cmdId);
+}
+
 void SetAnnotPresetColor(int cmdId, Color col) {
     ParsedColor* setting = AnnotPresetColorSetting(cmdId);
     if (!setting) {
@@ -437,6 +445,12 @@ static ToolbarButtonInfo gToolbarButtons[] = {
 
 constexpr int kButtonsCount = dimof(gToolbarButtons);
 
+// built-in buttons that are only on the toolbar when ToolbarCustomLayout lists them
+static ToolbarButtonInfo gOptionalToolbarButtons[] = {
+    {gIconChapterPrev, CmdGoToPrevChapter, TrN("Previous Chapter")},
+    {gIconChapterNext, CmdGoToNextChapter, TrN("Next Chapter")},
+};
+
 // The built-in buttons actually on the toolbar, which is gToolbarButtons unless
 // ToolbarCustomLayout asks for a different set / order (issue #5095). A layout
 // can repeat a button, so allow for more than the default count.
@@ -505,6 +519,11 @@ void PopulateToolbarLayout() {
                 break;
             }
         }
+        for (int i = 0; !found && i < dimof(gOptionalToolbarButtons) && cmdId != CmdNone; i++) {
+            if (gOptionalToolbarButtons[i].cmdId == cmdId) {
+                found = &gOptionalToolbarButtons[i];
+            }
+        }
         if (!found) {
             logf("ToolbarCustomLayout: no built-in toolbar button for '%s'\n", tok);
             continue;
@@ -536,7 +555,7 @@ void EnablePdfAnnotationsToolbar(MainWindow* win) {
 }
 
 bool ShouldShowToolbar(MainWindow* win) {
-    if (win->presentation || win->isQuickLook) {
+    if (win->InPresentation() || win->isQuickLook) {
         return false;
     }
 #if OS_WASM
@@ -550,7 +569,7 @@ bool ShouldShowToolbar(MainWindow* win) {
 }
 
 bool ShouldOverlayToolbar(MainWindow* win) {
-    if (win->presentation || win->isQuickLook) {
+    if (win->InPresentation() || win->isQuickLook) {
         return false;
     }
     if (ToolbarModeForWindow(win) != kToolbarOverlay) {

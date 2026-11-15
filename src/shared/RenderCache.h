@@ -72,6 +72,8 @@ struct BitmapCacheEntry {
     // ng: the platform image the canvas draws (a gpui RenderImage), built from
     // `bitmap` the first time the tile is painted and dropped with the entry
     void* renderImage = nullptr;
+    // the same, flipped left to right, for CmdToggleMirror
+    void* renderImageMirrored = nullptr;
     bool outOfDate = false;
     int refs = 1;
     // RenderCache::darkModeEpoch at render time; entries from an older epoch
@@ -192,8 +194,10 @@ struct RenderCache {
     AtomicBool grayscalePageColors = 0;
     // bumped by UpdateDocumentColors when page render colors / the PDF
     // document color mode change; renders started under an older epoch are
-    // discarded instead of cached
+    // discarded instead of cached. Render threads read it: change it through
+    // BumpDarkModeEpoch, which holds requestAccess
     u32 darkModeEpoch = 0;
+    void BumpDarkModeEpoch();
 
     /* Interface for page rendering thread */
     Semaphore startRendering; // signaled once per queued request
@@ -261,7 +265,6 @@ struct RenderCache {
     bool DropCacheEntryIfNotUsed(BitmapCacheEntry* entry);
     bool IsCached(BitmapCacheEntry* entry);
     void FreePage(DisplayModel* dm, int pageNo, TilePosition* tile = nullptr);
-    void FreeNotVisible();
 
 #if OS_WIN
     int PaintTile(HDC hdc, Rect bounds, DisplayModel* dm, int pageNo, TilePosition tile, Rect tileOnScreen,

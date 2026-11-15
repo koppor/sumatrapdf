@@ -219,7 +219,8 @@ struct PageDestinationFile : IPageDestination {
 struct PageDestination : IPageDestination {
     Str value;
     Str name;
-    int embedObjNum = 0; // PDF object number for embedded file attachment annotations
+    int embedObjNum = 0;   // PDF object number for embedded file attachment annotations
+    int attachmentNo = -1; // index of a kindDestinationAttachment, see PdfLoadAttachments
 
     ~PageDestination() override;
 
@@ -227,19 +228,38 @@ struct PageDestination : IPageDestination {
     Str GetName() override;
 };
 
-bool ParseJsPopUpMenuItems(Str js, StrVec& items);
+bool ParseJsPopUpMenuItems(Str js, StrVec& items, Vec<int>& levels);
 Str ExtractJsCallName(Str js);
 
 // JavaScript app.popUpMenu items (Altium schematic PDFs, issue #1198).
 struct PageDestinationJsMenu : IPageDestination {
     StrVec items;
+    // what picking each item returns (KiCad, issue #6503); empty when unknown
+    StrVec returns;
+    // submenu depth of each item, 0 = top; an item followed by a deeper one is
+    // that submenu's title (Xpedition, issue #6517). Empty when flat
+    Vec<int> levels;
     Str tooltip;
 
     PageDestinationJsMenu();
     ~PageDestinationJsMenu() override;
 
     Str GetValue() override;
+    int Level(int i);
+    bool IsSubmenu(int i);
 };
+
+bool ParseJsMenuCallItems(Str js, StrVec& items, StrVec& returns);
+bool JsDefinesMenuFunction(Str js, Str name);
+bool ParseXpeditionStrings(Str docJs, StrVec& strings);
+bool ParseXpeditionMenu(Str linkJs, StrVec& strings, PageDestinationJsMenu* menu);
+
+struct JsMenuAction {
+    Str url;
+    int pageNo = 0;
+    Str copyText;
+};
+JsMenuAction GetJsMenuAction(PageDestinationJsMenu*, int i);
 
 IPageDestination* NewSimpleDest(int pageNo, RectF rect, float zoom = 0.f, Str value = {});
 IPageDestination* NewSimpleDest(Arena* arena, int pageNo, RectF rect, float zoom = 0.f, Str value = {});
@@ -475,6 +495,9 @@ class EngineBase {
     // hex-encoded password fingerprint + crypt key; arena-allocated
     Str decryptionKey;
     bool hasPageLabels = false;
+    // bumped when IPageElement objects handed out by GetElements() are freed
+    // (e.g. after a content edit); holders compare it before using a pointer
+    AtomicInt elementsGeneration = 0;
     int logicalPageCount = 0;
     bool hideAnnotations = false;
     bool disableAntiAlias = false;
@@ -563,7 +586,7 @@ class EngineBase {
     void InvalidateTextForPage(int pageNo);
     virtual void ReleaseTextExtractionThreadContext() {}
     // pages where clipping doesn't help are rendered in larger tiles
-    virtual bool HasClipOptimizations(int pageNo) = 0;
+    virtual bool HasClipOptimizations(int /*pageNo*/) { return false; }
 
     // access to various document properties (such as Author, Title, etc.)
     virtual TempStr GetPropertyTemp(DocProp prop) = 0;
@@ -597,7 +620,7 @@ class EngineBase {
 
     // loads the given page so that the time required can be measured
     // without also measuring rendering times
-    virtual bool BenchLoadPage(int pageNo) = 0;
+    virtual bool BenchLoadPage(int /*pageNo*/) { return true; }
 
     Str FilePath() const;
 

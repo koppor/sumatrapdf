@@ -51,6 +51,7 @@ void AppShellSuppressAltMenu(MainWindow* win);
 void AppShellQuit();
 // brings the window to the foreground (orig's MainWindow::Focus())
 void AppShellActivateWindow(MainWindow* win);
+void AppShellMinimizeWindow(MainWindow* win);
 bool AppShellIsFrameFocused(MainWindow* win);
 void AppShellFocusFrame(MainWindow* win);
 void AppShellClearEatChar(MainWindow* win);
@@ -165,6 +166,10 @@ void AppShellOpenDocsReady();
 #endif
 // presentation mode's auto-hidden cursor (orig hides it with SetCursor(null))
 void AppShellShowCursor(MainWindow* win, bool show);
+// The shell tick drops to a slow cadence while the window is idle. Call this
+// when motion starts from an input handler, so it does not wait out that
+// cadence for the first frame.
+void AppShellRequestFastTick(MainWindow* win);
 // Fullscreen.PreventSleep: keep the display awake (Windows only for now)
 void AppShellPreventSleep(bool on);
 #if OS_WIN

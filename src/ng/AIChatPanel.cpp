@@ -27,6 +27,7 @@
 #include "AppSettings.h"
 #include "AppTools.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "SumatraPDF.h"
 #include "Translations.h"
@@ -39,6 +40,7 @@
 #include "AIChatCommon.h"
 #include "AIChatPanel.h"
 #include "AIChatPanelCommon.h"
+#include "AIChatAPI.h"
 
 #include "SumatraLog.h"
 
@@ -46,22 +48,22 @@
 // the page has loaded by then
 constexpr int kAutoSelectDelayMs = 500;
 
-// marked.min.js, unpacked once (orig reads it out of IDR_EMBEDDED_PAK)
-static u8* gMarkedJs = nullptr;
-static int gMarkedJsLen = 0;
+// markdown-it.min.js, unpacked once (orig reads it out of IDR_EMBEDDED_PAK)
+static u8* gMarkdownJs = nullptr;
+static int gMarkdownJsLen = 0;
 
-static void EnsureMarkedLoaded() {
-    if (gMarkedJs) {
+static void EnsureMarkdownJsLoaded() {
+    if (gMarkdownJs) {
         return;
     }
-    gMarkedJs = GetEmbeddedFileData(StrL("marked.min.js"), &gMarkedJsLen);
+    gMarkdownJs = GetEmbeddedFileData(StrL("markdown-it.min.js"), &gMarkdownJsLen);
 }
 
 // --- the panel --------------------------------------------------------------
 
 struct AIChatPanel;
 
-// serves the chat page and marked.min.js from the provider's virtual host
+// serves the chat page and markdown-it.min.js from the provider's virtual host
 struct AIChatResources : BrowserViewCallback {
     AIChatPanel* panel = nullptr;
 
@@ -85,8 +87,8 @@ struct AIChatPanel {
     DialogSelect optionSel;
     gp::InputState* input = nullptr;
     bool flagChecked = false;
-    // ms left of orig's kTimerAutoSelectSession; < 0 means not armed
-    int autoSelectMs = -1;
+    // orig's kTimerAutoSelectSession
+    Countdown autoSelect;
     // the selects are polled once a frame (see DialogSelect::PollChanged)
     bool initialized = false;
 };
@@ -114,10 +116,10 @@ Str AIChatResources::GetDataForUrl(Str url) {
     if (AIChatPathIs(url, StrL("index.html")) || len(url) == 0) {
         return panel->html;
     }
-    if (AIChatPathIs(url, StrL("marked.min.js"))) {
-        EnsureMarkedLoaded();
-        if (gMarkedJs && gMarkedJsLen > 0) {
-            return Str((char*)gMarkedJs, gMarkedJsLen);
+    if (AIChatPathIs(url, StrL("markdown-it.min.js"))) {
+        EnsureMarkdownJsLoaded();
+        if (gMarkdownJs && gMarkdownJsLen > 0) {
+            return Str((char*)gMarkdownJs, gMarkdownJsLen);
         }
     }
     return {};
@@ -201,7 +203,7 @@ static void EnsureWebViewReady(MainWindow* win) {
     if (!BrowserViewAvailable()) {
         return;
     }
-    EnsureMarkedLoaded();
+    EnsureMarkdownJsLoaded();
     MakeChatPage(p, provider);
     p->res.panel = p;
     p->view = BrowserViewCreate(win, nullptr, &p->res, provider->virtualHost);
@@ -280,6 +282,7 @@ static void OnSessionComboChange(MainWindow* win, int sel) {
         AIChatLog(provider->logger, StrL("session"), StrL("new"));
         str::ReplaceWithCopy(&st->sessionId, Str{});
         st->chatLog.Reset();
+        AIChatResetAPI(st);
         WebViewClearChat(win);
         return;
     }
@@ -294,6 +297,7 @@ static void OnSessionComboChange(MainWindow* win, int sel) {
         AIChatLog(provider->logger, StrL("session"), sessions[sessionIdx].sessionId);
         str::ReplaceWithCopy(&st->sessionId, sessions[sessionIdx].sessionId);
         st->chatLog.Reset();
+        AIChatResetAPI(st);
         WebViewClearChat(win);
         provider->LoadSessionHistory(win, st->sessionId, dir);
         // LoadSessionHistory writes to the webview which rebuilds chatLog
@@ -347,8 +351,8 @@ static void SyncAIChatSettingsFromUI(MainWindow* win) {
     }
     StrVec models;
     provider->BuildModelsList(models);
-    int sel = p->modelSel.sel;
-    if (sel >= 0 && sel < len(models)) {
+    int sel = AIChatFindModelInList(models, p->modelSel.SelText());
+    if (sel >= 0) {
         provider->SetModel(models[sel]);
     }
     if (p->optionSel.sel >= 0) {
@@ -363,7 +367,7 @@ static void SyncAIChatSettingsFromUI(MainWindow* win) {
 
 static bool AIChatIsWorking(MainWindow* win) {
     AIChatTabState* st = GetTabState(win->CurrentTab(), win->aiChatProvider);
-    return st && st->process != nullptr;
+    return st && (st->process != nullptr || st->apiRequest != nullptr);
 }
 
 void UpdateAIChatPanelForCurrentTab(MainWindow* win) {
@@ -460,6 +464,7 @@ static void AIChatReadThread(AIChatReadThreadCtx* ctx) {
 // provider parser while capturing the emitted text/errors. Same provider code
 // the panel uses, so it exercises the real path.
 bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str& outText, Str& outErr) {
+    if (backend == AIChatBackend::CustomAPI) return AIChatRunAPISync(message, outText, outErr);
     AIChatProvider* p = GetAIChatProvider((int)backend);
     if (!p) {
         outErr = str::Dup(StrL("unknown backend"));
@@ -524,9 +529,9 @@ bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str& outTex
     // parse the collected output through the real provider parser, capturing the
     // text it emits instead of posting to a (nonexistent) webview
     AIChatCaptureSink sink;
-    gAIChatCapture = &sink;
     AIChatStreamCtx ctx;
     ctx.providerId = (int)backend;
+    ctx.capture = &sink;
     Str rest = ToStr(raw);
     Str line;
     while (str::NextLine(rest, line, rest)) {
@@ -537,7 +542,6 @@ bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str& outTex
         AIChatLog(p->logger, StrL("<<<"), l);
         p->ParseStreamLine(l, &ctx);
     }
-    gAIChatCapture = nullptr;
     str::Free(ctx.sessionId);
 
     Str err = ToStr(sink.err);
@@ -577,7 +581,7 @@ static void SendAIChatMessage(MainWindow* win) {
     if (!tab || len(tab->filePath) == 0 || !st) {
         return;
     }
-    if (st->process) {
+    if (st->process || st->apiRequest) {
         return; // this tab already has a running request
     }
     gp::InputSetValue(p->input, GStrL(""));
@@ -602,6 +606,11 @@ static void SendAIChatMessage(MainWindow* win) {
     int optionIdx = provider->GetOption();
     if (optionIdx < 0 || optionIdx >= provider->optionCount) {
         optionIdx = provider->optionDefault;
+    }
+
+    if (provider->backend == AIChatBackend::CustomAPI) {
+        AIChatStartAPI(win, input, model);
+        return;
     }
 
     TempStr exePath = provider->FindExecutableTemp();
@@ -650,6 +659,8 @@ static void SendAIChatMessage(MainWindow* win) {
     ctx->stream.win = win;
     ctx->stream.providerId = win->aiChatProvider;
     ctx->stream.sessionId = str::Dup(st->sessionId ? st->sessionId : kAIChatPendingSessionId());
+    st->turnId = AIChatNewTurnId();
+    ctx->stream.turnId = st->turnId;
     RunAsync(MkFunc0(AIChatReadThread, ctx), StrL("AIChatReadThread"));
 }
 
@@ -775,7 +786,7 @@ void OnAIChatToggle(MainWindow* win, int providerId) {
         PopulateSessionCombo(win);
         // defer auto-select so the page has time to load
         AIChatPanel* panel = PanelOf(win);
-        panel->autoSelectMs = kAutoSelectDelayMs;
+        panel->autoSelect.Arm(kAutoSelectDelayMs);
     }
     logf("OnAIChatToggle:\n%s", AIChatPanelStateTemp(win));
     AppShellInvalidate(win);
@@ -817,7 +828,7 @@ void OnAIChatTabChanged(MainWindow* win) {
     }
 
     // update working state for this tab
-    SetAIChatWorking(win, st->process != nullptr);
+    SetAIChatWorking(win, (st->process != nullptr || st->apiRequest != nullptr));
 
     // if tab has in-memory chat log, replay it (fast, includes current session)
     if (len(st->chatLog) > 0) {
@@ -940,14 +951,9 @@ int AIChatPanelDx(MainWindow* win) {
 // the deferred auto-select orig runs off kTimerAutoSelectSession
 void AIChatTick(MainWindow* win, int elapsedMs) {
     AIChatPanel* p = PanelOf(win);
-    if (!p || p->autoSelectMs < 0) {
+    if (!p || !p->autoSelect.Tick(elapsedMs)) {
         return;
     }
-    p->autoSelectMs -= elapsedMs;
-    if (p->autoSelectMs > 0) {
-        return;
-    }
-    p->autoSelectMs = -1;
     AutoSelectRecentSession(win);
     PopulateSessionCombo(win);
     AppShellInvalidate(win);
@@ -1019,6 +1025,15 @@ gp::El* AIChatPanelBuild(MainWindow* win, gp::Ctx* cx) {
     // the chat page
     gp::El* chat = gp::Div(cx->a)->Flex1()->W(gp::kFill)->MinH(0);
     if (p->view) {
+#if OS_DARWIN
+        // the native WebView covers gpui popups: hide it while a list is open
+        auto isOpen = [cx](DialogSelect& sel) {
+            gpc::SelectState* st = sel.state.Get(cx);
+            return st && st->state.open;
+        };
+        bool listOpen = isOpen(p->sessionSel) || isOpen(p->modelSel) || isOpen(p->optionSel);
+        BrowserViewSetVisible(p->view, !listOpen);
+#endif
         chat->Child(BrowserViewBuild(p->view, cx));
     }
     col->Child(chat);

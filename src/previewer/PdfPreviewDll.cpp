@@ -71,6 +71,8 @@ class PreviewClassFactory : public IClassFactory {
             type = PreviewType::Cbx;
         } else if (IsClsid(StrL(kTgaPreviewClsid))) {
             type = PreviewType::Tga;
+        } else if (IsClsid(StrL(kOfdPreviewClsid))) {
+            type = PreviewType::Ofd;
         } else {
             return E_NOINTERFACE;
         }
@@ -113,9 +115,14 @@ static Str GetReason(DWORD dwReason) {
     return StrL("Unknown reason");
 }
 
+void UnregisterPreviewWndClass();
+
 STDAPI_(BOOL) DllMain(HINSTANCE hInstance, DWORD dwReason, void* /*lpReserved*/) {
     if (dwReason == DLL_PROCESS_ATTACH) {
         ReportIf(hInstance != GetInstance());
+    }
+    if (dwReason == DLL_PROCESS_DETACH) {
+        UnregisterPreviewWndClass();
     }
     gLogAppName = StrL("PdfPreview");
     logf("PdfPreview: DllMain %s\n", GetReason(dwReason));

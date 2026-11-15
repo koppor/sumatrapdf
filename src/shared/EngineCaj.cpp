@@ -253,17 +253,6 @@ static void CheckForCaj2pdfUpdate() {
     gCaj2pdfUpdateLock.Unlock();
 }
 
-static i64 FileAgeSec(FILETIME ft) {
-    FILETIME nowFt{};
-    GetSystemTimeAsFileTime(&nowFt);
-    u64 now = FileTimeToU64(nowFt);
-    u64 then = FileTimeToU64(ft);
-    if (then == 0 || then > now) {
-        return 0;
-    }
-    return (i64)((now - then) / kFileTimeTicksPerSec);
-}
-
 // a document shouldn't wait for the network when we can already convert it
 static void MaybeCheckForCaj2pdfUpdate(Str dir) {
     if (!HasPermission(Perm::InternetAccess)) {
@@ -451,43 +440,14 @@ void DeleteStaleCajCache() {
 
 // a proxy, so that FilePath() stays the user's file. A tab must not save
 // annotations into a cached PDF that gets deleted after a week.
-class EngineCaj : public EnginePdfProxy {
+class EngineCaj : public EngineCachedPdf {
   public:
     EngineCaj() {
         kind = kindEngineCaj;
         defaultExt = str::Dup(StrL(".caj"));
     }
 
-    ~EngineCaj() override { str::Free(cachedPdf); }
-
-    EngineBase* Clone() override {
-        if (len(cachedPdf) == 0 || !file::Exists(cachedPdf)) {
-            return nullptr;
-        }
-        EngineBase* inner = CreateEngineMupdfFromFile(cachedPdf, FileType::PDF, DpiGet(), nullptr);
-        if (!inner) {
-            return nullptr;
-        }
-        EngineCaj* clone = new EngineCaj();
-        if (FilePath()) {
-            clone->SetFilePath(FilePath());
-        }
-        clone->pdfEngine = inner;
-        clone->cachedPdf = str::Dup(cachedPdf);
-        clone->CopyStateFromPdfEngine();
-        return clone;
-    }
-
-    // saving as .pdf writes the conversion; anything else copies the original
-    bool SaveFileAs(Str dstPath) override {
-        if (str::EndsWithI(dstPath, StrL(".pdf")) && len(cachedPdf) > 0) {
-            return file::Copy(dstPath, cachedPdf, false);
-        }
-        Str srcPath = FilePath();
-        return len(srcPath) > 0 && file::Copy(dstPath, srcPath, false);
-    }
-
-    Str cachedPdf;
+    EngineCachedPdf* NewEmpty() override { return new EngineCaj(); }
 
     bool Load(Str fileName, PasswordUI* pwdUI) {
         pageCount = 0;
@@ -505,13 +465,7 @@ class EngineCaj : public EnginePdfProxy {
         if (len(pdf) == 0) {
             return false;
         }
-        cachedPdf = str::Dup(pdf);
-        pdfEngine = CreateEngineMupdfFromFile(cachedPdf, FileType::PDF, DpiGet(), nullptr);
-        if (!pdfEngine) {
-            return false;
-        }
-        CopyStateFromPdfEngine();
-        return true;
+        return OpenCachedPdf(pdf);
     }
 };
 

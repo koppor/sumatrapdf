@@ -30,12 +30,20 @@ TempStr BuildKeepPagesRangeTemp(int pageCount, const Vec<int>& pagesToDelete);
 TempStr FormatPageRangeTemp(const Vec<int>& pages);
 bool KeepOnlyPagesWithAnnotations(EngineBase* engine, Vec<int>& pages);
 TempStr DefaultPdfDestPathTemp(Str srcPath);
+bool ExtractPagesToNewPdf(WindowTab* tab, const Vec<int>& pages, Str destPath);
 bool ConvertImageCollectionToPdf(EngineBase* engine, Str destPath);
 constexpr int kConvertPdfToImagesDpi = 150;
 constexpr int kSaveSelectionDefaultDpi = 300;
 float SaveSelectionZoom(EngineBase* engine, float dpi);
 bool SaveSelectionSizeOk(int w, int h);
 bool EstimateSelectionPx(RectF rect, float zoom, int& w, int& h);
+// PNG / JPEG / BMP / GIF, same core formats as the Save Image dialog
+struct ConvertImageFormat {
+    Str label;
+    Str ext; // including the dot, e.g. ".png"
+};
+constexpr int kConvertImageFormatCount = 4;
+extern const ConvertImageFormat kConvertImageFormats[kConvertImageFormatCount];
 int ConvertImageFormatIdxFromPath(Str path);
 bool IsSupportedConvertImageExt(Str path);
 bool PathHasPagePlaceholder(Str path);

@@ -361,7 +361,8 @@ static EngineBase* CreateEngineForKind(FileType kind, FileType contentHintKind, 
     EngineBase* engine = nullptr;
     // markdown has no native SumatraPDF engine; always use mupdf (cmark-gfm),
     // regardless of gEnableEpubWithPdfEngine.
-    if (kind == FileType::PDF || kind == FileType::Xps || kind == FileType::Markdown || IsOfficeFileType(kind)) {
+    if (kind == FileType::PDF || kind == FileType::Xps || kind == FileType::Ofd || kind == FileType::Markdown ||
+        IsOfficeFileType(kind)) {
         return CreateEngineMupdfFromFile(path, kind, dpi, pwdUI);
     }
     if (IsEngineDjVuSupportedFileType(kind)) {
@@ -486,6 +487,10 @@ EngineBase* CreateEngineFromFile(Str path, PasswordUI* pwdUI, bool enableChmEngi
     FileType contentHint = FileType::Unknown;
     if (IsEngineCbxSupportedFileType(kind)) {
         contentHint = GuessFileTypeFromFile(path);
+        // OFD images are resources, not comic-book pages.
+        if (contentHint == FileType::Ofd) {
+            kind = contentHint;
+        }
     }
 
     EngineBase* engine = CreateEngineForKind(kind, contentHint, path, pwdUI, enableChmEngine);
@@ -510,6 +515,10 @@ EngineBase* CreateEngineFromFile(Str path, PasswordUI* pwdUI, bool enableChmEngi
 static EngineBase* CreateEngineForKindFromData(FileType kind, Str data, Str nameHint, PasswordUI* pwdUI) {
     if (kind == FileType::Unknown || len(data) == 0) {
         return nullptr;
+    }
+    if (kind == FileType::Ofd) {
+        // a .zip name would give MuPDF's comic handler priority
+        return CreateEngineMupdfFromData(data, StrL("file.ofd"), pwdUI);
     }
     if (kind == FileType::PDF || kind == FileType::Xps || kind == FileType::Markdown || IsOfficeFileType(kind)) {
         return CreateEngineMupdfFromData(data, nameHint, pwdUI);
@@ -554,6 +563,11 @@ EngineBase* CreateEngineFromData(Str data, Str nameHint, PasswordUI* pwdUI) {
         return nullptr;
     }
     FileType kind = GuessFileTypeFromName(nameHint, true);
+    // OFD images are resources, not comic-book pages
+    bool maybeZip = kind == FileType::Ofd || IsEngineCbxSupportedFileType(kind) || kind == FileType::Unknown;
+    if (maybeZip && GuessFileTypeFromData(data) == FileType::Zip && GuessFileTypeFromZipData(data) == FileType::Ofd) {
+        kind = FileType::Ofd;
+    }
     EngineBase* engine = CreateEngineForKindFromData(kind, data, nameHint, pwdUI);
     if (!engine) {
         FileType contentKind = GuessFileTypeFromData(data);
@@ -563,6 +577,48 @@ EngineBase* CreateEngineFromData(Str data, Str nameHint, PasswordUI* pwdUI) {
     }
     ApplyEngineSettings(engine);
     return engine;
+}
+
+EngineCachedPdf::~EngineCachedPdf() {
+    str::Free(cachedPdf);
+}
+
+// the proxy's FilePath() stays the user's file, not the cached conversion
+bool EngineCachedPdf::OpenCachedPdf(Str pdfPath) {
+    cachedPdf = str::Dup(pdfPath);
+    pdfEngine = CreateEngineMupdfFromFile(cachedPdf, FileType::PDF, DpiGet(), nullptr);
+    if (!pdfEngine) {
+        return false;
+    }
+    CopyStateFromPdfEngine();
+    return true;
+}
+
+EngineBase* EngineCachedPdf::Clone() {
+    if (len(cachedPdf) == 0 || !file::Exists(cachedPdf)) {
+        return nullptr;
+    }
+    EngineBase* inner = CreateEngineMupdfFromFile(cachedPdf, FileType::PDF, DpiGet(), nullptr);
+    if (!inner) {
+        return nullptr;
+    }
+    EngineCachedPdf* clone = NewEmpty();
+    if (FilePath()) {
+        clone->SetFilePath(FilePath());
+    }
+    clone->pdfEngine = inner;
+    clone->cachedPdf = str::Dup(cachedPdf);
+    clone->CopyStateFromPdfEngine();
+    return clone;
+}
+
+// saving as .pdf writes the cached conversion; anything else copies the original
+bool EngineCachedPdf::SaveFileAs(Str dstPath) {
+    if (str::EndsWithI(dstPath, StrL(".pdf")) && len(cachedPdf) > 0) {
+        return file::Copy(dstPath, cachedPdf, false);
+    }
+    Str srcPath = FilePath();
+    return len(srcPath) > 0 && file::Copy(dstPath, srcPath, false);
 }
 
 static bool IsEngineMupdf(EngineBase* engine) {
@@ -579,55 +635,5 @@ bool EngineSupportsAnnotations(EngineBase* engine) {
     if (!IsEngineMupdf(engine)) {
         return false;
     }
-    return EngineMupdfSupportsAnnotations(engine);
-}
-
-bool EngineGetAnnotations(EngineBase* engine, Vec<Annotation*>& annotsOut) {
-    if (!IsEngineMupdf(engine)) {
-        return false;
-    }
-    EngineMupdfGetAnnotations(engine, annotsOut);
-    return true;
-}
-
-bool EngineHasUnsavedAnnotations(EngineBase* engine) {
-    if (!IsEngineMupdf(engine)) {
-        return false;
-    }
-    return EngineMupdfHasUnsavedAnnotations(engine);
-}
-
-bool EngineHasRedactMarks(EngineBase* engine) {
-    if (!IsEngineMupdf(engine)) {
-        return false;
-    }
-    return EngineMupdfHasRedactMarks(engine);
-}
-
-bool EngineHasRedactMarksNoWait(EngineBase* engine) {
-    if (!IsEngineMupdf(engine)) {
-        return false;
-    }
-    return EngineMupdfHasRedactMarksNoWait(engine);
-}
-
-bool EngineHasUserRedactMarks(EngineBase* engine) {
-    if (!IsEngineMupdf(engine)) {
-        return false;
-    }
-    return EngineMupdfHasUserRedactMarks(engine);
-}
-
-Annotation* EngineGetAnnotationAtPos(EngineBase* engine, int pageNo, PointF pos, float padding, Annotation* annot) {
-    if (!IsEngineMupdf(engine)) {
-        return nullptr;
-    }
-    return EngineMupdfGetAnnotationAtPos(engine, pageNo, pos, padding, annot);
-}
-
-Annotation* EngineGetWidgetAtPos(EngineBase* engine, int pageNo, PointF pos) {
-    if (!IsEngineMupdf(engine)) {
-        return nullptr;
-    }
-    return EngineMupdfGetWidgetAtPos(engine, pageNo, pos);
+    return EngineMupdfIsPdf(engine);
 }

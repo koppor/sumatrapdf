@@ -14,6 +14,7 @@
 #include "gui/UIModels.h"
 
 #include "Settings.h"
+#include "SumatraConfig.h"
 #include "AppTools.h"
 #include "AppSettings.h"
 #include "DisplayMode.h"
@@ -35,6 +36,7 @@
 #include "Tabs.h"
 #include "ReadingAutoScroll.h"
 #include "ReadAloud.h"
+#include "AIChatTypes.h"
 #include "AIChatCommon.h"
 #include "AIChatPanel.h"
 #include "OverlayScrollbar.h"
@@ -157,7 +159,7 @@ void ControllerCallbackHandler::TocChanged(DocController* ctrl) {
         ReloadTocTree(tab);
     } else if (tab->showToc && !win->InPresentation()) {
         // presentation mode has its own sidebar state (tab->showTocPresentation)
-        SetSidebarVisibility(win, true, gSettings->showFavorites);
+        SetTocVisibility(win, true);
     }
     AppShellInvalidate(win);
 }
@@ -195,7 +197,10 @@ static void LaunchEmbeddedDestination(MainWindow* win, PageDestination* pd) {
         logf("LaunchEmbeddedDestination: opened '%s'\n", tmpPath);
     } else {
         logf("LaunchEmbeddedDestination: showing '%s' in the file manager\n", tmpPath);
-        OpenPathInDefaultFileManager(tmpPath);
+        // tests check the log; a revealed folder would leave a file manager window open
+        if (!gForTesting) {
+            OpenPathInDefaultFileManager(tmpPath);
+        }
     }
     str::Free(data);
 }
@@ -231,7 +236,7 @@ void LinkHandler::GotoLink(IPageDestination* dest) {
         // embedded files
         return;
     }
-    // ng: kindDestinationJsMenu needs a popup menu at the cursor.
+    // ng: DocCanvas shows a kindDestinationJsMenu link's popup, which needs the click's gpui context
     logf("LinkHandler::GotoLink: unhandled kind %s\n", Str(kind));
 }
 
@@ -437,131 +442,31 @@ void MainWindow::MoveDocBy(int dx, int dy) const {
     }
 }
 
-void MainWindow::ChangePresentationMode(PresentationMode mode) {
-    presentation = mode;
-    if (PM_BLACK_SCREEN == mode || PM_WHITE_SCREEN == mode) {
+// switches between the presentation modes (normal, black, white screen)
+void MainWindow::ChangePresentationMode(WindowMode mode) {
+    ReportIf(!InPresentation() || mode < WindowMode::Presentation);
+    windowMode = mode;
+    if (InBlankPresentation()) {
         DeleteLinkTooltip(this);
     }
     RedrawAll();
 }
 
-// ng: orig has these in CommandAvailability.cpp; they are the only part of it
-// that needs MainWindow / WindowTab, and keeping them out lets the command
-// policy link into the console tools. Bodies are orig's.
-static void PopulateTabCloseFlags(AppCommandCtx& ctx) {
-    if (!ctx.win) {
-        return;
-    }
-    int nTabs = ctx.win->TabCount();
-    ctx.nTabs = nTabs;
-    SetTabCloseFlags(ctx);
-}
-
-AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
-    AppCommandCtx ctx;
-    ctx.win = win;
-    ctx.cursorPos = cursorPos;
-    if (!win) {
-        return ctx;
-    }
-
-    ctx.tab = win->CurrentTab();
-    ctx.isDocLoaded = win->IsDocLoaded();
-    ctx.filePath = ctx.tab ? ctx.tab->filePath : Str();
+void FillAppCommandCtx(AppCommandCtx& ctx, MainWindow* win) {
     ctx.allowToggleMenuBar = true;
-    ctx.hasOpenDocuments = HasOpenedDocuments(win);
-    ctx.debugDpiOverrideAvailable = true;
-
-    if (ctx.tab) {
-        ctx.autoScrollOn = ctx.tab->autoScroll.on;
-        ctx.readingBarOn = ctx.tab->readingBar.on;
-        ctx.isChm = ctx.tab->AsChm() || ctx.tab->AsMarkdown();
-        Str currentPath = win->ctrl ? win->ctrl->GetFilePath() : ctx.filePath;
-        ctx.isMarkdown = str::EndsWithI(currentPath, StrL(".md")) || str::EndsWithI(currentPath, StrL(".markdown"));
-        EngineBase* engine = ctx.tab->GetEngine();
-        if (engine && engine->kind == kindEngineComicBooks) {
-            ctx.isCbx = true;
-        }
-        if (engine && engine->isImageCollection) {
-            ctx.isImageCollection = true;
-        }
-        ctx.isReflowable = engine && engine->isReflowable;
-        ctx.isEpub = IsEpubDoc(ctx.tab);
-        ctx.engineKind = ctx.tab->GetEngineType();
-        ctx.engineHasErrors = engine && engine->HasErrors();
-#ifndef DISABLE_DOCUMENT_RESTRICTIONS
-        ctx.allowsPrinting = !win->AsFixed() || (engine && engine->AllowsPrinting());
-#endif
-        ctx.isPdf = IsPdfDoc(ctx.tab);
-        if (ctx.isPdf && engine) {
-            ctx.isPdfEncrypted = EngineMupdfIsEncrypted(engine);
-        }
-        ctx.hideAnnotations = ctx.tab->hideAnnotations;
-        ctx.selectedAnnotation = ctx.tab->selectedAnnotation;
-        ctx.canContinueReadAloud = CanContinueReadAloud(ctx.tab);
-    }
     ctx.ttsAvailable = TtsIsAvailable();
-    ctx.isSpeaking = TtsIsSpeaking();
     ctx.clipboardHasImage = ImageEditHasClipboard(win);
     ctx.clipboardReadAsync = OS_WASM;
+    ctx.hasLayers = SidebarHasLayers(win);
+}
 
-    ctx.aiChatAvailable = IsAIChatAvailable();
-    ctx.aiChatSupported = IsAIChatSupportedForTab(ctx.tab);
-    ctx.grokInstalled = IsBackendInstalled(AIChatBackend::Grok);
-    ctx.claudeInstalled = IsBackendInstalled(AIChatBackend::Claude);
-    ctx.codexInstalled = IsBackendInstalled(AIChatBackend::Codex);
-    ctx.antiGravityInstalled = IsBackendInstalled(AIChatBackend::AntiGravity);
-
-    ctx.hasSelection = ctx.isDocLoaded && ctx.tab && win->showSelection && ctx.tab->selectionOnPage;
-
-    if (ctx.isDocLoaded && win->ctrl) {
-        ctx.isSinglePage = IsSingle(win->ctrl->GetDisplayMode());
-        ctx.pageCount = win->ctrl->PageCount();
-        ctx.hasToc = win->ctrl->HasToc();
+// (0, 0) is "no point": keep the hover. A real point is hit-tested
+// and must not reuse a stale hover.
+Annotation* AnnotationUnderCursor(MainWindow* win, DisplayModel* dm, Point cursorPos) {
+    if (cursorPos.IsEmpty()) {
+        return win->annotationUnderCursor;
     }
-
-    DisplayModel* dm = win->AsFixed();
-    if (dm) {
-        ctx.isFixedPage = true;
-        auto* engine = dm->GetEngine();
-        ctx.hasTextSelection = ctx.hasSelection && dm->textSelection->result.len > 0;
-        ctx.hasDrawnRectSelection = ctx.hasSelection && IsDrawnRectSelection(win);
-        ctx.supportsAnnots = EngineSupportsAnnotations(engine);
-        ctx.hasUnsavedAnnotations = EngineHasUnsavedAnnotations(engine);
-        ctx.hasRedactMarks = EngineHasRedactMarksNoWait(engine);
-        ctx.hasUserRedactMarks = EngineHasUserRedactMarks(engine);
-        ctx.canUndo = EngineMupdfCanUndoNoWait(engine);
-        ctx.canRedo = EngineMupdfCanRedoNoWait(engine);
-        int pageNoUnderCursor = dm->GetPageNoByPoint(cursorPos);
-        if (pageNoUnderCursor > 0) {
-            ctx.isCursorOnPage = true;
-        }
-        // (0, 0) is "no point": keep the hover. A real point is hit-tested
-        // and must not reuse a stale hover.
-        if (cursorPos.IsEmpty()) {
-            ctx.annotationUnderCursor = win->annotationUnderCursor;
-        } else {
-            ctx.annotationUnderCursor = dm->GetAnnotationAtPos(cursorPos, win->annotationUnderCursor);
-        }
-        IPageElement* pageEl = dm->GetElementAtPos(cursorPos, nullptr);
-        if (pageEl) {
-            Str value = pageEl->GetValue();
-            ctx.cursorOnLinkTarget = pageEl->Is(kindPageElementDest) && PageDestHasAddress(pageEl->AsLink());
-            ctx.cursorOnComment = value && pageEl->Is(kindPageElementComment);
-            ctx.cursorOnImage = pageEl->Is(kindPageElementImage);
-        }
-        if (ctx.annotationUnderCursor) {
-            ctx.cursorOnComment = !str::IsEmptyOrWhiteSpace(Contents(ctx.annotationUnderCursor));
-        }
-    }
-
-    if (!CanAccessDisk()) {
-        ctx.supportsAnnots = false;
-        ctx.hasUnsavedAnnotations = false;
-    }
-
-    PopulateTabCloseFlags(ctx);
-    return ctx;
+    return dm->GetAnnotationAtPos(cursorPos, win->annotationUnderCursor);
 }
 
 #if OS_WIN
@@ -573,19 +478,6 @@ MainWindow* FindMainWindowByHwnd(HWND hwnd) {
     return AppShellWindowFromHwnd(hwnd);
 }
 #endif
-
-// ng: orig's FindMainWindowByHwnd; the gpui window is what identifies a window
-MainWindow* FindMainWindowByGpuiWindow(gpui::Window* gw) {
-    if (!gw) {
-        return nullptr;
-    }
-    for (MainWindow* win : gWindows) {
-        if (win->gpuiWin == gw) {
-            return win;
-        }
-    }
-    return nullptr;
-}
 
 WindowTab* FindTabByFilePath(Str path, MainWindow* limitWin) {
     if (len(path) == 0) {

@@ -21,6 +21,7 @@ TemporaryFileAutoMove = true
 RememberOpenedFiles = true
 RememberStatePerDocument = true
 RestoreSession = true
+KeepMissingSessionTabs = true
 ReuseInstance = true
 ShowMenubar = true
 ShowMenubarWithTabs = false
@@ -31,10 +32,12 @@ ShowTips = true
 ShowToolbar = true
 Toolbar = show
 ToolbarPosition = top
+PageInfoLocation = notification
 SearchUIFloating = false
 ShowFavorites = false
 ShowSidebarMiddle = false
 SortFavoritesByName = false
+FavoritesManualOrder = false
 ShowToc = true
 AlwaysShowSidebar = false
 ShowThumbnailsIfNoToc = false
@@ -48,12 +51,14 @@ DisableLeftDragPan = false
 ExplorerQuickLook = false
 RememberViewOffsetOnPageTurn = false
 MouseWheelTurnsPage = false
+InvertMouseWheel = false
 ScrollEdgeTurnsPage = true
 ShowDocumentFocusIndicator = false
 ShowAnnotationNotification = true
 ShowFileNavigateHint = true
 ShowAnnotationAuthorInTooltip = false
 ShowTocPageNumbers = true
+TocWrapText = false
 AutoGenerateTOC = false
 ShowStartPage = true
 SidebarDx = 0
@@ -69,6 +74,7 @@ HighlightLinkDestination = false
 CitationHoverDelay = -1
 ReadAloudSpeed = 1
 ReadingAutoScrollSpeed = 40
+ReadingAutoScrollMinutes = 0
 ReadingBar [
 	Background = #66ffe082
 	Invert = false
@@ -77,6 +83,7 @@ ReadingBar [
 FastScrollOverScrollbar = false
 PreventSleepInFullscreen = true
 TabWidth = 300
+TabsEqualWidth = true
 Theme = Light
 HelpTheme = app
 DocumentColorsFollowTheme = off
@@ -98,6 +105,7 @@ TabsMru = false
 CtrlTabSimple = false
 ZoomLevels = 
 ZoomIncrement = 0
+FitWidthPercent = 100
 
 FixedPageUI [
 	Grayscale = false
@@ -185,6 +193,13 @@ AntiGravity [
 	BgColor = #ffffff
 ]
 
+CustomAI [
+	Name = Custom AI
+	ApiKeyEnv = CUSTOM_AI_API_KEY
+	IncludeCurrentPage = false
+	BgColor = #ffffff
+]
+
 AIChat [
 	FontSize = 0
 	LineSpacing = 0
@@ -225,6 +240,7 @@ PrinterDefaults [
 	PrintScale = shrink
 	Collate = default
 	PrintDpi = 0
+	AutoRotate = true
 ]
 
 Fullscreen [

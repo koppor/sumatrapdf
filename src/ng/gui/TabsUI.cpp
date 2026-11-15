@@ -30,6 +30,7 @@
 #include "Menu.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Tabs.h"
 #include "gui/AppShell.h"
@@ -38,6 +39,7 @@
 #include "gui/DialogWidgets.h"
 #include "gui/TabsUI.h"
 #include "AppHelpersCommon.h"
+#include "SvgIcons.h"
 
 #include "SumatraLog.h"
 
@@ -74,6 +76,9 @@ struct TabsView {
     static void OnTabUp(TabsView* self, gp::Ctx* cx, const gp::MouseUpEvent* ev, int64_t idx);
     static void OnBarDown(TabsView* self, gp::Ctx* cx, const gp::MouseDownEvent* ev);
     static void OnPlusClick(TabsView* self, gp::Ctx* cx, const gp::ClickEvent*);
+#if OS_WASM
+    static void OnHomeClick(TabsView* self, gp::Ctx* cx, const gp::ClickEvent*);
+#endif
     static void OnBarWheel(TabsView* self, gp::Ctx* cx, const gp::ScrollWheelEvent* ev);
     static void OnFillerDrop(TabsView* self, gp::Ctx* cx, const gp::DropEvent* ev);
     static void OnTabHover(TabsView* self, gp::Ctx* cx, const gp::HoverEvent* ev, int64_t idx);
@@ -449,6 +454,37 @@ void TabsView::OnPlusClick(TabsView* self, gp::Ctx* cx, const gp::ClickEvent*) {
     gp::Notify(cx);
 }
 
+#if OS_WASM
+static void RunExitCmd(MainWindow* win) {
+    if (IsMainWindowValidAndNotClosing(win)) {
+        ExecuteCmd(win, CmdExit);
+    }
+}
+
+// Exit saves the state, then the host page goes to its home page (sumatra-web
+// navigates to "/", docs/wasm-host-api.md). Posted: Exit deletes the window
+// this click is still being handled in
+void TabsView::OnHomeClick(TabsView* self, gp::Ctx* cx, const gp::ClickEvent*) {
+    uitask::Post(MkFunc0<MainWindow>(RunExitCmd, self->win), "HomeExit");
+    gp::Notify(cx);
+}
+
+// SumatraPDF Web: back to the web app's home page, before the menu button
+static gp::El* TabsUIHomeButton(MainWindow* win, gp::Ctx* cx) {
+    gpc::Icon* icon = gpc::Icon::Empty(cx)->Data(ToGpui(Str(gIconHome)));
+    gp::El* btn = gpc::Button::New(cx, GStrL("sumatra-web-home"))
+                      ->Icon(gpc::ButtonIcon::New(cx, icon)->WithSize(gp::UiSize::Small))
+                      ->Ghost()
+                      ->Compact()
+                      ->WithSize(gp::UiSize::Small)
+                      ->Tooltip(GpuiDup(cx->a, Tr("Home")))
+                      ->OnClick(gp::ListenTo(Ui(win)->view, &TabsView::OnHomeClick))
+                      ->IntoEl();
+    btn->H(gp::kFill)->Shrink0();
+    return btn;
+}
+#endif
+
 // ng: orig's TrackPopupMenu returns the command only after the menu is gone.
 // gpui's popup is still up when the action fires, and it holds the keyboard and
 // the mouse, so a command that opens a dialog would open it behind a layer that
@@ -594,17 +630,6 @@ static uint32_t ActMenuCmd() {
     return id;
 }
 
-// "Underline access keys when available" (off until Alt, by default)
-static bool MenuCuesOn() {
-#if OS_WIN
-    BOOL on = FALSE;
-    SystemParametersInfoW(SPI_GETKEYBOARDCUES, 0, &on, 0);
-    return on != FALSE;
-#else
-    return false;
-#endif
-}
-
 static void SetMenuCue(gp::Ctx* cx, gpc::PopupMenu* menu, gp::Str label, const MenuAccelText& at, bool disabled) {
     if (at.underlineOff < 0 || menu->items.len == 0) {
         return;
@@ -660,7 +685,7 @@ gp::El* TabsUIMenuButton(MainWindow* win, gp::Ctx* cx) {
     if (win->isMenuBarVisible || AppShellNativeMenu() || !win->menu) {
         return nullptr;
     }
-    gpc::PopupMenu* popup = MenuPopupFromModel(cx, win->menu, StrL("sumatra-menu-btn"), MenuCuesOn());
+    gpc::PopupMenu* popup = MenuPopupFromModel(cx, win->menu, StrL("sumatra-menu-btn"), MenuCuesAlways());
     popup->MinW(160);
     TrackPopup(cx, popup);
 
@@ -719,6 +744,9 @@ gp::El* TabsUIBuild(MainWindow* win, gp::Ctx* cx, int barDy) {
                       ->OnMouseUpOut(gp::ListenTo(Ui(win)->view, &TabsView::OnBarUpOut));
     // orig's caption has a menu button left of the tabs while the menu bar is
     // hidden (CB_MENU); a click opens the bar's menus as one drop-down
+#if OS_WASM
+    bar->Child(TabsUIHomeButton(win, cx));
+#endif
     if (gp::El* menuBtn = TabsUIMenuButton(win, cx)) {
         bar->Child(menuBtn);
     }

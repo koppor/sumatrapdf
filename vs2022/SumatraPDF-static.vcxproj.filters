@@ -37,9 +37,6 @@
     <Filter Include="src\gui\win">
       <UniqueIdentifier>{9E7B1B1E-0A31-9413-9325-8EEAFFD98A17}</UniqueIdentifier>
     </Filter>
-    <Filter Include="src\regress">
-      <UniqueIdentifier>{F7CE8947-6384-023D-EC78-FC13582DF940}</UniqueIdentifier>
-    </Filter>
     <Filter Include="src\shared">
       <UniqueIdentifier>{D3351079-BFED-51C6-28F5-2A2214CCECB6}</UniqueIdentifier>
     </Filter>
@@ -48,9 +45,6 @@
     </Filter>
     <Filter Include="src\shared\tests">
       <UniqueIdentifier>{F5F2F2BB-E1EB-110E-0A1E-F792F675F119}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="src\testcode">
-      <UniqueIdentifier>{D744682D-C3A7-F7D1-6C2D-3088586FC354}</UniqueIdentifier>
     </Filter>
     <Filter Include="src\tests">
       <UniqueIdentifier>{CF8328B6-3BEE-DC2C-842C-8ED2F0D5BA81}</UniqueIdentifier>
@@ -129,13 +123,22 @@
     <ClInclude Include="..\src\FindWindow.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\HexView.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\ImageSaveCropResize.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\Installer.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\LayersUI.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\MainWindow.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\MeasurementToolbar.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\Menu.h">
@@ -148,6 +151,9 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\OverlayScrollbar.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\PageInfoBar.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\PageThumbnails.h">
@@ -237,6 +243,9 @@
     <ClInclude Include="..\src\resource.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\shared\AIChatAPI.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\shared\AIChatCommon.h">
       <Filter>src\shared</Filter>
     </ClInclude>
@@ -244,6 +253,9 @@
       <Filter>src\shared</Filter>
     </ClInclude>
     <ClInclude Include="..\src\shared\AIChatPanelCommon.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\shared\AIChatTypes.h">
       <Filter>src\shared</Filter>
     </ClInclude>
     <ClInclude Include="..\src\shared\Accelerators.h">
@@ -423,6 +435,9 @@
     <ClInclude Include="..\src\shared\HangDetector.h">
       <Filter>src\shared</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\shared\HexViewCommon.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\shared\HomePage.h">
       <Filter>src\shared</Filter>
     </ClInclude>
@@ -487,6 +502,9 @@
       <Filter>src\shared</Filter>
     </ClInclude>
     <ClInclude Include="..\src\shared\OleDragDropCommon.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\shared\OpenFromUrlCommon.h">
       <Filter>src\shared</Filter>
     </ClInclude>
     <ClInclude Include="..\src\shared\OverlayScrollbarCommon.h">
@@ -687,9 +705,6 @@
     <ClInclude Include="..\src\shared\gui\UIModels.h">
       <Filter>src\shared\gui</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\testcode\test-app.h">
-      <Filter>src\testcode</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\uia\DocumentProvider.h">
       <Filter>src\uia</Filter>
     </ClInclude>
@@ -830,6 +845,9 @@
     <ClCompile Include="..\src\GoToPageDialog.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\HexView.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\HomePage.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -851,7 +869,13 @@
     <ClCompile Include="..\src\KeyboardHelp.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\LayersUI.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\MainWindow.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\MeasurementToolbar.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Menu.cpp">
@@ -866,6 +890,9 @@
     <ClCompile Include="..\src\Notifications.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\OpenFromUrlDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\OverlayScrollbar.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -873,6 +900,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\PageGridDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PageInfoBar.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\PageThumbnails.cpp">
@@ -941,10 +971,10 @@
     <ClCompile Include="..\src\SumatraDialogs.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\SumatraOnlineDialog.cpp">
+    <ClCompile Include="..\src\SumatraPDF.cpp">
       <Filter>src</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\SumatraPDF.cpp">
+    <ClCompile Include="..\src\SumatraPDFWebDialog.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\SumatraTest.cpp">
@@ -960,12 +990,6 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\TestPlugin.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\TestPreview.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\Tester.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Tests.cpp">
@@ -988,9 +1012,6 @@
     </ClCompile>
     <ClCompile Include="..\src\base\CrashHandler.cpp">
       <Filter>src\base</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\base\tests\AppendStore_ut.cpp">
-      <Filter>src\base\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\base\tests\Archive_ut.cpp">
       <Filter>src\base\tests</Filter>
@@ -1130,10 +1151,10 @@
     <ClCompile Include="..\src\gui\win\WindowBase.cpp">
       <Filter>src\gui\win</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\regress\Regress.cpp">
-      <Filter>src\regress</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\shared\AIAntiGravity.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\shared\AIChatAPI.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\AIChatCommon.cpp">
@@ -1328,6 +1349,9 @@
     <ClCompile Include="..\src\shared\HangDetector.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\shared\HexViewCommon.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\shared\HomePageCommon.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
@@ -1386,6 +1410,9 @@
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\OpenFileFilters_win.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\shared\OpenFromUrlCommon.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\OverlayScrollbarCommon.cpp">
@@ -1622,26 +1649,11 @@
     <ClCompile Include="..\src\shared\tests\RtfDoc_ut.cpp">
       <Filter>src\shared\tests</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\shared\tests\SimpleLog_ut.cpp">
-      <Filter>src\shared\tests</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\shared\tests\SumatraCommon_ut.cpp">
       <Filter>src\shared\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\tests\TextSelection_ut.cpp">
       <Filter>src\shared\tests</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\testcode\TestApp.cpp">
-      <Filter>src\testcode</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\testcode\TestLayout.cpp">
-      <Filter>src\testcode</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\testcode\TestTab.cpp">
-      <Filter>src\testcode</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\tests\ShortcutParse_ut.cpp">
-      <Filter>src\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\tests\Sumatra_ut.cpp">
       <Filter>src\tests</Filter>

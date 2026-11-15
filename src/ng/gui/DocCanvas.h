@@ -81,7 +81,7 @@ void CanvasHideScrollbars(MainWindow* win);
 
 // RenderCache::PaintTile blits a cached tile through these (RenderCache lives
 // in the `app` lib, which knows nothing about gpui)
-bool CanvasDrawTile(gpui::PaintCtx* ctx, BitmapCacheEntry* entry, Rect target, Rect source);
+bool CanvasDrawTile(gpui::PaintCtx* ctx, BitmapCacheEntry* entry, Rect target, Rect source, bool mirrored = false);
 // what wrapping cached pixmaps into gpui RenderImages has cost so far
 void CanvasBmpWrapStats(double& msOut, int& countOut);
 // ms from process start to the first page tile on screen, -1 before that
@@ -106,8 +106,6 @@ void CanvasDrawEllipse(gpui::PaintCtx* ctx, Rect r, Color col, float width);
 Size CanvasMeasureText(gpui::PaintCtx* ctx, Str s, float fontSize);
 void CanvasDrawText(gpui::PaintCtx* ctx, Str s, Point at, Color col, float fontSize);
 
-// orig's SetCapture / ReleaseCapture on the canvas HWND
-void CanvasSetCapture(MainWindow* win, bool capture);
 void CanvasSetClipboardText(MainWindow* win, Str s);
 // what orig reads with GetKeyState; here it is the last mouse or key event
 bool CanvasCtrlPressed();

@@ -32,6 +32,7 @@
 #include "Menu.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Favorites.h"
 #include "TableOfContents.h"
@@ -72,16 +73,17 @@ struct SidebarThumbCache {
     EngineBase* renderEngine = nullptr;
     DisplayModel* owner = nullptr;
     MainWindow* win = nullptr;
-    AtomicInt cancelRendering = 0;
+    BgJob job;
     int rotation = 0;
-    bool workerRunning = false;
-    bool deleteWhenWorkerFinishes = false;
 };
 
 // one visible row of a tree
 struct TocRow {
     TocItem* item;
     int depth;
+    // TocWrapText: where the row is in the list and how tall
+    float top = 0;
+    float dy = kRowDy;
 };
 
 struct FavRow {
@@ -113,8 +115,8 @@ struct SidebarUI {
     int thumbRevealPage = 0;
     int thumbSelectedPage = 0;
     bool thumbSelectionPinned = false;
-    // view icons, Bookmarks / Thumbnails / Favorites, for each panel
-    gpui::Bounds viewIconBounds[3][3]{};
+    // view icons, Bookmarks / Thumbnails / Favorites / Layers, for each panel
+    gpui::Bounds viewIconBounds[3][4]{};
     // pixel sizes at the current frame DPI (96 DPI keeps the constants above)
     int viewIconPx = kSidebarIconPx;
     int filterFontPx = kSidebarFilterFontPx;
@@ -147,6 +149,14 @@ struct SidebarUI {
     char typeAhead[64]{};
     int typeAheadLen = 0;
     double typeAheadTime = 0;
+
+    // the Layers pane: the engine's layer rows, re-read when the engine
+    // changes or a layer was toggled
+    Vec<PdfLayerRow*> layerRows;
+    EngineBase* layersFor = nullptr;
+    bool layersStale = true;
+    int layerSel = -1;
+    float layersScrollY = 0;
 };
 
 struct SidebarView {
@@ -177,6 +187,9 @@ struct SidebarView {
     static void OnThumbScroll(SidebarView* self, gp::Ctx* cx, const gp::ScrollEvent* ev);
     static void OnThumbClose(SidebarView* self, gp::Ctx* cx, const gp::ClickEvent*);
     static void OnPanelView(SidebarView* self, gp::Ctx* cx, const gp::ClickEvent*, int64_t arg);
+    static void OnLayerClick(SidebarView* self, gp::Ctx* cx, const gp::ClickEvent*, int64_t row);
+    static void OnLayersScroll(SidebarView* self, gp::Ctx* cx, const gp::ScrollEvent* ev);
+    static void OnLayersClose(SidebarView* self, gp::Ctx* cx, const gp::ClickEvent*);
 };
 
 // one action per pane, carrying the context-menu command id
@@ -278,10 +291,7 @@ static void DetachThumbCache(SidebarUI* ui) {
     if (!cache) {
         return;
     }
-    AtomicIntSet(&cache->cancelRendering, 1);
-    if (cache->workerRunning) {
-        cache->deleteWhenWorkerFinishes = true;
-    } else {
+    if (cache->job.Detach()) {
         DeleteThumbCache(cache);
     }
 }
@@ -299,6 +309,8 @@ void SidebarDelete(MainWindow* win) {
     DetachThumbCache(ui);
     VecReset(ui->tocRows);
     VecReset(ui->favRows);
+    DeleteVecMembers(ui->layerRows);
+    VecReset(ui->layerRows);
     delete ui;
     win->sidebar = nullptr;
 }
@@ -487,6 +499,9 @@ SidebarContent SidebarContentFromStr(Str s, SidebarContent fallback) {
     if (str::EqI(s, StrL("favorites"))) {
         return SidebarContent::Favorites;
     }
+    if (str::EqI(s, StrL("layers"))) {
+        return SidebarContent::Layers;
+    }
     return fallback;
 }
 
@@ -497,10 +512,25 @@ Str SidebarContentToStr(SidebarContent content) {
     if (content == SidebarContent::Favorites) {
         return StrL("favorites");
     }
+    if (content == SidebarContent::Layers) {
+        return StrL("layers");
+    }
     return StrL("bookmarks");
 }
 
+static EngineBase* LayersEngine(MainWindow* win) {
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    return dm ? dm->GetEngine() : nullptr;
+}
+
+bool SidebarHasLayers(MainWindow* win) {
+    return EngineMupdfHasLayers(LayersEngine(win));
+}
+
 static bool ContentAvailable(MainWindow* win, SidebarContent content) {
+    if (content == SidebarContent::Layers) {
+        return SidebarHasLayers(win);
+    }
     if (content == SidebarContent::Thumbnails) {
         return win && win->AsFixed();
     }
@@ -662,7 +692,26 @@ void SidebarToggleFavorites(MainWindow* win) {
     ToggleContent(win, SidebarContent::Favorites);
 }
 
+// orig's Layers view is about the document, so it shows in the top panel only
+void SidebarToggleLayers(MainWindow* win) {
+    if (!win || !win->CurrentTab() || !SidebarHasLayers(win)) {
+        return;
+    }
+    SidebarSlot shown;
+    if (ShownSlot(win, SidebarContent::Layers, &shown)) {
+        HidePanel(win, shown);
+        ScheduleSaveSettings();
+        return;
+    }
+    SetPanelContent(win, SidebarSlot::Top, SidebarContent::Layers);
+    SetSidebarVisibility(win, true, win->uiState.favVisible, SidebarResizeFrame::Adjust);
+    SidebarFocusPanel(win, SidebarSlot::Top);
+    ScheduleSaveSettings();
+}
+
 static float ScrollToRow(float scrollY, float viewH, int idx, int nRows);
+static bool LayersOnKeyDown(MainWindow* win, SidebarUI* ui, int vkey);
+static TempStr LayersTestTemp(MainWindow* win, Str op, int arg);
 static int TopPaneDy(MainWindow* win);
 
 // orig's TocTreeKeyDown / FavTreeKeyDown: Esc clears the search and focuses
@@ -814,6 +863,9 @@ bool SidebarOnKeyDown(MainWindow* win, int vkey, bool ctrl, bool shift, bool alt
         return false;
     }
     SidebarContent content = SlotContent(win, focused);
+    if (content == SidebarContent::Layers) {
+        return LayersOnKeyDown(win, ui, vkey);
+    }
     if (content == SidebarContent::Bookmarks) {
         int n = len(ui->tocRows);
         if (n == 0) {
@@ -1131,8 +1183,8 @@ static bool IsTocSelShown(SidebarUI* ui) {
         if (ui->tocRows[i].item != ui->tocSel) {
             continue;
         }
-        float top = (float)i * kRowDy;
-        return top >= ui->tocScrollY && top + kRowDy <= ui->tocScrollY + ui->tocView.h;
+        const TocRow& r = ui->tocRows[i];
+        return r.top >= ui->tocScrollY && r.top + r.dy <= ui->tocScrollY + ui->tocView.h;
     }
     return false;
 }
@@ -1150,6 +1202,11 @@ TempStr SidebarTestToc(MainWindow* win, Str op, int arg) {
     if (str::Eq(op, StrL("focus"))) {
         SidebarFocusPanel(win, SidebarSlot::Top);
         return SidebarPanelHasFocus(win, SidebarSlot::Top) ? StrL("ok") : StrL("ERR no-focus");
+    }
+    // the Layers pane: "layers-show" toggles it, "layer-toggle" <row> clicks a
+    // row; each answers with the pane's visibility, the saved state and the rows
+    if (win && str::StartsWith(op, StrL("layer"))) {
+        return LayersTestTemp(win, op, arg);
     }
     TocTree* tree = win ? CurrentTocTree(win) : nullptr;
     TocItem* root = tree && tree->root ? tree->root->child : nullptr;
@@ -1298,6 +1355,80 @@ static void FlattenToc(TocItem* item, int depth, Vec<TocRow>& out) {
     }
 }
 
+// ng: gpui measures text only while painting, so the lines a wrapped title
+// takes are estimated word by word, at about 6 px a character of the 12 px
+// tree font. A wrapped line is a row tall (kWrapLineHeight)
+constexpr float kCharDxEstimate = 6.0f;
+constexpr float kWrapLineHeight = kRowDy / kTreeFontSize;
+constexpr int kTocMaxLines = 20;
+// the row's PadR(6), the label box's PadX(2) and the page number's PadL(8)
+constexpr float kTocRowPadsDx = 6 + 4;
+constexpr float kTocPagePadDx = 8;
+
+// TocWrapText (#1139): how many rows a bookmark's title wraps to
+static int TocRowLines(MainWindow* win, TocItem* item, int depth, float viewDx) {
+    float pageDx = 0;
+    if (gSettings->showTocPageNumbers && win->ctrl && item->pageNo > 0) {
+        TempStr label = win->ctrl->GetPageLabeTemp(item->pageNo);
+        pageDx = kTocPagePadDx + (float)Utf8CodepointCount(label) * kCharDxEstimate;
+    }
+    float avail = viewDx - (kRowPadL + (float)depth * kIndentDx + kChevronDx) - kTocRowPadsDx - pageDx;
+    if (!gSettings->tocWrapText || avail <= kCharDxEstimate) {
+        return 1;
+    }
+    Str s = item->title;
+    int lines = 1;
+    float lineDx = 0;
+    int i = 0;
+    while (i < len(s)) {
+        int start = i;
+        while (i < len(s) && s.s[i] != ' ') {
+            i++;
+        }
+        float wordDx = (float)Utf8CodepointCount(Str(s.s + start, i - start)) * kCharDxEstimate;
+        float spaceDx = lineDx > 0 ? kCharDxEstimate : 0;
+        if (lineDx > 0 && lineDx + spaceDx + wordDx > avail) {
+            lines++;
+            lineDx = 0;
+            spaceDx = 0;
+        }
+        // a word wider than the line takes the lines it needs
+        while (wordDx > avail) {
+            lines++;
+            wordDx -= avail;
+        }
+        lineDx += spaceDx + wordDx;
+        i++;
+    }
+    return std::min(lines, kTocMaxLines);
+}
+
+// the rows' tops and heights, and the list's height
+static float LayoutTocRows(MainWindow* win, Vec<TocRow>& rows, float viewDx) {
+    float y = 0;
+    for (TocRow& r : rows) {
+        r.top = y;
+        r.dy = (float)TocRowLines(win, r.item, r.depth, viewDx) * kRowDy;
+        y += r.dy;
+    }
+    return y;
+}
+
+// the row at list position y (the last one below the end)
+static int TocRowAtY(const Vec<TocRow>& rows, float y) {
+    int lo = 0;
+    int hi = len(rows) - 1;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (rows[mid].top <= y) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return std::max(lo, 0);
+}
+
 static void FlattenFav(FavTreeItem* item, int depth, Vec<FavRow>& out) {
     VecAppend(out, FavRow{item, depth});
     if (!item->isExpanded) {
@@ -1434,7 +1565,8 @@ bool SidebarContextMenuFromKey(MainWindow* win, gp::Ctx* cx) {
             ui->tocRightClick = ui->tocSel;
             ui->tocMenuValid = false;
             float x = kRowPadL + (float)ui->tocRows[i].depth * kIndentDx + kChevronDx;
-            OpenPopupMenuAt(cx, ui->tocPopup, x, (float)(i + 1) * kRowDy - ui->tocScrollY);
+            const TocRow& r = ui->tocRows[i];
+            OpenPopupMenuAt(cx, ui->tocPopup, x, r.top + r.dy - ui->tocScrollY);
             break;
         }
     } else if (content == SidebarContent::Favorites) {
@@ -1501,7 +1633,10 @@ void SidebarView::OnTocRowHover(SidebarView* self, gp::Ctx* cx, const gp::HoverE
         HoverTooltipHide(cx);
         return;
     }
-    HoverTooltipShow(cx, tip, RowBounds(ui->tocView, ui->tocScrollY, (int)rowIdx));
+    gp::Bounds rowBounds = ui->tocView;
+    rowBounds.y = ui->tocView.y + ui->tocRows[(int)rowIdx].top - ui->tocScrollY;
+    rowBounds.h = ui->tocRows[(int)rowIdx].dy;
+    HoverTooltipShow(cx, tip, rowBounds);
 }
 
 void SidebarView::OnFavRowHover(SidebarView* self, gp::Ctx* cx, const gp::HoverEvent* ev, int64_t rowIdx) {
@@ -1717,10 +1852,17 @@ static gp::El* PaneHeader(MainWindow* win, gp::Ctx* cx, bool selectors, SidebarS
     if (selectors) {
         SidebarContent selected = SlotContent(win, slot);
         int slotIdx = (int)slot;
-        SidebarContent contents[] = {SidebarContent::Bookmarks, SidebarContent::Thumbnails, SidebarContent::Favorites};
-        gp::IconName icons[] = {gp::IconName::BookOpen, gp::IconName::GalleryVerticalEnd, gp::IconName::Star};
-        Str tips[] = {Tr("Bookmarks"), Tr("Thumbnails"), Tr("Favorites")};
+        SidebarContent contents[] = {SidebarContent::Bookmarks, SidebarContent::Thumbnails, SidebarContent::Favorites,
+                                     SidebarContent::Layers};
+        gp::IconName icons[] = {gp::IconName::BookOpen, gp::IconName::GalleryVerticalEnd, gp::IconName::Star,
+                                gp::IconName::Eye};
+        Str tips[] = {Tr("Bookmarks"), Tr("Thumbnails"), Tr("Favorites"), Tr("Layers")};
         for (int i = 0; i < dimofi(contents); i++) {
+            // Layers is about the document: only in its panel, only when it has them
+            bool docOnly = contents[i] == SidebarContent::Layers;
+            if (docOnly && (slot != SidebarSlot::Top || !ContentAvailable(win, contents[i]))) {
+                continue;
+            }
             int64_t arg = (slotIdx << 2) | (int)contents[i];
             auto* button = gpc::Button::New(cx, GpuiDup(cx->a, fmt("sidebar-view-%d-%d", slotIdx, i)))
                                ->Icon(icons[i])
@@ -1834,7 +1976,7 @@ struct SidebarThumbWorker {
     int next = 0; // pages[next] is rendered next
 };
 
-static Pixmap* RenderSidebarThumb(EngineBase* engine, int pageNo, Location loc, int rotation) {
+Pixmap* RenderPageThumb(EngineBase* engine, int pageNo, Location loc, int rotation) {
     int boxPage = loc.IsValid() && engine->isReflowable ? 1 : pageNo;
     RectF pageRect = engine->PageMediabox(boxPage);
     if (pageRect.IsEmpty()) {
@@ -1855,7 +1997,7 @@ static Pixmap* RenderSidebarThumb(EngineBase* engine, int pageNo, Location loc, 
 static void FinishSidebarThumb(SidebarThumbTask* task) {
     SidebarThumbCache* cache = task->cache;
     int idx = task->pageNo - 1;
-    if (!cache->deleteWhenWorkerFinishes && idx >= 0 && idx < len(cache->thumbs)) {
+    if (!cache->job.IsDetached() && idx >= 0 && idx < len(cache->thumbs)) {
         SidebarThumb& thumb = cache->thumbs[idx];
         if (task->bitmap) {
             FreePixmap(thumb.bitmap);
@@ -1875,8 +2017,7 @@ static void FinishSidebarThumb(SidebarThumbTask* task) {
 }
 
 static void FinishSidebarWorker(SidebarThumbCache* cache) {
-    cache->workerRunning = false;
-    if (cache->deleteWhenWorkerFinishes) {
+    if (cache->job.Finish()) {
         DeleteThumbCache(cache);
         return;
     }
@@ -1888,7 +2029,7 @@ static void RenderSidebarThumbs(SidebarThumbWorker* worker) {
     SidebarThumbCache* cache = worker->cache;
     u64 sliceStart = GetTickCount64();
     while (cache->renderEngine && worker->next < len(worker->pages)) {
-        if (AtomicIntGet(&cache->cancelRendering) != 0) {
+        if (cache->job.IsCanceled()) {
             break;
         }
         if (!kHasThreads && GetTickCount64() - sliceStart >= (u64)kUiSliceMs) {
@@ -1899,7 +2040,7 @@ static void RenderSidebarThumbs(SidebarThumbWorker* worker) {
         auto* task = new SidebarThumbTask;
         task->cache = cache;
         task->pageNo = worker->pages[i];
-        task->bitmap = RenderSidebarThumb(cache->renderEngine, task->pageNo, worker->locs[i], cache->rotation);
+        task->bitmap = RenderPageThumb(cache->renderEngine, task->pageNo, worker->locs[i], cache->rotation);
         uitask::Post(MkFunc0<SidebarThumbTask>(FinishSidebarThumb, task));
     }
     uitask::Post(MkFunc0<SidebarThumbCache>(FinishSidebarWorker, cache));
@@ -1939,7 +2080,7 @@ static SidebarThumbCache* EnsureThumbCache(MainWindow* win) {
 static void StartSidebarThumbs(MainWindow* win, int firstPage, int lastPage) {
     SidebarThumbCache* cache = EnsureThumbCache(win);
     DisplayModel* dm = win->AsFixed();
-    if (!cache || !dm || cache->workerRunning) {
+    if (!cache || !dm || cache->job.IsRunning()) {
         return;
     }
     auto* worker = new SidebarThumbWorker;
@@ -1959,8 +2100,7 @@ static void StartSidebarThumbs(MainWindow* win, int firstPage, int lastPage) {
         return;
     }
     worker->cache = cache;
-    cache->workerRunning = true;
-    AtomicIntSet(&cache->cancelRendering, 0);
+    cache->job.Start();
     auto fn = MkFunc0<SidebarThumbWorker>(RenderSidebarThumbs, worker);
     if (kHasThreads) {
         RunAsync(fn, StrL("SidebarThumbnailRender"));
@@ -1976,7 +2116,7 @@ void SidebarRefreshThumbnailPage(MainWindow* win, int pageNo) {
     if (!cache || idx < 0 || idx >= len(cache->thumbs)) {
         return;
     }
-    if (cache->workerRunning) {
+    if (cache->job.IsRunning()) {
         DetachThumbCache(ui);
         return;
     }
@@ -2182,6 +2322,25 @@ TempStr SidebarThumbnailsResultTemp(int* exitCodeOut) {
     return ToStrTemp(sb);
 }
 
+// the bookmark rows, for tests: "OK rowDy=18 width=240 wrap=1", then
+// "row y=0 dy=36 title=..." each (#1139)
+TempStr TocRowsResultTemp(int* exitCodeOut) {
+    *exitCodeOut = 2;
+    MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+    SidebarUI* ui = win ? Ui(win) : nullptr;
+    if (!ui || len(ui->tocRows) == 0) {
+        return str::DupTemp(StrL("NOTREADY no-toc\n"));
+    }
+    *exitCodeOut = 0;
+    str::Builder out;
+    int wrap = gSettings->tocWrapText ? 1 : 0;
+    out.Append(fmt("OK rowDy=%d width=%d wrap=%d\n", (int)kRowDy, (int)ui->tocView.w, wrap));
+    for (const TocRow& r : ui->tocRows) {
+        out.Append(fmt("row y=%d dy=%d title=%s\n", (int)r.top, (int)r.dy, r.item->title));
+    }
+    return ToStrTemp(out);
+}
+
 static gp::El* BuildTocPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
     SidebarUI* ui = Ui(win);
     const gp::Theme& th = gp::ThemeNow(cx->app);
@@ -2192,6 +2351,7 @@ static gp::El* BuildTocPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
         FlattenToc(tree->root->child, 0, ui->tocRows);
     }
     int nRows = ui->tocRows.len;
+    float listDy = LayoutTocRows(win, ui->tocRows, ui->tocView.w);
 
     if (ui->tocReveal) {
         int idx = -1;
@@ -2201,7 +2361,17 @@ static gp::El* BuildTocPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
                 break;
             }
         }
-        ui->tocScrollY = ScrollToRow(ui->tocScrollY, ui->tocView.h, idx, nRows);
+        // ScrollToRow with the rows' own heights
+        if (idx >= 0 && ui->tocView.h > 0) {
+            const TocRow& r = ui->tocRows[idx];
+            float y = ui->tocScrollY;
+            if (r.top < y) {
+                y = r.top;
+            } else if (r.top + r.dy > y + ui->tocView.h) {
+                y = r.top + r.dy - ui->tocView.h;
+            }
+            ui->tocScrollY = std::max(0.f, std::min(y, std::max(0.f, listDy - ui->tocView.h)));
+        }
         // the pane has no height before its first layout: reveal on a later frame
         if (ui->tocView.h > 0) {
             ui->tocReveal = nullptr;
@@ -2226,11 +2396,11 @@ static gp::El* BuildTocPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
 
     // the rows that fit the pane, plus spacers for the ones above and below
     float viewH = ui->tocView.h > 0 ? ui->tocView.h : 400;
-    int first = std::max(0, (int)(ui->tocScrollY / kRowDy) - 2);
-    int end = std::min(nRows, (int)((ui->tocScrollY + viewH) / kRowDy) + 3);
+    int first = nRows > 0 ? std::max(0, TocRowAtY(ui->tocRows, ui->tocScrollY) - 2) : 0;
+    int end = nRows > 0 ? std::min(nRows, TocRowAtY(ui->tocRows, ui->tocScrollY + viewH) + 3) : 0;
     gp::El* list = gp::Div(cx->a)->FlexCol()->W(gp::kFill);
     if (first > 0) {
-        list->Child(gp::Div(cx->a)->W(gp::kFill)->H((float)first * kRowDy));
+        list->Child(gp::Div(cx->a)->W(gp::kFill)->H(ui->tocRows[first].top));
     }
     gp::Listener click = gp::ListenTo(Ui(win)->view, &SidebarView::OnTocRowClick, 0);
     gp::Listener down = gp::ListenTo(Ui(win)->view, &SidebarView::OnTocRowDown, 0);
@@ -2242,12 +2412,14 @@ static gp::El* BuildTocPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
     for (int i = first; i < end; i++) {
         TocItem* item = ui->tocRows[i].item;
         int depth = ui->tocRows[i].depth;
+        float rowDy = ui->tocRows[i].dy;
+        bool isWrapped = rowDy > kRowDy;
         bool isSel = item == ui->tocSel;
         bool isMatch = TocItemIsMultiHighlight(win, item);
         gp::El* row = gp::Div(cx->a)
                           ->FlexRow()
                           ->W(gp::kFill)
-                          ->H(kRowDy)
+                          ->H(rowDy)
                           ->ItemsCenter()
                           ->PadR(6)
                           ->PadL(kRowPadL + (float)depth * kIndentDx)
@@ -2267,7 +2439,25 @@ static gp::El* BuildTocPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
         gp::El* labelBox = TreeRowLabelBox(cx, row, bgCol);
         gp::Rgba fg = ToGpui(txtCol);
         gp::El* label;
-        if (len(filterWords) > 0) {
+        if (isWrapped) {
+            // the chevron, the first line and the page number share the top row
+            row->ItemsStart();
+            labelBox->ItemsStart()->PadT(2);
+            label = gp::TextEl(cx->a, GpuiDup(cx->a, item->title))
+                        ->Font(kTreeFontSize)
+                        ->Fg(fg)
+                        ->Flex1()
+                        ->MinW(0)
+                        ->Wrap()
+                        ->LineHeight(kWrapLineHeight)
+                        ->ClipY();
+            if (bit::IsSet(item->fontFlags, kFontBitBold)) {
+                label->Bold();
+            }
+            if (bit::IsSet(item->fontFlags, kFontBitItalic)) {
+                label->Italic();
+            }
+        } else if (len(filterWords) > 0) {
             // orig's DrawTreeItemFilterHighlight: the matched letters get an
             // underlay while the bookmark filter is on
             label = FilterHighlightText(cx, item->title, filterWords, fg, 13)->Flex1()->MinW(0)->ClipX();
@@ -2307,7 +2497,7 @@ static gp::El* BuildTocPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
         list->Child(row);
     }
     if (end < nRows) {
-        list->Child(gp::Div(cx->a)->W(gp::kFill)->H((float)(nRows - end) * kRowDy));
+        list->Child(gp::Div(cx->a)->W(gp::kFill)->H(listDy - ui->tocRows[end].top));
     }
 
     gp::El* scroll = gp::Div(cx->a)
@@ -2469,6 +2659,163 @@ static gp::El* BuildFavPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot, bool
     return pane;
 }
 
+// --- layers -----------------------------------------------------------------
+
+static void ReloadLayerRows(MainWindow* win, SidebarUI* ui) {
+    EngineBase* engine = LayersEngine(win);
+    if (!ui->layersStale && ui->layersFor == engine) {
+        return;
+    }
+    if (ui->layersFor != engine) {
+        ui->layerSel = -1;
+        ui->layersScrollY = 0;
+    }
+    DeleteVecMembers(ui->layerRows);
+    EngineMupdfGetLayerRows(engine, ui->layerRows);
+    ui->layersFor = engine;
+    ui->layersStale = false;
+}
+
+// orig's ToggleLayerRow: turns the row's layer on or off and re-renders the
+// pages and their thumbnails
+static void ToggleLayer(MainWindow* win, int row) {
+    SidebarUI* ui = Ui(win);
+    if (row < 0 || !EngineMupdfToggleLayerRow(LayersEngine(win), row)) {
+        return;
+    }
+    ui->layersStale = true;
+    DetachThumbCache(ui);
+    MainWindowRerender(win);
+    AppShellInvalidate(win);
+}
+
+void SidebarView::OnLayerClick(SidebarView* self, gp::Ctx* cx, const gp::ClickEvent*, int64_t row) {
+    SidebarUI* ui = Ui(self->win);
+    ui->layerSel = (int)row;
+    ToggleLayer(self->win, (int)row);
+    gp::Notify(cx);
+}
+
+void SidebarView::OnLayersScroll(SidebarView* self, gp::Ctx* cx, const gp::ScrollEvent* ev) {
+    Ui(self->win)->layersScrollY = ev->offsetY;
+    gp::Notify(cx);
+}
+
+void SidebarView::OnLayersClose(SidebarView* self, gp::Ctx* cx, const gp::ClickEvent*) {
+    SidebarToggleLayers(self->win);
+    gp::Notify(cx);
+}
+
+//  [indent][checkbox / radio] text      a label has no box; a locked layer is disabled
+static gp::El* BuildLayersPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
+    SidebarUI* ui = Ui(win);
+    const gp::Theme& th = gp::ThemeNow(cx->app);
+    ReloadLayerRows(win, ui);
+
+    gp::El* pane = gp::Div(cx->a)->FlexCol()->SizeFull()->Bg(th.tokens.sidebar);
+    pane->Child(PaneHeader(win, cx, true, slot, Tr("Layers"), StrL("layers-close"),
+                           gp::ListenTo(ui->view, &SidebarView::OnLayersClose)));
+
+    gp::FocusHandle focus = SlotFocus(ui, slot);
+    bool hasFocus = focus.IsValid() && gp::FocusHandleIsFocused(cx->win, focus);
+    gp::Listener click = gp::ListenTo(ui->view, &SidebarView::OnLayerClick, 0);
+    gp::El* list = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->PadY(2);
+    for (int i = 0; i < len(ui->layerRows); i++) {
+        const PdfLayerRow* layer = ui->layerRows[i];
+        Color bgCol, txtCol;
+        TreeRowColors(i == ui->layerSel, hasFocus, &bgCol, &txtCol);
+        gp::El* row = gp::Div(cx->a)
+                          ->FlexRow()
+                          ->W(gp::kFill)
+                          ->H(kRowDy + 4)
+                          ->ItemsCenter()
+                          ->PadR(6)
+                          ->PadL(kRowPadL + (float)layer->depth * kIndentDx)
+                          ->Bg(ToGpui(bgCol));
+        Str id = fmt("layer-%d", i);
+        Str text = layer->text;
+        if (layer->kind == PdfLayerKind::Label) {
+            row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, text))
+                           ->Font(kTreeFontSize)
+                           ->Fg(ToGpui(txtCol))
+                           ->Flex1()
+                           ->MinW(0)
+                           ->Truncate());
+        } else if (layer->kind == PdfLayerKind::Radio) {
+            row->Child(gpc::Radio::New(cx, GpuiDup(cx->a, id))
+                           ->Label(GpuiDup(cx->a, text))
+                           ->Checked(layer->on)
+                           ->Disabled(layer->locked)
+                           ->WithSize(gp::UiSize::Small)
+                           ->TabStop(false)
+                           ->OnClick(gp::ListenerArg(click, i))
+                           ->IntoEl());
+        } else {
+            row->Child(gpc::Checkbox::New(cx, GpuiDup(cx->a, id))
+                           ->Label(GpuiDup(cx->a, text))
+                           ->Checked(layer->on)
+                           ->Disabled(layer->locked)
+                           ->WithSize(gp::UiSize::Small)
+                           ->TabStop(false)
+                           ->OnClick(gp::ListenerArg(click, i))
+                           ->IntoEl());
+        }
+        list->Child(row);
+    }
+    gp::El* scroll = gp::Div(cx->a)
+                         ->Id(GStrL("layers-list"))
+                         ->TrackFocus(focus)
+                         ->FocusOnPress()
+                         ->TabStop(false)
+                         ->FocusRing()
+                         ->FlexCol()
+                         ->Flex1()
+                         ->W(gp::kFill)
+                         ->MinH(0)
+                         ->ScrollY(ui->layersScrollY)
+                         ->ScrollFromPath()
+                         ->OnScroll(gp::ListenTo(ui->view, &SidebarView::OnLayersScroll))
+                         ->Child(list);
+    pane->Child(scroll);
+    return pane;
+}
+
+static TempStr LayersTestTemp(MainWindow* win, Str op, int arg) {
+    SidebarUI* ui = Ui(win);
+    if (str::Eq(op, StrL("layers-show"))) {
+        SidebarToggleLayers(win);
+    } else if (str::Eq(op, StrL("layer-toggle"))) {
+        ToggleLayer(win, arg);
+    }
+    ReloadLayerRows(win, ui);
+    str::Builder out;
+    out.Append(fmt("panel=%d\n", SidebarContentVisible(win, SidebarContent::Layers) ? 1 : 0));
+    out.Append(fmt("states=%s\n", EngineMupdfChangedLayerStatesTemp(LayersEngine(win))));
+    for (PdfLayerRow* row : ui->layerRows) {
+        out.Append(fmt("%d %d %d %s\n", row->depth, (int)row->kind, row->on ? 1 : 0, row->text));
+    }
+    return ToStrTemp(out);
+}
+
+// Up / Down move the selection, Space turns the selected row's layer on or off
+static bool LayersOnKeyDown(MainWindow* win, SidebarUI* ui, int vkey) {
+    int n = len(ui->layerRows);
+    if (n == 0) {
+        return false;
+    }
+    if (vkey == VK_SPACE) {
+        ToggleLayer(win, ui->layerSel);
+        return true;
+    }
+    if (vkey == VK_UP || vkey == VK_DOWN) {
+        int sel = ui->layerSel + (vkey == VK_DOWN ? 1 : -1);
+        ui->layerSel = limitValue(sel, 0, n - 1);
+        AppShellInvalidate(win);
+        return true;
+    }
+    return false;
+}
+
 // the top pane's height with the bottom one showing (TocDy), and the middle
 // one's (SidebarMiddleDy); the bottom pane takes the rest
 static int TopPaneDy(MainWindow* win) {
@@ -2499,6 +2846,9 @@ gp::El* SidebarBuild(MainWindow* win, gp::Ctx* cx) {
         }
         if (content == SidebarContent::Favorites) {
             return BuildFavPane(win, cx, slot);
+        }
+        if (content == SidebarContent::Layers) {
+            return BuildLayersPane(win, cx, slot);
         }
         return BuildTocPane(win, cx, slot);
     };

@@ -11,6 +11,13 @@
 #include "PagePosition.h"
 #include "DocController.h"
 
+// lets the app drop raw pointers it keeps to a controller (e.g. for DDE)
+Func1<DocController*> gOnDocControllerDestroyed;
+
+DocController::~DocController() {
+    gOnDocControllerDestroyed.Call(this);
+}
+
 Location DocController::CurrentLocation() {
     return LocFromPageNo(CurrentPageNo());
 }
@@ -461,13 +468,6 @@ void BrowserDocController::SaveHtmlScrollPosForUrl(Str url, PointF pos) {
     }
     htmlScrollUrls.Append(plainUrl);
     VecAppend(htmlScrollPositions, pos);
-}
-
-bool BrowserDocController::GetSavedHtmlScrollPosForPage(int pageNo, PointF* pos) const {
-    if (!pos || !ValidPageNo(pageNo)) {
-        return false;
-    }
-    return GetSavedHtmlScrollPosForUrl(ScrollUrlForPageTemp(pageNo), pos);
 }
 
 bool BrowserDocController::GetSavedHtmlScrollPosForUrl(Str url, PointF* pos) const {

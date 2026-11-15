@@ -55,6 +55,7 @@
 #endif
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "HomePage.h"
 #include "TextSelection.h"
@@ -96,16 +97,13 @@
 #include "NavFilesInFolder.h"
 #include "EngineAll.h"
 #include "PdfCad.h"
-#include <mupdf/pdf.h>
 #include "base/ByteReaderWriter.h"
 #include "PdfCreator.h"
 #include "ImageSaveCropResize.h"
 #include "ImageReader.h"
-extern "C" {
-#include <mupdf/fitz.h>
-}
 #include "Annotation.h"
 #include "AnnotEditToolbar.h"
+#include "AnnotEditToolbarCommon.h"
 #include "AnnotPlacement.h"
 #include "AnnotFilterToolbar.h"
 #include "SelectionToolbar.h"
@@ -120,16 +118,9 @@ extern "C" {
 #include "SumatraControl.h"
 #include "SumatraControlCommon.h"
 #include "BrightnessContrastDialogCommon.h"
+#include "OpenFromUrlCommon.h"
 
 #include "SumatraLog.h"
-
-static LayoutProbeState gLayoutProbe;
-
-void LayoutProbeNote(MainWindow* win) {
-    if (gLayoutProbe.active && gLayoutProbe.win == win) {
-        gLayoutProbe.count++;
-    }
-}
 
 // ng: the channel needs a listener thread, which wasm does not have
 #if !OS_WASM
@@ -391,157 +382,6 @@ TempStr ClickClearsSelectionResultTemp(Str word, int* exitCodeOut) {
     return ToStrTemp(out);
 }
 
-// render one page and count red / non-white pixels. tests/issue-3415.ts.
-TempStr PageRenderColorsResultTemp(Str path, int* exitCodeOut, int pageNo, int zoomPercent) {
-    str::Builder out;
-    auto fail = [&out, exitCodeOut](Str msg) {
-        if (exitCodeOut) {
-            *exitCodeOut = 1;
-        }
-        out.Append(msg);
-        return ToStrTemp(out);
-    };
-
-    EngineBase* engine = nullptr;
-    bool ownEngine = true;
-    if (len(gWindows) > 0 && gWindows[0]) {
-        WindowTab* tab = gWindows[0]->CurrentTab();
-        if (tab && tab->filePath && str::EqI(tab->filePath, path)) {
-            DisplayModel* dm = tab->AsFixed();
-            engine = dm ? dm->GetEngine() : nullptr;
-            ownEngine = false;
-        }
-    }
-    if (!engine) {
-        engine = CreateEngineFromFile(path, nullptr, false);
-    }
-    if (!engine) {
-        return fail(fmt("ERROR engine-create-failed path=%s\n", path));
-    }
-    if (pageNo < 1) {
-        pageNo = 1;
-    }
-    auto release = [&]() {
-        if (ownEngine) {
-            SafeEngineRelease(&engine);
-        }
-    };
-    if (pageNo > engine->PageCount()) {
-        int nPages = engine->PageCount();
-        release();
-        return fail(fmt("ERROR bad-page page=%d pages=%d\n", pageNo, nPages));
-    }
-    if (!engine->BenchLoadPage(pageNo)) {
-        release();
-        return fail(StrL("ERROR page-load-failed\n"));
-    }
-
-    float zoom = zoomPercent > 0 ? (float)zoomPercent / 100.f : 1.f;
-    RenderPageArgs rargs(pageNo, zoom, 0, nullptr, RenderTarget::Export);
-    Pixmap* bmp = engine->RenderPage(rargs);
-    if (!bmp || !bmp->data) {
-        FreePixmap(bmp);
-        int nPages = engine->PageCount();
-        release();
-        return fail(fmt("ERROR render-failed page=%d pages=%d\n", pageNo, nPages));
-    }
-    Pixmap* rgb = bmp;
-    if (bmp->format != PixmapFormat::BGRA8 && bmp->format != PixmapFormat::BGR8 && bmp->format != PixmapFormat::RGBA8) {
-        rgb = EnsureReadablePixmap(bmp);
-    }
-    if (!rgb || !rgb->data) {
-        int srcFmt = (int)bmp->format;
-        FreePixmap(bmp);
-        release();
-        return fail(fmt("ERROR pixmap-convert-failed fmt=%d\n", srcFmt));
-    }
-    int bpp = PixmapBytesPerPixel(rgb->format);
-    int red = 0;
-    int blue = 0;
-    int nonWhite = 0;
-    int gray = 0;
-    // bounding box of the non-white pixels
-    int bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
-    int darkLeft = 0;
-    int leftX = (rgb->width * 45) / 100;
-    int rMin = 255, rMax = 0, gMin = 255, gMax = 0, bMin = 255, bMax = 0;
-    if (bpp >= 3) {
-        for (int y = 0; y < rgb->height; y++) {
-            const u8* row = rgb->data + ((size_t)y * (size_t)rgb->stride);
-            for (int x = 0; x < rgb->width; x++) {
-                const u8* px = row + ((size_t)x * bpp);
-                int r, g, b;
-                if (rgb->format == PixmapFormat::RGBA8) {
-                    r = px[0];
-                    g = px[1];
-                    b = px[2];
-                } else {
-                    b = px[0];
-                    g = px[1];
-                    r = px[2];
-                }
-                if (r < 250 || g < 250 || b < 250) {
-                    if (nonWhite == 0) {
-                        bx0 = x, by0 = y, bx1 = x + 1, by1 = y + 1;
-                    }
-                    bx0 = std::min(bx0, x);
-                    by0 = std::min(by0, y);
-                    bx1 = std::max(bx1, x + 1);
-                    by1 = std::max(by1, y + 1);
-                    nonWhite++;
-                }
-                // mid-tones: what a blurred black-and-white image is made of
-                if (r >= 64 && r <= 192 && g >= 64 && g <= 192 && b >= 64 && b <= 192) {
-                    gray++;
-                }
-                if (r > 180 && g < 80 && b < 80) {
-                    red++;
-                }
-                if (b > 180 && r < 80 && g < 80) {
-                    blue++;
-                }
-                if (x < leftX && r < 80 && g < 80 && b < 80) {
-                    darkLeft++;
-                }
-                if (r < rMin) {
-                    rMin = r;
-                }
-                if (r > rMax) {
-                    rMax = r;
-                }
-                if (g < gMin) {
-                    gMin = g;
-                }
-                if (g > gMax) {
-                    gMax = g;
-                }
-                if (b < bMin) {
-                    bMin = b;
-                }
-                if (b > bMax) {
-                    bMax = b;
-                }
-            }
-        }
-    }
-    int spread = (rMax - rMin) + (gMax - gMin) + (bMax - bMin);
-    out.Append(
-        fmt("red=%d nonwhite=%d size=%dx%d pages=%d page=%d blue=%d spread=%d darkLeft=%d gray=%d box=%d,%d,%d,%d\n",
-            red, nonWhite, rgb->width, rgb->height, engine->PageCount(), pageNo, blue, spread, darkLeft, gray, bx0, by0,
-            bx1, by1));
-    if (rgb != bmp) {
-        FreePixmap(rgb);
-    }
-    FreePixmap(bmp);
-    if (ownEngine) {
-        SafeEngineRelease(&engine);
-    }
-    if (exitCodeOut) {
-        *exitCodeOut = 0;
-    }
-    return ToStrTemp(out);
-}
-
 // tests/rect-selection-drag.ts: a press in a rectangle over text grabs the rect
 TempStr RectSelectionDragResultTemp(Str word, int* exitCodeOut) {
     str::Builder out;
@@ -683,9 +523,7 @@ enum class ControlCmd : u16 {
     TestInverseSearch = 22,
     TestImageResizeArrowKey = 23,
     TestFindResultPageColumnClip = 24,
-    TestFileKind = 25,
     TestScrollToLink = 26,
-    TestI18nErrorString = 27,
     TestPageInfoOverlay = 28,
     TestGetToc = 29,
     TestPageLinks = 30,
@@ -734,7 +572,6 @@ enum class ControlCmd : u16 {
     TestSelectionToolbar = 73,
     TestMarkupAnnots = 74,
     TestCmykImageSave = 75,
-    TestContextMenuPoint = 76,
     TestFindWindowContents = 77,
     TestFindUiState = 78,
     TestRenderViewPrint = 79,
@@ -765,12 +602,8 @@ enum class ControlCmd : u16 {
     ResolveUnsavedChanges = 110,
     // orig's. 105 is TestSaveFileAs.
     TestImageOrientation = 106,
-    // ng: not one of orig's; the performance snapshot cmd/port-perf.ts reads.
-    // Orig's 101 / 102 are StartPerfLog / StopPerfLog, which this port answers
-    // at 119 / 120.
-    TestPerfStats = 101,
-    // ng: not one of orig's; the state of the six canvas overlays
-    TestOverlayState = 102,
+    // orig's
+    StopPerfLog = 102,
     // orig's. The session restore the tests wait on.
     WaitSessionRestored = 103,
     TestNavFiles = 104,
@@ -785,31 +618,16 @@ enum class ControlCmd : u16 {
     // orig's. A wheel while CloseWindow is in progress.
     TestWheelWhileClosing = 116,
     TestMainMenu = 117,
-    // ng: shows the "no longer the default app" bar for the given extensions
-    // (".pdf,.epub"); the real check needs an installation and a UserChoice
-    TestDefaultAppNotif = 118,
-    // ng: orig's 101 / 102, which the port had given to its own test commands
-    StartPerfLog = 119,
-    StopPerfLog = 120,
+    // 119 / 120: retired (StartPerfLog / StopPerfLog before they moved to orig's ids)
     // ng: not orig's; gpui input with modifiers / hover / a held button, and
     // one line of shell state to check it against
     TestInput = 121,
     TestUiState = 122,
-    // ng: Windows; exercises the OLE drag source / drop target in-process
-    TestOleDragDrop = 123,
-    // ng: Windows; the system file dialogs: off / on / state / cancel / accept
-    TestNativeFileDlg = 124,
     // ng: not one of orig's; the tool windows (gui/ToolWindow.h) and input
     // into one of them
     TestToolWindow = 125,
-    // ng: Windows; the system message boxes: on / off / state / answer <id>
-    TestNativeMsgBox = 126,
     // ng: the page context menu at a canvas point, same rows as TestMainMenu
     TestContextMenuAt = 127,
-    // ng: not one of orig's; answers the open save-path dialog, which orig
-    // does not have (it uses GetSaveFileNameW, which no script can drive).
-    // 103 is WaitSessionRestored.
-    TestSavePathDialog = 128,
     // ng: DDE execute grammar ([GotoPageWord], [Open], ...). Orig receives
     // these as WM_COPYDATA; macOS has no such message.
     TestDdeExecute = 129,
@@ -838,6 +656,25 @@ enum class ControlCmd : u16 {
     TestDrawRectSelection = 145,
     // the first window's tab widths, one "dx=<n> text=<title>" line per tab
     TestTabWidths = 149,
+    // [url, dir]: Open from URL as the dialog's Download starts it
+    TestOpenFromUrl = 150,
+    // [srcWin, tabIdx, dstWin]: move a tab as a drag does (-1 = new window);
+    // tabIdx < 0 only lists every window's tabs
+    TestMigrateTab = 151,
+    // the word count notification's text
+    TestWordCount = 154,
+    // the page info tip's text
+    TestPageInfoText = 155,
+    // the page info bar: where it is, the canvas, its text
+    TestPageInfoBar = 156,
+    // the Show Selected Text notification's text
+    TestSelectedText = 157,
+    // the bookmarks tree's visible rows and their heights
+    TestTocRows = 158,
+    // ng: not one of orig's; the performance snapshot cmd/port-perf.ts reads
+    TestPerfStats = 161,
+    // ng: not one of orig's; the state of the six canvas overlays
+    TestOverlayState = 162,
 };
 
 static_assert((u16)ControlCmd::Quit == (u16)ControlFrameCmd::Quit);
@@ -949,19 +786,7 @@ static Str MarkupTypeName(AnnotationType tp) {
 float CanvasScale(MainWindow* win);
 TempStr RefHoverResultTemp(Str action, int x, int y, int* exitCodeOut);
 
-// CvtToScreen is canvas space. Tests post the rect at the frame, and ToDoc
-// subtracts the canvas origin, so the reported point has to include it.
-static Rect FrameScreenRect(MainWindow* win, Rect r) {
-    float s = CanvasScale(win);
-    if (s <= 0.f) {
-        s = 1.f;
-    }
-    r.x += (int)((float)win->canvasRc.x / s + 0.5f);
-    r.y += (int)((float)win->canvasRc.y / s + 0.5f);
-    return r;
-}
-
-// the inverse: a visibility probe hands back the frame point FrameScreenRect reported
+// the inverse: a visibility probe hands back the frame point CanvasToFramePx reported
 static Point FramePointToCanvas(MainWindow* win, Point pt) {
     float s = CanvasScale(win);
     if (s <= 0.f) {
@@ -1047,7 +872,7 @@ static TempStr MarkupAnnotsResultTemp(Str action, int x, int y, int* exitCodeOut
         if (isRedact) {
             Vec<RectF> quads = GetQuadPointsAsRect(a);
             RectF r = GetRect(a);
-            Rect screen = FrameScreenRect(win, dm->CvtToScreen(PageNo(a), r));
+            Rect screen = CanvasToFramePx(win, dm->CvtToScreen(PageNo(a), r));
             out.Append(fmt("type=%s page=%d quads=%d rect=%g,%g,%g,%g screen=%d,%d,%d,%d\n", typeName, PageNo(a),
                            len(quads), r.x, r.y, r.dx, r.dy, screen.x, screen.y, screen.dx, screen.dy));
             for (int i = 0; i < len(quads); i++) {
@@ -1059,7 +884,7 @@ static TempStr MarkupAnnotsResultTemp(Str action, int x, int y, int* exitCodeOut
         }
         if (isShape || isStamp || isFileAttachment || isFreeText) {
             RectF r = GetRect(a);
-            Rect screen = FrameScreenRect(win, dm->CvtToScreen(PageNo(a), r));
+            Rect screen = CanvasToFramePx(win, dm->CvtToScreen(PageNo(a), r));
             out.Append(fmt("type=%s page=%d rect=%g,%g,%g,%g screen=%d,%d,%d,%d\n", typeName, PageNo(a), r.x, r.y, r.dx,
                            r.dy, screen.x, screen.y, screen.dx, screen.dy));
             if (tp == AnnotationType::PolyLine || tp == AnnotationType::Polygon) {
@@ -1110,7 +935,7 @@ static TempStr MarkupAnnotsResultTemp(Str action, int x, int y, int* exitCodeOut
         for (int i = 0; i < len(quads); i++) {
             RectF r = quads[i];
             out.Append(fmt("rect=%g,%g,%g,%g\n", r.x, r.y, r.dx, r.dy));
-            Rect screen = FrameScreenRect(win, dm->CvtToScreen(PageNo(a), r));
+            Rect screen = CanvasToFramePx(win, dm->CvtToScreen(PageNo(a), r));
             out.Append(fmt("screen=%d,%d,%d,%d\n", screen.x, screen.y, screen.dx, screen.dy));
         }
         n++;
@@ -1135,8 +960,8 @@ static TempStr MarkupAnnotsResultTemp(Str action, int x, int y, int* exitCodeOut
         }
         out.Append(fmt("page1text=%s\n", ToStrTemp(collapsed)));
     }
-    int canUndo = EngineMupdfCanUndo(engine) ? 1 : 0;
-    int canRedo = EngineMupdfCanRedo(engine) ? 1 : 0;
+    int canUndo = EngineCanUndoRedo(engine, UndoDir::Undo, EngineWait::Wait) ? 1 : 0;
+    int canRedo = EngineCanUndoRedo(engine, UndoDir::Redo, EngineWait::Wait) ? 1 : 0;
     int modified = EngineHasUnsavedAnnotations(engine) ? 1 : 0;
     out.Append(fmt("undo canUndo=%d canRedo=%d modified=%d\n", canUndo, canRedo, modified));
     bool selectedHover = tab->selectedAnnotation && tab->selectedAnnotation == win->annotationUnderCursor;
@@ -1871,19 +1696,6 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
-        case ControlCmd::TestFileKind: {
-            Str path = StringArg(req, 0);
-            Str expectedKind = StringArg(req, 1);
-            if (len(path) == 0 || len(expectedKind) == 0) {
-                AppendError(req, StrL("TestFileKind expects string path, string expectedKind"));
-                break;
-            }
-            int exitCode = 0;
-            Str res = FileKindResultTemp(path, expectedKind, &exitCode);
-            AppendTestResult(req, exitCode, res);
-            break;
-        }
-
         case ControlCmd::TestSelectionTranslate: {
             i32 backend = 0;
             Str srcLang = StringArg(req, 1);
@@ -1926,6 +1738,27 @@ static void ExecuteControlRequest(ControlRequest* req) {
             }
             int exitCode = 0;
             Str res = TripleClickLineResultTemp(pdf, clickWord, expectedLine, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestOpenFromUrl: {
+            MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+            bool ok = win && StartOpenFromUrl(win, StringArg(req, 0), StringArg(req, 1));
+            AppendTestResult(req, ok ? 0 : 1, ok ? StrL("OK") : StrL("FAIL"));
+            break;
+        }
+
+        case ControlCmd::TestMigrateTab: {
+            i32 srcWin = 0;
+            i32 tabIdx = 0;
+            i32 dstWin = 0;
+            if (!IntArg(req, 0, srcWin) || !IntArg(req, 1, tabIdx) || !IntArg(req, 2, dstWin)) {
+                AppendError(req, StrL("TestMigrateTab expects int srcWin, int tabIdx, int dstWin"));
+                break;
+            }
+            int exitCode = 0;
+            Str res = MigrateTabResultTemp(srcWin, tabIdx, dstWin, &exitCode);
             AppendTestResult(req, exitCode, res);
             break;
         }
@@ -2103,6 +1936,41 @@ static void ExecuteControlRequest(ControlRequest* req) {
         case ControlCmd::TestAIChatReplay: {
             int exitCode = 0;
             Str res = AIChatTestReplayResultTemp(StringArg(req, 0), StringArg(req, 1), &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestTocRows: {
+            int exitCode = 0;
+            Str res = TocRowsResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestSelectedText: {
+            int exitCode = 0;
+            Str res = SelectedTextResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestPageInfoBar: {
+            int exitCode = 0;
+            Str res = PageInfoBarResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestPageInfoText: {
+            int exitCode = 0;
+            Str res = PageInfoTextResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestWordCount: {
+            int exitCode = 0;
+            Str res = WordCountResultTemp(&exitCode);
             AppendTestResult(req, exitCode, res);
             break;
         }
@@ -2529,7 +2397,7 @@ static void ExecuteControlRequest(ControlRequest* req) {
                 if (PageGrid* pg = PageGridPrefs()) {
                     pg->slant = PageGridClampSlant((float)deg);
                 }
-                RedrawPageGridWindows();
+                RedrawAllWindows();
             } else if (str::EqI(action, StrL("probe-grid"))) {
                 MainWindow* win = FirstWindow();
                 AppendTestResult(req, 0, PageGridProbeTemp(win ? win->AsFixed() : nullptr));
@@ -2572,7 +2440,7 @@ static void ExecuteControlRequest(ControlRequest* req) {
                 break;
             }
             if (str::EqI(name, StrL("WM_CLOSE"))) {
-                uitask::Post(MkFunc0(TestPostCloseWindow, win), "TestWM_CLOSE");
+                PostForWindow(win, TestPostCloseWindow, "TestWM_CLOSE");
                 AppendTestResult(req, 0, StrL("OK"));
                 break;
             }
@@ -2720,8 +2588,8 @@ static void ExecuteControlRequest(ControlRequest* req) {
             // chrome, so a sweep can check fullscreen without a screenshot
             Rect scr = AppShellWindowScreenRect(win);
             out.Append(fmt("window rect=%d,%d,%d,%d maximized=%d fullscreen=%d presentation=%d scale=%.4f\n", scr.x,
-                           scr.y, scr.dx, scr.dy, win->isMaximized ? 1 : 0, win->isFullScreen ? 1 : 0,
-                           (int)win->presentation, CanvasScale(win)));
+                           scr.y, scr.dx, scr.dy, win->isMaximized ? 1 : 0, win->IsFullScreen() ? 1 : 0,
+                           (int)win->InPresentation(), CanvasScale(win)));
             WindowTab* titleTab = win->CurrentTab();
             Str frameTitle = titleTab ? titleTab->frameTitle : Str{};
             out.Append(fmt("windowTitle=%s\n", frameTitle));
@@ -2804,7 +2672,7 @@ static void ExecuteControlRequest(ControlRequest* req) {
                     // the bars sit outside the viewport, so report the visible page.
                     Rect view(Point(), dm->GetViewPort().Size());
                     Rect vis = pi->pageOnScreen.Intersect(view);
-                    Rect s = FrameScreenRect(win, vis.IsEmpty() ? pi->pageOnScreen : vis);
+                    Rect s = CanvasToFramePx(win, vis.IsEmpty() ? pi->pageOnScreen : vis);
                     out.Append(fmt("page n=%d shown=%d pos=%d,%d,%d,%d screen=%d,%d,%d,%d\n", pageNo,
                                    pi->isShown ? 1 : 0, p.x, p.y, p.dx, p.dy, s.x, s.y, s.dx, s.dy));
                 }
@@ -2941,17 +2809,6 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
-        case ControlCmd::TestSavePathDialog: {
-            Str path = StringArg(req, 0);
-            if (!IsSavePathDialogVisible()) {
-                AppendTestResult(req, 2, StrL("NOTREADY no-dialog"));
-                break;
-            }
-            bool ok = TestFinishSavePathDialog(path);
-            AppendTestResult(req, 0, fmt("OK done=%d path=%s", ok ? 1 : 0, path));
-            break;
-        }
-
         case ControlCmd::TestCurrentTab: {
             MainWindow* win = FirstWindow();
             if (!win) {
@@ -3004,21 +2861,6 @@ static void ExecuteControlRequest(ControlRequest* req) {
             AppendTestResult(req, 0, fmt("cmd=%s vis=%s", name, visName));
             break;
         }
-
-#if OS_WIN
-        case ControlCmd::TestDefaultAppNotif: {
-            MainWindow* win = FirstWindow();
-            if (!win) {
-                AppendTestResult(req, 2, StrL("NOTREADY no-window"));
-                break;
-            }
-            StrVec exts;
-            Split(&exts, StringArg(req, 0), StrL(","), true);
-            ShowDefaultAppNotification(win, exts);
-            AppendTestResult(req, 0, fmt("OK exts=%d", len(exts)));
-            break;
-        }
-#endif
 
         case ControlCmd::TestAdvSettingsRows: {
             Str action = StringArg(req, 0);
@@ -3190,35 +3032,6 @@ static void ExecuteControlRequest(ControlRequest* req) {
             AppendTestResult(req, 0, res);
             break;
         }
-
-#if OS_WIN
-        case ControlCmd::TestNativeMsgBox: {
-            i32 id = 0;
-            IntArg(req, 1, id);
-            AppendTestResult(req, 0, NativeMsgBoxTestTemp(StringArg(req, 0), id));
-            break;
-        }
-
-        case ControlCmd::TestNativeFileDlg: {
-            AppendTestResult(req, 0, NativeFileDlgTestTemp(FirstWindow(), StringArg(req, 0), StringArg(req, 1)));
-            break;
-        }
-
-        case ControlCmd::TestOleDragDrop: {
-            i32 x = 0, y = 0;
-            IntArg(req, 2, x);
-            IntArg(req, 3, y);
-            if (str::Eq(StringArg(req, 0), StrL("cursor"))) {
-                AppendTestResult(req, 0, NativeCursorTestTemp(FirstWindow(), StringArg(req, 1)));
-                break;
-            }
-            // ng: a fifth argument names the tool window to drop on
-            AppendTestResult(
-                req, 0,
-                OleDragDropTestTemp(FirstWindow(), StringArg(req, 0), StringArg(req, 1), x, y, StringArg(req, 4)));
-            break;
-        }
-#endif
 
         case ControlCmd::TestToolbarButtons: {
             int exitCode = 0;
@@ -3450,17 +3263,12 @@ static void ExecuteControlRequest(ControlRequest* req) {
                     AppendTestResult(req, 2, StrL("NOTREADY no-window"));
                     break;
                 }
-                uitask::Post(MkFunc0(TestPostCloseWindow, win), "TestWM_CLOSE");
+                PostForWindow(win, TestPostCloseWindow, "TestWM_CLOSE");
                 ExecuteCmd(win, CmdReadAloudFromTopPage);
             }
             AppendTestResult(req, 0, StrL("OK"));
             break;
         }
-
-        case ControlCmd::StartPerfLog:
-            StartPerfLog();
-            AppendTestResult(req, 0, StrL("OK"));
-            break;
 
         case ControlCmd::StopPerfLog:
             StopPerfLog();
@@ -3840,7 +3648,6 @@ void StartSumatraControl(Str pipeName) {
     logf("StartSumatraControl: pipe '%s'\n", pipeName);
 #if OS_WIN
     // a script cannot answer a system message box: it gets the port's own
-    // until it asks for the system's (TestNativeMsgBox on)
     NativeMsgBoxSetEnabled(false);
 #endif
     auto* arg = new ControlThreadArg{str::Dup(pipeName)};

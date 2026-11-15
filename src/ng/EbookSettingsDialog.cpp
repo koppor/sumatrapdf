@@ -19,6 +19,7 @@
 #include "EngineBase.h"
 #include "base/GuessFileType.h"
 #include "EngineAll.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "MainWindow.h"
 #include "FileHistory.h"
@@ -95,7 +96,7 @@ void CloseEbookSettingsDialog() {
     gp::InputState* edits[] = {gEbook.editFont, gEbook.editSize, gEbook.editMargin, gEbook.editSpacing, gEbook.editCss};
     for (gp::InputState* e : edits) {
         if (e && win && win->gpuiWin) {
-            gp::InputBlur(e, win->gpuiWin->app, win->gpuiWin);
+            InputBlurWhereFocused(e, win->gpuiWin);
         }
         delete e;
     }
@@ -112,15 +113,8 @@ void CloseEbookSettingsDialog() {
     AppShellInvalidate(win);
 }
 
-static TempStr EditTextTemp(gp::InputState* e) {
-    if (!e) {
-        return {};
-    }
-    return str::DupTemp(FromGpui(gp::InputValue(e)));
-}
-
 static float ParseFloatTemp(gp::InputState* e) {
-    TempStr s = EditTextTemp(e);
+    TempStr s = InputTextTemp(e);
     if (len(s) == 0) {
         return 0;
     }
@@ -128,7 +122,7 @@ static float ParseFloatTemp(gp::InputState* e) {
 }
 
 static Str FontNameFromControls() {
-    TempStr font = EditTextTemp(gEbook.editFont);
+    TempStr font = InputTextTemp(gEbook.editFont);
     if (str::Eq(font, FontDefaultLabel())) {
         return {};
     }
@@ -141,7 +135,7 @@ static void UpdateCssPreview() {
         return;
     }
     Vec<float> margin;
-    ParseMargin(EditTextTemp(gEbook.editMargin), margin);
+    ParseMargin(InputTextTemp(gEbook.editMargin), margin);
     // the same DPI the engine used: it takes it from DpiGet() when the document
     // is opened (EngineCreate.cpp)
     TempStr css = EbookGeneratedCssTemp(FontNameFromControls(), &margin, ParseFloatTemp(gEbook.editSpacing), DpiGet());
@@ -207,12 +201,12 @@ static void LoadFromTarget() {
 static void ReadControls(EbookVals& out) {
     out.fontName = EbookFontNameFromSetting(FontNameFromControls());
     out.fontSize = ParseFloatTemp(gEbook.editSize);
-    ParseMargin(EditTextTemp(gEbook.editMargin), out.margin);
+    ParseMargin(InputTextTemp(gEbook.editMargin), out.margin);
     out.lineSpacing = ParseFloatTemp(gEbook.editSpacing);
     out.ignoreDocumentCSS = gEbook.ignoreCss;
     out.useCustomCSS = gEbook.customCss;
     if (out.useCustomCSS) {
-        out.customCSS = EditTextTemp(gEbook.editCss);
+        out.customCSS = InputTextTemp(gEbook.editCss);
         // the CSS in the box replaces what we would have generated, so the
         // values those rules came from are no longer ours to apply
         out.fontName = {};
@@ -380,11 +374,11 @@ void EbookSettingsView::OnToggle(EbookSettingsView*, gp::Ctx* cx, const gp::Clic
         if (gEbook.customCss) {
             // start from what was being applied, so nothing is lost
             if (len(gEbook.customCssText) == 0) {
-                str::ReplaceWithCopy(&gEbook.customCssText, EditTextTemp(gEbook.editCss));
+                str::ReplaceWithCopy(&gEbook.customCssText, InputTextTemp(gEbook.editCss));
             }
             gp::InputSetValue(gEbook.editCss, ToGpui(gEbook.customCssText));
         } else {
-            str::ReplaceWithCopy(&gEbook.customCssText, EditTextTemp(gEbook.editCss));
+            str::ReplaceWithCopy(&gEbook.customCssText, InputTextTemp(gEbook.editCss));
         }
         UpdateCssPreview();
     } else {

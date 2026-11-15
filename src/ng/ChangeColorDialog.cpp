@@ -20,6 +20,7 @@
 #include "base/GuessFileType.h"
 #include "EngineAll.h"
 #include "Annotation.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "MainWindow.h"
 #include "FileHistory.h"
@@ -340,7 +341,7 @@ static void FinishColorDialog(CloseAction action) {
         }
     }
     if (!dlg && win && win->gpuiWin && gColor.editRgb) {
-        gp::InputBlur(gColor.editRgb, win->gpuiWin->app, win->gpuiWin);
+        InputBlurWhereFocused(gColor.editRgb, win->gpuiWin);
     }
     delete gColor.editRgb;
     gColor.editRgb = nullptr;

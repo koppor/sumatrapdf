@@ -33,6 +33,7 @@ extern "C" {
 #include "TextSearch.h"
 #include "MainWindow.h"
 #include "SumatraPDF.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "PagePosition.h"
 #include "Selection.h"
@@ -41,6 +42,7 @@ extern "C" {
 #include "Translations.h"
 #include "MarkdownModel.h"
 #include "TableOfContents.h"
+#include "Tabs.h"
 #include "SumatraTest.h"
 
 #include "SumatraLog.h"
@@ -181,6 +183,75 @@ TempStr FindPageRangeResultTemp(Str pdfPath, Str needle, int first, int last, St
 
 // walk the outline tree in document order, return the `target`-th (1-based) item
 // that has a destination. `counter` tracks how many dests we've seen so far.
+static int DecodeUtf8Rune(const u8* p, int n) {
+    if (n == 2) {
+        return ((p[0] & 0x1f) << 6) | (p[1] & 0x3f);
+    }
+    if (n == 3) {
+        return ((p[0] & 0x0f) << 12) | ((p[1] & 0x3f) << 6) | (p[2] & 0x3f);
+    }
+    if (n == 4) {
+        return ((p[0] & 0x07) << 18) | ((p[1] & 0x3f) << 12) | ((p[2] & 0x3f) << 6) | (p[3] & 0x3f);
+    }
+    return p[0];
+}
+
+// -extract-text: the page's text as hex, then each character's height and box,
+// for tests (tests/issue-6348.ts, tests/issue-6500.ts)
+void ExtractPageTextToStdout(EngineBase* engine, int pageNo) {
+    PageText pageText = engine->ExtractPageText(pageNo);
+    if (len(pageText.text) == 0) {
+        return;
+    }
+    TempStr s = str::ReplaceTemp(Str(pageText.text.s), StrL("\n"), StrL("_"));
+    printf("text on page %d: '", pageNo);
+    // print characters as hex because I don't know what kind of locale-specific mangling
+    // printf() might do
+    int idx = 0;
+    while (s.s[idx] != 0) {
+        char c = s.s[idx++];
+        printf("%02x ", (u8)c);
+    }
+    printf("'\n");
+    // codepoint:height, same order as the text. tests/issue-6348.ts
+    printf("boxh on page %d:", pageNo);
+    const u8* p = (const u8*)pageText.text.s;
+    const u8* end = p + pageText.text.len;
+    for (int i = 0; i < pageText.nCodepoints && p < end; i++) {
+        int n = utf8RuneLen(p);
+        if (n < 1 || p + n > end) {
+            break;
+        }
+        int cp = DecodeUtf8Rune(p, n);
+        int dy = pageText.coords ? pageText.coords[i].dy : 0;
+        printf(" %d:%d", cp, dy);
+        p += n;
+    }
+    printf("\n");
+
+    // codepoint:x,y,dx, same order as the text. tests/issue-6500.ts
+    // one write: log lines printed meanwhile would otherwise split it
+    str::Builder boxes;
+    boxes.Append(fmt("boxes on page %d:", pageNo));
+    p = (const u8*)pageText.text.s;
+    for (int i = 0; i < pageText.nCodepoints && p < end; i++) {
+        int n = utf8RuneLen(p);
+        if (n < 1 || p + n > end) {
+            break;
+        }
+        int cp = DecodeUtf8Rune(p, n);
+        Rect r = pageText.coords ? pageText.coords[i] : Rect{};
+        boxes.Append(fmt(" %d:%d,%d,%d", cp, r.x, r.y, r.dx));
+        p += n;
+    }
+    boxes.AppendChar('\n');
+    fflush(stdout);
+    Str boxesStr = ToStr(boxes);
+    fwrite(boxesStr.s, 1, len(boxesStr), stdout);
+    fflush(stdout);
+    FreePageText(&pageText);
+}
+
 IPageDestination* NthDestInToc(TocItem* item, int target, int& counter) {
     for (; item; item = item->next) {
         if (item->dest) {
@@ -816,6 +887,32 @@ TempStr GetTocResultTemp(Str path, int* exitCodeOut) {
     return ToStrTemp(out);
 }
 
+// Moves tab tabIdx of window srcWin to window dstWin (-1: a new one), as a
+// drag out of the strip does; tabIdx < 0 only lists. Returns one line per tab:
+// "win=<i> tab=<j> ctrl=<0|1> path=<path>" (tests/issue-6481.ts).
+TempStr MigrateTabResultTemp(int srcWin, int tabIdx, int dstWin, int* exitCodeOut) {
+    *exitCodeOut = 1;
+    if (tabIdx >= 0) {
+        MainWindow* src = srcWin >= 0 && srcWin < len(gWindows) ? gWindows[srcWin] : nullptr;
+        MainWindow* dst = dstWin >= 0 && dstWin < len(gWindows) ? gWindows[dstWin] : nullptr;
+        WindowTab* tab = src && tabIdx < src->TabCount() ? src->GetTab(tabIdx) : nullptr;
+        if (!tab || (dstWin >= 0 && !dst)) {
+            return str::DupTemp(StrL("ERROR bad-args\n"));
+        }
+        MaybeMigrateTab(tab, dst);
+    }
+    str::Builder out;
+    for (int i = 0; i < len(gWindows); i++) {
+        MainWindow* win = gWindows[i];
+        for (int j = 0; j < win->TabCount(); j++) {
+            WindowTab* t = win->GetTab(j);
+            out.Append(fmt("win=%d tab=%d ctrl=%d path=%s\n", i, j, t->ctrl ? 1 : 0, t->filePath));
+        }
+    }
+    *exitCodeOut = 0;
+    return ToStrTemp(out);
+}
+
 // Headless test for page image elements. Returns one line per image:
 // "image rect=<x>,<y>,<dx>,<dy>". Used by tests/issue-6441.ts.
 TempStr PageImagesResultTemp(Str path, int pageNo, int* exitCodeOut) {
@@ -885,6 +982,33 @@ TempStr PageLinksResultTemp(Str path, int pageNo, int* exitCodeOut, const PointF
             Str data = EngineMupdfLoadEmbedded(engine, (PageDestination*)dest);
             valueShown = fmt("%s size=%d", valueShown, len(data));
             str::Free(data);
+        }
+        if (dest->GetKind() == kindDestinationJsMenu) {
+            // what picking each item does: url:<url>, page:<n> or -
+            auto* menu = (PageDestinationJsMenu*)dest;
+            str::Builder actions;
+            for (int i = 0; i < len(menu->items); i++) {
+                JsMenuAction action = GetJsMenuAction(menu, i);
+                if (i > 0) {
+                    actions.AppendChar(';');
+                }
+                if (len(action.url) > 0) {
+                    actions.Append(fmt("url:%s", action.url));
+                } else if (action.pageNo > 0) {
+                    actions.Append(fmt("page:%d", action.pageNo));
+                } else {
+                    actions.AppendChar('-');
+                }
+            }
+            valueShown = fmt("%s actions=%s", valueShown, ToStr(actions));
+            if (len(menu->levels) > 0) {
+                // submenu depth of each item: levels=0,1,0
+                str::Builder levels;
+                for (int i = 0; i < len(menu->levels); i++) {
+                    levels.Append(fmt(i > 0 ? ",%d" : "%d", menu->levels[i]));
+                }
+                valueShown = fmt("%s levels=%s", valueShown, ToStr(levels));
+            }
         }
         RectF src = el->GetRect();
         RectF destRc = dest->GetRect();
@@ -1311,6 +1435,157 @@ TempStr ToggleFormButtonResultTemp(int pageNo, int idx, int* exitCodeOut) {
         *exitCodeOut = 0;
     }
     out.Append(fmt("OK toggled=%d before='%s' after='%s' buttons=%d\n", (int)toggled, before, after, nButtons));
+    return ToStrTemp(out);
+}
+
+// Render one page and count red / non-white pixels (issue #3415: WebP in EPUB paints).
+TempStr PageRenderColorsResultTemp(Str path, int* exitCodeOut, int pageNo, int zoomPercent) {
+    str::Builder out;
+    auto fail = [&out, exitCodeOut](Str msg) {
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        out.Append(msg);
+        return ToStrTemp(out);
+    };
+
+    EngineBase* engine = nullptr;
+    bool ownEngine = true;
+    if (len(gWindows) > 0 && gWindows[0]) {
+        WindowTab* tab = gWindows[0]->CurrentTab();
+        if (tab && tab->filePath && str::EqI(tab->filePath, path)) {
+            DisplayModel* dm = tab->AsFixed();
+            engine = dm ? dm->GetEngine() : nullptr;
+            ownEngine = false;
+        }
+    }
+    if (!engine) {
+        engine = CreateEngineFromFile(path, nullptr, false);
+    }
+    if (!engine) {
+        return fail(fmt("ERROR engine-create-failed path=%s\n", path));
+    }
+    if (pageNo < 1) {
+        pageNo = 1;
+    }
+    auto release = [&]() {
+        if (ownEngine) {
+            SafeEngineRelease(&engine);
+        }
+    };
+    if (pageNo > engine->PageCount()) {
+        int nPages = engine->PageCount();
+        release();
+        return fail(fmt("ERROR bad-page page=%d pages=%d\n", pageNo, nPages));
+    }
+    if (!engine->BenchLoadPage(pageNo)) {
+        release();
+        return fail(StrL("ERROR page-load-failed\n"));
+    }
+
+    float zoom = zoomPercent > 0 ? (float)zoomPercent / 100.f : 1.f;
+    RenderPageArgs rargs(pageNo, zoom, 0, nullptr, RenderTarget::Export);
+    Pixmap* bmp = engine->RenderPage(rargs);
+    if (!bmp || !bmp->data) {
+        FreePixmap(bmp);
+        int nPages = engine->PageCount();
+        release();
+        return fail(fmt("ERROR render-failed page=%d pages=%d\n", pageNo, nPages));
+    }
+    Pixmap* rgb = bmp;
+    if (bmp->format != PixmapFormat::BGRA8 && bmp->format != PixmapFormat::BGR8 && bmp->format != PixmapFormat::RGBA8) {
+        rgb = EnsureReadablePixmap(bmp);
+    }
+    if (!rgb || !rgb->data) {
+        int srcFmt = (int)bmp->format;
+        FreePixmap(bmp);
+        release();
+        return fail(fmt("ERROR pixmap-convert-failed fmt=%d\n", srcFmt));
+    }
+    int bpp = PixmapBytesPerPixel(rgb->format);
+    int red = 0;
+    int blue = 0;
+    int nonWhite = 0;
+    int gray = 0;
+    // bounding box of the non-white pixels
+    int bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
+    int darkLeft = 0;
+    int leftX = (rgb->width * 45) / 100;
+    int rMin = 255, rMax = 0, gMin = 255, gMax = 0, bMin = 255, bMax = 0;
+    if (bpp >= 3) {
+        for (int y = 0; y < rgb->height; y++) {
+            const u8* row = rgb->data + ((size_t)y * (size_t)rgb->stride);
+            for (int x = 0; x < rgb->width; x++) {
+                const u8* px = row + ((size_t)x * bpp);
+                int r, g, b;
+                if (rgb->format == PixmapFormat::RGBA8) {
+                    r = px[0];
+                    g = px[1];
+                    b = px[2];
+                } else {
+                    b = px[0];
+                    g = px[1];
+                    r = px[2];
+                }
+                if (r < 250 || g < 250 || b < 250) {
+                    if (nonWhite == 0) {
+                        bx0 = x, by0 = y, bx1 = x + 1, by1 = y + 1;
+                    }
+                    bx0 = std::min(bx0, x);
+                    by0 = std::min(by0, y);
+                    bx1 = std::max(bx1, x + 1);
+                    by1 = std::max(by1, y + 1);
+                    nonWhite++;
+                }
+                // mid-tones: what a blurred black-and-white image is made of
+                if (r >= 64 && r <= 192 && g >= 64 && g <= 192 && b >= 64 && b <= 192) {
+                    gray++;
+                }
+                if (r > 180 && g < 80 && b < 80) {
+                    red++;
+                }
+                if (b > 180 && r < 80 && g < 80) {
+                    blue++;
+                }
+                if (x < leftX && r < 80 && g < 80 && b < 80) {
+                    darkLeft++;
+                }
+                if (r < rMin) {
+                    rMin = r;
+                }
+                if (r > rMax) {
+                    rMax = r;
+                }
+                if (g < gMin) {
+                    gMin = g;
+                }
+                if (g > gMax) {
+                    gMax = g;
+                }
+                if (b < bMin) {
+                    bMin = b;
+                }
+                if (b > bMax) {
+                    bMax = b;
+                }
+            }
+        }
+    }
+    int spread = (rMax - rMin) + (gMax - gMin) + (bMax - bMin);
+    out.Append(
+        fmt("red=%d nonwhite=%d size=%dx%d pages=%d page=%d blue=%d spread=%d darkLeft=%d gray=%d box=%d,%d,%d,%d\n",
+            red, nonWhite, rgb->width, rgb->height, engine->PageCount(), pageNo, blue, spread, darkLeft, gray, bx0, by0,
+            bx1, by1));
+    if (rgb != bmp) {
+        FreePixmap(rgb);
+    }
+    FreePixmap(bmp);
+    if (ownEngine) {
+        SafeEngineRelease(&engine);
+    }
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
     return ToStrTemp(out);
 }
 

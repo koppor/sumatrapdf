@@ -33,6 +33,7 @@
 #include "Notifications.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Commands.h"
 #include "Version.h"
@@ -139,17 +140,13 @@ void OnFindBarTextChanged(MainWindow* win) {
     int nChars = FindEditTextLen(win);
     int delay = FindDebounceDelayMs(nChars);
     // re-arming replaces the previous countdown, so each keystroke restarts it
-    win->findDebounceLeftMs = delay;
+    win->findDebounce.Arm(delay);
     win->findDebouncePending = true;
 }
 
 // the shell's tick: runs the deferred search once the countdown expires
 void FindDebounceTick(MainWindow* win, int elapsedMs) {
-    if (!win->findDebouncePending) {
-        return;
-    }
-    win->findDebounceLeftMs -= elapsedMs;
-    if (win->findDebounceLeftMs > 0) {
+    if (!win->findDebounce.Tick(elapsedMs)) {
         return;
     }
     win->findDebouncePending = false;
@@ -163,8 +160,9 @@ void FindDebounceTick(MainWindow* win, int elapsedMs) {
 
 // if a debounced search is pending, cancel the timer and start it now (so Enter
 // forces the search to start immediately). Returns true if one was pending.
-// ng's debounce is a countdown that findDebouncePending gates
-void FindDebounceStop(MainWindow*) {}
+void FindDebounceStop(MainWindow* win) {
+    win->findDebounce.Cancel();
+}
 
 // ng's find buttons read the find state on every frame
 void FindSetToolbarBusy(MainWindow*, bool) {}
@@ -187,7 +185,7 @@ void UpdateFindStatus(UpdateFindStatusData* d) {
     AutoDelete delData(d);
 
     auto* win = d->win;
-    if (!IsMainWindowValidAndNotClosing(win) || win->findCancelled) {
+    if (!IsMainWindowValidAndNotClosing(win) || AtomicBoolGet(&win->findCancelled)) {
         return;
     }
     if (!d->showProgress && d->firstPage) {
@@ -197,7 +195,7 @@ void UpdateFindStatus(UpdateFindStatusData* d) {
         if (*d->firstPage == 0) {
             *d->firstPage = d->current;
         } else if (d->current != *d->firstPage) {
-            win->findCancelled = true;
+            AtomicBoolSet(&win->findCancelled, true);
         }
     }
     // explicit Find Next/Prev (showProgress): keep going to completion. There's
@@ -215,7 +213,7 @@ void UpdateFindStatus(UpdateFindStatusData* d) {
 // cancel a pending debounced find-as-you-type search
 void CancelPendingFind(MainWindow* win) {
     win->findDebouncePending = false;
-    win->findDebounceLeftMs = 0;
+    win->findDebounce.Cancel();
 }
 
 // ng: orig's win->canvasRc is the canvas HWND's client rect, i.e. the origin
@@ -230,111 +228,25 @@ Rect FindPaintClipRc(MainWindow*, DisplayModel* dm) {
     return CanvasClipRc(dm);
 }
 
-void PaintAllFindMatches(MainWindow* win, gp::PaintCtx* ctx) {
-    if (!win->IsDocLoaded() || !win->AsFixed()) {
-        return;
-    }
-    if (FindEditTextLen(win) == 0) {
-        return;
-    }
-
-    DisplayModel* dm = win->AsFixed();
-    // Matches/count cache are tied to the engine they were built for. After a
-    // tab close or reload without InvalidateFindForDocumentChange, refuse to
-    // map stale page/glyph coords onto a different document.
-    void* engine = (void*)dm->GetEngine();
-    if (win->findCountEngine && win->findCountEngine != engine) {
-        ClearFindMatches(win);
-        win->findCountValid = false;
-        win->findCountEngine = nullptr;
-        VecReset(win->findCountPositions);
-        str::FreePtr(&win->findCountText);
-        return;
-    }
-    TextSearch* ts = dm->textSearch;
-    // After the find UI is closed, still highlight the active match so F3 /
-    // FindNext navigation is visible (issue #5802). The full match list was
-    // cleared on hide; only paint the current TextSearch hit.
-    if (!IsFindUIVisible(win)) {
-        PaintCurrentFindMatch(win, dm, ts, ctx);
-        return;
-    }
-    if (!win->findCountValid && len(win->findMatches) == 0) {
-        // count still running: at least highlight the current match
-        PaintCurrentFindMatch(win, dm, ts, ctx);
-        return;
-    }
-    if (len(win->findMatches) == 0) {
-        return;
-    }
-    int firstPage = 0;
-    int lastPage = 0;
-    GetVisiblePageRange(dm, firstPage, lastPage);
-    if (!dm->ValidPageNo(firstPage)) {
-        return;
-    }
-
-    if (gFindMatchPaintCache.countEpoch != win->findCountEpoch || gFindMatchPaintCache.firstPage != firstPage ||
-        gFindMatchPaintCache.lastPage != lastPage) {
-        RebuildFindMatchPaintCache(win, dm, firstPage, lastPage);
-    }
-
-    u64 currentKey = 0;
-    if (ts && len(ts->result) > 0) {
-        currentKey = MatchKey(ts->startPage, ts->startGlyph);
-    }
-
-    ParsedColor* parsedCol = GetPrefsColor(gSettings->fixedPageUI.selectionColor);
-    u8 alpha = GetAlpha(parsedCol->col);
-    if (alpha == 0) {
-        alpha = kSelectionDefaultAlpha;
-    }
-
-    Rect clipRc = CanvasClipRc(dm);
-    Vec<Rect> otherRects;
-    Vec<Rect> currentRects;
-    Vec<FindMatchPaintPageRect>& positions = gFindMatchPaintCache.positions;
-    for (int i = 0; i < len(gFindMatchPaintCache.entries); i++) {
-        const FindMatchPaintRects& entry = gFindMatchPaintCache.entries[i];
-        Vec<Rect>& out = (entry.key == currentKey) ? currentRects : otherRects;
-        AppendPageRectsToScreen(dm, clipRc, &positions[entry.firstPos], entry.len, out);
-    }
-
-    if (len(otherRects) > 0) {
-        PaintTransparentRectangles(ctx, clipRc, otherRects, kFindOtherMatchColor, alpha);
-    }
-    if (len(currentRects) == 0 && ts && len(ts->result) > 0) {
-        AppendTextSelScreenRects(dm, clipRc, &ts->result, currentRects);
-    }
-    if (len(currentRects) > 0) {
-        PaintTransparentRectangles(ctx, clipRc, currentRects, parsedCol->col, alpha);
-    }
-}
-
 // --- the forward-search mark (step 18) --------------------------------------
 
 // ng: orig's kHideFwdSearchMarkTimerID handler in Canvas.cpp
 void ForwardSearchMarkTick(MainWindow* win, int elapsedMs) {
-    if (!win || win->fwdSearchMark.hideLeftMs < 0) {
-        return;
-    }
-    win->fwdSearchMark.hideLeftMs -= elapsedMs;
-    if (win->fwdSearchMark.hideLeftMs > 0) {
+    if (!win || !win->fwdSearchMark.hide.Tick(elapsedMs)) {
         return;
     }
     win->fwdSearchMark.hideStep++;
     if (win->fwdSearchMark.hideStep >= kHideFwdSearchMarkSteps) {
-        win->fwdSearchMark.hideLeftMs = -1;
         win->fwdSearchMark.show = false;
     } else {
-        win->fwdSearchMark.hideLeftMs = kHideFwdSearchMarkDecayIntervalInMs;
+        win->fwdSearchMark.hide.Arm(kHideFwdSearchMarkDecayIntervalInMs);
     }
     AppShellInvalidate(win);
 }
 
 // starts fading the forward search mark after delayMs
 void HideFwdSearchMarkAfter(MainWindow* win, int delayMs) {
-    win->fwdSearchMark.hideLeftMs = delayMs;
+    win->fwdSearchMark.hide.Arm(delayMs);
 }
 
 // Show the result of a PDF forward-search synchronization (initiated by a DDE
@@ -351,7 +263,10 @@ void ShowForwardSearchResult(MainWindow* win, Str fileName, int line, int /* col
         win->fwdSearchMark.page = page;
         win->fwdSearchMark.show = true;
         win->fwdSearchMark.hideStep = 0;
-        win->fwdSearchMark.hideLeftMs = gSettings->forwardSearch.highlightPermanent ? -1 : kHideFwdSearchMarkDelayInMs;
+        win->fwdSearchMark.hide.Cancel();
+        if (!gSettings->forwardSearch.highlightPermanent) {
+            win->fwdSearchMark.hide.Arm(kHideFwdSearchMarkDelayInMs);
+        }
 
         // Scroll to show the overall highlighted zone
         Rect overallrc = rects[0];
@@ -490,7 +405,11 @@ Str HandleOpenCmd(Str cmd, bool* ack) {
     if (!open.parsed) {
         return {};
     }
-    TempStr filePath = open.filePath;
+    // not a TempStr: creating a window below renders, and rendering resets the temp arena
+    Str filePath = str::Dup(open.filePath);
+    defer {
+        str::Free(filePath);
+    };
     int newWindow = open.newWindow;
     int setFocus = open.setFocus;
     int forceRefresh = open.forceRefresh;

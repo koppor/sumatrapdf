@@ -18,6 +18,7 @@
 #include "DocController.h"
 #include "EngineBase.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
@@ -408,7 +409,7 @@ void PDFScriptWnd::Create(MainWindow* owner, Str path) {
     input = str::Dup(path);
     colTxt = ThemeWindowTextColor();
     colBg = ThemeWindowControlBackgroundColor();
-    colMuted = ThemeWindowTextDisabledColor();
+    colMuted = ThemeWindowDarkerTextColor();
     fontText = DlgUiFont(kToolDlgTextFontPx);
     fontMeta = DlgUiFont(kToolDlgMetaFontPx);
     fontCode = GetUserGuiFont(StrL("Consolas"), DpiScale(kScriptCodeFontPx));
@@ -521,7 +522,7 @@ void PDFScriptWnd::Create(MainWindow* owner, Str path) {
     layout = columns;
 
     OnExample();
-    ResizeHwndToClientArea(hwnd, DpiScale(kScriptDlgDx), DpiScale(kScriptDlgDy), false);
+    HwndResizeClientSize(hwnd, DpiScale(kScriptDlgDx), DpiScale(kScriptDlgDy));
     DoLayout();
     HwndCenterDialog(hwnd, owner->hwndFrame);
     HwndEnsureOnScreen(hwnd);

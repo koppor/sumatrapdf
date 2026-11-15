@@ -30,6 +30,7 @@
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Commands.h"
 #include "Toolbar.h"
@@ -483,19 +484,15 @@ static AnnotFilterToolbar* GetOrCreate(MainWindow* win) {
     return f;
 }
 
-static int FilterEditPadL() {
-    return UiEdgeDx();
-}
-
 static int FilterEditPadR() {
-    return FilterEditPadL() + DpiScale(4);
+    return UiEdgeDx() + DpiScale(4);
 }
 
 static bool FrameIsMaxOrFullscreen(MainWindow* win) {
     if (!win || !win->hwndFrame) {
         return false;
     }
-    return win->isFullScreen || win->presentation || IsZoomed(win->hwndFrame);
+    return win->IsFullScreenOrPresentation() || IsZoomed(win->hwndFrame);
 }
 
 static Rect AnnotFilterDefaultRect(MainWindow* win, int dx, int dy) {
@@ -503,7 +500,7 @@ static Rect AnnotFilterDefaultRect(MainWindow* win, int dx, int dy) {
     Rect fr = HwndWindowRect(hwnd);
     int dpi = DpiGetForHwnd(hwnd);
     int gap = DpiScaleByDpi(dpi, kFloatWinGap);
-    Rect area = (win->isFullScreen || win->presentation) ? HwndGetFullscreenRect(hwnd) : GetWorkAreaRect(fr, nullptr);
+    Rect area = (win->IsFullScreenOrPresentation()) ? HwndGetFullscreenRect(hwnd) : GetWorkAreaRect(fr, nullptr);
     dx = std::min(dx, std::max(area.dx, 1));
     dy = std::min(dy, std::max(area.dy, 1));
 
@@ -845,7 +842,7 @@ bool AnnotFilterWindow::Create(MainWindow* mainWin) {
         args.noTheme = true;
         args.selectAllOnFocus = true;
         args.centerTextVert = true;
-        args.marginLeft = FilterEditPadL();
+        args.marginLeft = UiEdgeDx();
         args.marginRight = FilterEditPadR();
         edit = new Edit();
         edit->SetColors(colTxt, colBg);
@@ -984,17 +981,7 @@ void AnnotFilterWindow::OnTimer(WindowBase::TimerEvent* ev) {
 }
 
 void AnnotFilterWindow::OnDpiChanged(WindowBase::DpiChangedEvent* ev) {
-    if (!layout) {
-        ev->didHandle = true;
-        return;
-    }
-    RECT* r = ev->suggested;
-    if (r) {
-        SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
-    }
-    UpdateDpi((int)ev->dpiX);
-    ev->didHandle = true;
+    HandleDpiChanged(this, ev);
 }
 
 void AnnotFilterWindow::OnGetMinMaxInfo(WindowBase::GetMinMaxInfoEvent* ev) {
@@ -1159,7 +1146,7 @@ void ClearAnnotFilterAnnotations(MainWindow* win) {
     }
     UpdateCue(f);
     UpdateFloatButtons(f);
-    uitask::Post(MkFunc0(PostedRefreshAnnots, win), "RefreshAnnotFilterAnnots");
+    PostForWindow(win, PostedRefreshAnnots, "RefreshAnnotFilterAnnots");
 }
 
 void RefreshAnnotFilterAnnotations(MainWindow* win) {

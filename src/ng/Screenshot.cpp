@@ -11,6 +11,7 @@
 #include "gui/GpuiBridge.h"
 #include "base/File.h"
 #include "base/Pixmap.h"
+#include "PngOptimizer.h"
 
 #include "gui/UIModels.h"
 
@@ -22,6 +23,7 @@
 #include "EngineAll.h"
 #include "DisplayModel.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Selection.h"
 #include "Notifications.h"
@@ -201,6 +203,7 @@ void TakeScreenshots(MainWindow* win) {
         file::Delete(destPath);
 #else
         ImageEditCopyToClipboard(px);
+        OptimizePngFileAsync(destPath);
 #endif
     }
     FreePixmap(px);

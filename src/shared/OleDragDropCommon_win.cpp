@@ -24,6 +24,7 @@
 #include "ProgressUpdateUI.h"
 #include "TextSelection.h"
 #include "TextSearch.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
@@ -35,8 +36,6 @@
 // OLE drag and drop, the part orig's Canvas.cpp and ng's gui/OleDragDrop_win.cpp
 // share: the data objects and drop sources for dragging text or an image out of
 // the canvas, and reading text, URLs and files from a dropped data object.
-
-bool gTestCancelDrag = false;
 
 // data object of the most recent drag-out, kept connected because cross-process
 // drop targets can still extract data after DoDragDrop returns (e.g. Explorer
@@ -223,19 +222,6 @@ static bool IsImageUrl(Str url) {
         }
     }
     return false;
-}
-
-// Get the user's Downloads folder path
-TempStr GetDownloadsDirTemp() {
-    WCHAR* pathW = nullptr;
-    HRESULT hr = SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &pathW);
-    if (FAILED(hr) || !pathW) {
-        CoTaskMemFree(pathW);
-        return {};
-    }
-    TempStr res = ToUtf8Temp(pathW);
-    CoTaskMemFree(pathW);
-    return res;
 }
 
 static void AdvanceUrlPathUntilSuffix(Str& p, Str& lastSlash) {

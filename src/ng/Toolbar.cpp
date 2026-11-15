@@ -34,6 +34,7 @@
 #include "Theme.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "gui/AppShell.h"
 #include "gui/DocCanvas.h"
@@ -84,13 +85,6 @@ static bool IsCmdChecked(MainWindow* win, int cmdId) {
 // --- toolbar mode -----------------------------------------------------------
 
 // --- annotation colors (orig's) ---------------------------------------------
-
-// the color the button's next annotation is made in
-Color AnnotColorForCmd(int cmdId) {
-    ParsedColor* setting = AnnotPresetColorSetting(cmdId);
-    Color col = setting ? GetParsedColor(*setting, kColorUnset) : kColorUnset;
-    return col != kColorUnset ? col : AnnotDefaultColor(cmdId);
-}
 
 void AnnotPresetColors(int cmdId, Vec<Color>& out) {
     Str* list = AnnotPresetColorList(cmdId);
@@ -294,7 +288,7 @@ int ToolbarDy(MainWindow* win) {
 
 // The row a document tab gets, for sizing a document while Home is current.
 int ToolbarDocTabDy(MainWindow* win) {
-    if (win->presentation || win->isQuickLook || ToolbarModeForWindow(win) != kToolbarShow) {
+    if (win->InPresentation() || win->isQuickLook || ToolbarModeForWindow(win) != kToolbarShow) {
         return 0;
     }
     return Tb(win)->rowDy;
@@ -402,6 +396,8 @@ TempStr ToolbarButtonsResultTemp(int* exitCodeOut) {
         }
         out.Append(fmt("idx=%d cmd=%d hidden=%d rect=%d,%d,%d,%d text=%s\n", i, bi.cmdId, hidden[i] ? 1 : 0, r.x, r.y,
                        r.x + r.dx, r.y + r.dy, text));
+        bool enabled = bi.cmdId != 0 && IsCmdEnabled(win, bi.cmdId, ctx);
+        out.Append(fmt("button-enabled idx=%d enabled=%d text=%s\n", i, enabled ? 1 : 0, text));
         if (!hidden[i] && bi.cmdId != 0 && bi.cmdId != PageInfoId && len(bi.toolTip) > 0) {
             out.Append(fmt("tool=%d uid=%d rect=%d,%d,%d,%d\n", toolIdx, bi.cmdId, r.x, r.y, r.x + r.dx, r.y + r.dy));
             toolIdx++;
@@ -506,7 +502,7 @@ static void SetOverlayShown(MainWindow* win, bool shown) {
         return;
     }
     tb->overlayShown = shown;
-    tb->overlayHideLeftMs = 0;
+    tb->overlayHide.Cancel();
     logf("ToolbarOverlay: %s\n", shown ? StrL("shown") : StrL("hidden"));
     AppShellInvalidate(win);
 }
@@ -515,7 +511,7 @@ void RevealOverlayToolbar(MainWindow* win) {
     if (!win->isToolbarOverlay) {
         return;
     }
-    Tb(win)->overlayHideLeftMs = 0;
+    Tb(win)->overlayHide.Cancel();
     SetOverlayShown(win, true);
 }
 
@@ -567,8 +563,8 @@ void UpdateOverlayToolbarForMouse(MainWindow* win, Point ptInFrame) {
         return;
     }
     // don't hide immediately; give the user kDelayToolbarHide to come back
-    if (tb->overlayShown && tb->overlayHideLeftMs == 0) {
-        tb->overlayHideLeftMs = kDelayToolbarHide;
+    if (tb->overlayShown && !tb->overlayHide.IsArmed()) {
+        tb->overlayHide.Arm(kDelayToolbarHide);
     }
 }
 
@@ -584,18 +580,18 @@ void ShowOrHideToolbar(MainWindow* win) {
     Toolbar* tb = Tb(win);
     if (!overlay) {
         tb->overlayShown = false;
-        tb->overlayHideLeftMs = 0;
+        tb->overlayHide.Cancel();
     }
     if (enteredOverlay) {
         // reveal immediately on entering overlay mode (e.g. via F8) so the
         // change is visible; it auto-hides after kDelayToolbarHide
         tb->overlayShown = true;
-        tb->overlayHideLeftMs = kDelayToolbarHide;
+        tb->overlayHide.Arm(kDelayToolbarHide);
     }
     // move the focus out of the toolbar when it goes away
     if (!show && !overlay && IsToolbarPageBoxFocused(win) && win->gpuiWin) {
-        gp::InputBlur(tb->pageEdit, win->gpuiWin->app, win->gpuiWin);
-        gp::InputBlur(tb->chapterEdit, win->gpuiWin->app, win->gpuiWin);
+        InputBlurWhereFocused(tb->pageEdit, win->gpuiWin);
+        InputBlurWhereFocused(tb->chapterEdit, win->gpuiWin);
     }
     AppShellInvalidate(win);
 }
@@ -618,8 +614,8 @@ void HideToolbarHoverDropdown(MainWindow* win) {
     tb->hoverCmdId = 0;
     tb->hoverAnchorCmdId = 0;
     tb->hoverPendingCmdId = 0;
-    tb->hoverOpenLeftMs = 0;
-    tb->hoverCloseLeftMs = 0;
+    tb->hoverOpen.Cancel();
+    tb->hoverClose.Cancel();
     if (tb->ui) {
         FreeHoverItems(tb->ui);
         ResetHoverLock(tb->ui);
@@ -1573,8 +1569,8 @@ void ToolbarView::OnButtonUp(ToolbarView* self, gp::Ctx* cx, const gp::MouseUpEv
             tb->hoverCmdId = cmdId;
         }
         tb->hoverPendingCmdId = 0;
-        tb->hoverOpenLeftMs = 0;
-        tb->hoverCloseLeftMs = 0;
+        tb->hoverOpen.Cancel();
+        tb->hoverClose.Cancel();
         HoverTooltipHide(cx);
         gp::Notify(cx);
         return;
@@ -1605,16 +1601,16 @@ void ToolbarView::OnButtonHover(ToolbarView* self, gp::Ctx* cx, const gp::HoverE
     if (!ev->hovered) {
         if (tb->hoverPendingCmdId == cmdId) {
             tb->hoverPendingCmdId = 0;
-            tb->hoverOpenLeftMs = 0;
+            tb->hoverOpen.Cancel();
         }
         HoverTooltipHide(cx);
         return;
     }
-    tb->overlayHideLeftMs = 0;
+    tb->overlayHide.Cancel();
     // a button with a drop-down opens it instead of showing a tooltip once the
     // mouse has rested on it; buttons in the same group share the one that is up
     if (CmdHasHoverDropdown(cmdId)) {
-        tb->hoverCloseLeftMs = 0;
+        tb->hoverClose.Cancel();
         if (tb->hoverCmdId != 0) {
             // Zoom In and Zoom Out share the strip. The mouse's button changes
             // (its tooltip goes); the strip stays on the button that opened it.
@@ -1625,10 +1621,10 @@ void ToolbarView::OnButtonHover(ToolbarView* self, gp::Ctx* cx, const gp::HoverE
             }
         } else if (tb->hoverPendingCmdId != cmdId) {
             tb->hoverPendingCmdId = cmdId;
-            tb->hoverOpenLeftMs = kOpenHoverDropdownDelay;
+            tb->hoverOpen.Arm(kOpenHoverDropdownDelay);
         }
-    } else if (tb->hoverCmdId != 0 && tb->hoverCloseLeftMs <= 0) {
-        tb->hoverCloseLeftMs = kCloseHoverDropdownDelayMs;
+    } else if (tb->hoverCmdId != 0 && !tb->hoverClose.IsArmed()) {
+        tb->hoverClose.Arm(kCloseHoverDropdownDelayMs);
     }
     // the tooltip is orig's: the label plus the command's shortcut
     Str tip;
@@ -1839,16 +1835,16 @@ void ToolbarView::OnBarHover(ToolbarView* self, gp::Ctx* cx, const gp::HoverEven
     }
     Toolbar* tb = Tb(win);
     if (ev->hovered) {
-        tb->overlayHideLeftMs = 0;
+        tb->overlayHide.Cancel();
         return;
     }
     if (tb->overlayShown) {
-        tb->overlayHideLeftMs = kDelayToolbarHide;
+        tb->overlayHide.Arm(kDelayToolbarHide);
     }
     // the pointer may be on its way to the drop-down, or across to the other
     // zoom button: OnStripHover cancels, and so does landing on that button
-    if (tb->hoverCmdId != 0 && tb->hoverCloseLeftMs <= 0 && !PointerKeepsHover(win)) {
-        tb->hoverCloseLeftMs = kCloseHoverDropdownDelayMs;
+    if (tb->hoverCmdId != 0 && !tb->hoverClose.IsArmed() && !PointerKeepsHover(win)) {
+        tb->hoverClose.Arm(kCloseHoverDropdownDelayMs);
     }
     (void)cx;
 }
@@ -1861,15 +1857,15 @@ void ToolbarView::OnStripHover(ToolbarView* self, gp::Ctx*, const gp::HoverEvent
     }
     Toolbar* tb = Tb(win);
     if (ev->hovered) {
-        tb->overlayHideLeftMs = 0;
-        tb->hoverCloseLeftMs = 0;
+        tb->overlayHide.Cancel();
+        tb->hoverClose.Cancel();
         return;
     }
     if (tb->overlayShown) {
-        tb->overlayHideLeftMs = kDelayToolbarHide;
+        tb->overlayHide.Arm(kDelayToolbarHide);
     }
     if (tb->hoverCmdId != 0 && !PointerKeepsHover(win)) {
-        tb->hoverCloseLeftMs = kCloseHoverDropdownDelayMs;
+        tb->hoverClose.Arm(kCloseHoverDropdownDelayMs);
     }
 }
 
@@ -1937,37 +1933,24 @@ void ToolbarTick(MainWindow* win, int elapsedMs) {
         tb->ui->hoverRecenter = false;
         AppShellInvalidate(win);
     }
-    if (tb->hoverOpenLeftMs > 0) {
-        tb->hoverOpenLeftMs -= elapsedMs;
-        if (tb->hoverOpenLeftMs <= 0) {
-            tb->hoverOpenLeftMs = 0;
-            tb->hoverGen++;
-            ResetHoverLock(tb->ui);
-            tb->hoverCmdId = tb->hoverPendingCmdId;
-            tb->hoverAnchorCmdId = tb->hoverCmdId;
-            tb->hoverPendingCmdId = 0;
-            // orig's TakeHoverButtonTooltip: the drop-down takes the tooltip's place
-            if (win->gpuiWin) {
-                gp::TooltipRequestHide(win->gpuiWin);
-            }
-            AppShellInvalidate(win);
+    if (tb->hoverOpen.Tick(elapsedMs)) {
+        tb->hoverGen++;
+        ResetHoverLock(tb->ui);
+        tb->hoverCmdId = tb->hoverPendingCmdId;
+        tb->hoverAnchorCmdId = tb->hoverCmdId;
+        tb->hoverPendingCmdId = 0;
+        // orig's TakeHoverButtonTooltip: the drop-down takes the tooltip's place
+        if (win->gpuiWin) {
+            gp::TooltipRequestHide(win->gpuiWin);
         }
+        AppShellInvalidate(win);
     }
-    if (tb->hoverCloseLeftMs > 0) {
-        tb->hoverCloseLeftMs -= elapsedMs;
-        if (tb->hoverCloseLeftMs <= 0) {
-            HideToolbarHoverDropdown(win);
-            AppShellInvalidate(win);
-        }
+    if (tb->hoverClose.Tick(elapsedMs)) {
+        HideToolbarHoverDropdown(win);
+        AppShellInvalidate(win);
     }
-    if (tb->overlayHideLeftMs > 0) {
-        tb->overlayHideLeftMs -= elapsedMs;
-        if (tb->overlayHideLeftMs <= 0) {
-            tb->overlayHideLeftMs = 0;
-            if (!IsToolbarPageBoxFocused(win)) {
-                SetOverlayShown(win, false);
-            }
-        }
+    if (tb->overlayHide.Tick(elapsedMs) && !IsToolbarPageBoxFocused(win)) {
+        SetOverlayShown(win, false);
     }
 }
 
@@ -2060,8 +2043,8 @@ bool ToolbarOnEscape(MainWindow* win) {
     }
     Toolbar* tb = Tb(win);
     if (win->gpuiWin) {
-        gp::InputBlur(tb->pageEdit, win->gpuiWin->app, win->gpuiWin);
-        gp::InputBlur(tb->chapterEdit, win->gpuiWin->app, win->gpuiWin);
+        InputBlurWhereFocused(tb->pageEdit, win->gpuiWin);
+        InputBlurWhereFocused(tb->chapterEdit, win->gpuiWin);
     }
     UpdateOverlayToolbarForMouse(win, Point{});
     AppShellInvalidate(win);

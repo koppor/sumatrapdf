@@ -75,7 +75,7 @@ Str PageGridUnitName(int i);
 Str PageGridStyleName(int i);
 PageGrid* PageGridPrefs();
 void CopyPageGridSnap(PageGridSnap& dst, const PageGrid& src, bool showGrid);
-void RedrawPageGridWindows();
+void RedrawAllWindows();
 float PageGridAlignDown(float v, float origin, float step);
 bool PageGridIsMajor(float v, float origin, float minorPt, int subdiv);
 float PageGridClampSlant(float deg);
@@ -91,3 +91,14 @@ bool PageGridDragActive();
 void PageGridDragEnd();
 void PageGridDragCancel();
 TempStr PageGridProbeTemp(DisplayModel* dm);
+
+// an edit's float rounded to the nearest int; parseFloat reads the edit
+template <typename T>
+bool ParseEditIntWith(T* e, bool (*parseFloat)(T*, float*), int* out) {
+    float v = 0;
+    if (!parseFloat(e, &v)) {
+        return false;
+    }
+    *out = (int)(v + (v >= 0 ? 0.5f : -0.5f));
+    return true;
+}

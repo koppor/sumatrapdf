@@ -35,11 +35,13 @@
 #include "gui/AppShell.h"
 #include "gui/ToolWindow.h"
 #include "gui/PlatformFont.h"
+#include "AIChatTypes.h"
 #include "AIChatCommon.h"
 #include "SelectionTranslate.h"
 #include "SimpleBrowserWindow.h"
 #include "gui/DialogWidgets.h"
 #include "gui/NativeMsgBox.h"
+#include "resource.h"
 #include "SumatraDialogs.h"
 #include "shared/PdfToolsCommon.h"
 
@@ -448,6 +450,35 @@ ToolWindow* DlgWindowOpen(const DlgWindowSpec& spec, MainWindow* win) {
     return tw;
 }
 
+// `win` is closing: close its dialogs now, while their close callbacks can
+// still use it. The tool window layer reports a closed owner only later,
+// from the ui task queue, after the MainWindow is deleted.
+void DlgWindowsCloseFor(MainWindow* win) {
+    Vec<DlgWindowEntry*> entries = gDlgWindows;
+    for (DlgWindowEntry* e : entries) {
+        if (!VecContains(gDlgWindows, e) || e->win != win) {
+            continue;
+        }
+        // an unowned dialog moves to another main window instead
+        bool moves = e->spec.onOwnerClosed && !e->spec.modal && !e->spec.owned && len(gWindows) > 1;
+        if (moves) {
+            continue;
+        }
+        ToolWindow* tw = e->tw;
+        void (*close)() = e->spec.close;
+        {
+            DlgWindowCurrentScope current(tw);
+            if (close) {
+                close();
+            }
+        }
+        // a close callback that left its window up
+        if (VecContains(gDlgWindows, e)) {
+            DlgWindowClose(&tw);
+        }
+    }
+}
+
 void DlgWindowClose(ToolWindow** tw) {
     if (!tw || !*tw) {
         return;
@@ -573,6 +604,9 @@ gp::El* DialogsBuild(MainWindow* win, gp::Ctx* cx) {
     if (gp::El* e = AddFavoriteDialogBuild(win, cx)) {
         return e;
     }
+    if (gp::El* e = OpenFromUrlDialogBuild(win, cx)) {
+        return e;
+    }
     if (gp::El* e = PropertiesDialogBuild(win, cx)) {
         return e;
     }
@@ -687,14 +721,15 @@ DialogAccels DialogsAccelTable(MainWindow* win) {
     }
     bool any = IsMsgBoxVisible() || IsSimpleBrowserWindowVisible() || IsAIChatNotInstalledDialogVisible() ||
                IsSelectionTranslateDialogVisible() || IsAboutWindowVisible() || IsAddFavoriteDialogVisible() ||
-               IsGoToPageDialogVisible() || IsTabGroupsDialogVisible() || IsGetPasswordDialogVisible() ||
-               IsCustomZoomDialogVisible() || IsChangeScrollbarDialogVisible() || IsChangeLanguageDialogVisible() ||
-               IsChangeThemeDialogVisible() || IsChangeColorDialogVisible() || IsBrightnessContrastDialogVisible() ||
-               IsPDFScriptDialogVisible() || IsInverseSearchDialogVisible() || IsSignDocumentDialogVisible() ||
-               IsPdfToolDialogVisible() || IsImageEditWindowVisible() || IsSetScreenshotHotkeyDialogVisible() ||
-               IsEbookSettingsDialogVisible() || IsSettingsDialogVisible() || IsAdvancedSettingsDialogVisible() ||
-               IsConfigureRestrictedUseDialogVisible() || IsPageGridDialogVisible() || IsKeyboardHelpVisible() ||
-               IsUnsavedAnnotationsDialogVisible() || IsSavePathDialogVisible();
+               IsOpenFromUrlDialogVisible() || IsGoToPageDialogVisible() || IsTabGroupsDialogVisible() ||
+               IsGetPasswordDialogVisible() || IsCustomZoomDialogVisible() || IsChangeScrollbarDialogVisible() ||
+               IsChangeLanguageDialogVisible() || IsChangeThemeDialogVisible() || IsChangeColorDialogVisible() ||
+               IsBrightnessContrastDialogVisible() || IsPDFScriptDialogVisible() || IsInverseSearchDialogVisible() ||
+               IsSignDocumentDialogVisible() || IsPdfToolDialogVisible() || IsImageEditWindowVisible() ||
+               IsSetScreenshotHotkeyDialogVisible() || IsEbookSettingsDialogVisible() || IsSettingsDialogVisible() ||
+               IsAdvancedSettingsDialogVisible() || IsConfigureRestrictedUseDialogVisible() ||
+               IsPageGridDialogVisible() || IsKeyboardHelpVisible() || IsUnsavedAnnotationsDialogVisible() ||
+               IsSavePathDialogVisible();
     (void)win;
     return any ? DialogAccels::None : DialogAccels::All;
 }
@@ -1064,6 +1099,10 @@ bool DialogsOnEscape(MainWindow* win) {
         CloseAddFavoriteDialog();
         return true;
     }
+    if (IsOpenFromUrlDialogVisible()) {
+        CloseOpenFromUrlDialog();
+        return true;
+    }
     if (IsGoToPageDialogVisible()) {
         CloseGoToPageDialog();
         return true;
@@ -1269,12 +1308,15 @@ gp::El* DlgFooter(gp::Ctx* cx, Str okLabel, gp::Listener onOk, gp::Listener onCa
         row->Child(extra);
     }
     row->Child(gp::Div(cx->a)->Flex1());
-    row->Child(gpc::Button::New(cx, GStrL("dlg-cancel"))
-                   ->Label(ToGpui(Tr("Cancel")))
-                   ->Outline()
-                   ->WithSize(gp::UiSize::Small)
-                   ->OnClick(onCancel)
-                   ->IntoEl());
+    // no onCancel: only the action, as orig's NewDlgFooter() without a cancel button
+    if (onCancel.fn != 0) {
+        row->Child(gpc::Button::New(cx, GStrL("dlg-cancel"))
+                       ->Label(ToGpui(Tr("Cancel")))
+                       ->Outline()
+                       ->WithSize(gp::UiSize::Small)
+                       ->OnClick(onCancel)
+                       ->IntoEl());
+    }
     row->Child(DlgFilledButton(cx, GStrL("dlg-ok"), okLabel, onOk, okDisabled));
     return row;
 }
@@ -1358,3 +1400,117 @@ gp::El* DlgFrameCard(gp::Ctx* cx, gp::El* col, Str title, float dx, gp::Listener
                        ->Child(col);
     return gpc::Dialog::New(cx)->Open(true)->Surface(card)->W(dx)->OnClose(onClose)->IntoEl(gp::WindowSize(cx->win));
 }
+
+#if OS_WIN
+// the predefined window class atoms a DLGITEMTEMPLATE can name
+enum {
+    kAtomButton = 0x0080,
+    kAtomStatic = 0x0082,
+    kAtomComboBox = 0x0085,
+};
+
+// ng: orig loads IDD_PROPSHEET_PRINT_ADVANCED from its .rc. This port has no
+// resource compiler, so the DLGTEMPLATE is built in memory: same controls, same
+// ids, same dialog units as orig's resource. It also replaces orig's
+// GetRtLDlgTemplate() hack: for an RTL UI the extended style is simply set here.
+struct PrintAdvancedTemplate {
+    u8 buf[1024];
+    int pos = 0;
+    int nItems = 0;
+
+    void Align() {
+        while (pos & 3) {
+            Write(nullptr, 1);
+        }
+    }
+
+    void Write(const void* data, int n) {
+        ReportIf(pos + n > dimofi(buf));
+        if (pos + n > dimofi(buf)) {
+            return;
+        }
+        if (data) {
+            memcpy(buf + pos, data, (size_t)n);
+        }
+        pos += n;
+    }
+
+    void U16(int v) {
+        u16 v16 = (u16)v;
+        Write(&v16, 2);
+    }
+
+    void U32(u32 v) { Write(&v, 4); }
+
+    void Sz(const WCHAR* s) {
+        int n = s ? (int)wcslen(s) : 0;
+        Write(s, (n + 1) * 2);
+    }
+
+    void Item(u32 style, int x, int y, int cx, int cy, int id, int atom) {
+        Align();
+        U32(style | WS_CHILD | WS_VISIBLE);
+        U32(0);
+        U16(x);
+        U16(y);
+        U16(cx);
+        U16(cy);
+        U16(id);
+        U16(0xFFFF);
+        U16(atom);
+        U16(0); // the text is set in WM_INITDIALOG, as orig does
+        U16(0); // no creation data
+        nItems++;
+    }
+};
+
+static DLGTEMPLATE* BuildPrintAdvancedTemplate() {
+    PrintAdvancedTemplate t;
+    u32 style = DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    t.U32(style);
+    t.U32(IsUIRtl() ? (WS_EX_LAYOUTRTL | WS_EX_RTLREADING) : 0);
+    int cditPos = t.pos;
+    t.U16(0); // patched with nItems below
+    t.U16(0);
+    t.U16(0);
+    t.U16(292);
+    t.U16(207);
+    t.U16(0); // no menu
+    t.U16(0); // default dialog class
+    t.Sz(L"Advanced");
+    t.U16(8); // DS_SETFONT: point size and typeface
+    t.Sz(L"MS Shell Dlg");
+
+    u32 radio = BS_AUTORADIOBUTTON | WS_TABSTOP;
+    u32 check = BS_AUTOCHECKBOX | WS_TABSTOP;
+    t.Item(BS_GROUPBOX, 7, 7, 278, 52, IDC_SECTION_PRINT_RANGE, kAtomButton);
+    t.Item(radio | WS_GROUP, 14, 18, 264, 9, IDC_PRINT_RANGE_ALL, kAtomButton);
+    t.Item(radio, 14, 31, 264, 9, IDC_PRINT_RANGE_EVEN, kAtomButton);
+    t.Item(radio, 14, 44, 264, 9, IDC_PRINT_RANGE_ODD, kAtomButton);
+    t.Item(BS_GROUPBOX, 7, 62, 278, 65, IDC_SECTION_PRINT_SCALE, kAtomButton);
+    t.Item(radio | WS_GROUP, 14, 74, 264, 9, IDC_PRINT_SCALE_SHRINK, kAtomButton);
+    t.Item(radio, 14, 87, 264, 9, IDC_PRINT_SCALE_FIT, kAtomButton);
+    t.Item(radio, 14, 100, 264, 9, IDC_PRINT_SCALE_NONE, kAtomButton);
+    t.Item(radio, 14, 113, 264, 9, IDC_PRINT_SCALE_STRETCH, kAtomButton);
+    t.Item(check | WS_GROUP, 7, 133, 278, 10, IDC_PRINT_CENTER_HORIZONTALLY, kAtomButton);
+    t.Item(check, 7, 146, 278, 10, IDC_PRINT_PAPER_SOURCE_BY_SIZE, kAtomButton);
+    t.Item(check, 7, 159, 278, 10, IDC_PRINT_PER_PAGE_PAPER_SIZE, kAtomButton);
+    t.Item(check, 7, 172, 278, 10, IDC_PRINT_AUTO_ROTATE, kAtomButton);
+    t.Item(SS_LEFT, 7, 188, 72, 9, IDC_PRINT_ROTATE_LABEL, kAtomStatic);
+    t.Item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 82, 186, 90, 60, IDC_PRINT_ROTATE, kAtomComboBox);
+
+    u16 cdit = (u16)t.nItems;
+    memcpy(t.buf + cditPos, &cdit, sizeof(cdit));
+    return (DLGTEMPLATE*)MemDup(nullptr, t.buf, (size_t)t.pos);
+}
+
+void PrintAdvancedInitDlg(HWND) {}
+
+// the template must outlive the property sheet: kept until the next call
+void PrintAdvancedSetPage(PROPSHEETPAGE* psp) {
+    static ScopedMem<DLGTEMPLATE> dlgTemplate;
+    dlgTemplate.Set(BuildPrintAdvancedTemplate());
+    psp->dwFlags |= PSP_DLGINDIRECT;
+    psp->pResource = dlgTemplate.Get();
+}
+#endif

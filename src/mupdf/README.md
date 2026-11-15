@@ -31,3 +31,12 @@ _Changes_ to mupdf itself still go into `ext/mupdf` in place and get recorded as
 a patch in `ext/patches/` (see its README). Put code here only when it is
 entirely ours: a whole new file that mupdf's build does not know about. Shared
 additions live in `src/shared/mupdf`.
+
+## OFD
+
+`src/shared/mupdf/ofd.c` is a MuPDF document handler for OFD (GB/T 33190),
+registered by `EngineMupdf`. It builds a display list per page; a package's
+documents are one page sequence. `ofd-seal.c` reads and checks SES / GB/T 35275
+signatures and certificate chains with the SM2 / SM3 / SM4 code in
+`ofd-crypto.c`; `ofd-decrypt.c` opens password-encrypted packages. Tests: `tests/issue-1909.ts`; sample corpus:
+`tests/ad-hoc-ofd-corpus.ts`.

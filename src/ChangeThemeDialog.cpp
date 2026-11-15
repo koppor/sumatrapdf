@@ -69,26 +69,6 @@ static constexpr UINT_PTR kThemePreviewTimerId = 1;
 static constexpr UINT kThemePreviewDebounceMs = 300;
 static SeqStrings gDocumentColorsFollowThemeNames = "off\0smart\0legacy\0";
 
-static int DocumentColorsFollowThemeToDropDownIndex(DocumentColorsFollowTheme mode) {
-    if (mode == DocumentColorsFollowTheme::Smart) {
-        return 1;
-    }
-    if (mode == DocumentColorsFollowTheme::Legacy) {
-        return 2;
-    }
-    return 0;
-}
-
-static DocumentColorsFollowTheme DocumentColorsFollowThemeFromDropDownIndex(int idx) {
-    if (idx == 1) {
-        return DocumentColorsFollowTheme::Smart;
-    }
-    if (idx == 2) {
-        return DocumentColorsFollowTheme::Legacy;
-    }
-    return DocumentColorsFollowTheme::Off;
-}
-
 ChangeThemeWnd::~ChangeThemeWnd() {
     KillPreviewTimer();
     str::Free(startThemePref);
@@ -187,9 +167,9 @@ void ChangeThemeWnd::Recolor() {
     if (listBox) {
         SetDlgListColors(listBox);
     }
-    labelDocumentColorsFollowTheme->SetColor(kColText, ThemeWindowTextDisabledColor());
-    SetDlgButtonColors(btnCancel, DlgButtonStyle::Outline);
-    SetDlgButtonColors(btnChange, DlgButtonStyle::Filled);
+    labelDocumentColorsFollowTheme->SetColor(kColText, ThemeWindowDarkerTextColor());
+    SetVirtButtonStyle(btnCancel, DlgButtonStyle::Outline);
+    SetVirtButtonStyle(btnChange, DlgButtonStyle::Filled);
     HwndInvalidate(hwnd);
 }
 
@@ -217,7 +197,7 @@ void ChangeThemeWnd::OnDocumentColorsFollowThemeChanged() {
     if (idx < 0) {
         return;
     }
-    SetDocumentColorsFollowTheme(DocumentColorsFollowThemeFromDropDownIndex(idx));
+    SetDocumentColorsFollowTheme(FollowThemeFromIndex(idx));
     PreviewDocumentColors();
     KeepFocus();
 }
@@ -304,7 +284,7 @@ bool ChangeThemeWnd::Create(MainWindow* mainWin) {
     {
         HBox* row = NewDlgRow();
         labelDocumentColorsFollowTheme =
-            NewDlgLabel(Tr("Document colors follow theme"), fontText, ThemeWindowTextDisabledColor(), kToolDlgLineDy);
+            NewDlgLabel(Tr("Document colors follow theme"), fontText, ThemeWindowDarkerTextColor(), kToolDlgLineDy);
         row->AddChild(labelDocumentColorsFollowTheme);
         row->AddChild(new Spacer(0, 0), 1);
 
@@ -318,7 +298,7 @@ bool ChangeThemeWnd::Create(MainWindow* mainWin) {
         c->onSelectionChanged = MkMethod0<ChangeThemeWnd, &ChangeThemeWnd::OnDocumentColorsFollowThemeChanged>(this);
         c->onCloseUp = MkMethod0<ChangeThemeWnd, &ChangeThemeWnd::KeepFocus>(this);
         dropDownDocumentColorsFollowTheme = c;
-        CbSetCurrentSelection(c, DocumentColorsFollowThemeToDropDownIndex(startDocumentColorsFollowTheme));
+        CbSetCurrentSelection(c, FollowThemeToIndex(startDocumentColorsFollowTheme));
         row->AddChild(c);
         vbox->AddChild(new Padding(row, DpiScaledInsets(0, kToolDlgPadDx)));
     }
@@ -335,7 +315,7 @@ bool ChangeThemeWnd::Create(MainWindow* mainWin) {
     int dx = DpiScale(kThemeDlgDx);
     LayoutAndSizeToContent(layout, dx, 0, hwnd);
     // pick up the virtual controls so we paint them and they get their input
-    DoLayout(HwndClientRect(hwnd).Size());
+    DoLayout();
     PositionDialog(hwnd, win->hwndFrame);
     UpdateTheme();
     Recolor();

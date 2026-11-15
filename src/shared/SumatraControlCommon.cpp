@@ -3,6 +3,7 @@
 
 #include "base/Base.h"
 #include "base/UITask.h"
+#include "base/Pixmap.h"
 #include "gui/UIModels.h"
 #include "Settings.h"
 #include "DisplayMode.h"
@@ -21,6 +22,7 @@
 #include "SumatraPDF.h"
 #include "MainWindow.h"
 #include "AnnotPlacement.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "TextSelection.h"
 #include "Selection.h"
@@ -54,8 +56,17 @@
 #include "ReadingBar.h"
 #include "NavFilesInFolder.h"
 #include "PerfLog.h"
+#include "SumatraPDFCommon.h"
 #include "SumatraControl.h"
 #include "SumatraControlCommon.h"
+
+LayoutProbeState gLayoutProbe;
+
+void LayoutProbeNote(MainWindow* win) {
+    if (gLayoutProbe.active && gLayoutProbe.win == win) {
+        gLayoutProbe.count++;
+    }
+}
 
 // Parts of the -dbg-control channel that orig and ng have in common. ng has no
 // listener thread on wasm, so nothing calls them there.
@@ -352,6 +363,15 @@ bool ParseArgList(PacketReader& r, Vec<ControlArg*>* args, bool explicitCount, u
     return true;
 }
 
+// Pause between polls of a Wait* loop: fine-grained at first, so a test's
+// timing of a short wait isn't quantized to 20 ms, coarser once it drags on
+// since each poll repaints
+void ControlPollSleep(u64 startMs) {
+    constexpr u64 kFineForMs = 200;
+    bool fine = GetTickCount64() - startMs < kFineForMs;
+    SleepInMs(fine ? 5 : 20);
+}
+
 // Block on the control thread until visible tiles are cached at target
 // resolution, or until timeoutMs. Optional first int arg is the timeout.
 void RunWaitRenderIdle(ControlRequest* req) {
@@ -360,7 +380,8 @@ void RunWaitRenderIdle(ControlRequest* req) {
     if (timeoutMs < 1) {
         timeoutMs = 1;
     }
-    u64 deadline = GetTickCount64() + (u64)timeoutMs;
+    u64 start = GetTickCount64();
+    u64 deadline = start + (u64)timeoutMs;
     for (;;) {
         req->done.Reset();
         uitask::Post(MkFunc0<ControlRequest>(SnapshotRenderIdle, req), "WaitRenderIdle");
@@ -374,7 +395,7 @@ void RunWaitRenderIdle(ControlRequest* req) {
             AppendTestResult(req, 1, req->idleInfo[0] ? fmt("%s %s", kind, Str(req->idleInfo)) : kind);
             return;
         }
-        SleepInMs(20);
+        ControlPollSleep(start);
     }
 }
 
@@ -385,7 +406,8 @@ void RunWaitSessionRestored(ControlRequest* req) {
     if (timeoutMs < 1) {
         timeoutMs = 1;
     }
-    u64 deadline = GetTickCount64() + (u64)timeoutMs;
+    u64 start = GetTickCount64();
+    u64 deadline = start + (u64)timeoutMs;
     for (;;) {
         req->done.Reset();
         uitask::Post(MkFunc0<ControlRequest>(SnapshotSessionRestore, req), "WaitSessionRestored");
@@ -398,7 +420,7 @@ void RunWaitSessionRestored(ControlRequest* req) {
             AppendTestResult(req, 1, req->idleInfo[0] ? fmt("timeout %s", Str(req->idleInfo)) : StrL("timeout"));
             return;
         }
-        SleepInMs(20);
+        ControlPollSleep(start);
     }
 }
 
@@ -641,6 +663,17 @@ TempStr FavoriteNavResultTemp(Str action, int pageNo, int* exitCodeOut) {
         GoToNextFavorite(win, false);
     } else if (str::EqI(action, StrL("page"))) {
         // report only
+    } else if (str::EqI(action, StrL("list"))) {
+        // the current file's favorites in order: "OK manual=1 Intro@2,-@1"
+        FileState* fs = FileHistoryFindByPath(win->ctrl->GetFilePath());
+        out.Append(fmt("OK manual=%d ", gSettings->favoritesManualOrder ? 1 : 0));
+        int n = (fs && fs->favorites) ? len(*fs->favorites) : 0;
+        for (int i = 0; i < n; i++) {
+            Favorite* f = (*fs->favorites)[i];
+            out.Append(i > 0 ? StrL(",") : StrL(""));
+            out.Append(fmt("%s@%d", len(f->name) > 0 ? f->name : StrL("-"), ParseStoredPagePos(f->pageNo).pageNo));
+        }
+        return finish({}, 0);
     } else if (ControlFavoritesMenu(win, action, &menuIds)) {
         return finish(menuIds, 0);
     } else {
@@ -656,6 +689,57 @@ TempStr FavoriteNavResultTemp(Str action, int pageNo, int* exitCodeOut) {
         cur = ss.page;
     }
     return finish(fmt("OK page=%d y=%d", cur, y), 0);
+}
+
+// the first window's word count notification (#6489): "OK <text>", "OK" while there's none
+TempStr WordCountResultTemp(int* exitCodeOut) {
+    *exitCodeOut = 2;
+    if (len(gWindows) == 0 || !gWindows[0]->IsDocLoaded()) {
+        return str::DupTemp(StrL("NOTREADY no-doc\n"));
+    }
+    *exitCodeOut = 0;
+    TempStr msg = WordCountNotifMsgTemp(gWindows[0]);
+    return fmt("OK %s\n", msg);
+}
+
+// the first window's Show Selected Text notification (#6496): "OK <text>"
+TempStr SelectedTextResultTemp(int* exitCodeOut) {
+    *exitCodeOut = 2;
+    if (len(gWindows) == 0 || !gWindows[0]->IsDocLoaded()) {
+        return str::DupTemp(StrL("NOTREADY no-doc\n"));
+    }
+    *exitCodeOut = 0;
+    return fmt("OK %s", SelectedTextNotifMsgTemp(gWindows[0]));
+}
+
+// the first window's page info tip (#6492): "OK <text>", "OK" while it's not shown
+TempStr PageInfoTextResultTemp(int* exitCodeOut) {
+    *exitCodeOut = 2;
+    if (len(gWindows) == 0 || !gWindows[0]->IsDocLoaded()) {
+        return str::DupTemp(StrL("NOTREADY no-doc\n"));
+    }
+    *exitCodeOut = 0;
+    NotificationWnd* wnd = GetNotificationForGroup(gWindows[0], kNotifPageInfo);
+    TempStr msg = wnd ? NotificationGetMessageTemp(wnd) : TempStr{};
+    return fmt("OK %s\n", msg);
+}
+
+// the first window's page info bar (#6494): where it is and what it says
+TempStr PageInfoBarResultTemp(int* exitCodeOut) {
+    *exitCodeOut = 2;
+    if (len(gWindows) == 0 || !gWindows[0]->IsDocLoaded()) {
+        return str::DupTemp(StrL("NOTREADY no-doc\n"));
+    }
+    *exitCodeOut = 0;
+    MainWindow* win = gWindows[0];
+    Str place = StrL("none");
+    if (PageInfoBarShown(win)) {
+        place = GetPageInfoBarMode() == PageInfoBarMode::Bottom ? StrL("row") : StrL("overlay");
+    }
+    TempStr left;
+    TempStr right;
+    PageInfoBarTextTemp(win, &left, &right);
+    return fmt("OK place=%s %s\nleft=%s\nright=%s\n", place, PageInfoBarGeometryTemp(win), left, right);
 }
 
 // action: "get" | "r2l" | "presentation" | "fullscreen"
@@ -681,6 +765,27 @@ TempStr DisplayModeResultTemp(Str action, int* exitCodeOut) {
     }
 
     bool reportR2L = str::EqI(action, StrL("r2l"));
+    // "pages": the pages shown, for stepping one page in facing view (#6487)
+    if (str::EqI(action, StrL("pages"))) {
+        DisplayModel* dm = win->AsFixed();
+        if (!dm) {
+            return finish(StrL("ERROR not-fixed-page"), 1);
+        }
+        out.Append(fmt("OK mode=%s step=%d current=%d shown=", DisplayModeToString(dm->GetDisplayMode()),
+                       dm->GetFacingStepOne() ? 1 : 0, dm->CurrentPageNo()));
+        bool first = true;
+        for (int pageNo = 1; pageNo <= dm->PageCount(); pageNo++) {
+            if (!dm->PageShown(pageNo)) {
+                continue;
+            }
+            if (!first) {
+                out.AppendChar(',');
+            }
+            out.Append(fmt("%d", pageNo));
+            first = false;
+        }
+        return finish(StrL(""), 0);
+    }
     if (str::EqI(action, StrL("zoom-real"))) {
         return finish(fmt("OK zoomReal=%g", win->ctrl->GetZoomVirtual(true)), 0);
     }
@@ -709,7 +814,7 @@ TempStr DisplayModeResultTemp(Str action, int* exitCodeOut) {
     Str zoomLabel;
     ZoomToString(&zoomLabel, win->ctrl->GetZoomVirtual(false), nullptr);
     TempStr res = fmt("OK mode=%s presentation=%d fullscreen=%d zoom=%s", mode, win->InPresentation() ? 1 : 0,
-                      win->isFullScreen ? 1 : 0, zoomLabel);
+                      win->IsFullScreen() ? 1 : 0, zoomLabel);
     str::Free(zoomLabel);
     return finish(res, 0);
 }

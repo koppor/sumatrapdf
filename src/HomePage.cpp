@@ -94,35 +94,7 @@ struct TipHookInstaller {
 };
 static TipHookInstaller gTipHookInstaller;
 
-static Str sumatraPromos = StrL(R"promos(Try [Edna](https://edna.arslexis.io): a note taking web app for power users.
-Try [MarkLexis](https://marklexis.arslexis.io): a bookmarking web application.
-Try [Sumatra File Manager](https://sumatrafilemanager.com): file manager with super powers.
-Try [Sumatra File Manager Online](https://online.sumatrafilemanager.com): file manager for S3, Dropbox and more.
-)promos");
-
-static Str promoFromServer;
-
-static void EnsureTipsParsed() {
-    if (gTipsParsed) {
-        return;
-    }
-    CollectTipsFromString(sumatraTips, &gTipLines);
-    CollectTipsFromString(sumatraPromos, &gPromoLines);
-    gTipsParsed = true;
-    PickRandomTipOrPromo();
-}
-
 static void ClearHomeLayoutCache(MainWindow*);
-
-void FreeHomePageTips() {
-    if (gTipsParsed) {
-        gTipLines.Reset();
-        gPromoLines.Reset();
-        gTipsParsed = false;
-    }
-    str::Free(promoFromServer);
-    HomePageInvalidateLayoutCache();
-}
 
 // the About box: the brand over the version, the link rows, a note, then a
 // hairline over the copy link and the other software
@@ -174,28 +146,16 @@ static AboutRow gAboutRows[] = {
     {StrL("forums"), StrL("SumatraPDF forums"), StrL("https://github.com/sumatrapdfreader/sumatrapdf/discussions")},
     {StrL("licenses"), StrL("Various Open Source"),
      StrL("https://github.com/sumatrapdfreader/sumatrapdf/blob/master/AUTHORS")},
-#ifdef GIT_COMMIT_ID_STR
-    {StrL("last change"), StrL("git commit " GIT_COMMIT_ID_STR),
-     StrL("https://github.com/sumatrapdfreader/sumatrapdf/commit/" GIT_COMMIT_ID_STR)},
-#endif
+    // filled in by AboutSourceRow()
+    {StrL("source"), {}, {}},
     {StrL("more software by me"), StrL("Sumatra File Manager"), StrL("https://sumatrafilemanager.com")},
-    {{}, StrL("Sumatra File Manager Online"), StrL("https://online.sumatrafilemanager.com")},
+    {{}, StrL("Sumatra File Manager Web"), StrL("https://web.sumatrafilemanager.com")},
     {{}, {}, {}}};
 
 // the rows from kAboutSoftwareRow on are the other software, in the footer
 constexpr int kAboutSoftwareEnd = dimofi(gAboutRows) - 1;
 constexpr int kAboutSoftwareRow = kAboutSoftwareEnd - 2;
-
-// the line under the rows that says this isn't a release build
-static Str AboutNoteText() {
-#if defined(PRE_RELEASE_VER)
-    return StrL("pre-release build");
-#elif IS_DEBUG
-    return StrL("debug build, for testing only");
-#else
-    return {};
-#endif
-}
+constexpr int kAboutSourceRow = kAboutSoftwareRow - 1;
 
 // The About box, the same in the About window, the home page's dropdown and
 // the About page: the brand over the version line, label / link rows, the
@@ -234,33 +194,6 @@ struct AboutCtrl : VirtCtrl {
 static void OpenAboutUrl(VirtMouseEvent* ev) {
     auto* link = (VirtLink*)ev->target;
     OpenTipUrl(link->target);
-}
-
-void SetPromoString(Str s) {
-    if (len(s) == 0) return;
-    str::ReplaceWithCopy(&promoFromServer, s);
-}
-
-static TempStr GetAppVersionTemp() {
-    TempStr s = str::DupTemp(StrL("v" CURR_VERSION_STRA));
-    if (IsProcess64()) {
-        s = str::JoinTemp(s, StrL(" 64-bit"));
-    } else {
-        s = str::JoinTemp(s, StrL(" 32-bit"));
-    }
-    if (gIsDebugBuild) {
-        s = str::JoinTemp(s, StrL(" (dbg)"));
-    }
-    return s;
-}
-
-// "3.7 64-bit, built Oct 14 2026 01:46"
-static TempStr AboutVersionLineTemp() {
-    Str bits = IsProcess64() ? StrL("64-bit") : StrL("32-bit");
-    Str built = StrL(__DATE__ " " __TIME__);
-    // without the seconds
-    built.len = std::max(0, len(built) - 3);
-    return fmt("%s %s, built %s", StrL(CURR_VERSION_STRA), bits, built);
 }
 
 constexpr Color kCol1 = MkRgb(196, 64, 50);
@@ -392,6 +325,8 @@ void AboutCtrl::Sync() {
     int n = kAboutSoftwareRow;
     bool canAccessDisk = CanAccessDisk();
     if (len(labels) == 0) {
+        AboutRow* source = &gAboutRows[kAboutSourceRow];
+        AboutSourceRow(&source->rightTxt, &source->url);
         for (int i = 0; i < n; i++) {
             AboutRow* el = &gAboutRows[i];
             auto* label = new VirtText(el->leftTxt);
@@ -412,7 +347,7 @@ void AboutCtrl::Sync() {
     PlatformFont* fontText = HomePageFont(kAboutTextFontSize);
     PlatformFont* fontMeta = HomePageFont(kAboutMetaFontSize);
     Color colText = ThemeWindowTextColor();
-    Color colMuted = ThemeWindowTextDisabledColor();
+    Color colMuted = ThemeWindowDarkerTextColor();
 
     version->SetText(AboutVersionLineTemp());
     version->font = fontMeta;
@@ -1298,10 +1233,6 @@ void HomePageOnDpiChanged(MainWindow* win, int dpi) {
     }
 }
 
-void PickAnotherRandomPromotion() {
-    PickAnotherRandomTip();
-}
-
 // --- scroll-friendly layout cache: full LayoutHomePage only when content/size/
 // filter changes; pure scrollY changes just offset stored thumb rects ---
 struct HomePageLayoutCache {
@@ -1454,34 +1385,6 @@ static bool HomeLayoutCacheFilesMatch(MainWindow* win, const Vec<FileState*>& fi
         }
     }
     return true;
-}
-
-static void CollectHomePageFiles(MainWindow* win, Vec<FileState*>& fileStates, StrVec& filterWords) {
-    Vec<FileState*> allFileStates;
-    if (gSettings->homePageSortByFrequentlyRead) {
-        FileHistoryGetFrequencyOrder(allFileStates);
-    } else {
-        FileHistoryGetRecentlyOpenedOrder(allFileStates);
-    }
-
-    TempStr searchQuery = HomeSearchQueryTemp(win);
-    bool hasFilter = searchQuery && searchQuery.s[0];
-    if (hasFilter) {
-        SplitFilterToWords(searchQuery, filterWords);
-    }
-    for (int i = 0; i < len(allFileStates); i++) {
-        FileState* fs = allFileStates[i];
-        if (len(fs->filePath) == 0) {
-            continue;
-        }
-        if (hasFilter) {
-            TempStr baseName = path::GetBaseNameTemp(fs->filePath);
-            if (!FilterMatches(baseName, filterWords)) {
-                continue;
-            }
-        }
-        VecAppend(fileStates, fs);
-    }
 }
 
 static void SaveHomeLayoutCache(const HomePageLayout& l, Str filterText, int scrollY) {
@@ -2006,7 +1909,7 @@ static void DrawHomeListRow(Gfx* gfx, ThumbnailLayout& thumb, const StrVec& filt
         TempStr dirPath = path::GetDirTemp(path);
         u32 pathFmt = gfxTextVCenter | gfxTextPathEllipsis | (isRtl ? gfxTextLeft : gfxTextRight);
         Rect pathRect = thumb.rcListPath;
-        gfx->DrawText(dirPath, pathRect, pathFmt, fontText, ThemeWindowTextDisabledColor());
+        gfx->DrawText(dirPath, pathRect, pathFmt, fontText, ThemeWindowDarkerTextColor());
     }
 
     // file::GetSize once per row, then cache on ThumbnailLayout (scroll reuses
@@ -2092,7 +1995,7 @@ static void DrawHomeThumbnail(Gfx* gfx, ThumbnailLayout& thumb, const StrVec& fi
                              fontText, ThemeWindowTextColor());
     if (len(meta) > 0) {
         Rect rcMeta(rcName.x, rcName.y + rcName.dy, rcName.dx, thumb.rcText.dy - rcName.dy);
-        gfx->DrawText(meta, rcMeta, fmt, HomePageFont(12), ThemeWindowTextDisabledColor());
+        gfx->DrawText(meta, rcMeta, fmt, HomePageFont(12), ThemeWindowDarkerTextColor());
     }
 }
 
@@ -2419,7 +2322,7 @@ static void HomeOpenDocClicked(MainWindow* win, VirtMouseEvent*) {
 
 static void HomeTipBandDoubleClicked(MainWindow* win, VirtMouseEvent* ev) {
     ev->didHandle = true;
-    PickAnotherRandomPromotion();
+    PickAnotherRandomTip();
     // painting reuses the layout, which holds the parsed tip
     HomePageRelayout(win);
     HwndInvalidate(win->hwndCanvas);
@@ -3130,7 +3033,7 @@ void HomePageRelayout(MainWindow* win) {
     if (HomeLayoutCacheMatches(win, l.rc, filterText)) {
         Vec<FileState*> files;
         StrVec filterWords;
-        CollectHomePageFiles(win, files, filterWords);
+        CollectHomePageFiles(HomeSearchQueryTemp(win), files, filterWords);
         if (HomeLayoutCacheFilesMatch(win, files)) {
             ApplyHomeLayoutCache(l, win->homePageScrollY);
             usedCache = true;

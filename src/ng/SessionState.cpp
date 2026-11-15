@@ -25,11 +25,13 @@
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Tabs.h"
 #include "TableOfContents.h"
 #include "gui/Sidebar.h"
 #include "VirtualDesktop.h"
+#include "AppHelpersCommon.h"
 #include "SessionState.h"
 #include "SumatraLog.h"
 
@@ -57,63 +59,6 @@ static SessionData* CloneSessionData(const SessionData* src) {
         VecAppend(*dst->tabStates, CloneSessionTabState(ts));
     }
     return dst;
-}
-
-// find the saved state for a lazy tab by file path. Because gInitialSessionData
-// is kept in sync with the live session, this never matches a closed window;
-// per-tab disambiguation (e.g. same file in two windows) comes from the more
-// reliable tab->tabState, which RememberSessionState prefers.
-static TabState* FindSessionTabState(Str fp) {
-    if (!gInitialSessionData) {
-        return nullptr;
-    }
-    for (SessionData* psd : *gInitialSessionData) {
-        for (TabState* pts : *psd->tabStates) {
-            if (str::Eq(pts->filePath, fp)) {
-                return pts;
-            }
-        }
-    }
-    return nullptr;
-}
-
-// lazy tabs borrow tab->tabState from gInitialSessionData. After we replace that
-// snapshot, repoint those pointers so the next SaveSettings() does not clone freed
-// TabState objects
-static void RefreshLazyTabStatePointers() {
-    int sdIdx = 0;
-    for (MainWindow* win : gWindows) {
-        bool hasFileTab = false;
-        for (WindowTab* tab : win->Tabs()) {
-            if (tab->filePath) {
-                hasFileTab = true;
-                break;
-            }
-        }
-        if (!hasFileTab) {
-            continue;
-        }
-        SessionData* sd = nullptr;
-        if (gInitialSessionData && sdIdx < len(*gInitialSessionData)) {
-            sd = (*gInitialSessionData)[sdIdx++];
-        }
-        int tsIdx = 0;
-        for (WindowTab* tab : win->Tabs()) {
-            if (len(tab->filePath) == 0) {
-                continue;
-            }
-            TabState* ts = nullptr;
-            if (sd && tsIdx < len(*sd->tabStates)) {
-                ts = (*sd->tabStates)[tsIdx];
-            }
-            tsIdx++;
-            if (!tab->ctrl && tab->tabState) {
-                // null when the new snapshot has nothing to borrow: the old one
-                // was just freed and must not be left dangling
-                tab->tabState = ts;
-            }
-        }
-    }
 }
 
 // keep gInitialSessionData mirroring the just-saved live session, so re-saving
@@ -152,8 +97,8 @@ static void RememberSessionState() {
         }
         SessionData* windowState = NewSessionData();
         for (WindowTab* tab : win->Tabs()) {
-            if (len(tab->filePath) == 0) {
-                // home page tab
+            if (len(tab->filePath) == 0 || tab->IsHexTab()) {
+                // home page or hex view tab
                 continue;
             }
             Str fp = tab->filePath;
@@ -190,7 +135,7 @@ static void RememberSessionState() {
         int selectedDocOrdinal = 1;
         WindowTab* cur = win->CurrentTab();
         for (WindowTab* tab : win->Tabs()) {
-            if (tab->IsAboutTab() || len(tab->filePath) == 0) {
+            if (tab->IsAboutTab() || tab->IsHexTab() || len(tab->filePath) == 0) {
                 continue;
             }
             docOrdinal++;
@@ -229,6 +174,7 @@ static void RememberSessionStateForSave() {
     }
     RememberSessionState();
     SyncInitialSessionData();
+    SyncTabGroups();
 }
 
 void InstallSessionStateHook() {
@@ -280,7 +226,7 @@ void SetTabState(WindowTab* tab, TabState* state) {
 
     tab->tocState = *state->tocState;
     tab->sidebarContent = SidebarContentFromStr(state->sidebarView, SidebarContent::Bookmarks);
-    SetSidebarVisibility(win, state->showToc, gSettings->showFavorites);
+    SetTocVisibility(win, state->showToc);
 
     DisplayMode displayMode = DisplayModeFromString(state->displayMode, DisplayMode::Automatic);
     if (displayMode != DisplayMode::Automatic) {
@@ -316,12 +262,9 @@ void SetTabState(WindowTab* tab, TabState* state) {
 }
 
 static void RestoreMissingTabOnStartup(MainWindow* win, TabState* state) {
-    logf("RestoreTabOnStartup: file not found '%s', creating placeholder tab\n", state->filePath);
-    FileHistoryDemote(state->filePath, true);
-    WindowTab* tab = new WindowTab(win);
-    tab->SetFilePath(state->filePath);
-    tab->tabState = state;
-    AddTabToWindow(win, tab);
+    if (WindowTab* tab = NewMissingSessionTab(win, state)) {
+        AddTabToWindow(win, tab);
+    }
 }
 
 // while the session's tabs are being created: adding a tab selects it, which
@@ -331,10 +274,7 @@ static bool gRestoringSession = false;
 // orig's LoadArgs::lazyLoad: with LazyLoading the tab is created without its
 // document, which loads on the first switch to the tab
 static void RestoreLazyTabOnStartup(MainWindow* win, TabState* state) {
-    WindowTab* tab = new WindowTab(win);
-    tab->SetFilePath(state->filePath);
-    tab->tabState = state;
-    AddTabToWindow(win, tab);
+    AddTabToWindow(win, NewSessionTab(win, state));
 }
 
 // orig's LoadModelIntoTab: "if (gSettings->lazyLoading && !tab->ctrl &&
@@ -367,6 +307,10 @@ void LoadLazyTabIfNeeded(WindowTab* tab) {
         if (state) {
             SetTabState(curr, state);
         }
+        // the borrowed state is applied; gInitialSessionData that owns it can go
+        // away on the next save, as orig's LoadDocumentFinish does
+        curr->tabState = nullptr;
+        tab->tabState = nullptr;
     } else if (curr == tab) {
         tab->loadState = WindowTab::LoadState::Error;
     }
@@ -383,8 +327,8 @@ static void RestoreTabOnStartup(MainWindow* win, TabState* state) {
         RestoreLazyTabOnStartup(win, state);
         return;
     }
+    // a failed load already shows its error tab (or asks for a password)
     if (!LoadDocument(win, state->filePath, LoadPrefs::DontSave)) {
-        RestoreMissingTabOnStartup(win, state);
         return;
     }
     SetTabState(win->CurrentTab(), state);

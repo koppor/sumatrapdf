@@ -5,6 +5,7 @@
 
 struct Annotation;
 enum class AnnotationChange;
+enum class FileType : u8;
 
 struct FitzPageImageInfo {
     fz_rect rect = fz_unit_rect;
@@ -178,6 +179,9 @@ class EngineMupdf : public EngineBase {
     fz_context* _ctx = nullptr;
     fz_locks_context fz_locks_ctx;
     int displayDPI{96};
+    // 1 when the last page render palettized: the next one then renders into
+    // a plain buffer rather than a DIB that would be thrown away
+    AtomicInt renderPalettized = 0;
     fz_document* _doc = nullptr;
     pdf_document* pdfdoc = nullptr;
     // chapter-major page info; index [chapter - 1] is that chapter's pages
@@ -218,9 +222,9 @@ class EngineMupdf : public EngineBase {
     // set when a Redact annotation is created in this editing session. Apply
     // Redactions is offered for marks the user made, not for marks that came
     // with the file (which only show up as pages get loaded, see
-    // EngineMupdfHasUserRedactMarks)
+    // EngineHasUserRedactMarks)
     bool createdRedactMark = false;
-    // what EngineMupdfHasRedactMarksNoWait last saw, for when a render holds pagesLock
+    // what EngineHasRedactMarksNoWait last saw, for when a render holds pagesLock
     bool hasRedactMarksSeen = false;
     // what UndoPosNoWait last saw, for when a render holds docLock
     int undoPosSeen = -1;
@@ -271,11 +275,19 @@ class EngineMupdf : public EngineBase {
     bool cadHairlineVector = false;
     CadEnhanceOverride cadEnhanceOverride = CadEnhanceOverride::Unset;
 
+    // optional content groups (layers): how many, and their on/off state ("1" /
+    // "0" per group) as loaded and now. The UI thread reads layerStates
+    // without waiting for a render to let go of docLock
+    int layerCount = 0;
+    Str layerStatesAtLoad;
+    Str layerStates;
+
     bool CadEnhanceActive() const;
     void RunCadDetection();
     void ToggleCadEnhanceOverride();
 
     bool Load(Str filePath, PasswordUI* pwdUI = nullptr);
+    bool Load(Str filePath, PasswordUI* pwdUI, FileType kindHint);
     bool LoadFromStream(fz_stream* stm, Str nameHint, PasswordUI* pwdUI = nullptr);
     bool FinishLoading();
     RenderedBitmap* GetPageImage(int pageNo, RectF rect, int imageIdx);

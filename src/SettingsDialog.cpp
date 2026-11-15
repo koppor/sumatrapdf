@@ -169,14 +169,7 @@ float SettingsWnd::SelectedZoom() {
         return z == 0 ? startZoom : z;
     }
     TempStr text = dropZoom ? dropZoom->GetTextTemp() : Str{};
-    if (len(text) == 0) {
-        return startZoom;
-    }
-    float zoom = (float)atof(CStrTemp(text));
-    if (zoom == 0) {
-        return startZoom;
-    }
-    return limitValue(zoom, kZoomMin, kZoomMax);
+    return ParseZoomText(text, zoomLevels, startZoom);
 }
 
 void SettingsWnd::OnRememberOpenedChanged() {
@@ -269,26 +262,14 @@ bool SettingsWnd::Create(MainWindow* mainWin) {
     showInverseSearch = gSettings && gSettings->enableTeXEnhancements && CanAccessDisk();
     Color colTxt = ThemeWindowTextColor();
     Color colBg = ThemeWindowControlBackgroundColor();
-    Color colMuted = ThemeWindowTextDisabledColor();
+    Color colMuted = ThemeWindowDarkerTextColor();
     PlatformFont* fontText = DlgUiFont(kToolDlgTextFontPx);
     PlatformFont* fontMeta = DlgUiFont(kToolDlgMetaFontPx);
     SetFont(fontText);
     bool isRtl = IsUIRtl();
-    {
-        CreateCustomArgs args;
-        args.title = Tr("Settings");
-        args.visible = false;
-        args.style = WS_POPUPWINDOW | WS_CAPTION;
-        args.font = fontText;
-        args.isRtl = isRtl;
-        args.bgColor = colBg;
-        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
-        CreateCustom(args);
-    }
-    if (!hwnd) {
+    if (!CreateToolDialog(this, nullptr, Tr("Settings"), fontText, colTxt, colBg)) {
         return false;
     }
-    SetColors(colTxt, colBg);
 
     auto* vbox = new VBox();
     vbox->alignCross = CrossAxisAlign::Stretch;
@@ -382,9 +363,7 @@ bool SettingsWnd::Create(MainWindow* mainWin) {
     vbox->AddChild(NewDlgFooter(btnCancel, btnOk));
     layout = vbox;
 
-    LayoutAndSizeToContent(layout, DpiScale(kSettingsDlgDx), 0, hwnd);
-    DoLayout(HwndClientRect(hwnd).Size());
-    HwndCenterDialog(hwnd, win ? win->hwndFrame : nullptr);
+    SizeToLayout(this, layout, DpiScale(kSettingsDlgDx), 0, win ? win->hwndFrame : nullptr);
     UpdateTheme();
 
     SetIsVisible(true);

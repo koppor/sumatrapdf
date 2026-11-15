@@ -46,6 +46,7 @@
 #include "SumatraPDF.h"
 #include "MainWindow.h"
 #include "AnnotPlacement.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Tabs.h"
 #include "FileHistory.h"
@@ -106,10 +107,8 @@ struct PaletteThumb {
 struct ThumbnailCache {
     Vec<PaletteThumb> thumbs;
     EngineBase* renderEngine = nullptr;
-    AtomicInt cancelRendering = 0;
+    BgJob job;
     int rotation = 0;
-    bool workerRunning = false;
-    bool deleteWhenWorkerFinishes = false;
 };
 
 struct CommandPaletteWnd : PaletteSources {
@@ -229,28 +228,6 @@ static void DeleteThumbnailCache(ThumbnailCache* cache) {
     delete cache;
 }
 
-// orig's RenderPageThumbnail
-static Pixmap* RenderPageThumbnail(EngineBase* engine, int pageNo, Location loc, int rotation) {
-    // reflow docs share one mediabox; don't use a flat pageNo that a clone's
-    // chapter layout may have already shifted
-    int boxPage = loc.IsValid() && engine->isReflowable ? 1 : pageNo;
-    RectF pageRect = engine->PageMediabox(boxPage);
-    if (pageRect.IsEmpty()) {
-        return nullptr;
-    }
-
-    pageRect = engine->Transform(pageRect, boxPage, 1.0f, rotation);
-    if (pageRect.dx <= 0 || pageRect.dy <= 0) {
-        return nullptr;
-    }
-    float zoom = (float)kThumbDx / pageRect.dx;
-    pageRect.dy = std::min(pageRect.dy, (float)kThumbDy / zoom);
-    pageRect = engine->Transform(pageRect, boxPage, 1.0f, rotation, true);
-    RenderPageArgs args(pageNo, zoom, rotation, &pageRect, RenderTarget::View);
-    args.loc = loc;
-    return PixmapToBgr(engine->RenderPage(args));
-}
-
 struct ThumbRenderTask {
     ThumbnailCache* cache = nullptr;
     int pageNo = 0;
@@ -269,7 +246,7 @@ struct ThumbRenderWorker {
 static void FinishThumbRender(ThumbRenderTask* task) {
     ThumbnailCache* cache = task->cache;
     int idx = task->pageNo - 1;
-    bool isValid = !cache->deleteWhenWorkerFinishes && idx >= 0 && idx < len(cache->thumbs);
+    bool isValid = !cache->job.IsDetached() && idx >= 0 && idx < len(cache->thumbs);
     if (isValid) {
         PaletteThumb& t = cache->thumbs[idx];
         if (task->bitmap) {
@@ -292,8 +269,7 @@ static void FinishThumbRender(ThumbRenderTask* task) {
 }
 
 static void FinishThumbWorker(ThumbnailCache* cache) {
-    cache->workerRunning = false;
-    if (cache->deleteWhenWorkerFinishes) {
+    if (cache->job.Finish()) {
         DeleteThumbnailCache(cache);
         return;
     }
@@ -311,7 +287,7 @@ static void RenderThumbsInBackground(ThumbRenderWorker* worker) {
     }
     EngineBase* engine = cache->renderEngine;
     while (engine && worker->next < len(worker->pages)) {
-        if (AtomicIntGet(&cache->cancelRendering) != 0) {
+        if (cache->job.IsCanceled()) {
             break;
         }
         if (!kHasThreads && GetTickCount64() - sliceStart >= (u64)kUiSliceMs) {
@@ -323,7 +299,7 @@ static void RenderThumbsInBackground(ThumbRenderWorker* worker) {
         auto* task = new ThumbRenderTask;
         task->cache = cache;
         task->pageNo = worker->pages[i];
-        task->bitmap = RenderPageThumbnail(engine, worker->pages[i], loc, worker->rotation);
+        task->bitmap = RenderPageThumb(engine, worker->pages[i], loc, worker->rotation);
         uitask::Post(MkFunc0<ThumbRenderTask>(FinishThumbRender, task));
     }
     uitask::Post(MkFunc0<ThumbnailCache>(FinishThumbWorker, cache));
@@ -359,7 +335,7 @@ static float ThumbMaxScrollY(CommandPaletteWnd* wnd) {
 // screen on either side; thumbnails further than two more screens are freed
 static void StartThumbnailRendering() {
     CommandPaletteWnd* wnd = gCommandPaletteWnd;
-    if (!wnd || !wnd->thumbnailMode || !wnd->thumbCache || wnd->thumbCache->workerRunning) {
+    if (!wnd || !wnd->thumbnailMode || !wnd->thumbCache || wnd->thumbCache->job.IsRunning()) {
         return;
     }
     DisplayModel* dm = wnd->win ? wnd->win->AsFixed() : nullptr;
@@ -420,8 +396,7 @@ static void StartThumbnailRendering() {
         worker->sourceEngine = engine;
         engine->AddRef();
     }
-    AtomicIntSet(&cache->cancelRendering, 0);
-    cache->workerRunning = true;
+    cache->job.Start();
     auto fn = MkFunc0<ThumbRenderWorker>(RenderThumbsInBackground, worker);
     if (kHasThreads) {
         RunAsync(fn, StrL("CommandPaletteThumbnailRender"));
@@ -438,7 +413,7 @@ static void SetThumbnailMode(bool enabled) {
     wnd->thumbnailMode = enabled;
     if (!enabled) {
         if (wnd->thumbCache) {
-            AtomicIntSet(&wnd->thumbCache->cancelRendering, 1);
+            wnd->thumbCache->job.Cancel();
         }
         return;
     }
@@ -485,14 +460,11 @@ void CloseCommandPalette() {
         ToolWindowClose(wnd->tw);
         wnd->tw = nullptr;
     } else if (win && win->gpuiWin && wnd->editQuery) {
-        gp::InputBlur(wnd->editQuery, win->gpuiWin->app, win->gpuiWin);
+        InputBlurWhereFocused(wnd->editQuery, win->gpuiWin);
     }
     delete wnd->editQuery;
     if (wnd->thumbCache) {
-        AtomicIntSet(&wnd->thumbCache->cancelRendering, 1);
-        if (wnd->thumbCache->workerRunning) {
-            wnd->thumbCache->deleteWhenWorkerFinishes = true;
-        } else {
+        if (wnd->thumbCache->job.Detach()) {
             DeleteThumbnailCache(wnd->thumbCache);
         }
     }
@@ -1063,7 +1035,7 @@ static TempStr UpdateCommandNameTemp(MainWindow* win, int cmdId, Str s) {
     switch (cmdId) {
         case CmdToggleFullscreen: {
             isToggle = true;
-            newIsOn = !(win->isFullScreen || win->presentation);
+            newIsOn = !(win->IsFullScreenOrPresentation());
         } break;
         case CmdToggleMenuBar: {
             isToggle = true;
@@ -1087,9 +1059,13 @@ static TempStr UpdateCommandNameTemp(MainWindow* win, int cmdId, Str s) {
             isToggle = true;
             newIsOn = !SidebarContentVisible(win, SidebarContent::Thumbnails);
         } break;
+        case CmdToggleLayers: {
+            isToggle = true;
+            newIsOn = !SidebarContentVisible(win, SidebarContent::Layers);
+        } break;
         case CmdTogglePresentationMode: {
             isToggle = true;
-            newIsOn = !win->presentation;
+            newIsOn = !win->InPresentation();
         } break;
         case CmdToggleLinks: {
             isToggle = true;
@@ -1150,6 +1126,20 @@ static TempStr UpdateCommandNameTemp(MainWindow* win, int cmdId, Str s) {
             if (dm) {
                 isToggle = true;
                 newIsOn = !dm->GetFreePan();
+            }
+        } break;
+        case CmdToggleFacingStepOne: {
+            DisplayModel* dm = win->AsFixed();
+            if (dm) {
+                isToggle = true;
+                newIsOn = !dm->GetFacingStepOne();
+            }
+        } break;
+        case CmdToggleMirror: {
+            DisplayModel* dm = win->AsFixed();
+            if (dm) {
+                isToggle = true;
+                newIsOn = !dm->GetMirror();
             }
         } break;
         case CmdFindToggleMatchCase: {

@@ -40,6 +40,7 @@
 #include "SvgIcons.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Toolbar.h"
 #include "Menu.h"
@@ -104,7 +105,7 @@ struct AnnotFilterToolbar : AnnotFilterToolbarBase {
     gp::Bounds listBounds{};
     gp::Bounds cardBounds{};
     gp::Bounds saveNewBounds{};
-    int selectPendingMs = -1;
+    Countdown selectPending;
     // the row context menu, and the row it is for
     MenuModel* menu = nullptr;
     int menuIdx = -1;
@@ -471,7 +472,7 @@ static void RebuildList(AnnotFilterToolbar* f) {
 }
 
 static void CancelPendingSelection(AnnotFilterToolbar* f) {
-    f->selectPendingMs = -1;
+    f->selectPending.Cancel();
 }
 
 static void ApplySelectionNow(AnnotFilterToolbar* f) {
@@ -497,7 +498,7 @@ static void ScheduleSelection(AnnotFilterToolbar* f) {
     if (annot == tab->selectedAnnotation) {
         return;
     }
-    f->selectPendingMs = kSelectionDebounceMs;
+    f->selectPending.Arm(kSelectionDebounceMs);
 }
 
 // the buttons are rebuilt from the selection every frame
@@ -533,14 +534,11 @@ static void OnFilterTextChanged(AnnotFilterToolbar* f) {
 // ng: orig waits out a WM_TIMER; the shell's tick counts it down instead
 void AnnotFilterTick(MainWindow* win, int elapsedMs) {
     AnnotFilterToolbar* f = win ? win->annotFilterToolbar : nullptr;
-    if (!f || f->selectPendingMs < 0) {
+    if (!f || !f->selectPending.Tick(elapsedMs)) {
         return;
     }
-    f->selectPendingMs -= elapsedMs;
-    if (f->selectPendingMs <= 0) {
-        ApplySelectionNow(f);
-        AppShellInvalidate(win);
-    }
+    ApplySelectionNow(f);
+    AppShellInvalidate(win);
 }
 
 bool IsFloatingAnnotListVisible(MainWindow* win) {
@@ -752,7 +750,7 @@ void ClearAnnotFilterAnnotations(MainWindow* win) {
     VecReset(f->annotations);
     VecReset(f->visibleAnnots);
     ResetListState(f);
-    uitask::Post(MkFunc0(PostedRefreshAnnots, win), "RefreshAnnotFilterAnnots");
+    PostForWindow(win, PostedRefreshAnnots, "RefreshAnnotFilterAnnots");
 }
 
 void RefreshAnnotFilterAnnotations(MainWindow* win) {
@@ -997,7 +995,7 @@ static void RunAnnotListMenuCmd(AnnotListMenuCmd* c) {
             break;
         case AnnotListMenu::Edit:
             SetSelectedAnnotation(tab, annot);
-            uitask::Post(MkFunc0(StartSelectedAnnotContentsEdit, win), "StartAnnotContentsEdit");
+            PostForWindow(win, StartSelectedAnnotContentsEdit, "StartAnnotContentsEdit");
             break;
         case AnnotListMenu::Delete:
             DeleteListSelection(f);
@@ -1218,7 +1216,7 @@ static bool FrameIsMaxOrFullscreen(MainWindow* win) {
 #if OS_WIN
     zoomed = zoomed || IsZoomed(AppShellNativeHwnd(win));
 #endif
-    return win->isFullScreen || win->presentation || zoomed;
+    return win->IsFullScreenOrPresentation() || zoomed;
 }
 
 // orig's AnnotFilterDefaultRect: beside the frame on the side with more room,
@@ -1226,7 +1224,7 @@ static bool FrameIsMaxOrFullscreen(MainWindow* win) {
 static Rect AnnotFilterDefaultRect(MainWindow* win, int dx, int dy) {
     Rect fr = AppShellWindowScreenRect(win);
     int gap = MulDiv(kFloatWinGap, std::max(AppShellWindowDpi(win), 96), 96);
-    Rect area = (win->isFullScreen || win->presentation) ? AppShellMonitorRect(win) : AppShellWorkArea(win);
+    Rect area = (win->IsFullScreenOrPresentation()) ? AppShellMonitorRect(win) : AppShellWorkArea(win);
     dx = std::min(dx, std::max(area.dx, 1));
     dy = std::min(dy, std::max(area.dy, 1));
 
@@ -1544,11 +1542,11 @@ TempStr AnnotFilterToolbarStateTemp(MainWindow* win) {
     Color btnBg = AccentColor(ThemeWindowControlBackgroundColor(), 14);
     Color saveNewTxt = dirty ? ThemeWindowTextColor() : EnsureContrast(ThemeWindowTextDisabledColor(), btnBg);
     Rect saveNewRc = FromGpui(f->saveNewBounds);
-    out.Append(
-        fmt("deleteEnabled=%d discardEnabled=%d saveEnabled=%d nSel=%d deleteCount=%d anchor=%d scrollY=%d "
-            "viewRows=%d listFocused=%d filterFocused=%d pending=%d pageSel=%d\n",
-            DeleteCount(f) > 0 ? 1 : 0, dirty, dirty, SelectedCount(f), DeleteCount(f), f->anchor, (int)f->scrollY,
-            f->viewRows, f->listFocused ? 1 : 0, IsFilterFocused(f) ? 1 : 0, f->selectPendingMs >= 0 ? 1 : 0, pageSel));
+    out.Append(fmt(
+        "deleteEnabled=%d discardEnabled=%d saveEnabled=%d nSel=%d deleteCount=%d anchor=%d scrollY=%d "
+        "viewRows=%d listFocused=%d filterFocused=%d pending=%d pageSel=%d\n",
+        DeleteCount(f) > 0 ? 1 : 0, dirty, dirty, SelectedCount(f), DeleteCount(f), f->anchor, (int)f->scrollY,
+        f->viewRows, f->listFocused ? 1 : 0, IsFilterFocused(f) ? 1 : 0, f->selectPending.IsArmed() ? 1 : 0, pageSel));
     // a second fmt: one call's instruction list tops out at 32
     out.Append(fmt("saveNewRect=%d,%d,%d,%d saveNewText=%s saveNewBg=%s\n", saveNewRc.x, saveNewRc.y, saveNewRc.dx,
                    saveNewRc.dy, SerializeColorTemp(saveNewTxt), SerializeColorTemp(btnBg)));

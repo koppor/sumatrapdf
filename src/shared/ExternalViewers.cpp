@@ -16,6 +16,7 @@
 #include "EngineAll.h"
 #include "DisplayModel.h"
 #include "SumatraPDF.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "MainWindow.h"
 #include "Commands.h"
@@ -509,6 +510,14 @@ bool IsEpubDoc(WindowTab* tab) {
         return false;
     }
     return GuessFileTypeFromName(tab->filePath, true) == FileType::Epub;
+}
+
+// a loaded document MuPDF opened that isn't a PDF: XPS, EPUB, FB2, ... Extract
+// Pages writes its pages to a new PDF (#6509)
+bool IsMupdfNonPdfDoc(WindowTab* tab) {
+    DisplayModel* dm = tab ? tab->AsFixed() : nullptr;
+    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+    return engine && engine->kind == kindEngineMupdf && !EngineMupdfIsPdf(engine);
 }
 
 // Convert CAJ to PDF is offered once caj2pdf opened the file

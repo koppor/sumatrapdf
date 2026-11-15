@@ -78,6 +78,7 @@ void HoverTooltipShow(gpui::Ctx* cx, Str tip, gpui::Bounds at);
 void HoverTooltipShowIn(gpui::App* app, gpui::Window* win, Str tip, gpui::Bounds at);
 void HoverTooltipHideIn(gpui::Window* win);
 void HoverTooltipHide(gpui::Ctx* cx);
+void HoverTooltipHideBar(gpui::Window* barFrame, bool hovered, bool inBarWindow, gpui::Ctx* cx);
 bool DismissTrackedPopup(gpui::Ctx* cx);
 
 // gpui draws a ScrollY() box at the offset it is handed and reports the wheel
@@ -173,6 +174,7 @@ struct DlgWindowSpec {
 ToolWindow* DlgWindowOpen(const DlgWindowSpec& spec, MainWindow* win);
 // closes it and clears *tw
 void DlgWindowClose(ToolWindow** tw);
+void DlgWindowsCloseFor(MainWindow* win);
 // true while `cx` is such a window's
 bool DlgWindowIsHost(gpui::Ctx* cx);
 // the window whose build / close / key callback is running, for a dialog
@@ -291,3 +293,5 @@ gpui::El* DialogFooter(gpui::Ctx* cx, gpui::El* extra, gpui::Entity<V> ent, Str 
                           okText, gpui::ListenTo(ent, onOk)));
     return row;
 }
+bool MenuCuesAlways();
+TempStr InputTextTemp(gpui::InputState* e);

@@ -21,6 +21,7 @@
 #include "SumatraPDF.h"
 #include "SumatraConfig.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "TextSelection.h"
 #include "Selection.h"
@@ -157,10 +158,6 @@ TempStr OsDefaultDestinationLanguageTemp() {
     return StrL("English");
 }
 
-static void LogTranslation(AIChatBackend backend, Str direction, Str text) {
-    logf("selection-translate %s %s: %s", BackendLogName(backend), direction, text);
-}
-
 static void ReadPipeToStrBuilder(HANDLE hPipe, str::Builder& out) {
     char buf[4096];
     DWORD bytesRead = 0;
@@ -188,41 +185,16 @@ static void PopulateEngineDropDown(DropDown* dd, TranslateEngine selected) {
     CbSetCurrentSelection(dd, selIdx);
 }
 
-static bool RunTranslation(AIChatBackend backend, Str srcLang, Str dstLang, Str text, Str& msgOut) {
-    TempStr exePath = FindBackendExecutableTemp(backend);
-    if (len(exePath) == 0) {
-        msgOut = str::Dup(Tr("The selected AI CLI is not installed."));
-        return false;
-    }
+TempStr TranslateTempDirTemp() {
+    return GetTempDirTemp();
+}
 
-    TempStr prompt = BuildTranslationPromptTemp(srcLang, dstLang, text);
-    TempStr cwd = StripTrailingSlashTemp(GetTempDirTemp());
-    TempStr cmdLine;
-    if (backend == AIChatBackend::Grok) {
-        cmdLine = BuildGrokTranslateCmdLineTemp(exePath, prompt, cwd);
-    } else if (backend == AIChatBackend::Claude) {
-        cmdLine = BuildClaudeTranslateCmdLineTemp(exePath, prompt);
-    } else if (backend == AIChatBackend::Codex) {
-        cmdLine = BuildCodexTranslateCmdLineTemp(exePath, prompt, cwd);
-    } else if (backend == AIChatBackend::AntiGravity) {
-        cmdLine = BuildAntiGravityTranslateCmdLineTemp(exePath, prompt);
-    }
-
-    LogTranslation(backend, StrL(">>> backend"), BackendDisplayName(backend));
-    LogTranslation(backend, StrL(">>> srcLang"), srcLang);
-    LogTranslation(backend, StrL(">>> dstLang"), dstLang);
-    LogTranslation(backend, StrL(">>> prompt"), prompt);
-    LogTranslation(backend, StrL(">>> cmd"), cmdLine);
-
+TranslateRun RunTranslateCli(Str cmdLine, Str cwd, str::Builder& output) {
     AIChatProcessLaunchResult launch;
     if (!AIChatLaunchProcessWithStdoutPipe(cmdLine, cwd, &launch)) {
-        msgOut = str::Dup(Tr("Failed to launch the AI CLI."));
-        LogTranslation(backend, StrL("<<< error"), msgOut);
-        return false;
+        return TranslateRun::LaunchFailed;
     }
 
-    str::Builder output;
-    output.Reserve(4096);
     ReadPipeToStrBuilder(launch.hReadPipe, output);
     CloseHandle(launch.hReadPipe);
     launch.hReadPipe = nullptr;
@@ -231,30 +203,10 @@ static bool RunTranslation(AIChatBackend backend, Str srcLang, Str dstLang, Str 
     if (waitRes == WAIT_TIMEOUT) {
         TerminateProcess(launch.hProcess, 1);
         AIChatCloseProcess(&launch.hProcess, false);
-        msgOut = str::Dup(Tr("Translation timed out."));
-        LogTranslation(backend, StrL("<<< error"), msgOut);
-        return false;
+        return TranslateRun::TimedOut;
     }
     AIChatCloseProcess(&launch.hProcess, false);
-
-    LogTranslation(backend, StrL("<<< raw"), ToStr(output));
-
-    str::Builder translation;
-    translation.Reserve(1024);
-    ParseTranslationOutput(backend, ToStr(output), translation);
-    LogTranslation(backend, StrL("<<< parsed"), ToStr(translation));
-    if (len(translation) == 0) {
-        msgOut = str::Dup(Tr("Translation response did not contain text."));
-        LogTranslation(backend, StrL("<<< error"), msgOut);
-        return false;
-    }
-    if (TranslationLooksLikeError(ToStr(translation))) {
-        msgOut = translation.TakeStr();
-        LogTranslation(backend, StrL("<<< error"), msgOut);
-        return false;
-    }
-    msgOut = translation.TakeStr();
-    return true;
+    return TranslateRun::Done;
 }
 
 // backend: 0=Claude, 1=Grok, 2=Codex, 3=AntiGravity
@@ -327,7 +279,7 @@ void SelectionTranslateWnd::Relayout(bool initial) {
     if (initial || !sizeInitialized) {
         LayoutAndSizeToContent(layout, 0, 0, hwnd);
         // pick up the virtual controls so we paint them and they get their input
-        DoLayout(HwndClientRect(hwnd).Size());
+        DoLayout();
         HwndCenterDialog(hwnd, hwndOwner);
         sizeInitialized = true;
         return;
@@ -335,7 +287,7 @@ void SelectionTranslateWnd::Relayout(bool initial) {
     // keep current client size (or grow if new content needs more space, e.g. result)
     Rect rc = HwndClientRect(hwnd);
     LayoutAndSizeToContent(layout, rc.dx, rc.dy, hwnd);
-    DoLayout(HwndClientRect(hwnd).Size());
+    DoLayout();
 }
 
 void SelectionTranslateWnd::OnGetMinMaxInfo(WindowBase::GetMinMaxInfoEvent* ev) {
@@ -512,16 +464,18 @@ static void TeardownSelectionTranslateWnd() {
     w->ScheduleDelete();
 }
 
-static void OnSelectionTranslateClose(WindowBase::CloseEvent* ev) {
-    if (gSelectionTranslateWnd == (SelectionTranslateWnd*)ev->e->self) {
+static void TeardownIfCurrent(void* self) {
+    if (gSelectionTranslateWnd == (SelectionTranslateWnd*)self) {
         TeardownSelectionTranslateWnd();
     }
 }
 
+static void OnSelectionTranslateClose(WindowBase::CloseEvent* ev) {
+    TeardownIfCurrent(ev->e->self);
+}
+
 static void OnSelectionTranslateDestroy(WindowBase::DestroyEvent* ev) {
-    if (gSelectionTranslateWnd == (SelectionTranslateWnd*)ev->e->self) {
-        TeardownSelectionTranslateWnd();
-    }
+    TeardownIfCurrent(ev->e->self);
 }
 
 bool SelectionTranslateWnd::Create(HWND owner, Str selText, Str title) {
@@ -529,7 +483,7 @@ bool SelectionTranslateWnd::Create(HWND owner, Str selText, Str title) {
     bool isRtl = IsUIRtl();
     Color colTxt = ThemeWindowTextColor();
     Color colBg = ThemeWindowControlBackgroundColor();
-    Color colMuted = ThemeWindowTextDisabledColor();
+    Color colMuted = ThemeWindowDarkerTextColor();
     PlatformFont* fontText = DlgUiFont(kToolDlgTextFontPx);
     PlatformFont* fontMeta = DlgUiFont(kToolDlgMetaFontPx);
     SetFont(fontText);

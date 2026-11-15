@@ -50,6 +50,8 @@ void SidebarFocusTop(MainWindow*);
 void SidebarToggleThumbnails(MainWindow*);
 void SidebarToggleBookmarks(MainWindow*);
 void SidebarToggleFavorites(MainWindow*);
+void SidebarToggleLayers(MainWindow*);
+bool SidebarHasLayers(MainWindow*);
 bool SidebarOnKeyDown(MainWindow*, int vkey, bool ctrl, bool shift, bool alt);
 // a typed character while a tree has the keyboard: the native tree's type-ahead
 bool SidebarOnChar(MainWindow*, u32 ch);
@@ -67,3 +69,4 @@ bool SidebarPanelHasFocus(MainWindow*, SidebarSlot);
 bool SidebarHasFocus(MainWindow*);
 bool SidebarMenuOpen(MainWindow*, gpui::Ctx* cx);
 void SidebarFocusPanel(MainWindow*, SidebarSlot);
+Pixmap* RenderPageThumb(EngineBase* engine, int pageNo, Location loc, int rotation);

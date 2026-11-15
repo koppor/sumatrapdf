@@ -22,6 +22,7 @@
 #include "UpdateCheck.h"
 #include "UpdateCheckCommon.h"
 #include "FileThumbnails.h"
+#include "HexViewCommon.h"
 
 struct OpenDdeArgs {
     bool parsed = false;
@@ -375,13 +376,7 @@ void DocPropertiesTest() {
     utassert(str::Eq(PropNameTemp(DocProp::Title), StrL("title")));
     utassert(str::Eq(PropNameTemp(DocProp::FocalLength35mm), StrL("focalLength35mm")));
     utassert(str::Eq(PropNameTemp(DocProp::ImagePath), StrL("imagePath")));
-    utassert(PropFromName(StrL("title")) == DocProp::Title);
-    utassert(PropFromName(StrL("focalLength35mm")) == DocProp::FocalLength35mm);
-    utassert(PropFromName(StrL("imagePath")) == DocProp::ImagePath);
-    // a couple more, plus unknown/None
     utassert(str::Eq(PropNameTemp(DocProp::CreationDate), StrL("creationDate")));
-    utassert(PropFromName(StrL("modDate")) == DocProp::ModificationDate);
-    utassert(PropFromName(StrL("bogusPropName")) == DocProp::None);
 }
 
 void ParseFileArgsTest() {
@@ -393,6 +388,136 @@ void ParseFileArgsTest() {
     // a garbled drive letter: no file before the '?'
     utassert(!ParseFileArgs(StrL("?:\\foo.pdf")));
 }
+
+#if OS_WIN
+void ParseCommandLineTest() {
+    {
+        Flags i;
+        ParseFlags(GetPermArena(), L"SumatraPDF.exe -install -no-desktop-shortcut", i);
+        utassert(i.install);
+        utassert(i.noDesktopShortcut);
+        utassert(0 == len(i.fileNames));
+    }
+
+    {
+        Flags i;
+        ParseFlags(GetPermArena(), L"SumatraPDF.exe -start-perf-log -log-perf-file c:\\tmp\\perf.txt foo.pdf", i);
+        utassert(i.startPerfLog);
+        utassert(str::Eq(i.perfLogFile, StrL("c:\\tmp\\perf.txt")));
+        utassert(1 == len(i.fileNames));
+    }
+
+    {
+        Flags i;
+        ParseFlags(GetPermArena(), L"SumatraPDF.exe -bench foo.pdf", i);
+        utassert(2 == len(i.pathsToBenchmark));
+        utassert(str::Eq(StrL("foo.pdf"), i.pathsToBenchmark[0]));
+        utassert(len(i.pathsToBenchmark[1]) == 0);
+    }
+
+    {
+        Flags i;
+        ParseFlags(GetPermArena(), L"SumatraPDF.exe -bench foo.pdf -fwdsearch-width 5", i);
+        utassert(len(i.globalPrefArgs) == 2);
+        Str s = i.globalPrefArgs[0];
+        utassert(str::Eq(s, StrL("-fwdsearch-width")));
+        s = i.globalPrefArgs[1];
+        utassert(str::Eq(s, StrL("5")));
+        utassert(2 == len(i.pathsToBenchmark));
+        utassert(str::Eq(StrL("foo.pdf"), i.pathsToBenchmark[0]));
+        utassert(len(i.pathsToBenchmark[1]) == 0);
+    }
+
+    {
+        Flags i;
+        ParseFlags(GetPermArena(), L"SumatraPDF.exe -bench bar.pdf loadonly", i);
+        utassert(2 == len(i.pathsToBenchmark));
+        utassert(str::Eq(StrL("bar.pdf"), i.pathsToBenchmark[0]));
+        utassert(str::Eq(StrL("loadonly"), i.pathsToBenchmark[1]));
+    }
+
+    {
+        Flags i;
+        ParseFlags(GetPermArena(), L"SumatraPDF.exe -bench bar.pdf 1 -set-color-range 0x123456 #abCDef", i);
+        utassert(len(i.globalPrefArgs) == 3);
+        utassert(2 == len(i.pathsToBenchmark));
+        utassert(str::Eq(StrL("bar.pdf"), i.pathsToBenchmark[0]));
+        utassert(str::Eq(StrL("1"), i.pathsToBenchmark[1]));
+    }
+
+    {
+        Flags i;
+        ParseFlags(GetPermArena(), L"SumatraPDF.exe -bench bar.pdf 1-5,3   -bench some.pdf 1,3,8-34", i);
+        utassert(4 == len(i.pathsToBenchmark));
+        utassert(str::Eq(StrL("bar.pdf"), i.pathsToBenchmark[0]));
+        utassert(str::Eq(StrL("1-5,3"), i.pathsToBenchmark[1]));
+        utassert(str::Eq(StrL("some.pdf"), i.pathsToBenchmark[2]));
+        utassert(str::Eq(StrL("1,3,8-34"), i.pathsToBenchmark[3]));
+    }
+
+    {
+        Flags i;
+        ParseFlags(GetPermArena(), L"SumatraPDF.exe -presentation -bgcolor 0xaa0c13 foo.pdf -invert-colors bar.pdf", i);
+        utassert(true == i.enterPresentation);
+        utassert(true == i.invertColors);
+        utassert(2 == len(i.fileNames));
+        utassert(0 == i.fileNames.Find(StrL("foo.pdf")));
+        utassert(1 == i.fileNames.Find(StrL("bar.pdf")));
+    }
+
+    {
+        Flags i;
+        ParseFlags(GetPermArena(), L"SumatraPDF.exe -bg-color 0xaa0c13 -invertcolors rosanna.pdf", i);
+        utassert(true == i.invertColors);
+        utassert(1 == len(i.fileNames));
+        utassert(0 == i.fileNames.Find(StrL("rosanna.pdf")));
+    }
+
+    {
+        Flags i;
+        ParseFlags(GetPermArena(), LR"(SumatraPDF.exe "foo \" bar \\.pdf" un\"quoted.pdf)", i);
+        utassert(2 == len(i.fileNames));
+        utassert(0 == i.fileNames.Find(StrL(R"(foo " bar \\.pdf)")));
+        utassert(1 == i.fileNames.Find(StrL(R"(un"quoted.pdf)")));
+    }
+
+    {
+        Flags i;
+        ParseFlags(
+            GetPermArena(),
+            L"SumatraPDF.exe -page 37 -view continuousfacing -zoom fitcontent -scroll 45,1234         -reuse-instance",
+            i);
+        utassert(0 == len(i.fileNames));
+        utassert(i.pageNumber == 37);
+        utassert(i.startView == DisplayMode::ContinuousFacing);
+        utassert(i.startZoom == kZoomFitContent);
+        utassert(i.startScroll.x == 45 && i.startScroll.y == 1234);
+    }
+
+    {
+        Flags i;
+        ParseFlags(GetPermArena(), LR"(SumatraPDF.exe -view "single page" -zoom 237.45 -scroll -21,-1)", i);
+        utassert(0 == len(i.fileNames));
+        utassert(i.startView == DisplayMode::SinglePage);
+        utassert(i.startZoom == 237.45f);
+        utassert(i.startScroll.x == -21 && i.startScroll.y == -1);
+    }
+
+    {
+        Flags i;
+        ParseFlags(GetPermArena(), L"SumatraPDF.exe -zoom 35%", i);
+        utassert(0 == len(i.fileNames));
+        utassert(i.startZoom == 35.f);
+    }
+
+    {
+        Flags i;
+        ParseFlags(GetPermArena(), L"SumatraPDF.exe -zoom fit-content", i);
+        utassert(i.startZoom == kZoomFitContent);
+        utassert(0 == len(i.fileNames));
+    }
+}
+#endif
 
 // 8-byte signature, IHDR length and type, then big-endian width and height
 static Str PngHeaderTemp(u32 dx, u32 dy) {
@@ -434,4 +559,74 @@ void PngSizeTest() {
         DeleteSettings(gSettings);
         gSettings = nullptr;
     }
+}
+
+void HexViewTest() {
+    u64 v = 0;
+    utassert(HexParseOffset(StrL("31"), &v) && v == 31);
+    utassert(HexParseOffset(StrL("0x1F"), &v) && v == 31);
+    utassert(HexParseOffset(StrL("1Fh"), &v) && v == 31);
+    utassert(HexParseOffset(StrL("1f"), &v) && v == 31);
+    utassert(HexParseOffset(StrL(" 0X10 "), &v) && v == 16);
+    utassert(HexParseOffset(StrL("0xFFFFFFFFFFFFFFFF"), &v) && v == ~(u64)0);
+    utassert(!HexParseOffset(StrL(""), &v) && !HexParseOffset(StrL("0x"), &v) && !HexParseOffset(StrL("zz"), &v));
+    utassert(!HexParseOffset(StrL("0x1FFFFFFFFFFFFFFFF"), &v));
+    utassert(!HexParseOffset(StrL("-1"), &v));
+
+    utassert(str::Eq(HexOffsetTemp(0x1F, 100), StrL("1F")));
+    utassert(str::Eq(HexOffsetTemp(3, 0x1001), StrL("0003")));
+    utassert(str::Eq(HexOffsetTemp(0x100, 0x100), StrL("100")));
+    utassert(str::Eq(HexOffsetTemp(0, 0), StrL("0")));
+    utassert(str::Eq(HexOffsetTemp(0x1F, 0x100000001ULL), StrL("00000001F")));
+    utassert(HexOffsetDigits(~(u64)0) == 16);
+
+    // 8 offset digits, 2 gaps of 16 px and 32 bytes of 4 chars, at 8 px a char
+    utassert(HexPerRowFor(7 * 8 + 32 + 4 * 32 * 8, 8, 16, 8) == 32);
+    utassert(HexPerRowFor(7 * 8 + 32 + 4 * 32 * 8 - 1, 8, 16, 8) == 28);
+    utassert(HexPerRowFor(10, 8, 16, 8) == kHexMinPerRow && HexPerRowFor(100000, 8, 16, 8) == kHexMaxPerRow);
+
+    const u8 row[16] = {0x41, 0x42, 0, 0x7F, 0x20, 0xFF, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0x7E};
+    utassert(str::Eq(HexBytesTemp(row, 16, 16), StrL("41 42 00 7F 20 FF 06 07 08 09 0A 0B 0C 0D 0E 7E")));
+    utassert(str::Eq(HexBytesTemp(row, 3, 4), StrL("41 42 00   ")));
+    utassert(str::Eq(HexCharsTemp(row, 16), StrL("AB.. ..........~")));
+    utassert(str::Eq(HexColumnsHeaderTemp(4), StrL("00 01 02 03")));
+
+    utassert(HexClampTop(0, 0, 10, 16) == 0);
+    utassert(HexClampTop(1000, 100, 40, 16) == 0);
+    // 10 rows of 16, 4 shown: the last top is row 6
+    utassert(HexClampTop(1000, 160, 4, 16) == 96);
+    utassert(HexClampTop(17, 160, 4, 16) == 16);
+    utassert(HexClampTop(1000, 161, 4, 16) == 112);
+    u64 huge = 1ULL << 40;
+    utassert(HexClampTop(huge, huge, 10, 16) == huge - 160);
+
+    // bytes come from the right place across pieces of the file
+    TempStr path = GetTempFilePathTemp(StrL("hexview"));
+    int size = kHexCacheBytes * 3 + 7;
+    u8* data = AllocArray<u8>(size);
+    for (int i = 0; i < size; i++) {
+        data[i] = (u8)(i * 31 + (i >> 8));
+    }
+    utassert(file::WriteFile(path, Str((char*)data, size)));
+    HexView* hex = HexViewOpen(path);
+    utassert(hex && hex->size == (u64)size);
+    const int ats[] = {0, 16, kHexCacheBytes - 8, kHexCacheBytes, kHexCacheBytes * 2 + 100, size - 16, 32, size - 3};
+    for (int at : ats) {
+        const u8* got = nullptr;
+        int want = std::min(64, size - at);
+        int n = HexBytesAt(hex, (u64)at, &got, 64);
+        utassert(n == want && memcmp(got, data + at, (size_t)n) == 0);
+    }
+    const u8* none = nullptr;
+    utassert(HexBytesAt(hex, (u64)size + 100, &none, 16) == 0);
+    hex->rows = 4;
+    utassert(HexViewGoTo(hex, 100) && hex->top == 96 && hex->mark == 100);
+    utassert(!HexViewGoTo(hex, (u64)size));
+    utassert(HexViewGoTo(hex, (u64)size - 1));
+    HexScrollPages(hex, -1);
+    utassert(hex->top == HexLastTop(hex) - 3 * 16);
+    HexViewFree(hex);
+    free(data);
+    file::Delete(path);
+    utassert(!HexViewOpen(path));
 }

@@ -190,19 +190,7 @@ void CustomZoomWnd::OnKeyDown(KeyEvent* ev) {
 // it. Empty or unreadable leaves the zoom alone.
 float CustomZoomWnd::SelectedZoom() {
     TempStr text = editZoom ? editZoom->GetTextTemp() : Str{};
-    for (int i = 0; i < len(zoomLevels); i++) {
-        if (str::EqI(text, ZoomLevelStrExact(zoomLevels[i]))) {
-            return zoomLevels[i];
-        }
-    }
-    if (len(text) == 0) {
-        return startZoom;
-    }
-    float zoom = (float)atof(CStrTemp(text));
-    if (zoom == 0) {
-        return startZoom;
-    }
-    return limitValue(zoom, kZoomMin, kZoomMax);
+    return ParseZoomText(text, zoomLevels, startZoom);
 }
 
 void CustomZoomWnd::OnCancel(VirtMouseEvent*) {
@@ -237,26 +225,13 @@ bool CustomZoomWnd::Create(MainWindow* mainWin) {
 
     colTxt = ThemeWindowTextColor();
     colBg = ThemeWindowControlBackgroundColor();
-    Color colMuted = ThemeWindowTextDisabledColor();
+    Color colMuted = ThemeWindowDarkerTextColor();
     fontText = DlgUiFont(kToolDlgTextFontPx);
     SetFont(fontText);
     bool isRtl = IsUIRtl();
-    {
-        CreateCustomArgs args;
-        args.owner = win ? win->hwndFrame : nullptr;
-        args.title = Tr("Zoom");
-        args.visible = false;
-        args.style = WS_POPUPWINDOW | WS_CAPTION;
-        args.font = fontText;
-        args.isRtl = isRtl;
-        args.bgColor = colBg;
-        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
-        CreateCustom(args);
-    }
-    if (!hwnd) {
+    if (!CreateToolDialog(this, win ? win->hwndFrame : nullptr, Tr("Zoom"), fontText, colTxt, colBg)) {
         return false;
     }
-    SetColors(colTxt, colBg);
 
     auto* vbox = new VBox();
     vbox->alignCross = CrossAxisAlign::Stretch;
@@ -315,7 +290,7 @@ bool CustomZoomWnd::Create(MainWindow* mainWin) {
             }
         }
     }
-    DoLayout(HwndClientRect(hwnd).Size());
+    DoLayout();
     HwndCenterDialog(hwnd, win ? win->hwndFrame : nullptr);
     UpdateTheme();
 

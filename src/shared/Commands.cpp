@@ -218,7 +218,7 @@ const CommandInfo gCommands[] = {
     {CmdPdfCompress, "CmdPdfCompress\0", StrL("Compress PDF...")},
     {CmdPdfDecompress, "CmdPdfDecompress\0", StrL("Decompress PDF...")},
     {CmdPdfDeletePages, "CmdPdfDeletePages\0", StrL("Delete Pages From PDF...")},
-    {CmdPdfExtractPages, "CmdPdfExtractPages\0", StrL("Extract Pages From PDF...")},
+    {CmdPdfExtractPages, "CmdPdfExtractPages\0", StrL("Extract Pages...")},
     {CmdPdfEncrypt, "CmdPdfEncrypt\0", StrL("Encrypt PDF...")},
     {CmdPdfDecrypt, "CmdPdfDecrypt\0", StrL("Decrypt PDF...")},
     {CmdPdfBake, "CmdPdfBake\0", StrL("Bake PDF File...")},
@@ -293,7 +293,7 @@ const CommandInfo gCommands[] = {
     {CmdInsertImage, "CmdInsertImage\0", StrL("Insert Image...")},
     {CmdToggleHighlightFormFields, "CmdToggleHighlightFormFields\0", StrL("Toggle Highlight Form Fields")},
     {CmdTogglePageBoxes, "CmdTogglePageBoxes\0", StrL("Toggle Page Boxes")},
-    {CmdConvertPdfToImages, "CmdConvertPdfToImages\0", StrL("Convert PDF to Images...")},
+    {CmdConvertPdfToImages, "CmdConvertPdfToImages\0", StrL("Convert to Images...")},
     {CmdToggleUniformPageWidth, "CmdToggleUniformPageWidth\0", StrL("Toggle Uniform Page Width")},
     {CmdToggleTransparencyGrid, "CmdToggleTransparencyGrid\0", StrL("Toggle Transparency Grid")},
     {CmdTogglePageGrid, "CmdTogglePageGrid\0", StrL("Toggle Page Grid")},
@@ -354,10 +354,34 @@ const CommandInfo gCommands[] = {
     {CmdConvertEpubToPdf, "CmdConvertEpubToPdf\0", StrL("Convert EPUB to PDF...")},
     {CmdConvertCajToPDF, "CmdConvertCajToPDF\0", StrL("Convert CAJ to PDF...")},
     {CmdFindHistory, "CmdFindHistory\0", StrL("Find History")},
-    {CmdSumatraOnline, "CmdSumatraOnline\0", StrL("Sumatra Online...")},
+    {CmdSumatraPDFWeb, "CmdSumatraPDFWeb\0", StrL("SumatraPDF Web...")},
     {CmdDebugSaveSettings, "CmdDebugSaveSettings\0", StrL("Debug: Save Settings")},
     {CmdNewTab, "CmdNewTab\0", StrL("New Tab")},
     {CmdShowSignatures, "CmdShowSignatures\0", StrL("Show Signatures")},
+    {CmdOpenFromURL, "CmdOpenFromURL\0", StrL("Open from URL...")},
+    {CmdGoToPrevChapter, "CmdGoToPrevChapter\0", StrL("Previous Chapter")},
+    {CmdGoToNextChapter, "CmdGoToNextChapter\0", StrL("Next Chapter")},
+    {CmdToggleLayers, "CmdToggleLayers\0", StrL("Toggle Layers")},
+    {CmdToggleFacingStepOne, "CmdToggleFacingStepOne\0", StrL("Toggle Facing: Step One Page")},
+    {CmdCountWords, "CmdCountWords\0", StrL("Count Words")},
+    {CmdMinimizeWindow, "CmdMinimizeWindow\0", StrL("Minimize Window")},
+    {CmdShowSelectedText, "CmdShowSelectedText\0", StrL("Show Selected Text")},
+    {CmdToggleMirror, "CmdToggleMirror\0", StrL("Mirror Pages")},
+    {CmdTrimPagesToSelection, "CmdTrimPagesToSelection\0", StrL("Trim Pages To Selection")},
+    {CmdShowWholePages, "CmdShowWholePages\0", StrL("Show Whole Pages")},
+    {CmdMeasure, "CmdMeasure\0", StrL("Measure")},
+    {CmdReplaceImage, "CmdReplaceImage\0", StrL("Replace Image...")},
+    {CmdEditImageExternally, "CmdEditImageExternally\0", StrL("Edit Image in Another App")},
+    {CmdToggleReadColumns, "CmdToggleReadColumns\0", StrL("Read Columns")},
+    {CmdToggleColumnsWholePage, "CmdToggleColumnsWholePage\0", StrL("Read Columns: Show Whole Page")},
+    {CmdDebugShowDownloadedFonts, "CmdDebugShowDownloadedFonts\0", StrL("Debug: Show Downloaded Fonts")},
+    {CmdTocExpandChapter, "CmdTocExpandChapter\0", StrL("Bookmarks: Expand Chapter")},
+    {CmdTocCollapseChapter, "CmdTocCollapseChapter\0", StrL("Bookmarks: Collapse Chapter")},
+    {CmdEditFavorites, "CmdEditFavorites\0", StrL("Edit Favorites...")},
+    {CmdCloseMissingTabs, "CmdCloseMissingTabs\0", StrL("Close Tabs of Missing Files")},
+    {CmdViewAsHex, "CmdViewAsHex\0", StrL("View As Hex")},
+    {CmdAIChatWithCustomAPI, "CmdAIChatWithCustomAPI\0", StrL("Custom AI chat...")},
+    {CmdSaveTrimmedPagesAs, "CmdSaveTrimmedPagesAs\0", StrL("Save Trimmed Pages As...")},
     {CmdRefHoverPushToJabRef, "CmdRefHoverPushToJabRef\0", StrL("Push Reference to JabRef")},
 };
 const int gCommandsCount = dimofi(gCommands);
@@ -406,7 +430,7 @@ static const ArgSpec argSpecs[] = {
     {CmdCreateAnnotText, kCmdArgFocusEdit, CommandArg::Type::Bool},
     {CmdCreateAnnotText, kCmdArgFocusList, CommandArg::Type::Bool},
 
-    // and  CmdScrollDown, CmdGoToNextPage, CmdGoToPrevPage
+    // and CmdScrollDown, CmdScrollLeft, CmdScrollRight, CmdGoToNextPage, CmdGoToPrevPage
     {CmdScrollUp, kCmdArgN, CommandArg::Type::Int}, // default
 
     {CmdSetTheme, kCmdArgTheme, CommandArg::Type::String}, // default
@@ -555,6 +579,35 @@ void FreeCommandArgs(CommandArg* first) {
 
 static int gNextCustomCommandId = (int)CmdFirstCustom;
 
+// WM_COMMAND treats ids from 0xF000 up as system commands (SC_*), and ids
+// travel as 16 bits (LOWORD(wp))
+constexpr int kCustomCommandIdLimit = 0xF000;
+
+static bool IsCustomCommandIdUsed(int id) {
+    for (auto* cmd = gFirstCustomCommand; cmd; cmd = cmd->next) {
+        if (cmd->id == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Ids only grow (each settings reload and history entry takes new ones) so
+// live menus never see an id reused for another command. Once the range is
+// used up, take the lowest id no live command has.
+static int NewCustomCommandId() {
+    if (gNextCustomCommandId < kCustomCommandIdLimit) {
+        return gNextCustomCommandId++;
+    }
+    for (int id = (int)CmdFirstCustom; id < kCustomCommandIdLimit; id++) {
+        if (!IsCustomCommandIdUsed(id)) {
+            return id;
+        }
+    }
+    ReportIf(true);
+    return kCustomCommandIdLimit - 1;
+}
+
 CustomCommand* AllocCustomCommand(Str definition, Str name, Str key) {
     Str strings[] = {definition, name, key};
     auto* cmd = AllocCommandData<CustomCommand>(strings);
@@ -596,7 +649,7 @@ CustomCommand* CreateCustomCommand(Str definition, int origCmdId, CommandArg* ar
     // only when we have unique args we have to create a new command id
     int id = origCmdId;
     if (args != nullptr) {
-        id = gNextCustomCommandId++;
+        id = NewCustomCommandId();
     }
     NormalizeCommandNameAndKey(definition, &name, &key);
     auto* cmd = AllocCustomCommand(definition, name, key);
@@ -631,7 +684,7 @@ CustomCommand* CloneCustomCommand(CustomCommand* cmd, Str name, Str key) {
     auto* res = CreateCustomCommand(cmd->definition, cmd->origId, args, name, key);
     // Argumentless clones still need distinct toolbar IDs.
     if (!args) {
-        res->id = gNextCustomCommandId++;
+        res->id = NewCustomCommandId();
     }
     return res;
 }
@@ -643,6 +696,31 @@ CustomCommand* FindCustomCommand(int cmdId) {
         }
     }
     return nullptr;
+}
+
+// custom ids must stay below 0xF000 (system commands) once the range is used up
+bool Commands_UnitTestIdLimit() {
+    CustomCommand* savedFirst = gFirstCustomCommand;
+    int savedNext = gNextCustomCommandId;
+    gFirstCustomCommand = nullptr;
+    gNextCustomCommandId = kCustomCommandIdLimit - 2;
+
+    auto make = [] {
+        return CreateCustomCommand(StrL("CmdZoomCustom 50"), CmdZoomCustom, AllocCommandArg({}, StrL("50")), {}, {});
+    };
+    CustomCommand* a = make();
+    CustomCommand* b = make();
+    // range used up: the lowest free id is reused, never one at the limit
+    CustomCommand* c = make();
+    bool ok = a->id == kCustomCommandIdLimit - 2 && b->id == kCustomCommandIdLimit - 1;
+    ok = ok && c->id == (int)CmdFirstCustom;
+    CustomCommand* d = make();
+    ok = ok && d->id == (int)CmdFirstCustom + 1;
+
+    FreeCustomCommands();
+    gFirstCustomCommand = savedFirst;
+    gNextCustomCommandId = savedNext;
+    return ok;
 }
 
 void FreeCustomCommands() {
@@ -845,7 +923,8 @@ CustomCommand* CreateCommandFromDefinition(Str definition) {
     int argCmdId = cmdId;
     if (cmdId >= CmdCreateAnnotFirst && cmdId <= CmdCreateAnnotLast) {
         argCmdId = CmdCreateAnnotText;
-    } else if (cmdId == CmdScrollUp || cmdId == CmdScrollDown || cmdId == CmdGoToNextPage || cmdId == CmdGoToPrevPage) {
+    } else if (cmdId == CmdScrollUp || cmdId == CmdScrollDown || cmdId == CmdScrollLeft || cmdId == CmdScrollRight ||
+               cmdId == CmdGoToNextPage || cmdId == CmdGoToPrevPage) {
         argCmdId = CmdScrollUp;
     }
 

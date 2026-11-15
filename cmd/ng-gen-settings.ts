@@ -34,6 +34,8 @@ class Field {
   // saved & deserialized like any setting, but hidden from the advanced
   // settings dialog (app-managed / deprecated-for-migration values)
   Internal = false;
+  // a credential: left out of crash reports and not edited in the dialog
+  Secret = false;
   // not written by genStructMarkdown or genStructHTML. .internal() does not do this
   OmitFromDocs = false;
   DocComment: string;
@@ -59,6 +61,10 @@ class Field {
   }
   internal(): this {
     this.Internal = true;
+    return this;
+  }
+  secret(): this {
+    this.Secret = true;
     return this;
   }
   omitFromDocs(): this {
@@ -355,6 +361,12 @@ const tabFile: Field[] = [field("Path", Str, "", "path of the document")];
 const tabGroup: Field[] = [
   field("Name", Str, "", "name of the tab group, as shown when restoring it"),
   array("TabFiles", tabFile, "documents that belong to this tab group"),
+  field(
+    "AutoSync",
+    Bool,
+    false,
+    "if true, the group follows the tabs of the window it was saved from or restored into",
+  ).ver("3.7"),
 ];
 
 // screen coordinates in real (already DPI-scaled) pixels: these are saved from
@@ -395,6 +407,14 @@ const keyboardShortcut: Field[] = [
   field("CmdId", Int, null, "command id").ver("3.6").notSaved(),
 ];
 
+// fractions (0 to 1) of the page's media box
+const userCrop: Field[] = [
+  field("X", Float, 0, "left edge, as a fraction of the page width"),
+  field("Y", Float, 0, "top edge, as a fraction of the page height"),
+  field("Dx", Float, 0, "width, as a fraction of the page width"),
+  field("Dy", Float, 0, "height, as a fraction of the page height"),
+];
+
 const scrollPos: Field[] = [
   field("X", Float, 0, "horizontal scroll offset, in document units"),
   field("Y", Float, 0, "vertical scroll offset, in document units"),
@@ -425,6 +445,12 @@ const printerDefaults: Field[] = [
     0,
     "resolution to assume for the document when printing at original size (e.g. 300 for a 300 dpi scan whose file doesn't say); 0 uses the resolution recorded in the file",
   ),
+  field(
+    "AutoRotate",
+    Bool,
+    true,
+    "default for the Print dialog's Rotate wide pages to fit the paper: if true, a page wider than it is tall is turned 90° to fill the paper",
+  ).ver("3.7"),
 ];
 
 // HighlightOffset / HighlightWidth are in document units (multiplied by the
@@ -725,6 +751,27 @@ const antiGravity: Field[] = [
       "etc. in headless print mode (agy cannot prompt for permissions with -p)",
   ),
   field("BgColor", Color, "#ffffff", "background color of the Antigravity chat panel"),
+];
+
+const customAI: Field[] = [
+  field("Name", Str, "Custom AI", "display name of the OpenAI-compatible chat provider"),
+  field("BaseURL", Str, "", "OpenAI-compatible API base URL, such as https://api.deepseek.com/v1"),
+  field(
+    "ApiKeyEnv",
+    Str,
+    "CUSTOM_AI_API_KEY",
+    "environment variable holding the API key; takes precedence over ApiKey",
+  ),
+  field("ApiKey", Str, "", "API key; prefer ApiKeyEnv, which keeps it out of this file").secret(),
+  field("Model", Str, "", "model ID accepted by the provider"),
+  field("Models", Str, "", "additional model IDs, comma-separated"),
+  field(
+    "IncludeCurrentPage",
+    Bool,
+    false,
+    "send the current page's text to the configured provider with each question",
+  ),
+  field("BgColor", Color, "#ffffff", "background color of the custom AI chat panel"),
 ];
 
 const aiChat: Field[] = [
@@ -1222,11 +1269,37 @@ const fileState: Field[] = [
   field("TrimEmptyMargins", Bool, false, "if true, empty margins around page content are trimmed from display").ver(
     "3.7",
   ),
+  compactStruct(
+    "UserCrop",
+    userCrop,
+    "part of every page that is shown, set with CmdTrimPagesToSelection; all zeros shows whole pages",
+  )
+    .structName("RectF")
+    .ver("3.7"),
   field(
     "FreePan",
     Bool,
     false,
     "if true, the view can be panned past the page edges, so any part of a page can be brought to the center of the window",
+  ).ver("3.7"),
+  field(
+    "FacingStepOne",
+    Bool,
+    false,
+    "if true, facing and book view move one page at a time: pages 1-2, then 2-3, then 3-4",
+  ).ver("3.7"),
+  field("Mirror", Bool, false, "if true, pages are shown (and printed) mirrored left to right").ver("3.7"),
+  field(
+    "ReadingAutoScrollSpeed",
+    Float,
+    0,
+    "Automatically Scroll speed for this document, in pixels per second; 0 uses the global ReadingAutoScrollSpeed",
+  ).ver("3.7"),
+  field(
+    "ReadColumns",
+    Bool,
+    false,
+    "if true, scrolling reads a two-column page down its left column, then its right one (View / Read Columns)",
   ).ver("3.7"),
   field(
     "Brightness",
@@ -1242,6 +1315,15 @@ const fileState: Field[] = [
   ).ver("3.7"),
   field("BgCol", Color, "", "if given, overrides the background color for this document").ver("3.7"),
   field("TabCol", Color, "", "if given, overrides the tab color for this document").ver("3.7"),
+  field(
+    "LayerStates",
+    Str,
+    null,
+    "visibility of the PDF's layers (optional content groups), if changed: 1 (shown) or 0 (hidden) for each layer, in document order",
+  ).ver("3.7"),
+  // ng doesn't calibrate measurements, but keeps what orig saved in the shared settings file
+  field("MeasurementScale", Float, 0, "calibrated measurement units per document coordinate; 0 uses points"),
+  field("MeasurementUnit", Str, null, "unit name for calibrated measurements"),
   compactArray(
     "TocState",
     Int,
@@ -1278,6 +1360,9 @@ const fileStateLayout = [
   "Zoom",
   "BgCol",
   "TabCol",
+  "LayerStates",
+  "MeasurementUnit",
+  "MeasurementScale",
   "OpenCount",
   "PageNo",
   "PageCount",
@@ -1297,7 +1382,12 @@ const fileStateLayout = [
   "DisplayR2L",
   "UniformPageWidth",
   "TrimEmptyMargins",
+  "UserCrop",
   "FreePan",
+  "FacingStepOne",
+  "Mirror",
+  "ReadingAutoScrollSpeed",
+  "ReadColumns",
 ];
 fileState.sort((a, b) => fileStateLayout.indexOf(a.Name) - fileStateLayout.indexOf(b.Name));
 
@@ -1471,6 +1561,17 @@ const globalPrefs: Field[] = [
     true,
     "if true, opening a digitally signed PDF shows whether its signatures are valid",
   ).ver("3.7"),
+  compactArray(
+    "OfdTrustedCertificates",
+    Str,
+    null,
+    "certificate files (DER or PEM) trusted as roots for OFD signatures",
+  )
+    .ver("3.7")
+    .doc(
+      "paths of certificate files (DER or PEM) trusted as roots when checking OFD signatures, in addition to " +
+        "the Windows trusted root store (paths containing spaces must be quoted)",
+    ),
   field(
     "TemporaryFileShowNotification",
     Bool,
@@ -1484,6 +1585,13 @@ const globalPrefs: Field[] = [
     null,
     "folder that files from a temporary folder are copied to. When empty or not a folder, " +
       "Copy Temporary File to Permanent Folder asks for one and remembers it here",
+  ).ver("3.7"),
+  field(
+    "DownloadDirectory",
+    Str,
+    null,
+    "folder that Open from URL... saves downloaded files to. When empty, the dialog offers the Downloads folder " +
+      "and remembers the folder used here",
   ).ver("3.7"),
   field(
     "TemporaryFileAutoMove",
@@ -1501,6 +1609,13 @@ const globalPrefs: Field[] = [
       "after UseDefaultState in FileStates)",
   ),
   field("RestoreSession", Bool, true, "if true and SessionData isn't empty, that session will be restored at startup"),
+  field(
+    "KeepMissingSessionTabs",
+    Bool,
+    true,
+    "if true, a document of the restored session that no longer exists keeps its tab, which shows " +
+      "that the file is missing; if false, its tab is dropped at startup",
+  ).ver("3.7"),
   field(
     "ReuseInstance",
     Bool,
@@ -1567,6 +1682,16 @@ const globalPrefs: Field[] = [
     .enum(["top", "bottom"])
     .ver("3.7"),
   field(
+    "PageInfoLocation",
+    Str,
+    "notification",
+    "where Toggle Page Info (i) shows the page information: notification (or legacy), a tip over the document; " +
+      "bottom, a bar below the document with more about the file and the page; " +
+      "bottom-overlay, the same bar drawn over the bottom of the document",
+  )
+    .enum(["notification", "legacy", "bottom", "bottom-overlay"])
+    .ver("3.7"),
+  field(
     "SearchUIFloating",
     Bool,
     false,
@@ -1601,6 +1726,13 @@ const globalPrefs: Field[] = [
     false,
     "if true, favorites within each file are sorted alphabetically by name " +
       "(or page label); if false (the default), they are sorted by page number",
+  ).ver("3.7"),
+  field(
+    "FavoritesManualOrder",
+    Bool,
+    false,
+    "if true, favorites within each file keep the order set in Edit Favorites and new ones are added at the end; " +
+      "set by moving a favorite there, cleared by Sort By Name",
   ).ver("3.7"),
   field("ShowToc", Bool, true, "if true, show the table of contents (Bookmarks) sidebar when the document has one"),
   field(
@@ -1697,6 +1829,13 @@ const globalPrefs: Field[] = [
       "Alt + wheel still scrolls, Shift + wheel scrolls horizontally and Ctrl + wheel zooms",
   ).ver("3.7"),
   field(
+    "InvertMouseWheel",
+    Bool,
+    false,
+    "if true, the mouse wheel scrolls (and turns pages) the other way, as natural scrolling does; " +
+      "Ctrl + wheel zoom is unchanged",
+  ).ver("3.7"),
+  field(
     "ScrollEdgeTurnsPage",
     Bool,
     true,
@@ -1734,6 +1873,12 @@ const globalPrefs: Field[] = [
     Bool,
     true,
     "if true, show page numbers (labels) right-aligned on bookmark / table-of-contents entries",
+  ).ver("3.7"),
+  field(
+    "TocWrapText",
+    Bool,
+    false,
+    "if true, long bookmark / table-of-contents entries wrap to the sidebar's width instead of being cut off",
   ).ver("3.7"),
   field(
     "AutoGenerateTOC",
@@ -1829,7 +1974,13 @@ const globalPrefs: Field[] = [
     "ReadingAutoScrollSpeed",
     Float,
     40,
-    "pixels per second for Automatically Scroll (View menu / Ctrl+Shift+H). 8 to 320; also changed from the auto-scroll bar and the arrow keys while scrolling",
+    "pixels per second for Automatically Scroll (View menu / Ctrl+Shift+H). 1 to 320; also changed from the auto-scroll bar and the arrow keys while scrolling",
+  ).ver("3.7"),
+  field(
+    "ReadingAutoScrollMinutes",
+    Float,
+    0,
+    "Automatically Scroll pauses after scrolling this many minutes; 0 scrolls until the end of the document",
   ).ver("3.7"),
   struct(
     "ReadingBar",
@@ -1852,7 +2003,7 @@ const globalPrefs: Field[] = [
   field(
     "TabsEqualWidth",
     Bool,
-    true,
+    false,
     "if true, all tabs are equally wide. If false, a tab is as wide as its file name needs, up to TabWidth",
   ).ver("3.7"),
   // Built-in names must stay in sync with themesTxt in src/Theme.cpp (plus System)
@@ -2044,6 +2195,13 @@ const globalPrefs: Field[] = [
     "how much a single zoom in / zoom out step changes the zoom, as a percentage of the " +
       "current zoom level. If 0 or negative, zooming steps through ZoomLevels instead",
   ),
+  field(
+    "FitWidthPercent",
+    Int,
+    100,
+    "Fit Width (and Fit Visible) fit the pages to this percentage of the window's width, " +
+      "centered: e.g. 40 to read in the middle of a wide screen. 20 to 100",
+  ).ver("3.7"),
 
   emptyLine(),
 
@@ -2080,6 +2238,8 @@ const globalPrefs: Field[] = [
   struct("CodexBuild", codexBuild, "settings for the OpenAI Codex chat sidebar").ver("3.7"),
   emptyLine(),
   struct("AntiGravity", antiGravity, "settings for the Antigravity chat sidebar").ver("3.7"),
+  emptyLine(),
+  struct("CustomAI", customAI, "settings for an OpenAI-compatible Chat Completions provider").ver("3.7"),
   emptyLine(),
   struct("AIChat", aiChat, "appearance of the AI chat sidebar, shared by all backends").ver("3.7"),
   emptyLine(),
@@ -2232,12 +2392,12 @@ const globalPrefs: Field[] = [
     "OnlineApiKey",
     Str,
     null,
-    "API key for Sumatra Online. Set from File / Link Sumatra Online. Do not share the settings file.",
+    "API key for SumatraPDF Web. Set from File / Link SumatraPDF Web. Do not share the settings file.",
   )
     .internal()
     .ver("3.7")
     .omitFromDocs(),
-  field("OnlineServer", Str, null, "an empty value means the public Sumatra Online site. The dialog does not edit it.")
+  field("OnlineServer", Str, null, "an empty value means the public SumatraPDF Web site. The dialog does not edit it.")
     .internal()
     .ver("3.7")
     .omitFromDocs(),
@@ -2266,6 +2426,7 @@ const globalPrefsLayout = [
   "CustomColors",
   "Toolbar",
   "ToolbarPosition",
+  "PageInfoLocation",
   "Scrollbars",
   "ReadAloudVoiceId",
   "Theme",
@@ -2293,6 +2454,7 @@ const globalPrefsLayout = [
   "GrokBuild",
   "CodexBuild",
   "AntiGravity",
+  "CustomAI",
   "AIChat",
   "EBookUI",
   "ComicBookUI",
@@ -2304,6 +2466,7 @@ const globalPrefsLayout = [
   "CitationHoverDelay",
   "ReadAloudSpeed",
   "ReadingAutoScrollSpeed",
+  "ReadingAutoScrollMinutes",
   "ReadingBar",
   "TabWidth",
   "TabsEqualWidth",
@@ -2313,6 +2476,7 @@ const globalPrefsLayout = [
   "TreeFontSize",
   "UIFontSize",
   "ZoomIncrement",
+  "FitWidthPercent",
   "AIChatSidebarDx",
   "CustomScreenDPI",
   "WindowState",
@@ -2336,12 +2500,15 @@ const globalPrefsLayout = [
   "HomePageSortByFrequentlyRead",
   "ReloadModifiedDocuments",
   "ShowSignatureStatus",
+  "OfdTrustedCertificates",
   "TemporaryFileShowNotification",
   "TemporaryFileDestDir",
+  "DownloadDirectory",
   "TemporaryFileAutoMove",
   "RememberOpenedFiles",
   "RememberStatePerDocument",
   "RestoreSession",
+  "KeepMissingSessionTabs",
   "ReuseInstance",
   "ShowMenubar",
   "ShowMenubarWithTabs",
@@ -2352,6 +2519,7 @@ const globalPrefsLayout = [
   "ShowFavorites",
   "ShowSidebarMiddle",
   "SortFavoritesByName",
+  "FavoritesManualOrder",
   "ShowToc",
   "AlwaysShowSidebar",
   "ShowThumbnailsIfNoToc",
@@ -2366,12 +2534,14 @@ const globalPrefsLayout = [
   "ExplorerQuickLook",
   "RememberViewOffsetOnPageTurn",
   "MouseWheelTurnsPage",
+  "InvertMouseWheel",
   "ScrollEdgeTurnsPage",
   "ShowDocumentFocusIndicator",
   "ShowAnnotationNotification",
   "ShowFileNavigateHint",
   "ShowAnnotationAuthorInTooltip",
   "ShowTocPageNumbers",
+  "TocWrapText",
   "ShowStartPage",
   "ScrollbarInSinglePage",
   "SmoothScroll",
@@ -2646,6 +2816,7 @@ const desktopOnlySettings = new Set([
   "ReloadModifiedDocuments",
   "TemporaryFileShowNotification",
   "TemporaryFileDestDir",
+  "DownloadDirectory",
   "TemporaryFileAutoMove",
   "ReuseInstance",
   "ExplorerQuickLook",
@@ -2701,14 +2872,17 @@ function buildMetaData(struc: Field, built: Record<string, number>): string {
     } else if (struc.StructName === "Settings" && desktopOnlySettings.has(field.Name)) {
       dataLine.push("OS_WASM != 0");
     }
+    // positional FieldInfo initializers: internal, secret, enumValues, enumEmpty
+    if (field.Secret) {
+      while (dataLine.length < 4) dataLine.push("false");
+      dataLine.push("true");
+    }
     if (field.EnumValues) {
       if (field.Type !== Str) {
         throw new Error(`${field.Name}: only a string setting can be an enum`);
       }
       enumArrays.push(enumArrayDef(fullName, field));
-      if (dataLine.length === 3) {
-        dataLine.push("false");
-      }
+      while (dataLine.length < 5) dataLine.push("false");
       dataLine.push(enumArrayName(fullName, field));
       dataLine.push(field.EnumEmpty !== null ? `"${escapeCStr(field.EnumEmpty)}"` : "nullptr");
     }
@@ -2742,7 +2916,9 @@ function buildMetaData(struc: Field, built: Record<string, number>): string {
     metadataExterns.push(`extern ${constStr}StructInfo ${infoName};`);
   }
   lines.push(
-    `${metadataStorage(infoName)}${constStr}StructInfo ${infoName} = { sizeof(${struc.StructName}), ${names.length}, ${fieldsName}, "${namesStr}", "${commentsStr}", ${couldBeTemporary} };`,
+    `${metadataStorage(infoName)}${constStr}StructInfo ${infoName} = { sizeof(${struc.StructName}), (u16)dimof(${fieldsName}), ${fieldsName}, "${namesStr}", "${commentsStr}", ${couldBeTemporary} };`,
+    // the field names are walked fieldCount times: they must match the fields
+    `static_assert(dimof(${fieldsName}) == ${names.length});`,
   );
   return lines.join("\n");
 }

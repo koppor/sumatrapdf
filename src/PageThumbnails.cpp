@@ -23,6 +23,7 @@
 #include "DisplayModel.h"
 #include "MainWindow.h"
 #include "Theme.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "SumatraPDF.h"
 #include "PagePosition.h"
@@ -47,15 +48,13 @@ struct PageThumbnailsCache {
     Vec<u8> stale;
     PageThumbnailsCtrl* ctrl = nullptr;
     EngineBase* renderEngine = nullptr;
-    AtomicInt cancelRendering = 0;
+    BgJob job;
     int rotation = 0;
     int thumbDx = 0;
     int thumbDy = 0;
     // render with the document's own engine, so unsaved page edits show;
     // else with a copy loaded from the file, which doesn't compete with the view
     bool liveEngine = false;
-    bool workerRunning = false;
-    bool deleteWhenWorkerFinishes = false;
 };
 
 struct ThumbnailRowsModel : ListBoxModel {
@@ -94,7 +93,7 @@ static Pixmap* ThumbnailToDraw(PageThumbnailsCache* cache, int idx) {
 }
 
 static void FreeThumbnailRenderEngine(PageThumbnailsCache* cache) {
-    ReportIf(cache->workerRunning);
+    ReportIf(cache->job.IsRunning());
     if (cache->renderEngine) {
         cache->renderEngine->Release();
         cache->renderEngine = nullptr;
@@ -116,12 +115,9 @@ static void DetachThumbnailCache(PageThumbnailsCache* cache) {
         return;
     }
     cache->ctrl = nullptr;
-    AtomicIntSet(&cache->cancelRendering, 1);
-    if (cache->workerRunning) {
-        cache->deleteWhenWorkerFinishes = true;
-        return;
+    if (cache->job.Detach()) {
+        DeleteThumbnailCache(cache);
     }
-    DeleteThumbnailCache(cache);
 }
 
 Pixmap* RenderPageThumbnail(EngineBase* engine, int pageNo, Location loc, int rotation, int thumbDx, int thumbDy) {
@@ -148,7 +144,7 @@ Pixmap* RenderPageThumbnail(EngineBase* engine, int pageNo, Location loc, int ro
 static void FinishThumbnailRender(ThumbnailRenderTask* task) {
     PageThumbnailsCache* cache = task->cache;
     int idx = task->pageNo - 1;
-    bool isValid = !cache->deleteWhenWorkerFinishes && idx >= 0 && idx < len(cache->thumbnails);
+    bool isValid = !cache->job.IsDetached() && idx >= 0 && idx < len(cache->thumbnails);
     if (isValid) {
         cache->stale[idx] = 0;
         if (task->bitmap) {
@@ -167,8 +163,7 @@ static void FinishThumbnailRender(ThumbnailRenderTask* task) {
 }
 
 static void FinishThumbnailWorker(PageThumbnailsCache* cache) {
-    cache->workerRunning = false;
-    if (cache->deleteWhenWorkerFinishes) {
+    if (cache->job.Finish()) {
         DeleteThumbnailCache(cache);
         return;
     }
@@ -204,7 +199,7 @@ static void RenderThumbnailsInBackground(ThumbnailRenderWorker* worker) {
     if (engine) {
         int n = len(worker->pages);
         for (int i = 0; i < n; i++) {
-            if (AtomicIntGet(&cache->cancelRendering) != 0) {
+            if (cache->job.IsCanceled()) {
                 break;
             }
             Location loc = i < len(worker->locs) ? worker->locs[i] : kInvalidLocation;
@@ -621,7 +616,7 @@ void PageThumbnailsCtrl::Activate() {
         return;
     }
     active = true;
-    AtomicIntSet(&cache->cancelRendering, 0);
+    cache->job.ClearCancel();
     EnsureVisible((selectedPage - 1) / cols);
     StartRendering();
     Invalidate();
@@ -632,8 +627,8 @@ void PageThumbnailsCtrl::Deactivate() {
         return;
     }
     active = false;
-    AtomicIntSet(&cache->cancelRendering, 1);
-    if (!cache->workerRunning) {
+    cache->job.Cancel();
+    if (!cache->job.IsRunning()) {
         FreeThumbnailRenderEngine(cache);
     }
 }
@@ -649,7 +644,7 @@ int PageThumbnailsCtrl::RenderedCount() const {
 }
 
 void PageThumbnailsCtrl::StartRendering() {
-    if (!active || cache->workerRunning || pageCount <= 0) {
+    if (!active || cache->job.IsRunning() || pageCount <= 0) {
         return;
     }
     DisplayModel* dm = CurrentDoc(this);
@@ -715,7 +710,6 @@ void PageThumbnailsCtrl::StartRendering() {
         worker->sourceEngine = engine;
         engine->AddRef();
     }
-    AtomicIntSet(&cache->cancelRendering, 0);
-    cache->workerRunning = true;
+    cache->job.Start();
     RunAsync(MkFunc0<ThumbnailRenderWorker>(RenderThumbnailsInBackground, worker), StrL("PageThumbnailsRender"));
 }

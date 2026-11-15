@@ -23,6 +23,7 @@
 #include "EngineAll.h"
 #include "DisplayModel.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Theme.h"
 #include "SumatraConfig.h"
@@ -221,7 +222,7 @@ bool PageGridCovers(MainWindow* win) {
     if (!win || !ShowPageGrid() || !win->AsFixed()) {
         return false;
     }
-    return win->presentation != PM_BLACK_SCREEN && win->presentation != PM_WHITE_SCREEN;
+    return win->windowMode != WindowMode::PresentationBlack && win->windowMode != WindowMode::PresentationWhite;
 }
 
 void PaintPageGrid(DisplayModel* dm, gpui::PaintCtx* ctx) {
@@ -296,15 +297,8 @@ struct PageGridView {
 
 static gp::Entity<PageGridView> gPageGridView;
 
-static TempStr EditTextTemp(gp::InputState* e) {
-    if (!e) {
-        return {};
-    }
-    return str::DupTemp(FromGpui(gp::InputValue(e)));
-}
-
 static bool ParseEditFloat(gp::InputState* e, float* out) {
-    TempStr s = EditTextTemp(e);
+    TempStr s = InputTextTemp(e);
     if (len(s) == 0) {
         return false;
     }
@@ -319,12 +313,7 @@ static bool ParseEditFloat(gp::InputState* e, float* out) {
 }
 
 static bool ParseEditInt(gp::InputState* e, int* out) {
-    float v = 0;
-    if (!ParseEditFloat(e, &v)) {
-        return false;
-    }
-    *out = (int)(v + (v >= 0 ? 0.5f : -0.5f));
-    return true;
+    return ParseEditIntWith(e, ParseEditFloat, out);
 }
 
 static void WriteSnapToPrefs() {
@@ -420,7 +409,7 @@ static void ApplyLive() {
     str::ReplaceWithCopy(&pg->units, SeqStrByIndex(kPageGridUnitTok, gPageGrid.unitIdx));
     SetColorText(pg->color, SerializeColorTemp(gPageGrid.currentColor));
     SetShowPageGrid(gPageGrid.showGrid);
-    RedrawPageGridWindows();
+    RedrawAllWindows();
 }
 
 // orig's OnUnitsChanged: the values keep their length, the numbers change
@@ -498,7 +487,7 @@ static void FreePageGridInputs() {
                                gPageGrid.editOffX,  gPageGrid.editOffY,   gPageGrid.editColor};
     for (gp::InputState* e : edits) {
         if (e && win && win->gpuiWin) {
-            gp::InputBlur(e, win->gpuiWin->app, win->gpuiWin);
+            InputBlurWhereFocused(e, win->gpuiWin);
         }
         delete e;
     }
@@ -526,7 +515,7 @@ void ClosePageGridDialog() {
         gPageGrid.win = nullptr;
     }
     WriteSnapToPrefs();
-    RedrawPageGridWindows();
+    RedrawAllWindows();
     FreePageGridInputs();
     AppShellInvalidate(gPageGrid.win);
 }
@@ -621,7 +610,7 @@ void PageGridView::OnColorChanged(PageGridView*, gp::Ctx* cx, const gp::InputEve
         return;
     }
     ParsedColor parsed;
-    ParseColor(parsed, EditTextTemp(gPageGrid.editColor));
+    ParseColor(parsed, InputTextTemp(gPageGrid.editColor));
     if (!parsed.parsedOk || IsSpecialColor(parsed.col)) {
         return;
     }

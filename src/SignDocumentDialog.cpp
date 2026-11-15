@@ -22,6 +22,7 @@
 #include "EngineAll.h"
 #include "DisplayModel.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Selection.h"
 #include "Theme.h"
@@ -33,8 +34,6 @@
 #include "SumatraDialogs.h"
 #include "shared/PdfToolsCommon.h"
 #include "SignDocumentDialogCommon.h"
-
-extern bool SaveAnnotationsToMaybeNewPdfFile(WindowTab*);
 
 // Fills in a signature field with a certificate from a .pfx / .p12 file.
 //
@@ -172,10 +171,8 @@ bool IsPlacingSignature(MainWindow* win) {
 // Leaves placement mode. Returns true if it was active. The hidden dialog is
 // shown again so the user can change the certificate or cancel.
 bool CancelPlacingSignature(MainWindow* win) {
+    // placement in another window is left alone
     if (!IsPlacingSignature(win)) {
-        if (gPlacingSignature) {
-            gPlacingSignature = false;
-        }
         return false;
     }
     gPlacingSignature = false;
@@ -626,27 +623,14 @@ bool SignDocumentWnd::Create(MainWindow* mainWin) {
     CollectFields();
     Color colTxt = ThemeWindowTextColor();
     Color colBg = ThemeWindowControlBackgroundColor();
-    Color colMuted = ThemeWindowTextDisabledColor();
+    Color colMuted = ThemeWindowDarkerTextColor();
     PlatformFont* fontText = DlgUiFont(kToolDlgTextFontPx);
     PlatformFont* fontMeta = DlgUiFont(kToolDlgMetaFontPx);
     SetFont(fontText);
     bool isRtl = IsUIRtl();
-    {
-        CreateCustomArgs args;
-        args.owner = hwndOwner;
-        args.title = Tr("Sign Document");
-        args.visible = false;
-        args.style = WS_POPUPWINDOW | WS_CAPTION;
-        args.font = fontText;
-        args.isRtl = isRtl;
-        args.bgColor = colBg;
-        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
-        CreateCustom(args);
-    }
-    if (!hwnd) {
+    if (!CreateToolDialog(this, hwndOwner, Tr("Sign Document"), fontText, colTxt, colBg)) {
         return false;
     }
-    SetColors(colTxt, colBg);
 
     // every field after a muted label, the labels in one column
     Vec<VirtText*> labels;
@@ -765,9 +749,7 @@ bool SignDocumentWnd::Create(MainWindow* mainWin) {
     vbox->AddChild(NewDlgFooter(btnCancel, btnSign));
     layout = vbox;
 
-    LayoutAndSizeToContent(layout, DpiScale(kSignDlgDx), 0, hwnd);
-    DoLayout(HwndClientRect(hwnd).Size());
-    HwndCenterDialog(hwnd, win ? win->hwndFrame : nullptr);
+    SizeToLayout(this, layout, DpiScale(kSignDlgDx), 0, win ? win->hwndFrame : nullptr);
     UpdateTheme();
 
     SetIsVisible(true);
@@ -787,8 +769,15 @@ void ShowSignDocumentDialog(MainWindow* win, Str fieldName, bool hasField, int c
         return;
     }
     if (gSignDocumentWnd) {
-        if (gPlacingSignature) {
-            CancelPlacingSignature(win);
+        // cancel placement in the dialog's own window, which may not be win
+        MainWindow* dlgWin = gSignDocumentWnd->win;
+        CancelPlacingSignature(dlgWin);
+        if (dlgWin != win) {
+            // one dialog at a time and it signs another document: don't
+            // retarget it, just bring it up
+            gSignDocumentWnd->SetIsVisible(true);
+            HwndSetFocus(gSignDocumentWnd->hwnd);
+            return;
         }
         if (hasField) {
             str::ReplaceWithCopy(&gSignDocumentWnd->preselectField, fieldName);

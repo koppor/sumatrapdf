@@ -86,20 +86,13 @@ void CloseGoToPageDialog() {
     if (gGoToPage.tw) {
         DlgWindowClose(&gGoToPage.tw);
     } else if (win && win->gpuiWin && gGoToPage.editPage) {
-        gp::InputBlur(gGoToPage.editPage, win->gpuiWin->app, win->gpuiWin);
+        InputBlurWhereFocused(gGoToPage.editPage, win->gpuiWin);
         if (gGoToPage.editChapter) {
-            gp::InputBlur(gGoToPage.editChapter, win->gpuiWin->app, win->gpuiWin);
+            InputBlurWhereFocused(gGoToPage.editChapter, win->gpuiWin);
         }
     }
     FreeInputs();
     AppShellInvalidate(win);
-}
-
-static Str InputTextTemp(gp::InputState* s) {
-    if (!s) {
-        return {};
-    }
-    return str::DupTemp(FromGpui(gp::InputValue(s)));
 }
 
 // orig's GoToPageWnd::OnOk

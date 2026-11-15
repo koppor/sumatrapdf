@@ -21,6 +21,7 @@
 #include "Menu.h"
 #include "Toolbar.h"
 #include "Theme.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "MainWindow.h"
 #include "Selection.h"
@@ -119,8 +120,10 @@ void TtsProcessEvents() {}
 Vec<TtsVoiceInfo> TtsGetVoices() {
     return Vec<TtsVoiceInfo>();
 }
-void TtsFreeVoices(Vec<TtsVoiceInfo>&) {}
 bool TtsSetVoiceById(Str) {
+    return false;
+}
+bool TtsIsInitialized() {
     return false;
 }
 Str TtsGetVoiceId() {
@@ -146,30 +149,6 @@ void TtsTestPumpOnNextSpeak() {}
 
 #endif // OS_DARWIN / OS_WASM / OS_LINUX / !OS_WIN
 
-// orig has this in AppSettings.cpp; see ReadAloud.h
-bool ApplyReadAloudVoiceFromSettings() {
-    if (!gSettings) {
-        return false;
-    }
-
-    float speed = gSettings->readAloudSpeed;
-    TtsSetSpeed(speed > 0 ? speed : 1.0f);
-
-    Str voiceId = gSettings->readAloudVoiceId;
-    if (len(voiceId) == 0) {
-        TtsSetVoiceById(StrL(""));
-        return false;
-    }
-
-    if (!TtsSetVoiceById(voiceId)) {
-        logf("ApplyReadAloudVoiceFromSettings: voice '%s' not available, using system default\n", voiceId);
-        str::ReplaceWithCopy(&gSettings->readAloudVoiceId, Str{});
-        TtsSetVoiceById(StrL(""));
-        return true;
-    }
-    return false;
-}
-
 // ---------------- 2. the highlight on the canvas ----------------
 
 // ng: orig arms a WM_TIMER on the canvas; the shell's tick counts this down
@@ -177,15 +156,14 @@ void ReadAloudHighlightTimerStart(MainWindow* win) {
     if (!win) {
         return;
     }
-    win->readAloudTimerOn = true;
-    win->readAloudTimerLeftMs = kReadAloudHighlightDelayInMs;
+    win->readAloudTimer.Arm(kReadAloudHighlightDelayInMs);
 }
 
 void ReadAloudHighlightTimerStop(MainWindow* win) {
     if (!win) {
         return;
     }
-    win->readAloudTimerOn = false;
+    win->readAloudTimer.Cancel();
 }
 
 // ng: orig fills the underlines with Gfx::FillRects; CanvasFillRects is the
@@ -265,14 +243,10 @@ void PaintReadAloudHighlight(MainWindow* win, gp::PaintCtx* ctx) {
 
 // ng: orig's kReadAloudHighlightTimerID handler in Canvas.cpp
 void ReadAloudTick(MainWindow* win, int elapsedMs) {
-    if (!win || !win->readAloudTimerOn) {
+    if (!win || !win->readAloudTimer.Tick(elapsedMs)) {
         return;
     }
-    win->readAloudTimerLeftMs -= elapsedMs;
-    if (win->readAloudTimerLeftMs > 0) {
-        return;
-    }
-    win->readAloudTimerLeftMs = kReadAloudHighlightDelayInMs;
+    win->readAloudTimer.Arm(kReadAloudHighlightDelayInMs);
 
     if (!GetReadAloudSourceTab()) {
         ReadAloudHighlightTimerStop(win);
@@ -394,14 +368,7 @@ void ReadAloudPlaybackBarView::OnSpeedMove(ReadAloudPlaybackBarView* self, gp::C
 }
 
 void ReadAloudPlaybackBarView::OnSpeedHover(ReadAloudPlaybackBarView* self, gp::Ctx* cx, const gp::HoverEvent* ev) {
-    if (ev->hovered) {
-        return;
-    }
-    if (BarWindowOf(self->win, cx)) {
-        HoverTooltipHideIn(self->win->gpuiWin);
-        return;
-    }
-    HoverTooltipHide(cx);
+    HoverTooltipHideBar(self->win->gpuiWin, ev->hovered, BarWindowOf(self->win, cx) != nullptr, cx);
 }
 
 // --- orig's popup: the bar in a window of its own ---------------------------

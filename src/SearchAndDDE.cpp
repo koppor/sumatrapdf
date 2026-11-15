@@ -26,6 +26,7 @@
 #include "Notifications.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Commands.h"
 #include "AppTools.h"
@@ -77,10 +78,8 @@ void FindFirst(MainWindow* win) {
         return;
     }
     // IE backend: fall back to the browser's own find dialog
-    if (win->AsChm()) {
-        win->AsChm()->FindInCurrentPage();
-    } else if (win->AsMarkdown()) {
-        win->AsMarkdown()->FindInCurrentPage();
+    if (win->AsBrowser()) {
+        win->AsBrowser()->FindInCurrentPage();
         return;
     }
 
@@ -201,7 +200,7 @@ void UpdateFindStatus(UpdateFindStatusData* d) {
     AutoDelete delData(d);
 
     auto* win = d->win;
-    if (!IsMainWindowValidAndNotClosing(win) || win->findCancelled) {
+    if (!IsMainWindowValidAndNotClosing(win) || AtomicBoolGet(&win->findCancelled)) {
         return;
     }
     if (!d->showProgress) {
@@ -209,7 +208,7 @@ void UpdateFindStatus(UpdateFindStatusData* d) {
         // document. The n/m counter and the floating results list are built by
         // the count thread (which does its own full scan), so bail out early and
         // leave the heavy lifting to it.
-        win->findCancelled = true;
+        AtomicBoolSet(&win->findCancelled, true);
     }
     // explicit Find Next/Prev (showProgress): keep going to completion. There's
     // no progress notification now -- the n/m counter is the only feedback.
@@ -253,86 +252,6 @@ Rect FindPaintClipRc(MainWindow* win, DisplayModel*) {
     return win->canvasRc;
 }
 
-void PaintAllFindMatches(MainWindow* win, Gfx* gfx) {
-    if (!win->IsDocLoaded() || !win->AsFixed()) {
-        return;
-    }
-    if (CbGetTextLen(win->findEdit) == 0) {
-        return;
-    }
-
-    DisplayModel* dm = win->AsFixed();
-    // Matches/count cache are tied to the engine they were built for. After a
-    // tab close or reload without InvalidateFindForDocumentChange, refuse to
-    // map stale page/glyph coords onto a different document.
-    void* engine = (void*)dm->GetEngine();
-    if (win->findCountEngine && win->findCountEngine != engine) {
-        ClearFindMatches(win);
-        win->findCountValid = false;
-        win->findCountEngine = nullptr;
-        VecReset(win->findCountPositions);
-        str::FreePtr(&win->findCountText);
-        return;
-    }
-    TextSearch* ts = dm->textSearch;
-    // After the find UI is closed, still highlight the active match so F3 /
-    // FindNext navigation is visible (issue #5802). The full match list was
-    // cleared on hide; only paint the current TextSearch hit.
-    if (!IsFindUIVisible(win)) {
-        PaintCurrentFindMatch(win, dm, ts, gfx);
-        return;
-    }
-    if (!win->findCountValid && len(win->findMatches) == 0) {
-        // count still running: at least highlight the current match
-        PaintCurrentFindMatch(win, dm, ts, gfx);
-        return;
-    }
-    if (len(win->findMatches) == 0) {
-        return;
-    }
-    int firstPage = 0;
-    int lastPage = 0;
-    GetVisiblePageRange(dm, firstPage, lastPage);
-    if (!dm->ValidPageNo(firstPage)) {
-        return;
-    }
-
-    if (gFindMatchPaintCache.countEpoch != win->findCountEpoch || gFindMatchPaintCache.firstPage != firstPage ||
-        gFindMatchPaintCache.lastPage != lastPage) {
-        RebuildFindMatchPaintCache(win, dm, firstPage, lastPage);
-    }
-
-    u64 currentKey = 0;
-    if (ts && len(ts->result) > 0) {
-        currentKey = MatchKey(ts->startPage, ts->startGlyph);
-    }
-
-    ParsedColor* parsedCol = GetPrefsColor(gSettings->fixedPageUI.selectionColor);
-    u8 alpha = GetAlpha(parsedCol->col);
-    if (alpha == 0) {
-        alpha = kSelectionDefaultAlpha;
-    }
-
-    Vec<Rect> otherRects;
-    Vec<Rect> currentRects;
-    Vec<FindMatchPaintPageRect>& positions = gFindMatchPaintCache.positions;
-    for (int i = 0; i < len(gFindMatchPaintCache.entries); i++) {
-        const FindMatchPaintRects& entry = gFindMatchPaintCache.entries[i];
-        Vec<Rect>& out = (entry.key == currentKey) ? currentRects : otherRects;
-        AppendPageRectsToScreen(dm, win->canvasRc, &positions[entry.firstPos], entry.len, out);
-    }
-
-    if (len(otherRects) > 0) {
-        PaintTransparentRectangles(gfx, win->canvasRc, otherRects, kFindOtherMatchColor, alpha);
-    }
-    if (len(currentRects) == 0 && ts && len(ts->result) > 0) {
-        AppendTextSelScreenRects(dm, win->canvasRc, &ts->result, currentRects);
-    }
-    if (len(currentRects) > 0) {
-        PaintTransparentRectangles(gfx, win->canvasRc, currentRects, parsedCol->col, alpha);
-    }
-}
-
 // starts fading the forward search mark after delayMs
 void HideFwdSearchMarkAfter(MainWindow* win, int delayMs) {
     SetTimer(win->hwndCanvas, kHideFwdSearchMarkTimerID, delayMs, nullptr);
@@ -340,7 +259,9 @@ void HideFwdSearchMarkAfter(MainWindow* win, int delayMs) {
 
 void ShowForwardSearchResult(MainWindow* win, Str fileName, int line, int /* col */, int ret, int page,
                              Vec<Rect>& rects) {
-    ReportIf(!win->AsFixed());
+    if (ReportIf(!win->AsFixed())) {
+        return;
+    }
     DisplayModel* dm = win->AsFixed();
     VecReset(win->fwdSearchMark.rects);
     const PageInfo* pi = dm->GetPageInfo(page);

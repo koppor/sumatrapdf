@@ -13,6 +13,13 @@ EXPORTS
 	fz_last_uncaught_error
 
 	fz_open_document
+	fz_register_ofd_handler
+	ofd_count_signatures
+	ofd_check_signatures
+	ofd_drop_signature_infos
+	ofd_cert_issued_by
+	ofd_load_attachments
+	ofd_load_attachment
 
 	fz_write_byte
 
@@ -175,6 +182,7 @@ EXPORTS
 	fz_new_image_from_compressed_buffer
 
 	pdf_save_document
+	pdf_set_page_box
 
 	pdf_redact_page
 
@@ -198,6 +206,9 @@ EXPORTS
 	fz_outline_iterator_next
 	fz_outline_iterator_down
 	fz_outline_iterator_up
+	fz_outline_iterator_prev
+	fz_outline_iterator_insert
+	fz_is_external_link
 
 	fz_load_page
 
@@ -243,6 +254,8 @@ EXPORTS
 	fz_set_builtin_font_loader
 
 	sumatra_lookup_font_url
+	sumatra_font_count
+	sumatra_font_at
 
 	pdf_page_transform
 
@@ -253,10 +266,13 @@ EXPORTS
 	fz_drop_page
 
 	fz_colorspace_is_rgb
+	fz_colorspace_type
 
 	fz_colorspace_is_cmyk
 
 	fz_new_buffer_from_pixmap_as_jpeg
+
+	fz_new_buffer_from_image_as_png
 
 	fz_new_stext_page
 
@@ -1323,6 +1339,10 @@ EXPORTS
 	pdf_delete_page_range
 
 	pdf_page_write
+	pdf_create_link
+	pdf_new_outline_iterator
+	pdf_new_uri_from_explicit_dest
+	pdf_parse_write_options
 
 
 
@@ -1533,6 +1553,20 @@ EXPORTS
 	pdf_new_pdf_device
 
 	pdf_write_document
+
+	pdf_count_layers
+
+	pdf_layer_name
+
+	pdf_layer_is_enabled
+
+	pdf_enable_layer
+
+	pdf_count_layer_config_ui
+
+	pdf_layer_config_ui_info
+
+	pdf_toggle_layer_config_ui
 
 	pdf_lookup_page_number
 

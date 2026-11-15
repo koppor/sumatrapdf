@@ -24,6 +24,7 @@
 #include "EngineAll.h"
 #include "DisplayModel.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Selection.h"
 #include "Theme.h"
@@ -200,7 +201,7 @@ bool IsPlacingSignature(MainWindow* win) {
 static void FreeSignDialogState() {
     MainWindow* win = gSign.win;
     if (win && win->gpuiWin) {
-        gp::InputBlur(gSign.editCert, win->gpuiWin->app, win->gpuiWin);
+        InputBlurWhereFocused(gSign.editCert, win->gpuiWin);
     }
     delete gSign.editCert;
     delete gSign.editPassword;
@@ -241,8 +242,8 @@ void CloseSignDocumentDialog(MainWindow* win) {
 // Leaves placement mode. Returns true if it was active. The hidden dialog is
 // shown again so the user can change the certificate or cancel.
 bool CancelPlacingSignature(MainWindow* win) {
+    // placement in another window is left alone
     if (!IsPlacingSignature(win)) {
-        gSign.placing = false;
         return false;
     }
     gSign.placing = false;

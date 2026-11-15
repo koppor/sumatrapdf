@@ -22,6 +22,7 @@
 #include "base/GuessFileType.h"
 #include "base/Pixmap.h"
 #include "ImageReader.h"
+#include "PngOptimizer.h"
 #include "base/UITask.h"
 
 #include "gui/UIModels.h"
@@ -32,6 +33,7 @@
 #include "EngineBase.h"
 #include "EngineAll.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Theme.h"
 #include "SumatraConfig.h"
@@ -804,6 +806,8 @@ static void DoSave() {
         MessageBoxWarning(w.win, HostTr(StrL("Failed to save image")), StrL("Save Image"));
         return;
     }
+    // SavePixmapAsImage writes a PNG without zopfli, which takes seconds
+    OptimizePngFileAsync(dest);
     FinishSave(dest);
 }
 
@@ -824,7 +828,7 @@ void CloseImageEditWindow() {
         ToolWindowClose(gImgEdit.tw);
         gImgEdit.tw = nullptr;
     } else if (win && win->gpuiWin && gImgEdit.destEdit) {
-        gp::InputBlur(gImgEdit.destEdit, win->gpuiWin->app, win->gpuiWin);
+        InputBlurWhereFocused(gImgEdit.destEdit, win->gpuiWin);
     }
     delete gImgEdit.destEdit;
     gImgEdit.destEdit = nullptr;

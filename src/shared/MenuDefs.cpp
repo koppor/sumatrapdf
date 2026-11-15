@@ -19,6 +19,7 @@
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Commands.h"
 #include "ExternalViewers.h"
@@ -52,6 +53,10 @@ MenuDef menuDefFileOpen[] = {
     {
         TrN("Open using &SumatraPDF File Picker..."),
         CmdOpenFileWithSumatraFilePicker,
+    },
+    {
+        TrN("Open from &URL..."),
+        CmdOpenFromURL,
     },
     {
         TrN("Use SumatraPDF File Picker"),
@@ -145,8 +150,8 @@ MenuDef menuDefFile[] = {
         CmdPrint,
     },
     {
-        TrN("Lin&k Sumatra Online..."),
-        CmdSumatraOnline,
+        TrN("Lin&k SumatraPDF Web..."),
+        CmdSumatraPDFWeb,
     },
     {
         StrL(kMenuSeparator),
@@ -264,6 +269,30 @@ MenuDef menuDefView[] = {
         CmdToggleTrimEmptyMargins,
     },
     {
+        TrN("Trim Pages To Selection"),
+        CmdTrimPagesToSelection,
+    },
+    {
+        TrN("Show Whole Pages"),
+        CmdShowWholePages,
+    },
+    {
+        TrN("Save Trimmed Pages As..."),
+        CmdSaveTrimmedPagesAs,
+    },
+    {
+        TrN("Read &Columns"),
+        CmdToggleReadColumns,
+    },
+    {
+        TrN("Read Columns: Show &Whole Page"),
+        CmdToggleColumnsWholePage,
+    },
+    {
+        TrN("View As &Hex"),
+        CmdViewAsHex,
+    },
+    {
         StrL(kMenuSeparator),
         0,
     },
@@ -274,6 +303,10 @@ MenuDef menuDefView[] = {
     {
         TrN("Rotate &Right"),
         CmdRotateRight,
+    },
+    {
+        TrN("Mirror Pages"),
+        CmdToggleMirror,
     },
     {
         StrL(kMenuSeparator),
@@ -336,6 +369,10 @@ MenuDef menuDefView[] = {
         CmdConfigurePageGrid,
     },
     {
+        TrN("Measure"),
+        CmdMeasure,
+    },
+    {
         StrL(kMenuSeparator),
         0,
     },
@@ -354,6 +391,10 @@ MenuDef menuDefView[] = {
     {
         TrN("Antigravity chat"),
         CmdAIChatWithAntiGravity,
+    },
+    {
+        TrN("Custom AI"),
+        CmdAIChatWithCustomAPI,
     },
     {
         {},
@@ -383,6 +424,14 @@ MenuDef menuDefGoTo[] = {
     {
         TrN("Pa&ge..."),
         CmdGoToPage,
+    },
+    {
+        TrN("Next &Chapter"),
+        CmdGoToNextChapter,
+    },
+    {
+        TrN("Previous C&hapter"),
+        CmdGoToPrevChapter,
     },
     {
         StrL(kMenuSeparator),
@@ -526,10 +575,6 @@ MenuDef menuDefThemes[] = {
 
 //[ ACCESSKEY_GROUP Settings Menu
 MenuDef menuDefSettings[] = {
-#if 0
-    { TrN("Contribute Translation"),       CmdContributeTranslation },
-    { StrL(kMenuSeparator),                       0                  },
-#endif
     {
         TrN("&Settings..."),
         CmdOptions,
@@ -593,6 +638,10 @@ MenuDef menuDefFavorites[] = {
     {
         TrN("Show Favorites in Tab"),
         CmdFavoriteShowInTab,
+    },
+    {
+        TrN("Edit Favorites..."),
+        CmdEditFavorites,
     },
     {
         StrL(kMenuSeparator),
@@ -679,6 +728,10 @@ MenuDef menuDefDebug[] = {
     {
         StrL("Show crash minidumps"),
         CmdDebugShowCrashMiniDumps,
+    },
+    {
+        StrL("Show downloaded fonts"),
+        CmdDebugShowDownloadedFonts,
     },
     {
         {},
@@ -997,6 +1050,14 @@ MenuDef menuDefContextImage[] = {
         CmdResizeImage,
     },
     {
+        TrN("Re&place Image..."),
+        CmdReplaceImage,
+    },
+    {
+        TrN("Edit Image in &Another App"),
+        CmdEditImageExternally,
+    },
+    {
         TrN("Convert page to &PDF"),
         CmdConvertImageToPdf,
     },
@@ -1030,6 +1091,10 @@ MenuDef menuDefDocumentAIChat[] = {
         CmdAIChatWithAntiGravity,
     },
     {
+        TrN("Custom AI"),
+        CmdAIChatWithCustomAPI,
+    },
+    {
         {},
         0,
     },
@@ -1051,7 +1116,7 @@ MenuDef menuDefDocumentOperations[] = {
         CmdDocumentShowOutline,
     },
     {
-        TrN("Extract Pages From PDF"),
+        TrN("Extract Pages"),
         CmdPdfExtractPages,
     },
     {
@@ -1107,7 +1172,7 @@ MenuDef menuDefDocumentOperations[] = {
         CmdConvertToPDF,
     },
     {
-        TrN("Convert PDF to Images..."),
+        TrN("Convert to Images..."),
         CmdConvertPdfToImages,
     },
     {
@@ -1163,6 +1228,21 @@ MenuDef menuDefContextStart[] = {
 
 //] ACCESSKEY_GROUP Context Menu (Start)
 
+static MenuDef menuDefContextTabDuplicate[] = {
+    {
+        TrN("In New Window"),
+        CmdDuplicateInNewWindow,
+    },
+    {
+        TrN("In New Tab"),
+        CmdDuplicateInNewTab,
+    },
+    {
+        {},
+        0,
+    },
+};
+
 MenuDef menuDefContextTab[] = {
     // these top items are removed unless the document has unsaved changes;
     // text matches the "Unsaved changes" close dialog
@@ -1195,8 +1275,8 @@ MenuDef menuDefContextTab[] = {
         CmdCopyFilePath,
     },
     {
-        TrN("Open In New Window"),
-        CmdDuplicateInNewWindow,
+        TrN("Duplicate"),
+        (UINT_PTR)menuDefContextTabDuplicate,
     },
     {
         TrN("Change Tab Color"),
@@ -1270,6 +1350,14 @@ MenuDef menuDefContextToc[] = {
         CmdTocCollapseSameLevel,
     },
     {
+        TrN("Expand Chapter"),
+        CmdTocExpandChapter,
+    },
+    {
+        TrN("Collapse Chapter"),
+        CmdTocCollapseChapter,
+    },
+    {
         TrN("Expand to Current Page"),
         CmdExpandToCurrentPage,
     },
@@ -1312,6 +1400,10 @@ MenuDef menuDefContextFav[] = {
     {
         TrN("Sort By Name"),
         CmdToggleFavoritesSort,
+    },
+    {
+        TrN("Edit Favorites..."),
+        CmdEditFavorites,
     },
     {
         StrL(kMenuSeparator),

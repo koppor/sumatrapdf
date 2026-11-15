@@ -38,6 +38,7 @@ extern "C" {
 #include "Translations.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Canvas.h"
 #include "Commands.h"
@@ -76,7 +77,6 @@ struct AnnotEditChip : VirtCustom {
 static void StartContentsEdit(AnnotEditToolbar*);
 static void EndContentsEdit(AnnotEditToolbar*, bool accept);
 static void DestroyContentsEditor(AnnotEditToolbar*);
-static void PostedStartContentsEdit(MainWindow*);
 static void PostedDeleteSelectedAnnotation(MainWindow*);
 static bool FreeTextInPlaceEditJustEnded();
 
@@ -566,18 +566,6 @@ static void PaintStyleToggle(Gfx* gfx, Rect r, AnnotEditKind kind, Color col, Pl
     }
     PlatformFont* styled = GetPlatformFont(font->name, font->sizePt, style);
     gfx->DrawText(label, r, gfxTextCenter | gfxTextVCenter, styled ? styled : font, col);
-}
-
-static TempStr ChipLabelTemp(const AnnotEditItem& item) {
-    switch (item.kind) {
-        case AnnotEditKind::Opacity:
-            return fmt("%d%%", ((item.number * 100) + 127) / 255);
-        case AnnotEditKind::Border:
-        case AnnotEditKind::TextSize:
-            return fmt("%d", item.number);
-        default:
-            return item.text;
-    }
 }
 
 void AnnotEditChip::Paint(VirtPaintCtx& ctx) {
@@ -1200,7 +1188,7 @@ static bool GetAnnotScreenBounds(MainWindow* win, Annotation* annot, Rect& out) 
 // popup is TOPMOST (issue #6111)
 static HWND ToolbarZ(AnnotEditToolbar* tb) {
     MainWindow* win = tb ? tb->win : nullptr;
-    if (win && (win->isFullScreen || win->presentation)) {
+    if (win && (win->IsFullScreenOrPresentation())) {
         return HWND_TOPMOST;
     }
     return HWND_TOP;
@@ -1332,15 +1320,16 @@ static void EndContentsEdit(AnnotEditToolbar* tb, bool accept) {
     }
 }
 
+// posted tasks outlive the window that posted them: check it's still there
 static void PostedAcceptContents(MainWindow* win) {
-    if (!win || !win->annotEditToolbar) {
+    if (!IsMainWindowValid(win) || !win->annotEditToolbar) {
         return;
     }
     EndContentsEdit(win->annotEditToolbar, true);
 }
 
 static void PostedCancelContents(MainWindow* win) {
-    if (!win || !win->annotEditToolbar) {
+    if (!IsMainWindowValid(win) || !win->annotEditToolbar) {
         return;
     }
     EndContentsEdit(win->annotEditToolbar, false);
@@ -1389,7 +1378,7 @@ static bool KeepContentsEditOnKillFocus(AnnotEditToolbar* tb, HWND next) {
 }
 
 static void PostedRefocusContents(MainWindow* win) {
-    AnnotEditToolbar* tb = win ? win->annotEditToolbar : nullptr;
+    AnnotEditToolbar* tb = IsMainWindowValidAndNotClosing(win) ? win->annotEditToolbar : nullptr;
     if (!tb || tb->contentsEditClosing || !tb->editingContents || !tb->contentsEdit) {
         return;
     }
@@ -1586,12 +1575,8 @@ void StartSelectedAnnotContentsEdit(MainWindow* win) {
     StartContentsEdit(tb);
 }
 
-static void PostedStartContentsEdit(MainWindow* win) {
-    StartSelectedAnnotContentsEdit(win);
-}
-
 static void PostedDeleteSelectedAnnotation(MainWindow* win) {
-    AnnotEditToolbar* tb = win ? win->annotEditToolbar : nullptr;
+    AnnotEditToolbar* tb = IsMainWindowValidAndNotClosing(win) ? win->annotEditToolbar : nullptr;
     Annotation* annot = LiveToolbarAnnot(tb);
     if (annot) {
         DeleteAnnotationAndUpdateUI(tb->tab, annot);
@@ -2309,7 +2294,7 @@ void DrawAnnotationListRow(Gfx* gfx, PlatformFont* font, Rect rc, Annotation* an
                 gfx->PushClip(rcContents);
                 DrawMaybeHighlightedText(gfx, rcContents, oneLine, filterWords, hlScratch, colBg, false, false,
                                          gfxTextEllipsis | gfxTextVCenter | gfxTextLeft, font,
-                                         EnsureContrast(ThemeWindowTextDisabledColor(), colBg));
+                                         EnsureContrast(ThemeWindowDarkerTextColor(), colBg));
                 gfx->PopClip();
             }
         }
@@ -2387,7 +2372,7 @@ static void BuildAnnotationHoverOverlay(AnnotationHoverOverlay* overlay, Annotat
     CollectAnnotationHoverRows(annot, rows);
 
     Color textColor = AnnotationHoverText();
-    Color labelColor = ThemeWindowTextDisabledColor();
+    Color labelColor = ThemeWindowDarkerTextColor();
     auto* title = NewVirtText({
         .s = AnnotationReadableNameTemp(Type(annot)),
         .font = GetBoldPlatformFont(overlay->font),
@@ -2591,38 +2576,6 @@ void SetSelectedAnnotation(WindowTab* tab, Annotation* annot) {
     ScheduleShowSelectedAnnotationView(tab);
     UpdateAnnotEditToolbar(win);
     UpdateAnnotFilterToolbar(win);
-}
-
-// Load annot wrappers for one page (page + annot dicts, not stext).
-static void LoadAnnotsForPage(EngineMupdf* e, int pageNo) {
-    if (!e || pageNo < 1 || pageNo > e->pageCount) {
-        return;
-    }
-    FzPageInfo* pi = e->GetFzPageInfo(pageNo, true);
-    if (!pi) {
-        logf("LoadAnnotsForPage: page %d GetFzPageInfo failed\n", pageNo);
-        return;
-    }
-}
-
-void StartLoadingAnnotationsForUi(WindowTab* tab) {
-    if (!tab) {
-        return;
-    }
-    DisplayModel* dm = tab->AsFixed();
-    if (!dm) {
-        return;
-    }
-    EngineMupdf* engine = AsEngineMupdf(dm->GetEngine());
-    if (!engine) {
-        return;
-    }
-    Vec<int> firstPages;
-    CollectPriorityAnnotPages(tab, tab->selectedAnnotation, firstPages);
-    for (int pageNo : firstPages) {
-        LoadAnnotsForPage(engine, pageNo);
-    }
-    EngineMupdfStartLoadAllAnnotations(engine, firstPages, MkFunc0(OnAnnotsProgress, tab));
 }
 
 // orig reports canvas pixels as they are

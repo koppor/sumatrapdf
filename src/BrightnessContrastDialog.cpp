@@ -18,6 +18,7 @@
 #include "EngineBase.h"
 #include "DisplayModel.h"
 #include "RenderCache.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "MainWindow.h"
 #include "FileHistory.h"
@@ -72,14 +73,7 @@ static void ClearBrightnessContrastWnd() {
 }
 
 WindowTab* BrightnessContrastWnd::TargetTab() {
-    if (!IsMainWindowValidAndNotClosing(win)) {
-        return nullptr;
-    }
-    WindowTab* t = FindTabByFilePath(filePath);
-    if (!t || t->win != win) {
-        return nullptr;
-    }
-    return t;
+    return FindTabInWindow(filePath, win);
 }
 
 void BrightnessContrastWnd::UpdateValues() {
@@ -142,27 +136,14 @@ bool BrightnessContrastWnd::Create(MainWindow* mainWin) {
 
     Color colTxt = ThemeWindowTextColor();
     Color colBg = ThemeWindowControlBackgroundColor();
-    Color colMuted = ThemeWindowTextDisabledColor();
+    Color colMuted = ThemeWindowDarkerTextColor();
     PlatformFont* fontText = DlgUiFont(kToolDlgTextFontPx);
     SetFont(fontText);
     bool isRtl = IsUIRtl();
-    {
-        CreateCustomArgs args;
-        // owned by the main window, so it can't end up behind it
-        args.owner = win->hwndFrame;
-        args.title = Tr("Brightness / Contrast");
-        args.visible = false;
-        args.style = WS_POPUPWINDOW | WS_CAPTION;
-        args.font = fontText;
-        args.isRtl = isRtl;
-        args.bgColor = colBg;
-        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
-        CreateCustom(args);
-    }
-    if (!hwnd) {
+    // owned by the main window, so it can't end up behind it
+    if (!CreateToolDialog(this, win->hwndFrame, Tr("Brightness / Contrast"), fontText, colTxt, colBg)) {
         return false;
     }
-    SetColors(colTxt, colBg);
 
     auto* vbox = new VBox();
     vbox->alignCross = CrossAxisAlign::Stretch;
@@ -204,9 +185,8 @@ bool BrightnessContrastWnd::Create(MainWindow* mainWin) {
     vbox->AddChild(NewDlgFooter(btnCancel, btnOk, btnReset));
     layout = vbox;
 
-    LayoutAndSizeToContent(layout, DpiScale(kBcDlgDx), 0, hwnd);
+    SizeToLayout(this, layout, DpiScale(kBcDlgDx), 0, win->hwndFrame);
     UpdateValues();
-    HwndCenterDialog(hwnd, win->hwndFrame);
     UpdateTheme();
     SetIsVisible(true);
     return true;

@@ -242,9 +242,9 @@ static void MdTocParseWorker(MdTocParseCtx* ctx) {
         Str data = file::ReadFile(path);
         AutoFree dataOwner(data.s);
         if (ctx->htmlMode) {
-            ParseHtmlHeadingsData(data, toc->headings);
+            ParseHtmlHeadingsData(data, *toc->headings);
         } else {
-            ParseMarkdownHeadings(data, toc->headings);
+            ParseMarkdownHeadings(data, *toc->headings);
         }
     }
 }
@@ -258,6 +258,9 @@ void ParseMarkdownTocsParallel(StrVec& files, bool htmlMode, Vec<MarkdownFileToc
     }
     if (!VecResize(tocsOut, n)) {
         return;
+    }
+    for (MarkdownFileToc& toc : tocsOut) {
+        toc.headings = new Vec<MarkdownHeadingItem>();
     }
 
     EnsureCmarkPluginsRegistered();
@@ -489,8 +492,9 @@ static TempStr MarkdownPageCssTemp() {
 
     Str markBg = dark ? StrL("#e6c229") : StrL("#fff8c5");
     Str markFg = dark ? StrL("#1f2328") : fg;
-    TempStr cssVars = fmt("--bg:%s; --fg:%s; --link:%s; --muted:%s; --border:%s; --code-bg:%s; --mark:%s; --mark-fg:%s;",
-                          bg, fg, link, muted, border, codeBg, markBg, markFg);
+    TempStr cssVars =
+        fmt("--bg:%s; --fg:%s; --link:%s; --muted:%s; --border:%s; --code-bg:%s; --mark:%s; --mark-fg:%s;", bg, fg,
+            link, muted, border, codeBg, markBg, markFg);
     // code colors: GitHub's light or dark palette
     Str syntax = dark ? StrL(
                             "--syntax-comment:#8b949e; --syntax-keyword:#ff7b72; --syntax-string:#a5d6ff; "

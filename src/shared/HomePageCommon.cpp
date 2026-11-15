@@ -17,6 +17,7 @@
 #include "EngineBase.h"
 #include "EngineAll.h"
 #include "FileHistory.h"
+#include "FilterUtil.h"
 #include "Translations.h"
 #include "AppTools.h"
 #include "SumatraConfig.h"
@@ -47,6 +48,10 @@ void CollectTipsFromString(Str src, StrVec* out) {
     for (int i = 0; i < len(lines); i++) {
         Str line = lines[i];
         if (str::IsEmptyOrWhiteSpace(line)) {
+            continue;
+        }
+        // a browser tab has no LaTeX integration
+        if (OS_WASM && str::Contains(line, StrL("(Help/LaTeX-integration)"))) {
             continue;
         }
         out->Append(line);
@@ -102,7 +107,57 @@ TempStr TrimGitTemp(Str s) {
     return s;
 }
 
+// how many digits of the commit the About box shows
+constexpr int kAboutCommitDigits = 6;
+
+// The About box's "source" row: the commit the build is made from ("a1b2c3"),
+// linking to it on GitHub. Local builds aren't given one.
+void AboutSourceRow(Str* text, Str* url) {
+    static Str gText;
+    static Str gUrl;
+    if (str::IsNull(gText)) {
+        if (len(gitCommidId) > 0) {
+            gText = str::Dup(Str(gitCommidId.s, std::min(len(gitCommidId), kAboutCommitDigits)));
+            gUrl = str::Dup(fmt("https://github.com/sumatrapdfreader/sumatrapdf/commit/%s", gitCommidId));
+        } else {
+            gText = str::Dup(StrL("local build"));
+            gUrl = str::Dup(StrL("https://github.com/sumatrapdfreader/sumatrapdf"));
+        }
+    }
+    *text = gText;
+    *url = gUrl;
+}
+
 // Home-list entries with a path (same set as thumbnails when search is empty).
+// the history files the home page shows, in its sort order, matching searchQuery
+void CollectHomePageFiles(Str searchQuery, Vec<FileState*>& fileStates, StrVec& filterWords) {
+    Vec<FileState*> allFileStates;
+    if (gSettings->homePageSortByFrequentlyRead) {
+        FileHistoryGetFrequencyOrder(allFileStates);
+    } else {
+        FileHistoryGetRecentlyOpenedOrder(allFileStates);
+    }
+
+    bool hasFilter = len(searchQuery) > 0;
+    if (hasFilter) {
+        SplitFilterToWords(searchQuery, filterWords);
+    }
+    for (int i = 0; i < len(allFileStates); i++) {
+        FileState* fs = allFileStates[i];
+        // a state without a path can't be opened or thumbnailed - don't show it
+        if (len(fs->filePath) == 0) {
+            continue;
+        }
+        if (hasFilter) {
+            TempStr baseName = path::GetBaseNameTemp(fs->filePath);
+            if (!FilterMatches(baseName, filterWords)) {
+                continue;
+            }
+        }
+        VecAppend(fileStates, fs);
+    }
+}
+
 int CountHomePageFiles() {
     Vec<FileState*> all;
     if (gSettings && gSettings->homePageSortByFrequentlyRead) {
@@ -315,3 +370,75 @@ You can [zoom to fit the page content](Help/Scrolling-and-zooming#fit-the-page-c
 You can [paste an image from the clipboard](Help/Add-an-image-to-a-PDF#insert-an-image-from-the-clipboard).
 You can [translate selected text](Help/Customize-search-translation-services#search-or-translate-the-selection).
 )tips");
+
+static Str sumatraPromos = StrL(R"promos(Try [Edna](https://edna.arslexis.io): a note taking web app for power users.
+Try [MarkLexis](https://marklexis.arslexis.io): a bookmarking web application.
+Try [Sumatra File Manager](https://sumatrafilemanager.com): file manager with super powers.
+Try [Sumatra File Manager Web](https://web.sumatrafilemanager.com): file manager for S3, Dropbox and more.
+)promos");
+
+// promotions from the update-check file, shown with the built-in ones
+static Str promoFromServer;
+
+void EnsureTipsParsed() {
+    if (gTipsParsed) {
+        return;
+    }
+    CollectTipsFromString(sumatraTips, &gTipLines);
+    CollectTipsFromString(sumatraPromos, &gPromoLines);
+    if (len(promoFromServer) > 0) {
+        CollectTipsFromString(promoFromServer, &gPromoLines);
+    }
+    gTipsParsed = true;
+    PickRandomTipOrPromo();
+}
+
+void FreeHomePageTips() {
+    if (gTipsParsed) {
+        gTipLines.Reset();
+        gPromoLines.Reset();
+        gTipsParsed = false;
+    }
+    str::Free(promoFromServer);
+    promoFromServer = {};
+    HomePageInvalidateLayoutCache();
+}
+
+void SetPromoString(Str s) {
+    if (len(s) == 0) {
+        return;
+    }
+    str::ReplaceWithCopy(&promoFromServer, s);
+}
+
+static Str BitnessStr() {
+    return sizeof(void*) == 8 ? StrL("64-bit") : StrL("32-bit");
+}
+
+// "v3.7 64-bit (dbg)", for bug reports
+TempStr GetAppVersionTemp() {
+    TempStr s = fmt("v%s %s", currentVersion, BitnessStr());
+    if (gIsDebugBuild) {
+        s = str::JoinTemp(s, StrL(" (dbg)"));
+    }
+    return s;
+}
+
+// "3.7 64-bit, built Oct 14 2026 01:46"
+TempStr AboutVersionLineTemp() {
+    Str built = StrL(__DATE__ " " __TIME__);
+    // without the seconds
+    built.len = std::max(0, len(built) - 3);
+    return fmt("%s %s, built %s", currentVersion, BitnessStr(), built);
+}
+
+// the line under the rows that says this isn't a release build
+Str AboutNoteText() {
+#if defined(PRE_RELEASE_VER)
+    return StrL("pre-release build");
+#elif IS_DEBUG
+    return StrL("debug build, for testing only");
+#else
+    return {};
+#endif
+}

@@ -28,6 +28,7 @@
 #include "SumatraPDF.h"
 #include "MainWindow.h"
 #include "Toolbar.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Commands.h"
 #include "AppTools.h"
@@ -918,7 +919,8 @@ bool FindTermDiffersFromLast(MainWindow* win) {
     if (win->findCountText && len(win->findCountText) > 0) {
         return !str::Eq(searchText, FindTermWithoutWordStartSpace(win->findCountText));
     }
-    if (DisplayModel* dm = win->AsFixed()) {
+    // the find thread replaces (and frees) lastText while it runs
+    if (DisplayModel* dm = win->findThread ? nullptr : win->AsFixed()) {
         if (dm->textSearch && dm->textSearch->lastText) {
             return !str::Eq(searchText, dm->textSearch->lastText);
         }
@@ -986,7 +988,8 @@ TempStr CurrentFindTermTemp(MainWindow* win) {
     if (win->findCountText && len(win->findCountText) > 0) {
         return str::DupTemp(win->findCountText);
     }
-    if (DisplayModel* dm = win->AsFixed()) {
+    // the find thread replaces (and frees) lastText while it runs
+    if (DisplayModel* dm = win->findThread ? nullptr : win->AsFixed()) {
         if (dm->textSearch && dm->textSearch->lastText) {
             return str::DupTemp(dm->textSearch->lastText);
         }
@@ -1095,6 +1098,8 @@ static void FreeFindMatchPaintCacheEntries() {
 
 void InvalidateFindMatchPaintCache() {
     FreeFindMatchPaintCacheEntries();
+    gFindMatchPaintCache.win = nullptr;
+    gFindMatchPaintCache.dm = nullptr;
     gFindMatchPaintCache.firstPage = 0;
     gFindMatchPaintCache.lastPage = 0;
     gFindMatchPaintCache.countEpoch = 0;
@@ -1102,6 +1107,8 @@ void InvalidateFindMatchPaintCache() {
 
 void RebuildFindMatchPaintCache(MainWindow* win, DisplayModel* dm, int firstPage, int lastPage) {
     FreeFindMatchPaintCacheEntries();
+    gFindMatchPaintCache.win = win;
+    gFindMatchPaintCache.dm = dm;
     gFindMatchPaintCache.firstPage = firstPage;
     gFindMatchPaintCache.lastPage = lastPage;
     gFindMatchPaintCache.countEpoch = win->findCountEpoch;
@@ -1376,6 +1383,8 @@ void FindToggleMatchCase(MainWindow* win) {
     }
     win->findMatchCase = !win->findMatchCase;
     if (win->AsFixed()) {
+        // the find thread drives textSearch; it is re-run below anyway
+        JoinFindThread(win, false);
         win->AsFixed()->textSearch->SetMatchCase(win->findMatchCase);
     }
     FindBarSetMatchCaseChecked(win, win->findMatchCase);
@@ -1400,6 +1409,8 @@ void FindToggleMatchWholeWord(MainWindow* win) {
     }
     win->findMatchWholeWord = !win->findMatchWholeWord;
     if (win->AsFixed()) {
+        // the find thread drives textSearch; it is re-run below anyway
+        JoinFindThread(win, false);
         win->AsFixed()->textSearch->SetMatchWholeWord(win->findMatchWholeWord);
     }
     FindBarSetMatchWholeWordChecked(win, win->findMatchWholeWord);
@@ -1466,10 +1477,10 @@ struct FindThreadData {
 
     bool WasCanceled() {
         bool winValid = IsMainWindowValidAndNotClosing(win);
-        auto res = !winValid || win->findCancelled;
+        auto res = !winValid || AtomicBoolGet(&win->findCancelled);
         if (res) {
             logf("FindThreadData: WasCanceled() returns true, isMainWindowValid: %d, win->findCancelled: %d\n",
-                 (int)winValid, (int)win->findCancelled);
+                 (int)winValid, (int)AtomicBoolGet(&win->findCancelled));
         }
         return res;
     }
@@ -1518,6 +1529,8 @@ void InvalidateFindForDocumentChange(MainWindow* win) {
     win->findCountEngine = nullptr;
     VecReset(win->findCountPositions);
     str::FreePtr(&win->findCountText);
+    // a count queued for the previous document
+    str::FreePtr(&win->findCountPendingText);
     FindWindowDocChanged(win);
 
     if (!IsFindUIVisible(win)) {
@@ -2035,15 +2048,6 @@ void FindEndTask(FindEndTaskData* d) {
     win->findThread = nullptr;
 }
 
-static void UpdateSearchProgress(FindThreadData* ftd, ProgressUpdateData* data) {
-    if (data->wasCancelled) {
-        bool wasCancelled = ftd->WasCanceled();
-        *data->wasCancelled = wasCancelled;
-        return;
-    }
-    ftd->UpdateProgress(data->current, data->total);
-}
-
 static void PostFindEnd(FindThreadData* ftd, Vec<TextSel>* rect, bool canceled) {
     auto* data = new FindEndTaskData;
     data->win = ftd->win;
@@ -2103,7 +2107,7 @@ void FindThread(FindThreadData* ftd) {
     } else {
         ftd->started = true;
         ftd->dm = dm;
-        textSearch->progressCb = MkFunc1<FindThreadData, ProgressUpdateData*>(UpdateSearchProgress, ftd);
+        textSearch->progressCb = MkFunc1<FindThreadData, ProgressUpdateData*>(ForwardProgress<FindThreadData>, ftd);
         textSearch->SetDirection(ftd->direction);
         int currPageNo = textSearch->GetCurrentPageNo();
         if (ftd->wasModified || !ctrl->ValidPageNo(currPageNo) || !(bool)dm->GetPageInfo(currPageNo)->visibleRatio) {
@@ -2113,7 +2117,7 @@ void FindThread(FindThreadData* ftd) {
         }
     }
 
-    if (!textSearch->paused && !ftd->loopedAround && !win->findCancelled && !rect) {
+    if (!textSearch->paused && !ftd->loopedAround && !AtomicBoolGet(&win->findCancelled) && !rect) {
         // With no further findings, start over (unless this was a new search from the beginning)
         int startPage = (TextSearch::Direction::Forward == ftd->direction) ? textSearch->RestrictFirst()
                                                                            : textSearch->RestrictLast();
@@ -2128,13 +2132,9 @@ void FindThread(FindThreadData* ftd) {
         return;
     }
 
-    // wait for FindTextOnThread to return so that
-    // FindEndTask closes the correct handle to
-    // the current find thread
-    while (!win->findThread) {
-        SleepInMs(1);
-    }
-    PostFindEnd(ftd, rect, win->findCancelled);
+    // FindEndTask matches win->findThread against ftd->thread. Both are set
+    // by FindTextOnThread on the UI thread before the posted task can run
+    PostFindEnd(ftd, rect, AtomicBoolGet(&win->findCancelled));
     if (kHasThreads) {
         // a slice runs on the UI thread, whose temp memory isn't ours to free
         DestroyTempArena();
@@ -2149,11 +2149,11 @@ bool JoinFindThread(MainWindow* win, bool hideMessage) {
     if (win->findThread) {
         res = true;
         logf("JoinFindThread: setting win->findCancelled to true\n");
-        win->findCancelled = true;
+        AtomicBoolSet(&win->findCancelled, true);
         WaitThread(win->findThread, -1);
         win->findThread = nullptr;
     }
-    win->findCancelled = false;
+    AtomicBoolSet(&win->findCancelled, false);
 
     if (hideMessage) {
         bool didRemove = RemoveNotificationsForGroup(win, kNotifFindProgress);
@@ -2304,7 +2304,7 @@ static bool LaunchInverseSearchCmd(Str cmdLine) {
 }
 
 bool OnInverseSearch(MainWindow* win, int x, int y) {
-    if (!CanAccessDisk() || gPluginMode) {
+    if (OS_WASM || !CanAccessDisk() || gPluginMode) {
         return false;
     }
     WindowTab* tab = win->CurrentTab();
@@ -2669,6 +2669,13 @@ void FindTextOnThread(MainWindow* win, TextSearch::Direction direction, bool sho
 
 bool HandleExecuteCmds(HWND hwnd, Str cmd) {
     DdeExecuteBegin();
+    // a copy: cmd is often a TempStr, and opening a window can render and reset
+    // the temp arena while the handlers still parse the rest of it
+    Str ownedCmd = str::Dup(cmd);
+    defer {
+        str::Free(ownedCmd);
+    };
+    cmd = ownedCmd;
 
     bool didHandle = false;
     while (cmd) {
@@ -2768,6 +2775,88 @@ void PaintCurrentFindMatch(MainWindow* win, DisplayModel* dm, TextSearch* ts, Pa
     Rect clipRc = FindPaintClipRc(win, dm);
     Vec<Rect> currentRects;
     AppendTextSelScreenRects(dm, clipRc, &ts->result, currentRects);
+    if (len(currentRects) > 0) {
+        PaintTransparentRectangles(ctx, clipRc, currentRects, parsedCol->col, alpha);
+    }
+}
+
+void PaintAllFindMatches(MainWindow* win, PaintRef ctx) {
+    if (!win->IsDocLoaded() || !win->AsFixed()) {
+        return;
+    }
+    if (FindEditTextLen(win) == 0) {
+        return;
+    }
+
+    DisplayModel* dm = win->AsFixed();
+    // Matches/count cache are tied to the engine they were built for. After a
+    // tab close or reload without InvalidateFindForDocumentChange, refuse to
+    // map stale page/glyph coords onto a different document.
+    void* engine = (void*)dm->GetEngine();
+    if (win->findCountEngine && win->findCountEngine != engine) {
+        ClearFindMatches(win);
+        win->findCountValid = false;
+        win->findCountEngine = nullptr;
+        VecReset(win->findCountPositions);
+        str::FreePtr(&win->findCountText);
+        return;
+    }
+    TextSearch* ts = dm->textSearch;
+    // After the find UI is closed, still highlight the active match so F3 /
+    // FindNext navigation is visible (issue #5802). The full match list was
+    // cleared on hide; only paint the current TextSearch hit.
+    if (!IsFindUIVisible(win)) {
+        PaintCurrentFindMatch(win, dm, ts, ctx);
+        return;
+    }
+    if (!win->findCountValid && len(win->findMatches) == 0) {
+        // count still running: at least highlight the current match
+        PaintCurrentFindMatch(win, dm, ts, ctx);
+        return;
+    }
+    if (len(win->findMatches) == 0) {
+        return;
+    }
+    int firstPage = 0;
+    int lastPage = 0;
+    GetVisiblePageRange(dm, firstPage, lastPage);
+    if (!dm->ValidPageNo(firstPage)) {
+        return;
+    }
+
+    FindMatchPaintCache& cache = gFindMatchPaintCache;
+    bool stale = cache.win != win || cache.dm != dm || cache.countEpoch != win->findCountEpoch;
+    if (stale || cache.firstPage != firstPage || cache.lastPage != lastPage) {
+        RebuildFindMatchPaintCache(win, dm, firstPage, lastPage);
+    }
+
+    u64 currentKey = 0;
+    if (ts && len(ts->result) > 0) {
+        currentKey = MatchKey(ts->startPage, ts->startGlyph);
+    }
+
+    ParsedColor* parsedCol = GetPrefsColor(gSettings->fixedPageUI.selectionColor);
+    u8 alpha = GetAlpha(parsedCol->col);
+    if (alpha == 0) {
+        alpha = kSelectionDefaultAlpha;
+    }
+
+    Rect clipRc = FindPaintClipRc(win, dm);
+    Vec<Rect> otherRects;
+    Vec<Rect> currentRects;
+    Vec<FindMatchPaintPageRect>& positions = gFindMatchPaintCache.positions;
+    for (int i = 0; i < len(gFindMatchPaintCache.entries); i++) {
+        const FindMatchPaintRects& entry = gFindMatchPaintCache.entries[i];
+        Vec<Rect>& out = (entry.key == currentKey) ? currentRects : otherRects;
+        AppendPageRectsToScreen(dm, clipRc, &positions[entry.firstPos], entry.len, out);
+    }
+
+    if (len(otherRects) > 0) {
+        PaintTransparentRectangles(ctx, clipRc, otherRects, kFindOtherMatchColor, alpha);
+    }
+    if (len(currentRects) == 0 && ts && len(ts->result) > 0) {
+        AppendTextSelScreenRects(dm, clipRc, &ts->result, currentRects);
+    }
     if (len(currentRects) > 0) {
         PaintTransparentRectangles(ctx, clipRc, currentRects, parsedCol->col, alpha);
     }

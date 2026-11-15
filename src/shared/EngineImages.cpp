@@ -117,7 +117,6 @@ class EngineImages : public EngineBase {
     Str GetFileData() override;
     bool SaveFileAs(Str dstPath) override;
     PageText ExtractPageText(int /*pageNo*/) override { return {}; }
-    bool HasClipOptimizations(int /*pageNo*/) override { return false; }
 
     Vec<IPageElement*> GetElements(int pageNo) override;
     IPageElement* GetElementAtPos(int pageNo, PointF pt) override;
@@ -962,7 +961,9 @@ RectF EngineImages::Transform(const RectF& rect, int pageNo, float zoom, int rot
 
 // don't delete the result
 Vec<IPageElement*> EngineImages::GetElements(int pageNo) {
-    ReportIf(pageNo < 1 || pageNo > pageCount);
+    if (ReportIf(pageNo < 1 || pageNo > len(pageInfos))) {
+        return Vec<IPageElement*>();
+    }
     auto* pi = pageInfos[pageNo - 1];
     if (pi->hasImageElement) {
         return pi->allElements;
@@ -2136,6 +2137,9 @@ bool EngineImageDir::SaveFileAs(Str dstPath) {
 }
 
 Pixmap* EngineImageDir::LoadPixmapForPage(int pageNo, bool& deleteAfterUse) {
+    if (ReportIf(pageNo < 1 || pageNo > len(pageFileNames))) {
+        return nullptr;
+    }
     Str path = pageFileNames[pageNo - 1];
     Str bmpData = file::ReadFile(path);
     if (len(bmpData) == 0) {
@@ -2148,6 +2152,9 @@ Pixmap* EngineImageDir::LoadPixmapForPage(int pageNo, bool& deleteAfterUse) {
 }
 
 Str EngineImageDir::GetImageData(int pageNo) {
+    if (ReportIf(pageNo < 1 || pageNo > len(pageInfos) || pageNo > len(pageFileNames))) {
+        return {};
+    }
     ScopedRecursiveMutex scope(&cacheLock);
     auto* pi = pageInfos[pageNo - 1];
     if (len(pi->rawData) == 0) {
@@ -2346,10 +2353,13 @@ class EngineCbx : public EngineImages {
     bool LoadFromFile(Str fileName);
     bool LoadFromData(Str data);
     bool FinishLoading();
+    void PrefetchPageAfter(int pageNo);
 
     // access to cbxFile must be protected after initialization (with cacheLock)
     Archive* cbxArchive = nullptr;
     Vec<Archive::FileInfo*> files;
+    // the page a prefetch was last started for
+    AtomicInt prefetchedPageNo = 0;
     TocTree* tocTree = nullptr;
 
     // When set, the archive was actually opened from this local path (e.g.
@@ -2705,10 +2715,43 @@ TocTree* EngineCbx::GetToc() {
     return tocTree;
 }
 
+struct CbxPrefetch {
+    EngineCbx* engine;
+    Archive* archive;
+    int fileId;
+};
+
+static void CbxPrefetchThread(CbxPrefetch* p) {
+    p->archive->GetFileDataById(p->fileId);
+    p->engine->Release();
+    delete p;
+}
+
+// Paging forward asks for page N's media box and data while N+1 is still
+// unread; extracting N+1 now, off the UI thread, makes that next query a
+// cache hit. One prefetch per page, whichever thread asked first.
+void EngineCbx::PrefetchPageAfter(int pageNo) {
+    int next = pageNo + 1;
+    if (next > len(files) || AtomicIntGet(&prefetchedPageNo) == next) {
+        return;
+    }
+    Archive::FileInfo* fi = files[next - 1];
+    if (fi->data || fi->failed) {
+        return;
+    }
+    AtomicIntSet(&prefetchedPageNo, next);
+    AddRef();
+    auto* p = new CbxPrefetch{this, cbxArchive, fi->fileId};
+    RunAsync(MkFunc0(CbxPrefetchThread, p), StrL("CbxPrefetch"));
+}
+
 Str EngineCbx::GetImageData(int pageNo) {
-    ReportIf((pageNo < 1) || (pageNo > PageCount()));
+    if (ReportIf(pageNo < 1 || pageNo > len(files))) {
+        return {};
+    }
     int fileId = files[pageNo - 1]->fileId;
     auto* fi = cbxArchive->GetFileDataById(fileId);
+    PrefetchPageAfter(pageNo);
     if (!fi || !fi->data) {
         return {};
     }
@@ -2792,6 +2835,9 @@ void EngineCbx::GetProperties(Props& propsOut) {
 
 // SVG pages become display-list images, so they stay sharp at any zoom (#6364)
 fz_image* EngineCbx::LoadFzImageForPage(fz_context* ctx, int pageNo) {
+    if (ReportIf(pageNo < 1 || pageNo > len(files))) {
+        return nullptr;
+    }
     FileType kind = GuessFileTypeFromName(files[pageNo - 1]->name, true);
     if (FileType::Svg != kind) {
         return EngineImages::LoadFzImageForPage(ctx, pageNo);
@@ -2834,10 +2880,14 @@ Pixmap* EngineCbx::LoadPixmapForPage(int pageNo, bool& deleteAfterUse) {
 }
 
 RectF EngineCbx::LoadMediabox(int pageNo) {
+    if (ReportIf(pageNo < 1 || pageNo > len(files))) {
+        return {};
+    }
     int fileId = files[pageNo - 1]->fileId;
 
-    // try to get image size from just the file header (first 1024 bytes)
-    Str header = cbxArchive->GetFileDataPartById(fileId, 1024);
+    // try to get image size from just the file header
+    Str header = cbxArchive->GetFileDataPartById(fileId, kImageSizeFromDataPartialSize);
+    PrefetchPageAfter(pageNo);
     if (len(header) > 0) {
         Size size = ImageSizeFromDataPortable(header, true);
         str::Free(header);

@@ -29,6 +29,7 @@
 #include "DisplayModel.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "AIChatTypes.h"
 #include "WindowTab.h"
 #if !defined(SUMATRA_NG)
 #include "Canvas.h"
@@ -63,6 +64,15 @@ static int CaretBlinkMs() {
 #else
     return kCaretBlinkDefaultMs;
 #endif
+}
+
+// leaves the caret solid when blinking is turned off system-wide
+static void ArmCaretBlink(MainWindow* win) {
+    win->textSelectBlink.Cancel();
+    int ms = CaretBlinkMs();
+    if (ms > 0) {
+        win->textSelectBlink.Arm(ms);
+    }
 }
 #endif
 
@@ -220,7 +230,7 @@ static void ApplySelection(MainWindow* win, bool selecting) {
 static void RestartCaretBlink(MainWindow* win) {
     win->textSelectCaretVisible = true;
 #if defined(SUMATRA_NG)
-    win->textSelectBlinkLeftMs = CaretBlinkMs();
+    ArmCaretBlink(win);
 #else
     if (!win->hwndCanvas) {
         return;
@@ -237,14 +247,10 @@ static void RestartCaretBlink(MainWindow* win) {
 
 #if defined(SUMATRA_NG)
 void SelectTextWithKeyboardBlinkTick(MainWindow* win, int elapsedMs) {
-    if (!SelectTextWithKeyboardActive(win) || win->textSelectBlinkLeftMs <= 0) {
+    if (!SelectTextWithKeyboardActive(win) || !win->textSelectBlink.Tick(elapsedMs)) {
         return;
     }
-    win->textSelectBlinkLeftMs -= elapsedMs;
-    if (win->textSelectBlinkLeftMs > 0) {
-        return;
-    }
-    win->textSelectBlinkLeftMs = CaretBlinkMs();
+    ArmCaretBlink(win);
     win->textSelectCaretVisible = !win->textSelectCaretVisible;
     RepaintTextSelect(win);
 }
@@ -304,7 +310,7 @@ bool StopSelectTextWithKeyboard(MainWindow* win) {
     win->textSelectModeActive = false;
     win->textSelectModeVisual = false;
 #if defined(SUMATRA_NG)
-    win->textSelectBlinkLeftMs = 0;
+    win->textSelectBlink.Cancel();
     RemoveNotificationsForGroup(win, kNotifTextSelectMode);
     RepaintTextSelect(win);
 #else
@@ -383,6 +389,11 @@ void ToggleSelectTextWithKeyboard(MainWindow* win) {
     }
     if (!CanSelectTextWithKeyboard(win)) {
         return;
+    }
+    // only the highlighter works on a keyboard selection; other placements
+    // take the pointer and end, as starting one ends this mode
+    if (IsPlacingAnnotation(win) && win->annotPlacement.kind != AnnotPlacementKind::Highlighter) {
+        CancelAnnotationPlacement(win);
     }
     PlaceInitialCaret(win);
     if (PageTextLen(win->AsFixed()->GetEngine(), win->textSelectPage) <= 0) {
