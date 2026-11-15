@@ -38,6 +38,7 @@
 #include "Favorites.h"
 #include "Translations.h"
 #include "Version.h"
+#include "VirtualDesktop.h"
 #include "SearchAndDDE.h"
 #include "SearchAndDDECommon.h"
 
@@ -345,6 +346,28 @@ Go to a page and select the search term, but only if it's found on that page
 [GotoPageWord("<pdffile>",<page>,"<search-term>")]
 */
 
+// An empty window is only a good reuse target when it sits on the user's
+// current virtual desktop: focusing one on another desktop drags the user
+// over there, the very thing #5630 avoids for the main window.
+static MainWindow* FindEmptyWinOnCurDesktop() {
+    ISumatraVirtualDesktopManager* vdm = CreateVirtualDesktopManager();
+    MainWindow* res = nullptr;
+    for (auto& w : gWindows) {
+        if (w->HasDocsLoaded()) {
+            continue;
+        }
+        if (!IsWindowOnCurrentDesktop(vdm, w->hwndFrame)) {
+            continue;
+        }
+        res = w;
+        break;
+    }
+    if (vdm) {
+        vdm->Release();
+    }
+    return res;
+}
+
 /*
 Open file DDE Command
 
@@ -401,14 +424,10 @@ Str HandleOpenCmd(Str cmd, bool* ack) {
 
     // intelligently pick a window or create one
     MainWindow* win = nullptr;
-    MainWindow* emptyExistingWin = nullptr;
     auto nWindows = len(gWindows);
-    for (auto& w : gWindows) {
-        if (!w->HasDocsLoaded()) {
-            emptyExistingWin = w;
-            logf("HandleOpenCmd: found empty existing window\n");
-            break;
-        }
+    MainWindow* emptyExistingWin = FindEmptyWinOnCurDesktop();
+    if (emptyExistingWin) {
+        logf("HandleOpenCmd: found empty existing window\n");
     }
     if (newWindow > 0) {
         if (emptyExistingWin) {
@@ -620,13 +639,7 @@ Str HandleAppRequestCmd(Str cmd, bool* ack, str::Builder& res) {
 static void OpenManyCopyDataAsyncRun(OpenManyCopyDataAsync* d) {
     MainWindow* win = nullptr;
     if (d->newWindow) {
-        MainWindow* emptyExistingWin = nullptr;
-        for (auto& w : gWindows) {
-            if (!w->HasDocsLoaded()) {
-                emptyExistingWin = w;
-                break;
-            }
-        }
+        MainWindow* emptyExistingWin = FindEmptyWinOnCurDesktop();
         win = emptyExistingWin ? emptyExistingWin : CreateAndShowMainWindow(nullptr);
     } else {
         win = FindMainWindowByHwnd(d->hwnd);
@@ -651,13 +664,7 @@ static void OpenCopyDataAsyncRun(OpenCopyDataAsync* d) {
     // had to wait on us in the first place.
     MainWindow* win = nullptr;
     if (d->newWindow) {
-        MainWindow* emptyExistingWin = nullptr;
-        for (auto& w : gWindows) {
-            if (!w->HasDocsLoaded()) {
-                emptyExistingWin = w;
-                break;
-            }
-        }
+        MainWindow* emptyExistingWin = FindEmptyWinOnCurDesktop();
         win = emptyExistingWin ? emptyExistingWin : CreateAndShowMainWindow(nullptr);
     } else {
         win = FindMainWindowByFile(d->path, true);
