@@ -473,6 +473,30 @@ MainWindow* FindMainWindowByFile(Str file, bool focusTab, MainWindow* limitWin) 
     return tab->win;
 }
 
+// The window showing file that we can bring to the front without switching the
+// user's virtual desktop, selecting its tab. Picks the same window as
+// FindMainWindowByFile() whenever that one is on the current desktop; only when
+// it isn't do we look for another window here that also shows the file.
+MainWindow* FindMainWindowToActivate(Str file, MainWindow* limitWin) {
+    MainWindow* win = FindMainWindowByFile(file, false, limitWin);
+    if (win && !CanFocusWithoutDesktopSwitch(win->hwndFrame)) {
+        win = nullptr;
+        for (auto& w : gWindows) {
+            if (limitWin) {
+                break;
+            }
+            if (CanFocusWithoutDesktopSwitch(w->hwndFrame) && FindTabByFilePath(file, w)) {
+                win = w;
+                break;
+            }
+        }
+    }
+    if (win) {
+        SelectTabInWindow(FindTabByFilePath(file, win));
+    }
+    return win;
+}
+
 // Paths currently being loaded. Tabs are only created in LoadDocumentFinish, so
 // without this set a second open for the same path (common when Explorer multi-
 // opens password PDFs: cmdline load + reuseInstance DDE/COPYDATA during the
@@ -506,12 +530,21 @@ static int IndexOfLoadingFile(Str path) {
 
 // True if a tab already shows this file, or a load for it is already in progress
 // (tab is only created when load finishes, so mid-password / async loads need this).
+// A tab on another virtual desktop doesn't count: callers use this to skip the
+// open, and we'd rather load a second copy on the current desktop than switch
+// the user away from it. A load in progress always counts - it has no window
+// yet, and starting a second one is what #4576 was about.
 bool IsDocumentOpenOrLoading(Str file) {
     if (len(file) == 0) {
         return false;
     }
-    if (FindTabByFilePath(file)) {
-        return true;
+    for (auto& w : gWindows) {
+        if (!CanFocusWithoutDesktopSwitch(w->hwndFrame)) {
+            continue;
+        }
+        if (FindTabByFilePath(file, w)) {
+            return true;
+        }
     }
     return IndexOfLoadingFile(file) >= 0;
 }
@@ -4016,11 +4049,7 @@ void StartLoadDocument(LoadArgs* argsIn) {
 
     if (argsIn->activateExisting) {
         MainWindow* limitWin = argsIn->activateExistingInWindow ? win : nullptr;
-        MainWindow* existing = FindMainWindowByFile(path, true, limitWin);
-        if (existing && !CanFocusWithoutDesktopSwitch(existing->hwndFrame)) {
-            // on another virtual desktop: load here instead of dragging the user there
-            existing = nullptr;
-        }
+        MainWindow* existing = FindMainWindowToActivate(path, limitWin);
         if (existing) {
             existing->Focus();
             argsIn->onFinished.Call(true);
@@ -4270,11 +4299,7 @@ MainWindow* LoadDocument(LoadArgs* args) {
     Str path = args->FilePath();
     if (args->activateExisting) {
         MainWindow* limitWin = args->activateExistingInWindow ? args->win : nullptr;
-        MainWindow* existing = FindMainWindowByFile(path, true, limitWin);
-        if (existing && !CanFocusWithoutDesktopSwitch(existing->hwndFrame)) {
-            // on another virtual desktop: load here instead of dragging the user there
-            existing = nullptr;
-        }
+        MainWindow* existing = FindMainWindowToActivate(path, limitWin);
         if (existing) {
             existing->Focus();
             return existing;

@@ -660,11 +660,7 @@ static void OpenCopyDataAsyncRun(OpenCopyDataAsync* d) {
         MainWindow* emptyExistingWin = FindEmptyWinToReuse();
         win = emptyExistingWin ? emptyExistingWin : CreateAndShowMainWindow(nullptr);
     } else {
-        win = FindMainWindowByFile(d->path, true);
-        if (win && !CanFocusWithoutDesktopSwitch(win->hwndFrame)) {
-            // on another virtual desktop: open here rather than switching desktops
-            win = nullptr;
-        }
+        win = FindMainWindowToActivate(d->path);
         if (win) {
             // Already open: just focus (matches activateExisting).
             win->Focus();
