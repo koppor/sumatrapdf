@@ -16,4 +16,5 @@ ISumatraVirtualDesktopManager* CreateVirtualDesktopManager();
 bool IsWindowOnCurrentDesktop(ISumatraVirtualDesktopManager* vdm, HWND hwnd);
 TempStr GetWindowDesktopIdTemp(ISumatraVirtualDesktopManager* vdm, HWND hwnd);
 bool MoveWindowToVirtualDesktop(ISumatraVirtualDesktopManager* vdm, HWND hwnd, Str desktopId);
+bool CanFocusWithoutDesktopSwitch(HWND hwnd);
 #endif

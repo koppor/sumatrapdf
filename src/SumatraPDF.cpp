@@ -4017,6 +4017,10 @@ void StartLoadDocument(LoadArgs* argsIn) {
     if (argsIn->activateExisting) {
         MainWindow* limitWin = argsIn->activateExistingInWindow ? win : nullptr;
         MainWindow* existing = FindMainWindowByFile(path, true, limitWin);
+        if (existing && !CanFocusWithoutDesktopSwitch(existing->hwndFrame)) {
+            // on another virtual desktop: load here instead of dragging the user there
+            existing = nullptr;
+        }
         if (existing) {
             existing->Focus();
             argsIn->onFinished.Call(true);
@@ -4267,6 +4271,10 @@ MainWindow* LoadDocument(LoadArgs* args) {
     if (args->activateExisting) {
         MainWindow* limitWin = args->activateExistingInWindow ? args->win : nullptr;
         MainWindow* existing = FindMainWindowByFile(path, true, limitWin);
+        if (existing && !CanFocusWithoutDesktopSwitch(existing->hwndFrame)) {
+            // on another virtual desktop: load here instead of dragging the user there
+            existing = nullptr;
+        }
         if (existing) {
             existing->Focus();
             return existing;

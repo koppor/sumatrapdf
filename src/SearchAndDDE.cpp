@@ -668,6 +668,10 @@ static void OpenCopyDataAsyncRun(OpenCopyDataAsync* d) {
         win = emptyExistingWin ? emptyExistingWin : CreateAndShowMainWindow(nullptr);
     } else {
         win = FindMainWindowByFile(d->path, true);
+        if (win && !CanFocusWithoutDesktopSwitch(win->hwndFrame)) {
+            // on another virtual desktop: open here rather than switching desktops
+            win = nullptr;
+        }
         if (win) {
             // Already open: just focus (matches activateExisting).
             win->Focus();
@@ -692,8 +696,9 @@ static void OpenCopyDataAsyncRun(OpenCopyDataAsync* d) {
     args.activateExisting = d->newWindow == 0;
     // Match the legacy DDE Open(..., setFocus=1) behavior used by
     // shell/reuseInstance launches: opening into an existing instance should
-    // bring that window to the foreground.
-    if (win) {
+    // bring that window to the foreground. Not across virtual desktops: that
+    // would switch the user away from the desktop they opened the file on.
+    if (win && CanFocusWithoutDesktopSwitch(win->hwndFrame)) {
         win->Focus();
     }
     StartLoadDocument(&args);
