@@ -1660,6 +1660,14 @@ const globalPrefs: Field[] = [
     "if true, open documents in the already running SumatraPDF instead of starting a new one",
   ),
   field(
+    "ReuseInstanceOnOtherDesktop",
+    Bool,
+    true,
+    "if true, opening a document may reuse a SumatraPDF window on another virtual desktop, which " +
+      "makes Windows switch to that desktop; if false, the document opens on the current virtual " +
+      "desktop (Windows 10+)",
+  ).ver("3.7"),
+  field(
     "ShowMenubar",
     Bool,
     true,
@@ -2555,6 +2563,7 @@ const globalPrefsLayout = [
   "RestoreSession",
   "KeepMissingSessionTabs",
   "ReuseInstance",
+  "ReuseInstanceOnOtherDesktop",
   "ShowMenubar",
   "ShowMenubarWithTabs",
   "ShowTips",

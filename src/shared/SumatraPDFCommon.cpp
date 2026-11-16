@@ -2284,6 +2284,21 @@ bool IsWindowOnCurrentDesktop(ISumatraVirtualDesktopManager* vdm, HWND hwnd) {
     return onCurrent != FALSE;
 }
 
+// Focusing a window on another virtual desktop makes Windows switch the user
+// to that desktop, so a window there is not a usable activation target (#5630).
+// reuseInstanceOnOtherDesktop opts back in to switching.
+bool CanFocusWithoutDesktopSwitch(HWND hwnd) {
+    if (gSettings->reuseInstanceOnOtherDesktop) {
+        return true;
+    }
+    ISumatraVirtualDesktopManager* vdm = CreateVirtualDesktopManager();
+    bool res = IsWindowOnCurrentDesktop(vdm, hwnd);
+    if (vdm) {
+        vdm->Release();
+    }
+    return res;
+}
+
 // the virtual desktop hwnd is on, as "{GUID}". Empty when the shell can't
 // tell (no manager, hidden window).
 TempStr GetWindowDesktopIdTemp(ISumatraVirtualDesktopManager* vdm, HWND hwnd) {
