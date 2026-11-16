@@ -473,6 +473,30 @@ MainWindow* FindMainWindowByFile(Str file, bool focusTab, MainWindow* limitWin) 
     return tab->win;
 }
 
+// The window showing file that we can bring to the front without switching the
+// user's virtual desktop, selecting its tab. Picks the same window as
+// FindMainWindowByFile() whenever that one is on the current desktop; only when
+// it isn't do we look for another window here that also shows the file.
+MainWindow* FindMainWindowToActivate(Str file, MainWindow* limitWin) {
+    MainWindow* win = FindMainWindowByFile(file, false, limitWin);
+    if (win && !CanFocusWithoutDesktopSwitch(win->hwndFrame)) {
+        win = nullptr;
+        for (auto& w : gWindows) {
+            if (limitWin) {
+                break;
+            }
+            if (CanFocusWithoutDesktopSwitch(w->hwndFrame) && FindTabByFilePath(file, w)) {
+                win = w;
+                break;
+            }
+        }
+    }
+    if (win) {
+        SelectTabInWindow(FindTabByFilePath(file, win));
+    }
+    return win;
+}
+
 // Paths currently being loaded. Tabs are only created in LoadDocumentFinish, so
 // without this set a second open for the same path (common when Explorer multi-
 // opens password PDFs: cmdline load + reuseInstance DDE/COPYDATA during the
@@ -4025,11 +4049,7 @@ void StartLoadDocument(LoadArgs* argsIn) {
 
     if (argsIn->activateExisting) {
         MainWindow* limitWin = argsIn->activateExistingInWindow ? win : nullptr;
-        MainWindow* existing = FindMainWindowByFile(path, true, limitWin);
-        if (existing && !CanFocusWithoutDesktopSwitch(existing->hwndFrame)) {
-            // on another virtual desktop: load here instead of dragging the user there
-            existing = nullptr;
-        }
+        MainWindow* existing = FindMainWindowToActivate(path, limitWin);
         if (existing) {
             existing->Focus();
             argsIn->onFinished.Call(true);
@@ -4279,11 +4299,7 @@ MainWindow* LoadDocument(LoadArgs* args) {
     Str path = args->FilePath();
     if (args->activateExisting) {
         MainWindow* limitWin = args->activateExistingInWindow ? args->win : nullptr;
-        MainWindow* existing = FindMainWindowByFile(path, true, limitWin);
-        if (existing && !CanFocusWithoutDesktopSwitch(existing->hwndFrame)) {
-            // on another virtual desktop: load here instead of dragging the user there
-            existing = nullptr;
-        }
+        MainWindow* existing = FindMainWindowToActivate(path, limitWin);
         if (existing) {
             existing->Focus();
             return existing;
