@@ -1260,6 +1260,11 @@ struct Settings {
     // if true, open documents in the already running SumatraPDF instead of
     // starting a new one
     bool reuseInstance;
+    // if true, opening a document may reuse a SumatraPDF window on another
+    // virtual desktop, which makes Windows switch to that desktop; if
+    // false, the document opens on the current virtual desktop (Windows
+    // 10+)
+    bool reuseInstanceOnOtherDesktop;
     // if true, show the menu bar (F9 toggles it; the choice is remembered
     // across sessions)
     bool showMenubar;
