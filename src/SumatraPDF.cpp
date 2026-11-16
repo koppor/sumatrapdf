@@ -506,12 +506,21 @@ static int IndexOfLoadingFile(Str path) {
 
 // True if a tab already shows this file, or a load for it is already in progress
 // (tab is only created when load finishes, so mid-password / async loads need this).
+// A tab on another virtual desktop doesn't count: callers use this to skip the
+// open, and we'd rather load a second copy on the current desktop than switch
+// the user away from it. A load in progress always counts - it has no window
+// yet, and starting a second one is what #4576 was about.
 bool IsDocumentOpenOrLoading(Str file) {
     if (len(file) == 0) {
         return false;
     }
-    if (FindTabByFilePath(file)) {
-        return true;
+    for (auto& w : gWindows) {
+        if (!CanFocusWithoutDesktopSwitch(w->hwndFrame)) {
+            continue;
+        }
+        if (FindTabByFilePath(file, w)) {
+            return true;
+        }
     }
     return IndexOfLoadingFile(file) >= 0;
 }
