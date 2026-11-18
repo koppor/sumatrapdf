@@ -4,6 +4,7 @@
 struct AIChatAPIRequest;
 struct SelectionOnPage;
 struct MainWindow;
+struct PushedCitation;
 struct DocController;
 struct DisplayModel;
 struct ChmModel;
@@ -217,6 +218,13 @@ struct WindowTab {
     // Skip the next file-watcher auto-reload (e.g. after we save annotations
     // and already call ReloadDocument ourselves). Consumed by kAutoReloadTimerID.
     bool ignoreNextAutoReload = false;
+    // In-text citation markers painted as colored dots on the source page.
+    // Populated by the Ctrl+J push UI task on a successful add (and by the
+    // future page-scan flow on a positive existence-check); read by Canvas
+    // WM_PAINT. Pointer-owned so callers can null-check cheaply; allocated
+    // lazily on first push to avoid a Vec for every tab that never sees a
+    // citation push.
+    Vec<PushedCitation>* pushedCitations = nullptr;
     // follow the spoken word while reading; disabled when the user scrolls away
     bool readAloudAutoScroll = false;
     AutoScroll autoScroll;

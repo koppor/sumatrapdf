@@ -473,6 +473,30 @@ MainWindow* FindMainWindowByFile(Str file, bool focusTab, MainWindow* limitWin) 
     return tab->win;
 }
 
+// The window showing file that we can bring to the front without switching the
+// user's virtual desktop, selecting its tab. Picks the same window as
+// FindMainWindowByFile() whenever that one is on the current desktop; only when
+// it isn't do we look for another window here that also shows the file.
+MainWindow* FindMainWindowToActivate(Str file, MainWindow* limitWin) {
+    MainWindow* win = FindMainWindowByFile(file, false, limitWin);
+    if (win && !CanFocusWithoutDesktopSwitch(win->hwndFrame)) {
+        win = nullptr;
+        for (auto& w : gWindows) {
+            if (limitWin) {
+                break;
+            }
+            if (CanFocusWithoutDesktopSwitch(w->hwndFrame) && FindTabByFilePath(file, w)) {
+                win = w;
+                break;
+            }
+        }
+    }
+    if (win) {
+        SelectTabInWindow(FindTabByFilePath(file, win));
+    }
+    return win;
+}
+
 // Paths currently being loaded. Tabs are only created in LoadDocumentFinish, so
 // without this set a second open for the same path (common when Explorer multi-
 // opens password PDFs: cmdline load + reuseInstance DDE/COPYDATA during the
@@ -506,12 +530,21 @@ static int IndexOfLoadingFile(Str path) {
 
 // True if a tab already shows this file, or a load for it is already in progress
 // (tab is only created when load finishes, so mid-password / async loads need this).
+// A tab on another virtual desktop doesn't count: callers use this to skip the
+// open, and we'd rather load a second copy on the current desktop than switch
+// the user away from it. A load in progress always counts - it has no window
+// yet, and starting a second one is what #4576 was about.
 bool IsDocumentOpenOrLoading(Str file) {
     if (len(file) == 0) {
         return false;
     }
-    if (FindTabByFilePath(file)) {
-        return true;
+    for (auto& w : gWindows) {
+        if (!CanFocusWithoutDesktopSwitch(w->hwndFrame)) {
+            continue;
+        }
+        if (FindTabByFilePath(file, w)) {
+            return true;
+        }
     }
     return IndexOfLoadingFile(file) >= 0;
 }
@@ -4016,7 +4049,7 @@ void StartLoadDocument(LoadArgs* argsIn) {
 
     if (argsIn->activateExisting) {
         MainWindow* limitWin = argsIn->activateExistingInWindow ? win : nullptr;
-        MainWindow* existing = FindMainWindowByFile(path, true, limitWin);
+        MainWindow* existing = FindMainWindowToActivate(path, limitWin);
         if (existing) {
             existing->Focus();
             argsIn->onFinished.Call(true);
@@ -4266,7 +4299,7 @@ MainWindow* LoadDocument(LoadArgs* args) {
     Str path = args->FilePath();
     if (args->activateExisting) {
         MainWindow* limitWin = args->activateExistingInWindow ? args->win : nullptr;
-        MainWindow* existing = FindMainWindowByFile(path, true, limitWin);
+        MainWindow* existing = FindMainWindowToActivate(path, limitWin);
         if (existing) {
             existing->Focus();
             return existing;
@@ -8584,6 +8617,211 @@ static Annotation* GetAnnotionUnderCursor(WindowTab* tab, Annotation* annot, LPA
     return annot;
 }
 
+// Single-slot notification group for Ctrl+J → JabRef push. Lets the in-flight
+// "Sending…" notification be replaced by the result notification.
+static Kind kNotifJabRefPush = "jabRefPush";
+
+static NotificationWnd* ShowJabRefPushNotification(HWND hwndCanvas, Str msg, int timeoutMs) {
+    RemoveNotificationsForGroup(hwndCanvas, kNotifJabRefPush);
+    NotificationCreateArgs args;
+    args.hwndParent = hwndCanvas;
+    args.groupId = kNotifJabRefPush;
+    args.msg = msg;
+    args.timeoutMs = timeoutMs;
+    return ShowNotification(args);
+}
+
+struct PushToJabRefAsyncData {
+    HWND hwndCanvas;
+    char* entryText;         // owned, freed by PushToJabRefAsync
+    char* parserCacheKey;    // owned, may be null when hover-time lookup hadn't returned
+    RefHoverState* refHover; // for status-badge update on UI thread; lives as long as the window
+    // Captured at Ctrl+J time from refHover->pending so the in-PDF marker
+    // dot can be placed even if the user hovers a different citation while
+    // the async push is in flight (which would overwrite pending.srcRect).
+    WindowTab* tab; // not owned; validated on UI thread before use
+    int srcPage;
+    RectF srcRect;
+};
+
+struct PushToJabRefUITaskData {
+    HWND hwndCanvas;
+    RefHoverState* refHover;
+    RefHoverPushResult res;
+    int httpStatus;  // raw status from JabRef (0 = no response / TCP error)
+    char* respBody;  // owned; JabRef's exception message on 4xx/5xx
+    char* entryText; // owned; needed on Sent to record the local "pushed" hash
+    WindowTab* tab;
+    int srcPage;
+    RectF srcRect;
+};
+
+// JabRef's exception messages include stack traces and a final "Caused by: …"
+// line that's the actual error. Plus they're often multi-line. Notifications
+// are best kept to one line, so we extract the most informative single line
+// (last non-empty line, capped at 200 chars) for display.
+static TempStr FormatJabRefErrorSnippet(const char* respBody) {
+    if (!respBody || !*respBody) {
+        return {};
+    }
+    // Walk the response, keep the last non-empty line.
+    const char* bestStart = nullptr;
+    const char* bestEnd = nullptr;
+    const char* p = respBody;
+    while (*p) {
+        while (*p == '\r' || *p == '\n' || *p == ' ' || *p == '\t') {
+            p++;
+        }
+        if (!*p) {
+            break;
+        }
+        const char* lineStart = p;
+        while (*p && *p != '\r' && *p != '\n') {
+            p++;
+        }
+        const char* lineEnd = p;
+        if (lineEnd > lineStart) {
+            bestStart = lineStart;
+            bestEnd = lineEnd;
+        }
+    }
+    if (!bestStart) {
+        return {};
+    }
+    constexpr size_t kMaxSnippetLen = 200;
+    size_t len = (size_t)(bestEnd - bestStart);
+    if (len > kMaxSnippetLen) {
+        len = kMaxSnippetLen;
+    }
+    return str::DupTemp(Str(bestStart, (int)len));
+}
+
+// Append an in-PDF marker entry to the tab so Canvas WM_PAINT can paint the
+// dot. Markers arrive from async pushes and existence checks, so the tab
+// pointer is re-validated via the window list — if the user closed the tab or
+// switched to another one in the meantime, skip. An existing marker for the
+// same entry is promoted olive -> mint on an actual push, never downgraded.
+void RefHoverAddMarker(HWND hwndCanvas, WindowTab* tab, int srcPage, RectF srcRect, const char* entryText,
+                       RefHoverPushStatus status) {
+    MainWindow* win = FindMainWindowByHwnd(hwndCanvas);
+    if (!win || !tab || win->CurrentTab() != tab || srcPage <= 0) {
+        return;
+    }
+    if (!tab->pushedCitations) {
+        tab->pushedCitations = new Vec<PushedCitation>();
+    }
+    u64 hash = RefHoverHashEntryText(entryText);
+    for (int i = 0; i < tab->pushedCitations->len; i++) {
+        PushedCitation& pc = tab->pushedCitations->operator[](i);
+        if (pc.srcPage != srcPage || pc.entryTextHash != hash) {
+            continue;
+        }
+        if (status == RefHoverPushStatus::Sent && pc.status != status) {
+            pc.status = status;
+            ScheduleRepaint(win, 0);
+        }
+        return;
+    }
+    PushedCitation pc;
+    pc.srcPage = srcPage;
+    pc.srcRect = srcRect;
+    pc.entryTextHash = hash;
+    pc.status = status;
+    VecAppend(*tab->pushedCitations, pc);
+    // Repaint the page so the new dot appears immediately.
+    ScheduleRepaint(win, 0);
+}
+
+static void PushToJabRefUI(PushToJabRefUITaskData* t) {
+    if (t->res == RefHoverPushResult::Sent) {
+        // Record locally so subsequent hovers of the same citation show the
+        // mint badge without depending on a server-side lookup that may
+        // flake (rate-limited LLM, JabRef restart, etc.).
+        RefHoverMarkPushed(t->refHover, t->entryText);
+        RefHoverAddMarker(t->hwndCanvas, t->tab, t->srcPage, t->srcRect, t->entryText, RefHoverPushStatus::Sent);
+    }
+    RefHoverSetPushStatus(t->refHover,
+                          t->res == RefHoverPushResult::Sent ? RefHoverPushStatus::Sent : RefHoverPushStatus::Failed);
+    TempStr msg;
+    if (t->res == RefHoverPushResult::Sent) {
+        msg = Tr("Reference sent to JabRef");
+    } else if (t->httpStatus == 0) {
+        msg = Tr("Could not reach JabRef. Enable its HTTP server (port 23119).");
+    } else {
+        TempStr snippet = FormatJabRefErrorSnippet(t->respBody);
+        if (snippet) {
+            msg = fmt(Tr("JabRef returned HTTP %d: %s").s, t->httpStatus, snippet);
+        } else if (t->httpStatus == 400) {
+            // 400 = parser failed to extract a BibEntry from the plain
+            // citation. Server reachable; entryText just isn't parseable.
+            msg = Tr("JabRef rejected the citation (HTTP 400 — parser couldn't extract a BibTeX entry).");
+        } else {
+            msg = fmt(Tr("JabRef returned HTTP %d.").s, t->httpStatus);
+        }
+    }
+    // Errors carry server detail the user may want to copy out — give them
+    // longer to read before auto-dismiss. Success stays at the standard 5s.
+    int timeoutMs = (t->res == RefHoverPushResult::Sent) ? kNotif5SecsTimeOut : 15 * 1000;
+    ShowJabRefPushNotification(t->hwndCanvas, msg, timeoutMs);
+    str::Free(Str(t->respBody));
+    str::Free(Str(t->entryText));
+    delete t;
+}
+
+static void PushToJabRefAsync(PushToJabRefAsyncData* d) {
+    int httpStatus = 0;
+    char* respBody = nullptr;
+    RefHoverPushResult res = RefHoverPushToJabRef(d->entryText, d->parserCacheKey, &httpStatus, &respBody);
+    // entryText ownership transfers to the UI task — needed for the local
+    // pushed-set update on Sent. Async-side frees only the cache key.
+    auto* t = new PushToJabRefUITaskData{d->hwndCanvas, d->refHover, res,        httpStatus, respBody,
+                                         d->entryText,  d->tab,      d->srcPage, d->srcRect};
+    str::Free(Str(d->parserCacheKey));
+    delete d;
+    auto fn = MkFunc0<PushToJabRefUITaskData>(PushToJabRefUI, t);
+    uitask::Post(fn, "PushToJabRefResult");
+}
+
+// Ctrl+J body, extracted so accelerator dispatch (CmdRefHoverPushToJabRef) and
+// the in-canvas keydown handler share the same code path. Returns true when
+// the keystroke is consumed.
+static bool PushReferenceToJabRefFromHover(MainWindow* win) {
+    if (!win || !win->IsDocLoaded()) {
+        return false;
+    }
+    char* entryText = win->refHover ? RefHoverDupEntryTextIfPushable(win->refHover) : nullptr;
+    if (!entryText) {
+        ShowTemporaryNotification(win->hwndCanvas, Tr("No bibliography entry under cursor. Hover a citation first."));
+        return true;
+    }
+    // Already-in-library skip: any positive answer (Ctrl+J earlier in this
+    // session OR a Sent badge from a server-side existence check) means a
+    // push now would just create a duplicate. JabRef's plain-citation add
+    // endpoint has no dedup, so blocking the request here is the cheapest
+    // way to enforce one-citation-one-entry.
+    if (RefHoverWasPushed(win->refHover, entryText)) {
+        ShowJabRefPushNotification(win->hwndCanvas, Tr("Citation is already in the JabRef library."),
+                                   kNotif5SecsTimeOut);
+        str::Free(Str(entryText));
+        return true;
+    }
+    char* parserCacheKey = win->refHover ? RefHoverDupParserCacheKey(win->refHover) : nullptr;
+    // Snapshot source location now: the in-PDF marker dot needs to be placed
+    // at the in-text reference even if the user hovers elsewhere while the
+    // async POST is pending (pending.* would otherwise be overwritten).
+    int srcPage = win->refHover ? win->refHover->pending.srcPage : -1;
+    RectF srcRect = win->refHover ? win->refHover->pending.srcRect : RectF{};
+    ShowJabRefPushNotification(win->hwndCanvas, Tr("Sending reference to JabRef…"), kNotifNoTimeout);
+    RefHoverSetPushStatus(win->refHover, RefHoverPushStatus::Sending);
+    auto* asyncData = new PushToJabRefAsyncData{win->hwndCanvas,   entryText, parserCacheKey, win->refHover,
+                                                win->CurrentTab(), srcPage,   srcRect};
+    auto fn = MkFunc0<PushToJabRefAsyncData>(PushToJabRefAsync, asyncData);
+    RunAsync(fn, StrL("PushToJabRef"));
+    return true;
+}
+
+// Map a Windows virtual key to a portable selection extend (unit, delta).
+// Returns false if the key is not a selection-extend key.
 // Shift+arrows extend an existing text selection instead of scrolling (#5814).
 static bool TryExtendTextSelectionFromKey(MainWindow* win, WPARAM key) {
     if (!win || !IsShiftPressed() || IsCtrlPressed() || IsAltPressed()) {
@@ -8649,6 +8887,15 @@ static bool FrameOnKeydown(MainWindow* win, WPARAM key, LPARAM lp) {
     }
 
     DisplayModel* dm = win->AsFixed();
+
+    // Ctrl+J: push the bibliography reference shown in the citation-hover
+    // popup to a running JabRef instance. The accelerator routes through
+    // CmdRefHoverPushToJabRef in OnCommand so the keystroke is also caught
+    // when focus is on the toolbar / sidebar / search edit (a common case
+    // after alt-tabbing back to the window).
+    if (isCtrl && (key == 'J')) {
+        return PushReferenceToJabRefFromHover(win);
+    }
 
     // some of the chm key bindings are different than the rest and we
     // need to make sure we don't break them
@@ -12326,6 +12573,10 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             ScheduleSaveSettings();
             break;
         }
+
+        case CmdRefHoverPushToJabRef:
+            PushReferenceToJabRefFromHover(win);
+            return 0;
 
         case CmdToggleEngineeringDrawingEnhance: {
             DisplayModel* fixedDm = win->AsFixed();

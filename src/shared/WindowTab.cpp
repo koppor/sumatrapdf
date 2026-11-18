@@ -28,6 +28,7 @@
 #include "ReadingAutoScroll.h"
 #include "ReadingBar.h"
 #include "AnnotEditToolbar.h"
+#include "RefHover.h"
 #endif
 #include "AIChatTypes.h"
 #include "AIChatCommon.h"
@@ -183,6 +184,7 @@ WindowTab::~WindowTab() {
     // but gMostRecentlyOpenedDoc is only for dde commands
     // so doesn't need to be kept for long
     gMostRecentlyOpenedDoc = nullptr;
+    delete pushedCitations;
 #endif
     // waits for in-flight renders off the UI thread; deletes on the UI thread
     DeleteControllerAsync(ctrl);

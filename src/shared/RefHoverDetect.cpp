@@ -731,9 +731,14 @@ static RectF FindColumnWrapContinuation(WStr text, const Rect* coords, RectF med
 
 // Fit a bibliography, glossary, or abbreviation entry; otherwise use LandscapeBox.
 // continuationOut optionally receives the entry's tail in the next column.
-RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX, float destY, RectF* continuationOut) {
+// outIsBibEntry optionally reports whether the box is a fitted bibliography entry.
+RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX, float destY, RectF* continuationOut,
+                     bool* outIsBibEntry) {
     if (continuationOut) {
         *continuationOut = RectF{};
+    }
+    if (outIsBibEntry) {
+        *outIsBibEntry = false;
     }
     // Show the whole page when sparse text would hide its images.
     constexpr int kSparsePageTextLen = 50;
@@ -998,6 +1003,9 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
                       (float)(bMaxX - bMinX) + (2.f * kEntryPadPt), (float)(bMaxY - bMinY) + (2.f * kEntryPadPt)};
             ClipToMediabox(box, mediabox);
             if (box.dx >= 50.f && box.dy >= 20.f) {
+                if (outIsBibEntry) {
+                    *outIsBibEntry = true;
+                }
                 // Without a sibling or further body text, look for continuation in the next column.
                 if (continuationOut && !foundSibling) {
                     // Short footer tokens do not count as following body text.
@@ -1167,6 +1175,9 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
     }
     // Bracket labels identify bibliography entries.
     if (text.s[startIdx] == L'[') {
+        if (outIsBibEntry) {
+            *outIsBibEntry = true;
+        }
         return box;
     }
     // A wide continuation offset is a table column gap, not a hanging indent.
@@ -1201,6 +1212,9 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
     }
     // Keep the fitted box when an aligned sibling identifies a list or footnote entry.
     if (descListSibling) {
+        if (outIsBibEntry) {
+            *outIsBibEntry = true;
+        }
         return box;
     }
     // Isolated single lines may be captions, headings or in-text destinations.
@@ -1208,5 +1222,117 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
         return LandscapeBox(mediabox, destX, destY, text, coords);
     }
     // Keep the fitted author-year entry.
+    if (outIsBibEntry) {
+        *outIsBibEntry = true;
+    }
+    return box;
+}
+
+// The bibliography entry containing page point (x, y) — for a cursor resting
+// on the reference list itself rather than a link pointing into it. Walks up
+// from the cursor's line to the entry head (a '[' label line, or the
+// out-dented first line of a hanging indent), then defers to DetectEntryBox.
+// Empty, with *outIsBibEntry false, when (x, y) isn't inside a bib entry.
+RectF DetectEntryBoxAt(WStr text, const Rect* coords, RectF mediabox, float x, float y, bool* outIsBibEntry) {
+    if (outIsBibEntry) {
+        *outIsBibEntry = false;
+    }
+    if (len(text) == 0 || !coords) {
+        return {};
+    }
+
+    // the glyph under the cursor: same line band, nearest horizontally
+    int px = (int)x;
+    int py = (int)y;
+    int idx = -1;
+    int bestDx = INT_MAX;
+    for (int i = 0; i < text.len; i++) {
+        if (IsGlyphSpace(text.s[i])) {
+            continue;
+        }
+        Rect r = coords[i];
+        if (py < r.y - 2 || py > r.y + r.dy + 2) {
+            continue;
+        }
+        int dx = abs(r.x + r.dx / 2 - px);
+        if (dx < bestDx) {
+            bestDx = dx;
+            idx = i;
+        }
+    }
+    constexpr int kMaxCursorGlyphDistPt = 40;
+    if (idx < 0 || bestDx > kMaxCursorGlyphDistPt) {
+        return {};
+    }
+
+    // Walk up to the entry head. Per line: a '[' at the line's left edge is a
+    // bracket label (head); a line above that is out-dented is a hanging-
+    // indent head; one indented further right means we already are the head.
+    constexpr int kMaxEntryLines = 25;
+    constexpr int kIndentSlackPt = 4;
+    constexpr int kMaxHangingIndentPt = 60;
+    LineRun run = LineRunExtent(text, coords, idx);
+    for (int step = 0; step < kMaxEntryLines; step++) {
+        if (text.s[run.leftIdx] == L'[') {
+            break;
+        }
+        int curY = coords[run.leftIdx].y;
+        int curDy = coords[run.leftIdx].dy;
+
+        // the closest line above, within this column
+        int aboveIdx = -1;
+        int aboveY = INT_MIN;
+        for (int i = 0; i < text.len; i++) {
+            if (IsGlyphSpace(text.s[i])) {
+                continue;
+            }
+            Rect r = coords[i];
+            if (r.y >= curY - 2) {
+                continue;
+            }
+            if (r.x + r.dx < run.leftX - kMaxHangingIndentPt || r.x > run.rightX) {
+                continue;
+            }
+            if (r.y > aboveY) {
+                aboveY = r.y;
+                aboveIdx = i;
+            }
+        }
+        if (aboveIdx < 0) {
+            break; // top of the column: this line starts the entry
+        }
+        int lineH = curDy > 0 ? curDy : 10;
+        if (curY - aboveY > 3 * lineH) {
+            break; // a blank gap above: this line starts the entry
+        }
+
+        LineRun aboveRun = LineRunExtent(text, coords, aboveIdx);
+        if (aboveRun.leftX > run.leftX + kIndentSlackPt) {
+            break; // line above is indented right of us: we are the head
+        }
+        bool aboveIsHead = aboveRun.leftX < run.leftX - kIndentSlackPt;
+        run = aboveRun;
+        if (aboveIsHead) {
+            break; // out-dented line above is the hanging-indent head
+        }
+    }
+
+    float headX = (float)run.leftX;
+    float headY = (float)coords[run.leftIdx].y;
+    bool isBib = false;
+    RectF box = DetectEntryBox(text, coords, mediabox, headX, headY, nullptr, &isBib);
+    if (!isBib || box.dx <= 0.f || box.dy <= 0.f) {
+        return {};
+    }
+
+    // the cursor must actually sit inside the detected entry
+    constexpr float kContainSlackPt = 3.f;
+    if (x < box.x - kContainSlackPt || x > box.x + box.dx + kContainSlackPt || y < box.y - kContainSlackPt ||
+        y > box.y + box.dy + kContainSlackPt) {
+        return {};
+    }
+    if (outIsBibEntry) {
+        *outIsBibEntry = true;
+    }
     return box;
 }

@@ -1285,6 +1285,11 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM key) {
 
             RefHoverOnCanvasMouseMove(win->refHover, win->hwndCanvas, win->ctrl, win->linkHandler, dm, x, y, el,
                                       srcPageNo, hoverDelayMs);
+            if (win->refHover) {
+                // the existence check snapshots the tab so an async match can
+                // place its marker dot on the right document
+                win->refHover->tab = win->CurrentTab();
+            }
             break;
         }
 
@@ -2889,6 +2894,97 @@ NO_INLINE static void PaintCurrentEditAnnotationMark(WindowTab* tab, HDC hdc, Di
     drawHandle(left, midY);
 }
 
+// Paint the in-PDF marker dots for citations the user has pushed to JabRef
+// (mint) or that JabRef reports live in another open library (olive).
+// Mirrors the popup-corner badge palette in RefHover.cpp so the two surfaces
+// match. Skipped for non-fixed-layout tabs (the marker positions are PDF
+// user-space rects and have no meaning in reflowed views).
+static void PaintCitationMarkers(WindowTab* tab, HDC hdc, DisplayModel* dm) {
+    if (!tab || !tab->pushedCitations || tab->pushedCitations->len == 0) {
+        return;
+    }
+    Gdiplus::Graphics gs(hdc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    // Match the popup badge palette. Same constants are inlined in
+    // RefHover.cpp; keeping them duplicated here avoids cross-TU coupling for
+    // two colours that aren't going to drift.
+    Gdiplus::SolidBrush brushMint(Gdiplus::Color(255, 0x44, 0xBB, 0x99));
+    Gdiplus::SolidBrush brushOlive(Gdiplus::Color(255, 0xAA, 0xAA, 0x00));
+    int sz = DpiScale(8);
+    for (int i = 0; i < tab->pushedCitations->len; i++) {
+        const PushedCitation& pc = tab->pushedCitations->operator[](i);
+        if (pc.srcPage <= 0 || !dm->PageVisible(pc.srcPage)) {
+            continue;
+        }
+        // CvtToScreen requires the page be visible (laid out); guarded above.
+        Rect rc = dm->CvtToScreen(pc.srcPage, pc.srcRect);
+        // Anchor dot at the citation rect's top-right corner, half-overlapping
+        // so it reads as a callout rather than swallowing the link text.
+        int cx = rc.x + rc.dx - sz / 2;
+        int cy = rc.y - sz / 2;
+        Gdiplus::SolidBrush* brush = (pc.status == RefHoverPushStatus::RelatedMatch) ? &brushOlive : &brushMint;
+        gs.FillEllipse(brush, cx, cy, sz, sz);
+    }
+}
+
+// Paint the live push-status badge at the hovered bibliography entry's
+// top-right corner (hover-over-bibliography, no popup). Mirrors the popup
+// badge's hue + shape palette in RefHoverPopup.cpp.
+static void PaintBibHoverBadge(MainWindow* win, HDC hdc, DisplayModel* dm) {
+    RefHoverState* s = win->refHover;
+    if (!s || s->bibHoverPage <= 0 || s->pushStatus == RefHoverPushStatus::None) {
+        return;
+    }
+    if (!dm->PageVisible(s->bibHoverPage)) {
+        return;
+    }
+    Rect rc = dm->CvtToScreen(s->bibHoverPage, s->bibHoverRect);
+    int sz = DpiScale(10);
+    int bx = rc.x + rc.dx - sz / 2;
+    int by = rc.y - sz / 2;
+
+    Gdiplus::Graphics gs(hdc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::Color gray(255, 0xBB, 0xBB, 0xBB);
+    Gdiplus::Color mint(255, 0x44, 0xBB, 0x99);
+    Gdiplus::Color olive(255, 0xAA, 0xAA, 0x00);
+    Gdiplus::Color orange(255, 0xEE, 0x77, 0x33);
+    switch (s->pushStatus) {
+        case RefHoverPushStatus::Searching:
+        case RefHoverPushStatus::Sending: {
+            // small centred grey square — the result icon reads larger
+            Gdiplus::SolidBrush b(gray);
+            int side = sz / 2;
+            int off = (sz - side) / 2;
+            gs.FillRectangle(&b, bx + off, by + off, side, side);
+            break;
+        }
+        case RefHoverPushStatus::NoMatch: {
+            Gdiplus::Pen p(gray, (Gdiplus::REAL)DpiScale(2));
+            gs.DrawEllipse(&p, bx, by, sz, sz);
+            break;
+        }
+        case RefHoverPushStatus::Sent: {
+            Gdiplus::SolidBrush b(mint);
+            gs.FillEllipse(&b, bx, by, sz, sz);
+            break;
+        }
+        case RefHoverPushStatus::RelatedMatch: {
+            Gdiplus::SolidBrush b(olive);
+            gs.FillEllipse(&b, bx, by, sz, sz);
+            break;
+        }
+        case RefHoverPushStatus::Failed:
+        case RefHoverPushStatus::Disconnected: {
+            Gdiplus::SolidBrush b(orange);
+            gs.FillEllipse(&b, bx, by, sz, sz);
+            break;
+        }
+        case RefHoverPushStatus::None:
+            break;
+    }
+}
+
 // CmdToggleMirror (#6221): the part of the page that shows in bounds once
 // flipped is painted as usual into a bitmap, then copied in mirrored. What is
 // already there (the page background, for transparent pages) goes into the
@@ -3186,6 +3282,8 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
     RepositionAnnotEditToolbar(win);
     RepositionFreeTextInPlaceEdit(win);
     PaintCurrentEditAnnotationMark(tab, hdc, dm);
+    PaintCitationMarkers(tab, hdc, dm);
+    PaintBibHoverBadge(win, hdc, dm);
     if (ShowPageGrid() && !win->InPresentation()) {
         PaintPageGrid(dm, hdc);
     }

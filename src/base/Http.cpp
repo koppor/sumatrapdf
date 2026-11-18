@@ -190,6 +190,109 @@ Exit:
     return ok;
 }
 
+bool HttpPost(Str serverA, int port, Str urlA, str::Builder* headers, str::Builder* data, str::Builder* outResp,
+              DWORD* outStatusCode) {
+    str::Builder resp;
+    str::BuilderReserve(resp, 2048);
+    bool ok = false;
+    if (outStatusCode) {
+        *outStatusCode = 0;
+    }
+    char* hdr = nullptr;
+    DWORD hdrLen = 0;
+    HINTERNET hConn = nullptr, hReq = nullptr;
+    void* d = nullptr;
+    DWORD dLen = 0;
+    unsigned int timeoutMs = 15 * 1000;
+    DWORD respHttpCode = 0;
+    DWORD respHttpCodeSize = sizeof(respHttpCode);
+    DWORD dwRead = 0;
+    DWORD flags;
+    DWORD dwService;
+    WCHAR* server = CWStrTemp(serverA);
+    WCHAR* url = CWStrTemp(urlA);
+    DWORD infoLevel;
+
+    // Loopback POST targets (JabRef HTTP server on 127.0.0.1:23119, etc.) get
+    // INTERNET_OPEN_TYPE_DIRECT so a system-configured proxy can't intercept
+    // localhost traffic. The default INTERNET_OPEN_TYPE_PRECONFIG honors IE /
+    // Windows Internet Options, and some corp PAC files route loopback through
+    // the proxy — there the request never reaches the local server even when
+    // a plain Python / curl request to the same URL succeeds.
+    bool isLoopback = str::Eq(serverA, StrL("127.0.0.1")) || str::Eq(serverA, StrL("localhost")) ||
+                      str::Eq(serverA, StrL("::1")) || str::EqI(serverA, StrL("localhost"));
+    DWORD accessType = isLoopback ? INTERNET_OPEN_TYPE_DIRECT : INTERNET_OPEN_TYPE_PRECONFIG;
+    HINTERNET hInet = InternetOpenW(kUserAgent, accessType, nullptr, nullptr, 0);
+    if (!hInet) {
+        goto Exit;
+    }
+    dwService = INTERNET_SERVICE_HTTP;
+    hConn = InternetConnectW(hInet, server, (INTERNET_PORT)port, nullptr, nullptr, dwService, 0, 1);
+    if (!hConn) {
+        goto Exit;
+    }
+
+    flags = INTERNET_FLAG_NO_UI;
+    if (port == 443) {
+        flags |= INTERNET_FLAG_SECURE;
+    }
+    hReq = HttpOpenRequestW(hConn, L"POST", url, nullptr, nullptr, nullptr, flags, 0);
+    if (!hReq) {
+        goto Exit;
+    }
+
+    if (headers && len(*headers) > 0) {
+        hdr = ToStr(*headers).s;
+        hdrLen = (DWORD)len(*headers);
+    }
+    if (data && len(*data) > 0) {
+        d = ToStr(*data).s;
+        dLen = (DWORD)len(*data);
+    }
+
+    InternetSetOptionW(hReq, INTERNET_OPTION_SEND_TIMEOUT, &timeoutMs, sizeof(timeoutMs));
+    InternetSetOptionW(hReq, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeoutMs, sizeof(timeoutMs));
+
+    if (!HttpSendRequestA(hReq, hdr, hdrLen, d, dLen)) {
+        goto Exit;
+    }
+
+    infoLevel = HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER;
+    HttpQueryInfoW(hReq, infoLevel, &respHttpCode, &respHttpCodeSize, nullptr);
+
+    do {
+        char buf[1024];
+        if (!InternetReadFile(hReq, buf, sizeof(buf), &dwRead)) {
+            goto Exit;
+        }
+        ok = resp.Append(Str(buf, (int)dwRead));
+        if (!ok) {
+            goto Exit;
+        }
+    } while (dwRead > 0);
+
+    // Accept any 2xx — JabRef's /libraries/current/entries returns 201 Created
+    // on success, and other REST endpoints commonly return 202/204.
+    ok = (respHttpCode >= 200 && respHttpCode < 300);
+    if (outResp && len(resp) > 0) {
+        outResp->Append(ToStr(resp));
+    }
+    if (outStatusCode) {
+        *outStatusCode = respHttpCode;
+    }
+Exit:
+    if (hReq) {
+        InternetCloseHandle(hReq);
+    }
+    if (hConn) {
+        InternetCloseHandle(hConn);
+    }
+    if (hInet) {
+        InternetCloseHandle(hInet);
+    }
+    return ok;
+}
+
 #endif // OS_WIN
 
 //--- URL encoding

@@ -383,6 +383,7 @@ const commandsRaw = [
     "CmdViewAsHex", "View As Hex",
     "CmdAIChatWithCustomAPI", "Custom AI chat...",
     "CmdSaveTrimmedPagesAs", "Save Trimmed Pages As...",
+    "CmdRefHoverPushToJabRef", "Push Reference to JabRef",
 ];
 
 // removed slots are dropped: nothing outside the generators should see them
