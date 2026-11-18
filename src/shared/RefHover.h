@@ -17,6 +17,7 @@ struct El;
 class EngineBase;
 struct DocController;
 struct DisplayModel;
+struct WindowTab;
 struct ILinkHandler;
 struct IPageDestination;
 struct IPageElement;
@@ -103,6 +104,8 @@ struct RefHoverState {
         // the popup so it stays within the document area and doesn't drift
         // into the gray margins outside the page.
         Rect pageScreenRect;
+        // probe for a bib entry under the cursor instead of showing a popup
+        bool bibProbe = false;
     } pending;
 
     // Async rendering: renders run on a background thread (a complex page
@@ -191,6 +194,15 @@ struct RefHoverState {
     // of manual citation imports — no eviction needed.
     Vec<u64> pushedEntryHashes;
 
+    // Hover-over-bibliography (no popup): the entry under the cursor, page
+    // coords. bibHoverPage <= 0 = none; the canvas paints the push-status
+    // badge at the rect's top-right corner (PaintBibHoverBadge).
+    int bibHoverPage = -1;
+    RectF bibHoverRect{};
+    // current tab at hover time, set by Canvas; opaque here, validated by
+    // RefHoverAddMarker before persisting a marker dot
+    WindowTab* tab = nullptr;
+
     // Push-status badge for the currently-shown entry. Reset to None whenever
     // the popup transitions to a new entry; advanced by RefHoverSetPushStatus
     // when the user fires Ctrl+J.
@@ -246,6 +258,12 @@ enum class RefHoverWheelAt {
     Popup
 };
 void RefHoverOnWheel(RefHoverState* s, EngineBase* engine, UINT msg, WPARAM wp, LPARAM lp, RefHoverWheelAt at);
+void RefHoverScheduleBibProbe(RefHoverState* s, HWND hwndCanvas, int delayMs, int srcPage, Point pagePt);
+void RefHoverClearBibHover(RefHoverState* s, HWND hwndCanvas);
+void RefHoverBibProbeOnTimer(RefHoverState* s, EngineBase* engine);
+// implemented by the app (SumatraPDF.cpp)
+void RefHoverAddMarker(HWND hwndCanvas, WindowTab* tab, int srcPage, RectF srcRect, const char* entryText,
+                       RefHoverPushStatus status);
 #endif
 
 void RefHoverHandlePopupClick(RefHoverState* s, IPageDestination* dest);
@@ -348,6 +366,8 @@ RectF DetectEquationBox(WStr text, const Rect* coords, RectF mediabox, float des
 
 RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX, float destY,
                      RectF* continuationOut = nullptr, bool* outIsBibEntry = nullptr);
+
+RectF DetectEntryBoxAt(WStr text, const Rect* coords, RectF mediabox, float x, float y, bool* outIsBibEntry);
 
 bool ShouldSearchNextPage(RectF mediabox, float destY);
 

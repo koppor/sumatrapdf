@@ -8696,43 +8696,49 @@ static TempStr FormatJabRefErrorSnippet(const char* respBody) {
     return str::DupTemp(Str(bestStart, (int)len));
 }
 
+// Append an in-PDF marker entry to the tab so Canvas WM_PAINT can paint the
+// dot. Markers arrive from async pushes and existence checks, so the tab
+// pointer is re-validated via the window list — if the user closed the tab or
+// switched to another one in the meantime, skip. An existing marker for the
+// same entry is promoted olive -> mint on an actual push, never downgraded.
+void RefHoverAddMarker(HWND hwndCanvas, WindowTab* tab, int srcPage, RectF srcRect, const char* entryText,
+                       RefHoverPushStatus status) {
+    MainWindow* win = FindMainWindowByHwnd(hwndCanvas);
+    if (!win || !tab || win->CurrentTab() != tab || srcPage <= 0) {
+        return;
+    }
+    if (!tab->pushedCitations) {
+        tab->pushedCitations = new Vec<PushedCitation>();
+    }
+    u64 hash = RefHoverHashEntryText(entryText);
+    for (int i = 0; i < tab->pushedCitations->len; i++) {
+        PushedCitation& pc = tab->pushedCitations->operator[](i);
+        if (pc.srcPage != srcPage || pc.entryTextHash != hash) {
+            continue;
+        }
+        if (status == RefHoverPushStatus::Sent && pc.status != status) {
+            pc.status = status;
+            ScheduleRepaint(win, 0);
+        }
+        return;
+    }
+    PushedCitation pc;
+    pc.srcPage = srcPage;
+    pc.srcRect = srcRect;
+    pc.entryTextHash = hash;
+    pc.status = status;
+    VecAppend(*tab->pushedCitations, pc);
+    // Repaint the page so the new dot appears immediately.
+    ScheduleRepaint(win, 0);
+}
+
 static void PushToJabRefUI(PushToJabRefUITaskData* t) {
     if (t->res == RefHoverPushResult::Sent) {
         // Record locally so subsequent hovers of the same citation show the
         // mint badge without depending on a server-side lookup that may
         // flake (rate-limited LLM, JabRef restart, etc.).
         RefHoverMarkPushed(t->refHover, t->entryText);
-
-        // Append in-PDF marker entry to the tab so Canvas WM_PAINT can paint
-        // the dot. Re-validate the tab pointer via the window list — if the
-        // user closed the tab while the async push was in flight, skip.
-        MainWindow* win = FindMainWindowByHwnd(t->hwndCanvas);
-        if (win && win->CurrentTab() == t->tab && t->tab && t->srcPage > 0) {
-            if (!t->tab->pushedCitations) {
-                t->tab->pushedCitations = new Vec<PushedCitation>();
-            }
-            u64 hash = RefHoverHashEntryText(t->entryText);
-            // De-dupe: same srcRect re-push (e.g. user pressed Ctrl+J twice
-            // before the first reply landed) shouldn't double-paint.
-            bool already = false;
-            for (int i = 0; i < t->tab->pushedCitations->len; i++) {
-                const PushedCitation& pc = t->tab->pushedCitations->operator[](i);
-                if (pc.srcPage == t->srcPage && pc.entryTextHash == hash) {
-                    already = true;
-                    break;
-                }
-            }
-            if (!already) {
-                PushedCitation pc;
-                pc.srcPage = t->srcPage;
-                pc.srcRect = t->srcRect;
-                pc.entryTextHash = hash;
-                pc.status = RefHoverPushStatus::Sent;
-                VecAppend(*t->tab->pushedCitations, pc);
-                // Repaint the page so the new dot appears immediately.
-                ScheduleRepaint(win, 0);
-            }
-        }
+        RefHoverAddMarker(t->hwndCanvas, t->tab, t->srcPage, t->srcRect, t->entryText, RefHoverPushStatus::Sent);
     }
     RefHoverSetPushStatus(t->refHover,
                           t->res == RefHoverPushResult::Sent ? RefHoverPushStatus::Sent : RefHoverPushStatus::Failed);

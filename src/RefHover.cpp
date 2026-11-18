@@ -72,6 +72,7 @@ void RefHoverSchedule(RefHoverState* s, HWND hwndCanvas, int delayMs, Point scre
         s->displayed.destY == destY && sameSrc) {
         return;
     }
+    s->pending.bibProbe = false;
     s->pending.screenPt = screenPt;
     s->pending.destPage = destPage;
     s->pending.destX = destX;
@@ -85,6 +86,33 @@ void RefHoverSchedule(RefHoverState* s, HWND hwndCanvas, int delayMs, Point scre
         delayMs = 0;
     }
     SetTimer(hwndCanvas, kRefHoverTimerID, (UINT)delayMs, nullptr);
+}
+
+// Hovering plain bibliography text (no link, no citation pattern): after the
+// hover delay, probe whether the cursor sits inside a bib entry and light the
+// badge at its corner (RefHoverBibProbeOnTimer). No popup.
+void RefHoverScheduleBibProbe(RefHoverState* s, HWND hwndCanvas, int delayMs, int srcPage, Point pagePt) {
+    if (!s || delayMs < 0) {
+        return;
+    }
+    // still inside the badged entry: keep the badge, skip the re-probe
+    if (s->bibHoverPage == srcPage && s->bibHoverRect.Contains(PointF((float)pagePt.x, (float)pagePt.y))) {
+        return;
+    }
+    s->pending.bibProbe = true;
+    s->pending.destPage = srcPage;
+    s->pending.destX = (float)pagePt.x;
+    s->pending.destY = (float)pagePt.y;
+    SetTimer(hwndCanvas, kRefHoverTimerID, (UINT)delayMs, nullptr);
+}
+
+void RefHoverClearBibHover(RefHoverState* s, HWND hwndCanvas) {
+    if (!s || s->bibHoverPage <= 0) {
+        return;
+    }
+    s->bibHoverPage = -1;
+    s->bibHoverRect = {};
+    InvalidateRect(hwndCanvas, nullptr, FALSE);
 }
 
 void RefHoverHide(RefHoverState* s, HWND hwndCanvas) {
@@ -321,6 +349,10 @@ struct ExistenceCheckAsyncData {
     RefHoverState* s;
     int version;
     char* entryText; // owned
+    HWND hwndCanvas;
+    WindowTab* tab; // opaque; validated by RefHoverAddMarker on the UI thread
+    int srcPage;
+    RectF srcRect;
 };
 
 struct ExistenceCheckUIData {
@@ -332,6 +364,10 @@ struct ExistenceCheckUIData {
     char* parserCacheKey; // owned; null if not returned
     char* matchScope;     // owned: "active" / "other" / "none" (or null on parse miss)
     char* entryText;      // owned; needed to record the positive lookup in the local set
+    HWND hwndCanvas;
+    WindowTab* tab;
+    int srcPage;
+    RectF srcRect;
 };
 
 static void ExistenceCheckUI(ExistenceCheckUIData* t) {
@@ -352,6 +388,13 @@ static void ExistenceCheckUI(ExistenceCheckUIData* t) {
             // add to the active library, so the user needs to keep seeing
             // the olive cue.
             RefHoverMarkPushed(t->s, t->entryText);
+        }
+        // Persist a marker dot for a confirmed library match, so entries and
+        // citations the user merely hovered keep their dot (mint = active
+        // library, olive = another open library).
+        if ((isActiveLibMatch || t->exists) && t->srcPage > 0) {
+            RefHoverPushStatus st = isActiveLibMatch ? RefHoverPushStatus::Sent : RefHoverPushStatus::RelatedMatch;
+            RefHoverAddMarker(t->hwndCanvas, t->tab, t->srcPage, t->srcRect, t->entryText, st);
         }
         // Local set already promoted the badge to Sent in RefHoverOnTimer
         // for previously-confirmed citations — don't downgrade that.
@@ -397,8 +440,9 @@ static void ExistenceCheckAsync(ExistenceCheckAsyncData* d) {
     char* parserCacheKey = ok ? ExtractJsonString(respStr, "parserCacheKey") : nullptr;
     char* matchScope = ok ? ExtractJsonString(respStr, "matchScope") : nullptr;
     // entryText ownership transfers to UI task for the local-set update.
-    auto* t =
-        new ExistenceCheckUIData{d->s, d->version, ok, exists, (int)status, parserCacheKey, matchScope, d->entryText};
+    auto* t = new ExistenceCheckUIData{d->s,          d->version,     ok,         exists,
+                                       (int)status,   parserCacheKey, matchScope, d->entryText,
+                                       d->hwndCanvas, d->tab,         d->srcPage, d->srcRect};
     delete d;
     auto fn = MkFunc0<ExistenceCheckUIData>(ExistenceCheckUI, t);
     uitask::Post(fn, "RefHoverExistenceCheck");
@@ -408,7 +452,13 @@ static void KickoffExistenceCheck(RefHoverState* s) {
     if (!s || !s->entryText) {
         return;
     }
-    auto* d = new ExistenceCheckAsyncData{s, s->entryVersion, str::Dup(Str(s->entryText)).s};
+    auto* d = new ExistenceCheckAsyncData{s,
+                                          s->entryVersion,
+                                          str::Dup(Str(s->entryText)).s,
+                                          s->hwndCanvas,
+                                          s->tab,
+                                          s->pending.srcPage,
+                                          s->pending.srcRect};
     auto fn = MkFunc0<ExistenceCheckAsyncData>(ExistenceCheckAsync, d);
     RunAsync(fn, StrL("RefHoverExistenceCheck"));
 }
@@ -467,6 +517,10 @@ void RefHoverSetPushStatus(RefHoverState* s, RefHoverPushStatus status) {
     s->pushStatus = status;
     if (s->hwndPopup && HwndIsVisible(s->hwndPopup)) {
         InvalidateRect(s->hwndPopup, nullptr, FALSE);
+    }
+    // the bib-hover badge is drawn on the canvas, repaint it too
+    if (s->bibHoverPage > 0 && s->hwndCanvas) {
+        InvalidateRect(s->hwndCanvas, nullptr, FALSE);
     }
 }
 

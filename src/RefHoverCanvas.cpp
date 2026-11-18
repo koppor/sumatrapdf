@@ -137,8 +137,20 @@ void RefHoverOnCanvasMouseMove(RefHoverState*& s, HWND hwndCanvas, DocController
             RefHoverSchedule(s, hwndCanvas, hoverDelayMs, screenPt, destPage, destX, destY, 0.f, srcPageNo,
                              citationSrcRect, pageScreenRect);
             scheduled = true;
+        } else {
+            // No link, no citation pattern: the cursor may rest on the
+            // reference list itself — probe for a bib entry after the delay.
+            RefHoverScheduleHide(s, hwndCanvas, hoverDelayMs);
+            RefHoverScheduleBibProbe(s, hwndCanvas, hoverDelayMs, srcPageNo, pagePt);
+            // tracking a cursor that isn't over the canvas would fire a
+            // leave at once, killing the probe timer
+            if (HwndIsCursorOverWindow(hwndCanvas)) {
+                TrackMouseLeave(hwndCanvas);
+            }
+            return;
         }
     }
+    RefHoverClearBibHover(s, hwndCanvas);
     if (!scheduled) {
         RefHoverScheduleHide(s, hwndCanvas, hoverDelayMs);
     }
@@ -149,6 +161,7 @@ void RefHoverOnCanvasMouseLeave(RefHoverState* s, HWND hwndCanvas, int hoverDela
         return;
     }
     RefHoverScheduleHide(s, hwndCanvas, hoverDelayMs);
+    RefHoverClearBibHover(s, hwndCanvas);
 }
 
 void RefHoverOnCanvasLeftButtonDown(RefHoverState* s, HWND hwndCanvas) {

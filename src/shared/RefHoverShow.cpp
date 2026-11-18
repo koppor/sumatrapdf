@@ -65,6 +65,13 @@ void RefHoverOnTimer(RefHoverState* s, EngineBase* engine, float pageZoom) {
     if (!s || !engine || s->pending.destPage <= 0) {
         return;
     }
+#if !defined(SUMATRA_NG)
+    if (s->pending.bibProbe) {
+        s->pending.bibProbe = false;
+        RefHoverBibProbeOnTimer(s, engine);
+        return;
+    }
+#endif
     if (s->hitEngine != engine) {
         if (s->hitEngine) {
             s->hitEngine->Release();
@@ -220,3 +227,41 @@ void RefHoverOnTimer(RefHoverState* s, EngineBase* engine, float pageZoom) {
     RefHoverCaptureEntryAndCheck(s, engine, destPage, region, isBibEntry);
 #endif
 }
+
+#if !defined(SUMATRA_NG)
+// Bib-probe timer: the cursor rests on plain bibliography text (no link, no
+// citation pattern). Detect the entry under it, light the corner badge via the
+// usual capture + existence check, and remember the rect so Ctrl+J and the
+// marker dot anchor at the entry itself. No popup — the entry is on screen.
+void RefHoverBibProbeOnTimer(RefHoverState* s, EngineBase* engine) {
+    int pageNo = s->pending.destPage;
+    float x = s->pending.destX;
+    float y = s->pending.destY;
+    s->pending.destPage = -1;
+
+    RectF mediabox = engine->PageMediabox(pageNo);
+    if (mediabox.dx <= 0.f || mediabox.dy <= 0.f) {
+        RefHoverClearBibHover(s, s->hwndCanvas);
+        return;
+    }
+    AutoArenaSavepoint tempScope;
+    Rect* coords = nullptr;
+    TempWStr text = RegionTextTemp(engine, pageNo, &coords);
+    bool isBibEntry = false;
+    RectF region = DetectEntryBoxAt(text, coords, mediabox, x, y, &isBibEntry);
+    if (!isBibEntry) {
+        RefHoverClearBibHover(s, s->hwndCanvas);
+        return;
+    }
+    if (s->bibHoverPage == pageNo && s->bibHoverRect == region) {
+        return; // same entry: badge already live, don't re-check
+    }
+
+    s->bibHoverPage = pageNo;
+    s->bibHoverRect = region;
+    s->pending.srcPage = pageNo;
+    s->pending.srcRect = region;
+    RefHoverCaptureEntryAndCheck(s, engine, pageNo, region, true);
+    InvalidateRect(s->hwndCanvas, nullptr, FALSE);
+}
+#endif

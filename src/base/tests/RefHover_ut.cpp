@@ -1060,7 +1060,68 @@ static void TwoColumnWatermarkStaysInColumn() {
     utassert(box.x + box.dx < 340.f);
 }
 
+// DetectEntryBoxAt: cursor in the middle of a wrapped bracket entry walks up
+// to the '[' label line and detects the whole entry, not just lines below.
+static void EntryAtCursorMidBracketEntry() {
+    WCHAR text[1024];
+    Rect coords[1024];
+    int n = 0;
+    AddText(text, coords, n, 1024, L"[Foo10] Smith J., 2010, Some title.", 72, 200);
+    AddText(text, coords, n, 1024, L"continuation line of the entry.", 92, 215);
+    AddText(text, coords, n, 1024, L"[Bar11] Doe J., 2011, Another title.", 72, 240);
+    AddText(text, coords, n, 1024, L"continuation line of the entry.", 92, 255);
+    // cursor on entry 1's second line
+    bool isBib = false;
+    RectF box = DetectEntryBoxAt(WStr(text, n), coords, Mediabox(), 150.f, 220.f, &isBib);
+    utassert(isBib);
+    utassert(!IsEmpty(box));
+    utassert(box.y <= 200.f + 6.f);
+    utassert(box.y + box.dy > 215.f);
+    utassert(box.y + box.dy < 240.f);
+    // cursor on entry 2's label line detects entry 2
+    isBib = false;
+    box = DetectEntryBoxAt(WStr(text, n), coords, Mediabox(), 100.f, 245.f, &isBib);
+    utassert(isBib);
+    utassert(box.y >= 228.f && box.y <= 246.f);
+}
+
+// DetectEntryBoxAt: author-year hanging indent — cursor on the indented
+// continuation line walks up to the out-dented head.
+static void EntryAtCursorAuthorYear() {
+    WCHAR text[1024];
+    Rect coords[1024];
+    int n = 0;
+    AddText(text, coords, n, 1024, L"Smith, J. (2010). Some title here.", 72, 200);
+    AddText(text, coords, n, 1024, L"Journal of Things, 12(3), 45-67.", 92, 215);
+    AddText(text, coords, n, 1024, L"Doe, A. (2011). Another work title.", 72, 240);
+    AddText(text, coords, n, 1024, L"Other Journal, 4(2), 89-101.", 92, 255);
+    bool isBib = false;
+    RectF box = DetectEntryBoxAt(WStr(text, n), coords, Mediabox(), 150.f, 220.f, &isBib);
+    utassert(isBib);
+    utassert(!IsEmpty(box));
+    utassert(box.y <= 200.f && box.y >= 188.f);
+    utassert(box.y + box.dy > 215.f);
+    utassert(box.y + box.dy < 240.f);
+}
+
+// DetectEntryBoxAt: a cursor far from any glyph (margin / below the last
+// entry) detects nothing.
+static void EntryAtCursorInMarginRejected() {
+    WCHAR text[1024];
+    Rect coords[1024];
+    int n = 0;
+    AddText(text, coords, n, 1024, L"[Foo10] Smith J., 2010, Some title.", 72, 200);
+    AddText(text, coords, n, 1024, L"continuation line of the entry.", 92, 215);
+    bool isBib = true;
+    RectF box = DetectEntryBoxAt(WStr(text, n), coords, Mediabox(), 300.f, 500.f, &isBib);
+    utassert(!isBib);
+    utassert(IsEmpty(box));
+}
+
 void RefHoverTest() {
+    EntryAtCursorMidBracketEntry();
+    EntryAtCursorAuthorYear();
+    EntryAtCursorInMarginRejected();
     TwoColumnNumericLeftEntryNotHijacked();
     TwoColumnNumericReferenceFound();
     TwoColumnWideSecondLineStaysInColumn();
