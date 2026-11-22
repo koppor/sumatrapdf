@@ -370,7 +370,66 @@ struct ExistenceCheckUIData {
     RectF srcRect;
 };
 
+// ---- known-entries cache ----
+//
+// Last JabRef answer per entry-text hash, shared by hover, auto-scan and the
+// per-document disk restore. Positive answers (Sent / RelatedMatch) are kept
+// for the session; a NoMatch expires, so a reference added to JabRef later
+// is found again without restarting.
+struct KnownEntry {
+    u64 hash;
+    RefHoverPushStatus status;
+    u64 tickMs;
+};
+static Vec<KnownEntry> gKnownEntries;
+constexpr u64 kNoMatchTtlMs = 5 * 60 * 1000;
+
+void RefHoverKnownAdd(u64 hash, RefHoverPushStatus status) {
+    for (int i = 0; i < len(gKnownEntries); i++) {
+        KnownEntry& e = gKnownEntries[i];
+        if (e.hash != hash) {
+            continue;
+        }
+        // never downgrade a positive answer
+        bool positive = (e.status == RefHoverPushStatus::Sent || e.status == RefHoverPushStatus::RelatedMatch);
+        if (status == RefHoverPushStatus::NoMatch && positive) {
+            return;
+        }
+        e.status = status;
+        e.tickMs = GetTickCount64();
+        return;
+    }
+    VecAppend(gKnownEntries, KnownEntry{hash, status, GetTickCount64()});
+}
+
+RefHoverPushStatus RefHoverKnownGet(u64 hash) {
+    for (int i = 0; i < len(gKnownEntries); i++) {
+        KnownEntry& e = gKnownEntries[i];
+        if (e.hash != hash) {
+            continue;
+        }
+        if (e.status == RefHoverPushStatus::NoMatch && GetTickCount64() - e.tickMs > kNoMatchTtlMs) {
+            return RefHoverPushStatus::None;
+        }
+        return e.status;
+    }
+    return RefHoverPushStatus::None;
+}
+
 static void ExistenceCheckUI(ExistenceCheckUIData* t) {
+    // Cache the answer regardless of whether a newer hover superseded this
+    // one — it is keyed by the entry's text, not the hover.
+    {
+        u64 hash = RefHoverHashEntryText(t->entryText);
+        bool isActive = t->matchScope && str::Eq(Str(t->matchScope), StrL("active"));
+        if (isActive) {
+            RefHoverKnownAdd(hash, RefHoverPushStatus::Sent);
+        } else if (t->exists) {
+            RefHoverKnownAdd(hash, RefHoverPushStatus::RelatedMatch);
+        } else if (t->ok) {
+            RefHoverKnownAdd(hash, RefHoverPushStatus::NoMatch);
+        }
+    }
     // Stale result: a newer entry replaced ours before the check came back.
     // Silently drop so the new entry's badge / cache key isn't overwritten.
     if (t->s && t->version == t->s->entryVersion) {
@@ -424,21 +483,33 @@ static void ExistenceCheckUI(ExistenceCheckUIData* t) {
     delete t;
 }
 
-static void ExistenceCheckAsync(ExistenceCheckAsyncData* d) {
+// One lookup round-trip on the calling (worker) thread. The endpoint parses +
+// duplicate-checks + caches in one go; the result is JSON:
+// {matches:[…], parserCacheKey:"…", matchScope:"…"}. Out-strings are owned.
+static bool JabRefLookup(const char* entryText, DWORD* statusOut, bool* existsOut, char** matchScopeOut,
+                         char** parserCacheKeyOut) {
     str::Builder headers;
     headers.Append(StrL("Content-Type: text/plain; charset=utf-8\r\n"));
     str::Builder body;
-    body.Append(Str(d->entryText));
+    body.Append(Str(entryText));
     str::Builder resp;
     DWORD status = 0;
-    // Lookup endpoint parses + duplicate-checks + caches in one round trip.
-    // Result is JSON: {matches:[…], parserCacheKey:"…", parsedEntryType:"…"}.
     bool ok = HttpPost(StrL("127.0.0.1"), 23119, StrL("/libraries/current/citations/lookup"), &headers, &body, &resp,
                        &status);
     char* respStr = ToStrTemp(resp).s;
-    bool exists = ok && ResponseHasMatch(respStr);
-    char* parserCacheKey = ok ? ExtractJsonString(respStr, "parserCacheKey") : nullptr;
-    char* matchScope = ok ? ExtractJsonString(respStr, "matchScope") : nullptr;
+    *existsOut = ok && ResponseHasMatch(respStr);
+    *parserCacheKeyOut = ok ? ExtractJsonString(respStr, "parserCacheKey") : nullptr;
+    *matchScopeOut = ok ? ExtractJsonString(respStr, "matchScope") : nullptr;
+    *statusOut = status;
+    return ok;
+}
+
+static void ExistenceCheckAsync(ExistenceCheckAsyncData* d) {
+    DWORD status = 0;
+    bool exists = false;
+    char* matchScope = nullptr;
+    char* parserCacheKey = nullptr;
+    bool ok = JabRefLookup(d->entryText, &status, &exists, &matchScope, &parserCacheKey);
     // entryText ownership transfers to UI task for the local-set update.
     auto* t = new ExistenceCheckUIData{d->s,          d->version,     ok,         exists,
                                        (int)status,   parserCacheKey, matchScope, d->entryText,
@@ -504,10 +575,154 @@ void RefHoverCaptureEntryAndCheck(RefHoverState* s, EngineBase* engine, int dest
         // have a definitive answer from the local pushed-set (Sent set in
         // the RefHoverWasPushed branch above).
         if (s->pushStatus != RefHoverPushStatus::Sent) {
+            // Cached answer (auto-scan, earlier hover, disk restore): light
+            // the badge without another server lookup. A fresh NoMatch is
+            // cached too, so re-hovers don't re-run JabRef's LLM parse.
+            RefHoverPushStatus known = RefHoverKnownGet(RefHoverHashEntryText(s->entryText));
+            if (known != RefHoverPushStatus::None) {
+                s->pushStatus = known;
+                return;
+            }
             s->pushStatus = RefHoverPushStatus::Searching;
         }
         KickoffExistenceCheck(s);
     }
+}
+
+// ---- bibliography auto-scan ----
+//
+// Pages are scanned once per session as they become visible (Canvas paint):
+// every bracket-label entry gets one existence lookup, strictly sequential,
+// so JabRef's LLM-parsing lookup endpoint is never hammered. Results go into
+// the known-entries cache; matches get persistent marker dots on the tab.
+struct BibScanItem {
+    HWND hwndCanvas;
+    WindowTab* tab; // opaque; validated by RefHoverAddMarker on the UI thread
+    int pageNo;
+    RectF rect;
+    char* entryText; // owned
+};
+static Vec<BibScanItem*> gBibScanQueue;
+static bool gBibScanBusy = false;
+static u64 gBibScanPausedUntil = 0;
+constexpr u64 kBibScanPauseMs = 60 * 1000;
+constexpr int kMaxBibHeadsPerPage = 64;
+
+static void BibScanNext();
+
+struct BibScanUIData {
+    BibScanItem* it;
+    bool ok;
+    bool exists;
+    int httpStatus;
+    char* matchScope; // owned
+};
+
+static void BibScanUI(BibScanUIData* t) {
+    gBibScanBusy = false;
+    BibScanItem* it = t->it;
+    if (t->httpStatus == 0) {
+        // JabRef unreachable: pause scanning and drop the queue. The pages
+        // stay marked as scanned; per-entry hovering still works.
+        gBibScanPausedUntil = GetTickCount64() + kBibScanPauseMs;
+        for (int i = 0; i < len(gBibScanQueue); i++) {
+            str::Free(Str(gBibScanQueue[i]->entryText));
+            delete gBibScanQueue[i];
+        }
+        VecClear(gBibScanQueue);
+    } else {
+        u64 hash = RefHoverHashEntryText(it->entryText);
+        bool isActive = t->matchScope && str::Eq(Str(t->matchScope), StrL("active"));
+        if (isActive) {
+            RefHoverKnownAdd(hash, RefHoverPushStatus::Sent);
+            RefHoverAddMarker(it->hwndCanvas, it->tab, it->pageNo, it->rect, it->entryText, RefHoverPushStatus::Sent);
+        } else if (t->exists) {
+            RefHoverKnownAdd(hash, RefHoverPushStatus::RelatedMatch);
+            RefHoverAddMarker(it->hwndCanvas, it->tab, it->pageNo, it->rect, it->entryText,
+                              RefHoverPushStatus::RelatedMatch);
+        } else if (t->ok) {
+            RefHoverKnownAdd(hash, RefHoverPushStatus::NoMatch);
+        }
+    }
+    str::Free(Str(it->entryText));
+    delete it;
+    str::Free(Str(t->matchScope));
+    delete t;
+    BibScanNext();
+}
+
+static void BibScanAsync(BibScanItem* it) {
+    DWORD status = 0;
+    bool exists = false;
+    char* matchScope = nullptr;
+    char* parserCacheKey = nullptr;
+    bool ok = JabRefLookup(it->entryText, &status, &exists, &matchScope, &parserCacheKey);
+    str::Free(Str(parserCacheKey));
+    auto* t = new BibScanUIData{it, ok, exists, (int)status, matchScope};
+    auto fn = MkFunc0<BibScanUIData>(BibScanUI, t);
+    uitask::Post(fn, "RefHoverBibScan");
+}
+
+static void BibScanNext() {
+    if (gBibScanBusy || len(gBibScanQueue) == 0 || GetTickCount64() < gBibScanPausedUntil) {
+        return;
+    }
+    BibScanItem* it = VecPopAt(gBibScanQueue, 0);
+    gBibScanBusy = true;
+    auto fn = MkFunc0<BibScanItem>(BibScanAsync, it);
+    RunAsync(fn, StrL("RefHoverBibScan"));
+}
+
+// Detect this page's bracket-label entries and queue an existence lookup for
+// each not-yet-known one. False = scanning is paused (JabRef unreachable), so
+// the caller should not mark the page as scanned yet.
+bool RefHoverBibScanPage(HWND hwndCanvas, WindowTab* tab, EngineBase* engine, int pageNo) {
+    if (GetTickCount64() < gBibScanPausedUntil) {
+        return false;
+    }
+    RectF mediabox = engine->PageMediabox(pageNo);
+    if (mediabox.dx <= 0.f || mediabox.dy <= 0.f) {
+        return true;
+    }
+
+    AutoArenaSavepoint tempScope;
+    Rect* coords = nullptr;
+    TempWStr text = RefHoverPageTextTemp(engine, pageNo, &coords);
+    Point heads[kMaxBibHeadsPerPage];
+    int nHeads = FindBibEntryHeads(text, coords, heads, kMaxBibHeadsPerPage);
+
+    for (int i = 0; i < nHeads; i++) {
+        bool isBib = false;
+        RectF region = DetectEntryBox(text, coords, mediabox, (float)heads[i].x, (float)heads[i].y, nullptr, &isBib);
+        if (!isBib || region.dx <= 0.f || region.dy <= 0.f) {
+            continue;
+        }
+        char* entryText = ExtractEntryText(engine, pageNo, region);
+        if (!entryText) {
+            continue;
+        }
+        u64 hash = RefHoverHashEntryText(entryText);
+
+        RefHoverPushStatus known = RefHoverKnownGet(hash);
+        if (known == RefHoverPushStatus::Sent || known == RefHoverPushStatus::RelatedMatch) {
+            // known match (e.g. restored from disk for another copy of the
+            // document): just make sure the dot is there
+            RefHoverAddMarker(hwndCanvas, tab, pageNo, region, entryText, known);
+        }
+        bool queued = false;
+        for (int q = 0; q < len(gBibScanQueue) && !queued; q++) {
+            queued = RefHoverHashEntryText(gBibScanQueue[q]->entryText) == hash;
+        }
+        if (known != RefHoverPushStatus::None || queued) {
+            str::Free(Str(entryText));
+            continue;
+        }
+
+        auto* it = new BibScanItem{hwndCanvas, tab, pageNo, region, entryText};
+        VecAppend(gBibScanQueue, it);
+    }
+    BibScanNext();
+    return true;
 }
 
 void RefHoverSetPushStatus(RefHoverState* s, RefHoverPushStatus status) {

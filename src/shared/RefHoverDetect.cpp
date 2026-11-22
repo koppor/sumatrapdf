@@ -1336,3 +1336,24 @@ RectF DetectEntryBoxAt(WStr text, const Rect* coords, RectF mediabox, float x, f
     }
     return box;
 }
+
+// Positions of bracket-style entry labels on the page: each '[' that is the
+// leftmost glyph of its (gutter-aware) line run starts an entry candidate.
+// DetectEntryBox at the returned position decides whether it really is one.
+int FindBibEntryHeads(WStr text, const Rect* coords, Point* out, int cap) {
+    if (len(text) == 0 || !coords || cap <= 0) {
+        return 0;
+    }
+    int n = 0;
+    for (int i = 0; i < text.len && n < cap; i++) {
+        if (text.s[i] != L'[') {
+            continue;
+        }
+        LineRun run = LineRunExtent(text, coords, i);
+        if (run.leftIdx != i) {
+            continue;
+        }
+        out[n++] = Point(coords[i].x, coords[i].y);
+    }
+    return n;
+}

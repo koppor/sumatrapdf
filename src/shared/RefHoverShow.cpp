@@ -16,7 +16,7 @@ enum class MissingEntry {
 };
 
 // the page's text with watermark glyphs dropped and glyphs snapped to lines
-static TempWStr RegionTextTemp(EngineBase* engine, int pageNo, Rect** coordsOut) {
+TempWStr RefHoverPageTextTemp(EngineBase* engine, int pageNo, Rect** coordsOut) {
     Rect* coords = nullptr;
     int textLen = 0;
     Str textUtf8 = engine->GetTextForPage(pageNo, &textLen, &coords);
@@ -37,7 +37,7 @@ static TempWStr RegionTextTemp(EngineBase* engine, int pageNo, Rect** coordsOut)
 static RectF DetectNoteRegion(EngineBase* engine, int pageNo, RectF mediabox, float destY) {
     AutoArenaSavepoint tempScope;
     Rect* coords = nullptr;
-    TempWStr text = RegionTextTemp(engine, pageNo, &coords);
+    TempWStr text = RefHoverPageTextTemp(engine, pageNo, &coords);
     return NoteBox(mediabox, destY, text, coords);
 }
 
@@ -47,7 +47,7 @@ static RectF DetectRegion(EngineBase* engine, int pageNo, RectF mediabox, float 
     AutoArenaSavepoint tempScope;
 
     Rect* normCoords = nullptr;
-    TempWStr text = RegionTextTemp(engine, pageNo, &normCoords);
+    TempWStr text = RefHoverPageTextTemp(engine, pageNo, &normCoords);
 
     RectF region = DetectEquationBox(text, normCoords, mediabox, destX, destY);
     if (region.dx <= 0.f || region.dy <= 0.f) {
@@ -246,7 +246,7 @@ void RefHoverBibProbeOnTimer(RefHoverState* s, EngineBase* engine) {
     }
     AutoArenaSavepoint tempScope;
     Rect* coords = nullptr;
-    TempWStr text = RegionTextTemp(engine, pageNo, &coords);
+    TempWStr text = RefHoverPageTextTemp(engine, pageNo, &coords);
     bool isBibEntry = false;
     RectF region = DetectEntryBoxAt(text, coords, mediabox, x, y, &isBibEntry);
     if (!isBibEntry) {

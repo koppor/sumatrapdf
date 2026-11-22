@@ -225,6 +225,10 @@ struct WindowTab {
     // lazily on first push to avoid a Vec for every tab that never sees a
     // citation push.
     Vec<PushedCitation>* pushedCitations = nullptr;
+    // pushedCitations restored from disk for this document (lazy, first paint)
+    bool pushedCitationsLoaded = false;
+    // pages already auto-scanned for bibliography entries (JabRef existence)
+    Vec<int> bibScanPages;
     // follow the spoken word while reading; disabled when the user scrolls away
     bool readAloudAutoScroll = false;
     AutoScroll autoScroll;

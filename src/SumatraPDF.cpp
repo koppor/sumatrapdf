@@ -8696,6 +8696,83 @@ static TempStr FormatJabRefErrorSnippet(const char* respBody) {
     return str::DupTemp(Str(bestStart, (int)len));
 }
 
+// One pushed-markers file per document, under <appdata>/jabrefPushed/, named
+// by the lowercased path's hash. Format: one marker per line,
+// "page x y dx dy hashHi hashLo status".
+static TempStr PushedMarkersPathTemp(WindowTab* tab) {
+    if (!tab || len(tab->filePath) == 0) {
+        return {};
+    }
+    TempStr dataDir = GetAppDataDirTemp();
+    if (len(dataDir) == 0) {
+        return {};
+    }
+    TempStr dir = path::JoinTemp(dataDir, StrL("jabrefPushed"));
+    Str lower = str::ToLowerInPlace(str::DupTemp(tab->filePath));
+    u64 h = RefHoverHashEntryText(lower.s);
+    TempStr name = fmt("%u-%u.txt", (u32)(h >> 32), (u32)h);
+    return path::JoinTemp(dir, name);
+}
+
+void RefHoverSaveMarkers(WindowTab* tab) {
+    TempStr path = PushedMarkersPathTemp(tab);
+    if (len(path) == 0) {
+        return;
+    }
+    dir::CreateAll(path::GetDirTemp(path));
+    str::Builder sb;
+    if (tab->pushedCitations) {
+        for (int i = 0; i < tab->pushedCitations->len; i++) {
+            const PushedCitation& pc = tab->pushedCitations->operator[](i);
+            sb.Append(fmt("%d %.2f %.2f %.2f %.2f %u %u %d\n", pc.srcPage, pc.srcRect.x, pc.srcRect.y, pc.srcRect.dx,
+                          pc.srcRect.dy, (u32)(pc.entryTextHash >> 32), (u32)pc.entryTextHash, (int)pc.status));
+        }
+    }
+    Str out = sb.TakeStr();
+    file::WriteFile(path, out);
+    str::Free(out);
+}
+
+// Restore this document's marker dots (lazy, once per tab). Hashes are also
+// fed into the known-entries cache so hover and auto-scan see them as known.
+void RefHoverLoadMarkers(WindowTab* tab) {
+    if (!tab || tab->pushedCitationsLoaded) {
+        return;
+    }
+    tab->pushedCitationsLoaded = true;
+    TempStr path = PushedMarkersPathTemp(tab);
+    if (len(path) == 0) {
+        return;
+    }
+    Str data = file::ReadFile(path);
+    if (len(data) == 0) {
+        return;
+    }
+    char* p = data.s;
+    while (p && *p) {
+        int page = 0, status = 0;
+        float x, y, dx, dy;
+        u32 hi = 0, lo = 0;
+        if (sscanf(p, "%d %f %f %f %f %u %u %d", &page, &x, &y, &dx, &dy, &hi, &lo, &status) == 8 && page > 0) {
+            if (!tab->pushedCitations) {
+                tab->pushedCitations = new Vec<PushedCitation>();
+            }
+            PushedCitation pc;
+            pc.srcPage = page;
+            pc.srcRect = RectF(x, y, dx, dy);
+            pc.entryTextHash = ((u64)hi << 32) | lo;
+            pc.status = (RefHoverPushStatus)status;
+            VecAppend(*tab->pushedCitations, pc);
+            RefHoverKnownAdd(pc.entryTextHash, pc.status);
+        }
+        p = strchr(p, '\n');
+        if (p) {
+            p++;
+        }
+    }
+    str::Free(data);
+}
+
 // Append an in-PDF marker entry to the tab so Canvas WM_PAINT can paint the
 // dot. Markers arrive from async pushes and existence checks, so the tab
 // pointer is re-validated via the window list — if the user closed the tab or
@@ -8718,6 +8795,7 @@ void RefHoverAddMarker(HWND hwndCanvas, WindowTab* tab, int srcPage, RectF srcRe
         }
         if (status == RefHoverPushStatus::Sent && pc.status != status) {
             pc.status = status;
+            RefHoverSaveMarkers(tab);
             ScheduleRepaint(win, 0);
         }
         return;
@@ -8728,6 +8806,7 @@ void RefHoverAddMarker(HWND hwndCanvas, WindowTab* tab, int srcPage, RectF srcRe
     pc.entryTextHash = hash;
     pc.status = status;
     VecAppend(*tab->pushedCitations, pc);
+    RefHoverSaveMarkers(tab);
     // Repaint the page so the new dot appears immediately.
     ScheduleRepaint(win, 0);
 }

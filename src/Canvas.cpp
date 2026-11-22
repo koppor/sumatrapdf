@@ -2899,6 +2899,15 @@ NO_INLINE static void PaintCurrentEditAnnotationMark(WindowTab* tab, HDC hdc, Di
 // Mirrors the popup-corner badge palette in RefHover.cpp so the two surfaces
 // match. Skipped for non-fixed-layout tabs (the marker positions are PDF
 // user-space rects and have no meaning in reflowed views).
+// A human annotating a reference list puts the mark in the margin, left of
+// the entry's label — anchor the dot there, centered on the first line.
+static Point CitationMarkerPos(Rect rc, int sz) {
+    int cx = rc.x - sz - DpiScale(4);
+    int firstLineH = std::min(rc.dy, DpiScale(14));
+    int cy = rc.y + (firstLineH - sz) / 2;
+    return Point(cx, cy);
+}
+
 static void PaintCitationMarkers(WindowTab* tab, HDC hdc, DisplayModel* dm) {
     if (!tab || !tab->pushedCitations || tab->pushedCitations->len == 0) {
         return;
@@ -2918,17 +2927,14 @@ static void PaintCitationMarkers(WindowTab* tab, HDC hdc, DisplayModel* dm) {
         }
         // CvtToScreen requires the page be visible (laid out); guarded above.
         Rect rc = dm->CvtToScreen(pc.srcPage, pc.srcRect);
-        // Anchor dot at the citation rect's top-right corner, half-overlapping
-        // so it reads as a callout rather than swallowing the link text.
-        int cx = rc.x + rc.dx - sz / 2;
-        int cy = rc.y - sz / 2;
+        Point at = CitationMarkerPos(rc, sz);
         Gdiplus::SolidBrush* brush = (pc.status == RefHoverPushStatus::RelatedMatch) ? &brushOlive : &brushMint;
-        gs.FillEllipse(brush, cx, cy, sz, sz);
+        gs.FillEllipse(brush, at.x, at.y, sz, sz);
     }
 }
 
-// Paint the live push-status badge at the hovered bibliography entry's
-// top-right corner (hover-over-bibliography, no popup). Mirrors the popup
+// Paint the live push-status badge in the margin left of the hovered
+// bibliography entry (hover-over-bibliography, no popup). Mirrors the popup
 // badge's hue + shape palette in RefHoverPopup.cpp.
 static void PaintBibHoverBadge(MainWindow* win, HDC hdc, DisplayModel* dm) {
     RefHoverState* s = win->refHover;
@@ -2940,8 +2946,9 @@ static void PaintBibHoverBadge(MainWindow* win, HDC hdc, DisplayModel* dm) {
     }
     Rect rc = dm->CvtToScreen(s->bibHoverPage, s->bibHoverRect);
     int sz = DpiScale(10);
-    int bx = rc.x + rc.dx - sz / 2;
-    int by = rc.y - sz / 2;
+    Point at = CitationMarkerPos(rc, sz);
+    int bx = at.x;
+    int by = at.y;
 
     Gdiplus::Graphics gs(hdc);
     gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
@@ -2982,6 +2989,23 @@ static void PaintBibHoverBadge(MainWindow* win, HDC hdc, DisplayModel* dm) {
         }
         case RefHoverPushStatus::None:
             break;
+    }
+}
+
+// Restore this document's saved marker dots on first paint and kick the
+// once-per-page bibliography auto-scan for pages that just became visible.
+static void ScanVisibleBibPages(MainWindow* win, WindowTab* tab, DisplayModel* dm) {
+    if (!tab || gSettings->citationHoverDelay < 0) {
+        return;
+    }
+    RefHoverLoadMarkers(tab);
+    for (int p = 1; dm->ValidPageNo(p); p++) {
+        if (!dm->PageVisible(p) || VecContains(tab->bibScanPages, p)) {
+            continue;
+        }
+        if (RefHoverBibScanPage(win->hwndCanvas, tab, dm->GetEngine(), p)) {
+            VecAppend(tab->bibScanPages, p);
+        }
     }
 }
 
@@ -3284,6 +3308,7 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
     PaintCurrentEditAnnotationMark(tab, hdc, dm);
     PaintCitationMarkers(tab, hdc, dm);
     PaintBibHoverBadge(win, hdc, dm);
+    ScanVisibleBibPages(win, tab, dm);
     if (ShowPageGrid() && !win->InPresentation()) {
         PaintPageGrid(dm, hdc);
     }

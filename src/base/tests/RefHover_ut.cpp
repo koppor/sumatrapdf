@@ -548,6 +548,27 @@ static void NumericCitationSrcRectDistinctOnLine() {
     utassert(first.x != second.x);
 }
 
+// (13x) A diagonal watermark letter crossing a citation list must not break
+// bracket detection or balloon the citation's anchor rect: its tall rotated
+// bbox puts its baseline within the line's baseline tolerance.
+static void NumericCitationWatermarkIgnored() {
+    WCHAR text[256];
+    Rect coords[256];
+    int n = 0;
+    AddText(text, coords, n, 256, L"tion [10, 12, 13, 63] more", 72, 200);
+    text[n] = L'w';
+    coords[n] = Rect{157, 145, 40, 60};
+    n++;
+    int num = 0;
+    Rect src{};
+    // cursor on the '1' of "13" (glyph 14 → x = 72 + 14*6 = 156)
+    bool ok = DetectNumericCitationInPageText(WStr(text, n), coords, n, Point{158, 206}, &num, &src);
+    utassert(ok);
+    utassert(num == 13);
+    utassert(src.y >= 195);
+    utassert(src.dy <= 20);
+}
+
 // (13c) Numeric citation page range written with an en-dash ("[2, 9–14]"):
 // the en-dash must not break bracket detection, and hovering an endpoint
 // resolves to that endpoint's number.
@@ -1118,7 +1139,24 @@ static void EntryAtCursorInMarginRejected() {
     utassert(IsEmpty(box));
 }
 
+// FindBibEntryHeads: a '[' leading its line is an entry head; a '[' inside a
+// body line is not. Column gutters keep the right column's heads separate.
+static void BibEntryHeadsFound() {
+    WCHAR text[1024];
+    Rect coords[1024];
+    int n = 0;
+    AddText(text, coords, n, 1024, L"[Foo10] Smith J., 2010, Some title.", 72, 200);
+    AddText(text, coords, n, 1024, L"continuation with [cite] inside.", 92, 215);
+    AddText(text, coords, n, 1024, L"[Bar11] Doe J., 2011, Another one.", 72, 240);
+    Point heads[8];
+    int nHeads = FindBibEntryHeads(WStr(text, n), coords, heads, 8);
+    utassert(nHeads == 2);
+    utassert(heads[0].x == 72 && heads[0].y == 200);
+    utassert(heads[1].x == 72 && heads[1].y == 240);
+}
+
 void RefHoverTest() {
+    BibEntryHeadsFound();
     EntryAtCursorMidBracketEntry();
     EntryAtCursorAuthorYear();
     EntryAtCursorInMarginRejected();
@@ -1161,6 +1199,7 @@ void RefHoverTest() {
     SurnameFoundOnBibPage();
     NumericCitationDetected();
     NumericCitationSrcRectDistinctOnLine();
+    NumericCitationWatermarkIgnored();
     NumericCitationRangeEnDash();
     NumericCitationLineBreakList();
     NumericCitationWrapEndOfLine();

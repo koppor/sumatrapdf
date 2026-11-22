@@ -261,9 +261,14 @@ void RefHoverOnWheel(RefHoverState* s, EngineBase* engine, UINT msg, WPARAM wp, 
 void RefHoverScheduleBibProbe(RefHoverState* s, HWND hwndCanvas, int delayMs, int srcPage, Point pagePt);
 void RefHoverClearBibHover(RefHoverState* s, HWND hwndCanvas);
 void RefHoverBibProbeOnTimer(RefHoverState* s, EngineBase* engine);
+void RefHoverKnownAdd(u64 hash, RefHoverPushStatus status);
+RefHoverPushStatus RefHoverKnownGet(u64 hash);
+bool RefHoverBibScanPage(HWND hwndCanvas, WindowTab* tab, EngineBase* engine, int pageNo);
 // implemented by the app (SumatraPDF.cpp)
 void RefHoverAddMarker(HWND hwndCanvas, WindowTab* tab, int srcPage, RectF srcRect, const char* entryText,
                        RefHoverPushStatus status);
+void RefHoverLoadMarkers(WindowTab* tab);
+void RefHoverSaveMarkers(WindowTab* tab);
 #endif
 
 void RefHoverHandlePopupClick(RefHoverState* s, IPageDestination* dest);
@@ -368,6 +373,10 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
                      RectF* continuationOut = nullptr, bool* outIsBibEntry = nullptr);
 
 RectF DetectEntryBoxAt(WStr text, const Rect* coords, RectF mediabox, float x, float y, bool* outIsBibEntry);
+
+int FindBibEntryHeads(WStr text, const Rect* coords, Point* out, int cap);
+
+TempWStr RefHoverPageTextTemp(EngineBase* engine, int pageNo, Rect** coordsOut);
 
 bool ShouldSearchNextPage(RectF mediabox, float destY);
 
