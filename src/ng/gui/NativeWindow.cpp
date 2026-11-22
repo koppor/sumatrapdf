@@ -33,14 +33,15 @@
 #include "PdfTools.h"
 #include "gui/AppShell.h"
 #include "gui/ToolWindow.h"
-#include "gui/OleDragDrop.h"
-#include "gui/NativeCursors.h"
-#include "gui/TouchGestures.h"
 #include "HomePage.h"
 #include "SumatraConfig.h"
 #include "RefHover.h"
 #include "gui/DocCanvas.h"
 #include "AnnotEditToolbar.h"
+#include "Settings.h"
+#include "Theme.h"
+#include "AppSettings.h"
+#include "Translations.h"
 
 #if OS_WIN
 
@@ -139,6 +140,50 @@ void AppShellSetFullScreen(MainWindow* win, bool fullScreen, bool restoreMaximiz
     restore = ShiftRectToWorkArea(restore, nullptr, true);
     HwndMoveWindow(hwnd, &restore);
     logf("AppShellSetFullScreen: off, %d,%d,%d,%d\n", restore.x, restore.y, restore.dx, restore.dy);
+}
+
+// orig's ResizeFullScreenToCurrentDisplay: a resolution change, rotation or
+// moved taskbar leaves a fullscreen window the old monitor's size
+static void RefitFullScreen(MainWindow* win) {
+    NativeWin* nw = NativeWinOf(win);
+    if (!win || !nw || !nw->isFullScreen) {
+        return;
+    }
+    HWND hwnd = nw->hwnd;
+    Rect fsRect = HwndGetFullscreenRect(hwnd);
+    if (fsRect == HwndWindowRect(hwnd)) {
+        return;
+    }
+    uint flags = SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER;
+    SetWindowPos(hwnd, nullptr, fsRect.x, fsRect.y, fsRect.dx, fsRect.dy, flags);
+}
+
+// orig's MaybeRefreshAllWindowsDpi: an RDP connect can change the DPI with no
+// WM_DPICHANGED, only a WM_DISPLAYCHANGE (#4581)
+static void RefreshDpi(MainWindow* win) {
+    NativeWin* nw = NativeWinOf(win);
+    if (!win || !nw) {
+        return;
+    }
+    int dpi = RoundUp(DpiGetForHwnd(nw->hwnd), 4);
+    if (dpi <= 0 || dpi == win->frameDpi) {
+        return;
+    }
+    logf("RefreshDpi: hwnd=0x%p old=%d new=%d\n", (void*)nw->hwnd, win->frameDpi, dpi);
+    AppShellOnDpiChanged(win, dpi);
+}
+
+static void RefreshDpiLater(MainWindow* win) {
+    if (IsMainWindowValidAndNotClosing(win)) {
+        RefreshDpi(win);
+    }
+}
+
+// a check now and one queued: GetDpiForWindow can still report the pre-RDP
+// value when WM_DISPLAYCHANGE first arrives
+static void RefreshDpiAfterDisplayChange(MainWindow* win) {
+    RefreshDpi(win);
+    uitask::Post(MkFunc0<MainWindow>(RefreshDpiLater, win), "DpiAfterDisplayChange");
 }
 
 Rect AppShellWindowScreenRect(MainWindow* win) {
@@ -373,11 +418,8 @@ static void OpenDroppedFilesNow(DroppedFiles* d) {
     delete d;
 }
 
-// orig's OnDropFiles. `ptDrop` is in client pixels. Returns false when the
-// drop is refused. `dragFinish` is false for an HDROP that an IDataObject
-// owns (OLE drop), and then the files are opened once Drop() returned, so
-// the drag source isn't kept waiting.
-bool AppShellOnDropFiles(HWND hwnd, HDROP hdrop, POINT ptDrop, bool inClient, bool dragFinish) {
+// orig's OnDropFiles, for WM_DROPFILES. `ptDrop` is in client pixels.
+static void AppShellOnDropFiles(HWND hwnd, HDROP hdrop, POINT ptDrop, bool inClient) {
     int n = (int)DragQueryFileW(hdrop, (UINT)-1, nullptr, 0);
     // client pixels; the Merge PDF grid wants window dips
     float scale = (float)DpiGetForHwnd(hwnd) / 96.f;
@@ -397,9 +439,7 @@ bool AppShellOnDropFiles(HWND hwnd, HDROP hdrop, POINT ptDrop, bool inClient, bo
             VecAppend(paths, str::Dup(path));
         }
     }
-    if (dragFinish) {
-        DragFinish(hdrop);
-    }
+    DragFinish(hdrop);
     logf("AppShellOnDropFiles: %d file(s)\n", paths.len);
     // a tool window's drop (the Merge PDF window) is its main window's
     DropHost host = ToolWindowOwnsHwnd(hwnd) ? DropHost::ToolWindow : DropHost::Frame;
@@ -423,7 +463,7 @@ bool AppShellOnDropFiles(HWND hwnd, HDROP hdrop, POINT ptDrop, bool inClient, bo
         for (Str s : paths) {
             str::Free(s);
         }
-        return false;
+        return;
     }
     auto* d = new DroppedFiles();
     d->win = win;
@@ -433,44 +473,13 @@ bool AppShellOnDropFiles(HWND hwnd, HDROP hdrop, POINT ptDrop, bool inClient, bo
     d->pt = ptDips;
     d->inClient = inClient;
     d->host = host;
-    if (dragFinish) {
-        OpenDroppedFilesNow(d);
-    } else {
-        uitask::Post(MkFunc0<DroppedFiles>(OpenDroppedFilesNow, d), "OpenDroppedFiles");
-    }
-    return true;
+    OpenDroppedFilesNow(d);
 }
 
 static void OnDropFiles(HWND hwnd, HDROP hdrop) {
     POINT ptDrop{};
     bool inClient = DragQueryPoint(hdrop, &ptDrop);
-    AppShellOnDropFiles(hwnd, hdrop, ptDrop, inClient, true);
-}
-
-// ng: gpui has no cursor from an image. When the canvas wants one of orig's
-// bitmap cursors (the drag hand, the laser dot, a placement cursor) it asks
-// gpui for a stand-in kind and this puts the real cursor in its place.
-static HCURSOR NativeCursorWanted(HWND hwnd) {
-    MainWindow* win = WinOf(hwnd);
-    if (!win || !AppShellNativeCursorActive(win)) {
-        return nullptr;
-    }
-    return NativeCursorGet(win->nativeCursor);
-}
-
-void AppShellApplyNativeCursor(MainWindow* win) {
-    HWND hwnd = AppShellNativeHwnd(win);
-    if (!hwnd || !AppShellNativeCursorActive(win)) {
-        return;
-    }
-    POINT pt{};
-    GetCursorPos(&pt);
-    if (WindowFromPoint(pt) != hwnd) {
-        return;
-    }
-    if (HCURSOR cur = NativeCursorGet(win->nativeCursor)) {
-        SetCursor(cur);
-    }
+    AppShellOnDropFiles(hwnd, hdrop, ptDrop, inClient);
 }
 
 float CanvasScale(MainWindow* win);
@@ -549,6 +558,14 @@ static void PresentScroll(MainWindow* win, HWND hwnd) {
     }
 }
 
+// a print job is running and was not asked to stop
+static bool IsPrintInProgress(MainWindow* win) {
+    if (!win || !win->printThread || AtomicBoolGet(&win->printCanceled)) {
+        return false;
+    }
+    return WaitForSingleObject(win->printThread, 0) == WAIT_TIMEOUT;
+}
+
 static LRESULT CALLBACK ShellSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
     switch (msg) {
         case WM_NCCALCSIZE:
@@ -581,32 +598,6 @@ static LRESULT CALLBACK ShellSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                     }
                 }
                 return 0;
-            }
-            break;
-        case WM_SETCURSOR:
-            if (LOWORD(lp) == HTCLIENT) {
-                if (HCURSOR cur = NativeCursorWanted(hwnd)) {
-                    SetCursor(cur);
-                    return TRUE;
-                }
-            }
-            break;
-        case WM_MOUSEMOVE: {
-            // gpui sets the cursor itself from inside the mouse move when the
-            // kind under the pointer changed
-            LRESULT res = DefSubclassProc(hwnd, msg, wp, lp);
-            if (HCURSOR cur = NativeCursorWanted(hwnd)) {
-                SetCursor(cur);
-            }
-            return res;
-        }
-        case WM_GESTURENOTIFY:
-        case WM_GESTURE:
-            // orig's OnGesture: pinch zoom, pan, flick, rotate, taps on a document
-            if (MainWindow* win = WinOf(hwnd)) {
-                if (TouchGesturesOnMessage(win, hwnd, msg, lp)) {
-                    return 0;
-                }
             }
             break;
         case WM_DROPFILES:
@@ -750,6 +741,19 @@ static LRESULT CALLBACK ShellSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                 return 0;
             }
             break;
+        case WM_DISPLAYCHANGE:
+            RefitFullScreen(WinOf(hwnd));
+            RefreshDpiAfterDisplayChange(WinOf(hwnd));
+            break;
+        case WM_MOUSEACTIVATE:
+            // orig: the click that activates a presentation only activates it,
+            // it doesn't also turn the page
+            if (MainWindow* win = WinOf(hwnd)) {
+                if (win->InPresentation() && hwnd != GetForegroundWindow()) {
+                    return MA_ACTIVATEANDEAT;
+                }
+            }
+            break;
         case WM_DPICHANGED:
             // gpui only moves the window to the suggested rect. The font sizes
             // follow frameDpi, which AppShellOnDpiChanged stores first.
@@ -787,7 +791,45 @@ static LRESULT CALLBACK ShellSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             break;
         case WM_DESTROY:
             GlobalHotkeysOnDestroy(hwnd);
-            RevokeCanvasDropTarget(hwnd);
+            break;
+        case WM_SETTINGCHANGE:
+            // Windows switched between light and dark mode: re-resolve the
+            // System theme (no-op unless Theme = System)
+            if (lp && str::EqI(ToUtf8Temp(WStr((const WCHAR*)lp)), StrL("ImmersiveColorSet"))) {
+                UpdateThemeAfterSystemColorChange();
+            }
+            // high contrast can be toggled at any time (Alt+Shift+PrtScr)
+            UpdateThemeAfterHighContrastChange();
+            // a work area change can come without WM_DISPLAYCHANGE
+            RefitFullScreen(WinOf(hwnd));
+            RefreshDpiAfterDisplayChange(WinOf(hwnd));
+            break;
+        case WM_QUERYENDSESSION:
+            // block logoff/shutdown while a print job runs. The reason shows
+            // in the shutdown UI, where the user can wait or force it.
+            // ENDSESSION_CRITICAL: the system goes down regardless
+            if ((lp & ENDSESSION_CRITICAL) || !IsPrintInProgress(WinOf(hwnd))) {
+                ShutdownBlockReasonDestroy(hwnd);
+                return TRUE;
+            }
+            ShutdownBlockReasonCreate(hwnd, ToWStrTemp(Tr("Printing in progress.")).s);
+            return FALSE;
+        case WM_ENDSESSION:
+            // the forced CloseWindow below aborts any print job still running
+            ScheduleSaveSettings();
+            FlushScheduledSaveSettings();
+            // wp is FALSE when the session end was cancelled: we keep running
+            if (wp == TRUE) {
+                gDontSaveSettings = true;
+                CloseWindow(WinOf(hwnd), true, true);
+            }
+            return 0;
+        case WM_SYSCOLORCHANGE:
+            // the default theme and high contrast mode draw in the system colors
+            SumatraUpdateTheme();
+            if (gSettings->useSysColors) {
+                UpdateDocumentColors();
+            }
             break;
         case WM_CONTEXTMENU:
             if (AppShellOnWmContextMenu(WinOf(hwnd), GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
@@ -873,6 +915,30 @@ void AppShellToggleDpiOverride() {
     }
 }
 
+constexpr UINT_PTR kToolCmdSubclassId = 2;
+
+static LRESULT CALLBACK ToolCmdSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (msg == WM_COMMAND && HIWORD(wp) == 0 && LOWORD(wp) > 0) {
+        // tests send the palette Ctrl+A / Ctrl+C that way
+        MainWindow* win = ToolWindowOwnerFromHwnd(hwnd);
+        if (IsMainWindowValid(win)) {
+            ExecuteCmd(win, (int)LOWORD(wp));
+            return 0;
+        }
+    }
+    if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, ToolCmdSubclass, kToolCmdSubclassId);
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+// orig: a command id sent at a tool window runs on its owner
+void AppShellClaimToolHwnd(HWND hwnd) {
+    if (hwnd) {
+        SetWindowSubclass(hwnd, ToolCmdSubclass, kToolCmdSubclassId, 0);
+    }
+}
+
 void AppShellEnableFileDrop(MainWindow* win) {
     HWND hwnd = nullptr;
     EnumThreadWindows(GetCurrentThreadId(), FindGpuiWnd, (LPARAM)&hwnd);
@@ -882,11 +948,13 @@ void AppShellEnableFileDrop(MainWindow* win) {
     }
     NativeWin nw{hwnd, win};
     VecAppend(gNativeWins, nw);
-    // WM_DROPFILES, for when the OLE registration below fails
+    // WM_DROPFILES, for when gpui's OLE drop target could not be registered
     DragAcceptFiles(hwnd, TRUE);
-    // orig's CanvasDropTarget: files, image URLs, and where a dragged file is
-    RegisterCanvasDropTarget(hwnd);
     SetWindowSubclass(hwnd, ShellSubclass, 1, 0);
+    // what RefreshDpiAfterDisplayChange compares against (orig sets it on create)
+    if (win->frameDpi <= 0) {
+        win->frameDpi = RoundUp(DpiGetForHwnd(hwnd), 4);
+    }
     RegisterGlobalHotkeys(hwnd);
     // SAPI posts its word-boundary / end-of-stream events to a window
     TtsSetNotifyWindow(hwnd, kWmTtsEvent, 0, 0);
@@ -950,16 +1018,12 @@ void AppShellForgetNativeHwnd(MainWindow* win) {
         HWND hwnd = gNativeWins[i].hwnd;
         VecRemoveAt(gNativeWins, i);
         GlobalHotkeysOnDestroy(hwnd);
-        RevokeCanvasDropTarget(hwnd);
-        TouchGesturesForget(win);
     }
 }
 
 #else
 
 void AppShellEnableFileDrop(MainWindow*) {}
-
-void AppShellApplyNativeCursor(MainWindow*) {}
 
 void AppShellFrameChanged(MainWindow*) {}
 

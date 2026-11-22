@@ -73,14 +73,15 @@
 #include "SumatraPDF.h"
 #include "SumatraLog.h"
 #include "MainWindow.h"
+#include "ImageReplace.h"
 #include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Tabs.h"
+#include "StripGroups.h"
 #include "HexView.h"
 #include "gui/Dpi.h"
 #include "gui/AppShell.h"
 #include "gui/NativeFileDlg.h"
-#include "gui/OleDragDrop.h"
 #include "gui/NativeCursors.h"
 #include "gui/Sidebar.h"
 #include "gui/WasmBridge.h"
@@ -94,6 +95,7 @@
 #include "TextSearch.h"
 #include "AppTools.h"
 #include "SearchAndDDE.h"
+#include "ReuseInstance.h"
 #include "FindBar.h"
 #include "Toolbar.h"
 #include "ReadingBar.h"
@@ -104,8 +106,11 @@
 #include "TableOfContents.h"
 #include "Favorites.h"
 #include "gui/Sidebar.h"
+#include "SignatureUICommon.h"
+#include "SignatureUI.h"
 #include "FileThumbnails.h"
 #include "HomePage.h"
+#include "ServerFiles.h"
 #include "DocumentProperties.h"
 #include "PdfDarkMode.h"
 #include "PagePosition.h"
@@ -123,6 +128,7 @@
 #include "AnnotFilterToolbar.h"
 #include "AnnotPlacement.h"
 #include "AnnotTextPopup.h"
+#include "MeasurementToolbar.h"
 #include "RefHover.h"
 #include "FormFields.h"
 #include "ImageReader.h"
@@ -143,6 +149,7 @@
 #include "OpenFromUrlCommon.h"
 #include "AppHelpersCommon.h"
 #include "SumatraTest.h"
+#include "Cli.h"
 
 RenderCache* gRenderCache = nullptr;
 static Flags* gFlags = nullptr;
@@ -281,12 +288,14 @@ void UpdateDocumentColors() {
     gRenderCache->linkColor = link;
     gRenderCache->BumpDarkModeEpoch();
 
-    // ng: orig also regenerates the chm / markdown previews here; their browser
-    // host is step 11b
+    // also regenerate chm / markdown previews (their colors are baked into the html)
     for (MainWindow* win : gWindows) {
         for (WindowTab* tab : win->Tabs()) {
             DisplayModel* dm = tab->AsFixed();
             if (!dm) {
+                if (BrowserDocController* browser = tab->AsBrowser()) {
+                    browser->UpdateTheme();
+                }
                 continue;
             }
             gRenderCache->AbortRendering(dm);
@@ -353,8 +362,62 @@ void ReloadSettingsUpdateWindows(bool showToolbarBefore) {
     }
 }
 
+// orig's: the paths of every document tab, then every window but one closes.
+// A window that is printing is left alone.
+static MainWindow* CollectPathsAndCloseWindows(StrVec& paths) {
+    for (MainWindow* w : gWindows) {
+        for (WindowTab* tab : w->Tabs()) {
+            if (tab->IsAboutTab() || len(tab->filePath) == 0) {
+                continue;
+            }
+            paths.Append(tab->filePath);
+        }
+    }
+    // closing the windows below must not overwrite this session snapshot
+    ScheduleSaveSettings();
+    FlushScheduledSaveSettings();
+
+    // quitIfLast=false keeps the last one alive, as an empty window
+    Vec<MainWindow*> toClose(gWindows);
+    for (MainWindow* w : toClose) {
+        if (w->printThread) {
+            continue;
+        }
+        CloseWindow(w, false, false);
+    }
+    return len(gWindows) > 0 ? gWindows[0] : nullptr;
+}
+
+// UseTabs turned off: each document in a window of its own
+static void TransitionToNoTabs() {
+    StrVec paths;
+    MainWindow* surviving = CollectPathsAndCloseWindows(paths);
+    for (int i = 0; i < len(paths); i++) {
+        MainWindow* win = (i == 0 && surviving) ? surviving : CreateAndShowMainWindow(nullptr);
+        if (win) {
+            LoadDocument(win, paths[i]);
+            win->RedrawAll(true);
+        }
+    }
+}
+
+// UseTabs turned on: every document a tab of one window
+static void TransitionToTabs() {
+    StrVec paths;
+    MainWindow* win = CollectPathsAndCloseWindows(paths);
+    if (!win && len(paths) > 0) {
+        win = CreateAndShowMainWindow(nullptr);
+    }
+    if (!win) {
+        return;
+    }
+    for (Str path : paths) {
+        LoadDocument(win, path);
+    }
+    win->RedrawAll(true);
+}
+
 // orig's, minus what this port has no service for: ExplorerQuickLook (step 14)
-// and the UseTabs <-> windows transition (it closes and reopens every window)
 void ApplyChangedSettingsAndRelayout(const SettingsApplyState& before) {
     Settings* p = gSettings;
 
@@ -423,6 +486,16 @@ void ApplyChangedSettingsAndRelayout(const SettingsApplyState& before) {
         RebuildMenuBar(w);
         w->lastViewPortSize = Size{};
         w->RedrawAll(true);
+    }
+
+    // UseTabs converts existing windows <-> tabs (closes and reopens windows);
+    // post it so it runs after the settings dialog has been torn down
+    if (before.useTabs != p->useTabs) {
+        if (p->useTabs) {
+            uitask::Post(MkFunc0Void(TransitionToTabs), "TransitionToTabs");
+        } else {
+            uitask::Post(MkFunc0Void(TransitionToNoTabs), "TransitionToNoTabs");
+        }
     }
 }
 
@@ -860,6 +933,63 @@ MainWindow* FindMainWindowByFile(Str file, bool focusTab, MainWindow* limitWin) 
     return tab->win;
 }
 
+// ng: MainWindow wrappers of the OpenOnOtherDesktop helpers; virtual desktops
+// are Windows-only, elsewhere every window counts as on the current desktop
+bool IsWinOnCurrentDesktop(MainWindow* win) {
+#if OS_WIN
+    return IsOnCurrentDesktop(MainWindowHwnd(win));
+#else
+    (void)win;
+    return true;
+#endif
+}
+
+bool CanFocusWinHere(MainWindow* win) {
+#if OS_WIN
+    return CanFocusWithoutDesktopSwitch(MainWindowHwnd(win));
+#else
+    (void)win;
+    return true;
+#endif
+}
+
+bool BringWinHere(MainWindow* win) {
+#if OS_WIN
+    return BringToCurrentDesktop(MainWindowHwnd(win));
+#else
+    (void)win;
+    return false;
+#endif
+}
+
+// The window showing file that we can bring to the front without switching the
+// user's virtual desktop, selecting its tab. Picks the same window as
+// FindMainWindowByFile() whenever that one is on the current desktop; only when
+// it isn't do we look for another window here that also shows the file, and
+// under OpenOnOtherDesktop = move we pull the found window onto this desktop.
+MainWindow* FindMainWindowToActivate(Str file, MainWindow* limitWin) {
+    MainWindow* win = FindMainWindowByFile(file, false, limitWin);
+    if (win && !CanFocusWinHere(win)) {
+        MainWindow* here = nullptr;
+        for (int i = 0; !limitWin && i < len(gWindows); i++) {
+            MainWindow* w = gWindows[i];
+            if (FindTabByFilePath(file, w) && CanFocusWinHere(w)) {
+                here = w;
+                break;
+            }
+        }
+        if (here) {
+            win = here;
+        } else if (!BringWinHere(win)) {
+            win = nullptr;
+        }
+    }
+    if (win) {
+        SelectTabInWindow(FindTabByFilePath(file, win));
+    }
+    return win;
+}
+
 // --- thumbnails (orig's, from SumatraPDF.cpp) --------------------------------
 
 // ng: a thumbnail never asks for a password
@@ -1151,6 +1281,10 @@ void ReloadDocument(MainWindow* win, bool autoRefresh) {
         logf("ReloadDocument: tab->filePath is empty, auto refresh: %d\n", (int)autoRefresh);
         return;
     }
+    // already loading (StartLoadDocument): that load finishes it
+    if (tab->loadState == WindowTab::LoadState::Loading) {
+        return;
+    }
     if (!tab->IsDocLoaded() && !autoRefresh) {
         LoadDocument(win, path, LoadPrefs::DontSave, LoadReuse::CurrentTab);
         return;
@@ -1385,6 +1519,11 @@ static void ShowLoadWarning(MainWindow* win, WindowTab* tab, Kind groupId, Str m
 }
 
 // orig's LoadDocumentFinish: what the user should know about the document
+// the "Errors in document" notification is up (kNotifDocErrors is per file)
+bool IsDocErrorsNotifShown(MainWindow* win) {
+    return GetNotificationForGroup(win, kNotifDocErrors) != nullptr;
+}
+
 static void ShowLoadWarnings(MainWindow* win, WindowTab* tab) {
     if (!win->IsDocLoaded()) {
         return;
@@ -1401,7 +1540,8 @@ static void ShowLoadWarnings(MainWindow* win, WindowTab* tab) {
     // "Errors" link opens the Show Errors dialog
     DisplayModel* dmErr = win->AsFixed();
     EngineBase* engineErr = dmErr ? dmErr->GetEngine() : nullptr;
-    if (engineErr && engineErr->HasErrors()) {
+    // ShowDocumentErrors = false keeps quiet; Show Errors is still in the menu (#6558)
+    if (engineErr && engineErr->HasErrors() && gSettings->showDocumentErrors) {
         TempStr msg = fmt("[%s](CmdShowErrors) %s", Tr("Errors"), Tr("in document"));
         ShowLoadWarning(win, tab, kNotifDocErrors, msg, false);
     }
@@ -1502,9 +1642,9 @@ bool ScrollBrowserDocKey(MainWindow* win, int vk) {
     return true;
 }
 
-// A failed open still gets a tab: the canvas shows the error, and the file
-// stays available to "show in folder" (issue #3595). Page number stays 0.
-static void ShowLoadErrorTab(MainWindow* win, Str fullPath, LoadReuse reuse) {
+// A tab for fullPath without a document: the canvas shows the load error
+// (Error) or "Loading ..." (Loading). Page number stays 0.
+static WindowTab* ShowDocumentlessTab(MainWindow* win, Str fullPath, LoadReuse reuse, WindowTab::LoadState state) {
     WindowTab* tab = nullptr;
     if (reuse == LoadReuse::CurrentTab) {
         tab = win->CurrentTab();
@@ -1533,13 +1673,13 @@ static void ShowLoadErrorTab(MainWindow* win, Str fullPath, LoadReuse reuse) {
         DeleteControllerAsync(prev);
         tab->SetFilePath(fullPath);
         tab->everPaintedPage = false;
-        tab->loadState = WindowTab::LoadState::Error;
+        tab->loadState = state;
         win->currentTabTemp = tab;
     } else {
         SaveCurrentWindowTab(win);
         tab = new WindowTab(win);
         tab->SetFilePath(fullPath);
-        tab->loadState = WindowTab::LoadState::Error;
+        tab->loadState = state;
         AddTabToWindow(win, tab);
         win->currentTabTemp = tab;
     }
@@ -1551,13 +1691,20 @@ static void ShowLoadErrorTab(MainWindow* win, Str fullPath, LoadReuse reuse) {
     RebuildMenuBar(win);
     TabsUIOnTabsChanged(win);
     AppShellInvalidate(win);
+    return tab;
+}
+
+// A failed open still gets a tab: the canvas shows the error, and the file
+// stays available to "show in folder" (issue #3595).
+static void ShowLoadErrorTab(MainWindow* win, Str fullPath, LoadReuse reuse) {
+    ShowDocumentlessTab(win, fullPath, reuse, WindowTab::LoadState::Error);
 }
 
 // ng: orig's LoadDocumentFinish, the half that puts the remembered FileState
 // back on screen. What it drops is the window placement (gpui cannot move a
 // window), the UIA notification and the browser-hosted (chm / markdown)
 // branch, which has no scroll position to restore yet (step 11).
-MainWindow* LoadDocument(MainWindow* win, Str path, LoadPrefs prefs, LoadReuse reuse) {
+static MainWindow* LoadDocumentNow(MainWindow* win, Str path, LoadPrefs prefs, LoadReuse reuse) {
     if (gCrashOnOpen) {
         log(StrL("LoadDocument: about to call CrashMe()\n"));
         CrashMe();
@@ -1593,6 +1740,252 @@ MainWindow* LoadDocument(MainWindow* win, Str path, LoadPrefs prefs, LoadReuse r
         return nullptr;
     }
     return LoadDocumentFinish(win, fullPath, ctrl, prefs, reuse, timeStart);
+}
+
+// -dbg-control TestLoadDelay: makes opening a document as slow as a sleeping drive
+AtomicInt gTestLoadDelayMs = 0;
+
+static void MaybeTestLoadDelay() {
+    int delayMs = AtomicIntGet(&gTestLoadDelayMs);
+    if (delayMs > 0) {
+        SleepInMs(delayMs);
+    }
+}
+
+MainWindow* LoadDocument(MainWindow* win, Str path, LoadPrefs prefs, LoadReuse reuse) {
+    MaybeTestLoadDelay();
+    return LoadDocumentNow(win, path, prefs, reuse);
+}
+
+// orig's StartLoadDocument for a lazy tab or an open: the slow part (waking
+// the drive, parsing the file) runs on a thread so the UI stays usable
+struct LazyTabLoad {
+    WindowTab* tab = nullptr;
+    Str path;
+    FileEBookUI* fileEBookUI = nullptr;
+    float ebookLayoutAspect = 0;
+    bool chmInFixedUI = false;
+    // browser-view and chm documents only get the drive woken up here
+    bool createEngine = false;
+    // an open (StartLoadDocument) rather than a restored session tab
+    bool isOpen = false;
+    LoadPrefs prefs = LoadPrefs::DontSave;
+    // an open's result: false when it failed or was superseded
+    Func1<bool> onFinished;
+    TimeStamp timeStart;
+    EngineBase* engine = nullptr;
+    ~LazyTabLoad() {
+        str::Free(path);
+        DeleteFileEBookUI(fileEBookUI);
+        SafeEngineRelease(&engine);
+    }
+};
+
+// at most this many documents load at once (e.g. many files dropped together)
+constexpr int kMaxLoadThreads = 4;
+static int gLoadThreadsActive = 0;
+static Vec<LazyTabLoad*> gLoadQueue;
+
+static void LazyTabLoadThread(LazyTabLoad* d);
+
+static void StartOrQueueLoadThread(LazyTabLoad* d) {
+    if (gLoadThreadsActive >= kMaxLoadThreads) {
+        VecAppend(gLoadQueue, d);
+        return;
+    }
+    gLoadThreadsActive++;
+    RunAsync(MkFunc0<LazyTabLoad>(LazyTabLoadThread, d), StrL("LazyTabLoad"));
+}
+
+// the UI-thread half of an open: the engine goes on screen in the loading tab.
+// Without one (password, CAJ consent, failure) the regular load runs, quickly
+// now that the drive is awake, and asks or shows the error.
+static bool FinishOpenLoad(LazyTabLoad* d) {
+    WindowTab* tab = d->tab;
+    MainWindow* win = tab->win;
+    TempStr path = str::DupTemp(tab->filePath);
+    if (!d->engine) {
+        // a password dialog shows over the error, which stays if it's cancelled
+        tab->loadState = WindowTab::LoadState::Error;
+        return LoadDocumentNow(win, path, d->prefs, LoadReuse::CurrentTab) != nullptr;
+    }
+    DocController* ctrl = new DisplayModel(d->engine, win->cbHandler);
+    d->engine = nullptr;
+    return LoadDocumentFinish(win, path, ctrl, d->prefs, LoadReuse::CurrentTab, d->timeStart) != nullptr;
+}
+
+static void LazyTabLoadDone(LazyTabLoad* d) {
+    AutoDelete delData(d);
+    gLoadThreadsActive--;
+    if (len(gLoadQueue) > 0) {
+        StartOrQueueLoadThread(VecPopAt(gLoadQueue, 0));
+    }
+    WindowTab* tab = d->tab;
+    MainWindow* win = FindMainWindowByTab(tab);
+    if (!win || !IsMainWindowValidAndNotClosing(win)) {
+        d->onFinished.Call(false);
+        return;
+    }
+    if (tab->loadState != WindowTab::LoadState::Loading || !str::Eq(tab->filePath, d->path)) {
+        d->onFinished.Call(false);
+        return;
+    }
+    tab->loadCopyBytesCopied = -1;
+    tab->loadCopyBytesTotal = 0;
+    tab->loadStartedAt = 0;
+    if (!IsCurrentTab(win, tab)) {
+        // loads again when selected, quickly now that the drive is awake
+        tab->loadState = d->isOpen ? WindowTab::LoadState::LoadedPending : WindowTab::LoadState::None;
+        d->onFinished.Call(true);
+        return;
+    }
+    if (d->isOpen) {
+        bool ok = FinishOpenLoad(d);
+        d->onFinished.Call(ok);
+        return;
+    }
+    EngineBase* engine = d->engine;
+    d->engine = nullptr;
+    // done loading: ReloadDocument skips a tab that is still loading
+    tab->loadState = WindowTab::LoadState::None;
+    FinishLazyTabLoad(tab, engine);
+}
+
+// network-drive cbx cache copy progress, painted on the loading tab
+struct LoadCopyProgress {
+    WindowTab* tab = nullptr;
+    i64 bytesCopied = 0;
+    i64 bytesTotal = 0;
+};
+
+static void UpdateLoadCopyProgress(LoadCopyProgress* p) {
+    AutoDelete delProgress(p);
+    WindowTab* tab = p->tab;
+    MainWindow* win = FindMainWindowByTab(tab);
+    if (!win || tab->loadState != WindowTab::LoadState::Loading) {
+        return;
+    }
+    tab->loadCopyBytesCopied = p->bytesCopied;
+    tab->loadCopyBytesTotal = p->bytesTotal;
+    if (IsCurrentTab(win, tab)) {
+        AppShellInvalidate(win);
+    }
+}
+
+// on the load thread: d->tab is only handed to the UI thread, which checks it
+static void OnLoadCopyProgress(LazyTabLoad* d, file::CopyProgress* cp) {
+    auto* p = new LoadCopyProgress;
+    p->tab = d->tab;
+    p->bytesCopied = cp->bytesCopied;
+    p->bytesTotal = cp->bytesTotal;
+    uitask::Post(MkFunc0<LoadCopyProgress>(UpdateLoadCopyProgress, p), "LoadCopyProgress");
+    // TestLoadDelay holds the copy while set, so a test sees its progress
+    while (AtomicIntGet(&gTestLoadDelayMs) > 0) {
+        SleepInMs(20);
+    }
+}
+
+static void LazyTabLoadThread(LazyTabLoad* d) {
+    MaybeTestLoadDelay();
+    if (d->createEngine && DocumentPathExists(d->path)) {
+        SetLoadThreadFileEBookUI(d->fileEBookUI);
+        float prevAspect = EngineMupdfSetEbookLayoutAspect(d->ebookLayoutAspect);
+        file::gFileCopyProgressCb = MkFunc1<LazyTabLoad, file::CopyProgress*>(OnLoadCopyProgress, d);
+        // no password prompt off the UI thread: FinishLazyTabLoad's regular
+        // load asks for it
+        d->engine = CreateEngineFromFile(d->path, nullptr, d->chmInFixedUI);
+        file::gFileCopyProgressCb = {};
+        EngineMupdfSetEbookLayoutAspect(prevAspect);
+        SetLoadThreadFileEBookUI(nullptr);
+        if (d->engine && d->engine->pageCount <= 0) {
+            SafeEngineRelease(&d->engine);
+        }
+    } else {
+        DocumentPathExists(d->path);
+    }
+    uitask::Post(MkFunc0<LazyTabLoad>(LazyTabLoadDone, d), "LazyTabLoadDone");
+}
+
+static LazyTabLoad* NewTabLoad(WindowTab* tab) {
+    MainWindow* win = tab->win;
+    auto* d = new LazyTabLoad;
+    d->tab = tab;
+    d->path = str::Dup(tab->filePath);
+    d->timeStart = TimeGet();
+    FileType kind = GuessFileTypeFromName(d->path);
+    d->chmInFixedUI = gSettings->chmUI.useFixedPageUI || !BrowserViewAvailable();
+    bool chmInBrowser = !d->chmInFixedUI && ChmModel::IsSupportedFileType(kind);
+    bool mdInBrowser = ShouldUseBrowserView(kind) && BrowserViewAvailable();
+    d->createEngine = !chmInBrowser && !mdInBrowser;
+    d->ebookLayoutAspect = EbookLayoutAspectForLoad(win, d->path);
+    d->fileEBookUI = CopyFileEBookUI(GetFileEBookUI(d->path));
+    tab->loadStartedAt = GetTickCount64();
+    tab->loadState = WindowTab::LoadState::Loading;
+    tab->loadCopyBytesCopied = -1;
+    tab->loadCopyBytesTotal = 0;
+    AppShellInvalidate(win);
+    return d;
+}
+
+void StartLazyTabLoad(WindowTab* tab) {
+    StartOrQueueLoadThread(NewTabLoad(tab));
+}
+
+// orig's StartLoadDocument: the tab shows "Loading ..." while the engine is
+// created on a thread, so a sleeping drive doesn't freeze the UI. Returns the
+// tab that gets the document. onFinished gets whether it loaded. Wasm has no
+// threads and loads right away.
+WindowTab* StartLoadDocument(MainWindow* win, Str path, LoadPrefs prefs, LoadReuse reuse,
+                             const Func1<bool>& onFinished) {
+    if (gCrashOnOpen) {
+        log(StrL("StartLoadDocument: about to call CrashMe()\n"));
+        CrashMe();
+    }
+    if (!win || len(path) == 0) {
+        onFinished.Call(false);
+        return nullptr;
+    }
+#if OS_WASM
+    bool ok = LoadDocument(win, path, prefs, reuse) != nullptr;
+    WindowTab* res = ok ? win->CurrentTab() : nullptr;
+    onFinished.Call(ok);
+    return res;
+#else
+    TempStr fullPath = path::NormalizeTemp(path);
+    // TemporaryFileAutoMove: open the copy in TemporaryFileDestDir (#6437)
+    TempStr permanent = MaybeAutoCopyTemporaryFile(fullPath);
+    if (len(permanent) > 0) {
+        fullPath = permanent;
+    }
+    WindowTab* tab = ShowDocumentlessTab(win, fullPath, reuse, WindowTab::LoadState::Loading);
+    LazyTabLoad* d = NewTabLoad(tab);
+    d->isOpen = true;
+    d->prefs = prefs;
+    d->onFinished = onFinished;
+    StartOrQueueLoadThread(d);
+    return tab;
+#endif
+}
+
+// an open that finished while another tab was current loads again when its
+// tab is selected
+void LoadPendingTab(WindowTab* tab) {
+    if (!tab || tab->ctrl || tab->loadState != WindowTab::LoadState::LoadedPending) {
+        return;
+    }
+    MainWindow* win = tab->win;
+    if (!IsMainWindowValidAndNotClosing(win) || !IsCurrentTab(win, tab)) {
+        return;
+    }
+    StartLoadDocument(win, str::DupTemp(tab->filePath), LoadPrefs::Save, LoadReuse::CurrentTab);
+}
+
+// LoadDocument into the current tab with an engine a lazy tab's background
+// load created
+void LoadDocumentWithEngine(MainWindow* win, Str path, EngineBase* engine) {
+    auto timeStart = TimeGet();
+    DocController* ctrl = new DisplayModel(engine, win->cbHandler);
+    LoadDocumentFinish(win, path, ctrl, LoadPrefs::DontSave, LoadReuse::CurrentTab, timeStart);
 }
 
 static void MaybeShowTemporaryFileNotification(MainWindow* win, WindowTab* tab);
@@ -1883,6 +2276,7 @@ static MainWindow* LoadDocumentFinish(MainWindow* win, Str fullPath, DocControll
     }
     SetTocVisibility(win, showToc);
     MaybeShowTemporaryFileNotification(win, tab);
+    CheckTabSignatures(tab);
 
     UpdateWindowTitle(win);
     RebuildMenuBar(win);
@@ -1922,7 +2316,7 @@ static void StartLoadDocuments(StrVec& paths, MainWindow* win, bool skipHistory)
     SortNatural(&pathsToLoad);
     for (Str path : pathsToLoad) {
         logf("StartLoadDocuments: '%s'\n", path);
-        WindowTab* tab = LoadDocument(win, path) ? win->CurrentTab() : nullptr;
+        WindowTab* tab = StartLoadDocument(win, path);
         if (tab && skipHistory) {
             tab->skipHistory = true;
         }
@@ -2220,6 +2614,41 @@ void OnDocumentVerticalScrollIntent(MainWindow* win, bool down) {
     MaybeShowNextFileScrollHint(win);
 }
 
+// toggle command states that need this app's UI (see ToggleCmdState)
+bool AppToggleCmdState(MainWindow* win, int cmdId, bool& on) {
+    switch (cmdId) {
+        case CmdToggleBookmarks:
+        case CmdToggleTableOfContents:
+            on = SidebarContentVisible(win, SidebarContent::Bookmarks);
+            return true;
+        case CmdToggleThumbnails:
+            on = SidebarContentVisible(win, SidebarContent::Thumbnails);
+            return true;
+        case CmdToggleLayers:
+            on = SidebarContentVisible(win, SidebarContent::Layers);
+            return true;
+        case CmdFavoriteToggle:
+            on = SidebarContentVisible(win, SidebarContent::Favorites);
+            return true;
+        case CmdToggleMenuBar:
+            on = win->IsFullScreen() ? gSettings->fullscreen.showMenubar : win->isMenuBarVisible;
+            return true;
+        case CmdToggleImages:
+            on = ShowImageOutlines();
+            return true;
+        case CmdToggleTransparencyGrid:
+            on = ShowTransparencyGrid();
+            return true;
+        case CmdTogglePageGrid:
+            on = ShowPageGrid();
+            return true;
+        case CmdToggleLaserPointer:
+            on = IsLaserPointerActive();
+            return true;
+    }
+    return false;
+}
+
 // --- the page-info tip, CmdTogglePageInfo (orig SumatraPDF.cpp) ------------
 
 // Light separator between page-info values: space + U+00B7 MIDDLE DOT + space.
@@ -2241,9 +2670,11 @@ void ShowPageInfoIfWanted(MainWindow* win) {
         RemoveNotificationsForGroup(win, kNotifPageInfo);
         return;
     }
+    // orig's PageNoChanged / ZoomChanged pass the page they report: at the end
+    // of a document that is the last page, not the most visible one
     NotificationWnd* wnd = GetNotificationForGroup(win, kNotifPageInfo);
     if (wnd) {
-        UpdatePageInfoHelper(win, wnd, -1);
+        UpdatePageInfoHelper(win, wnd, win->currPageNo);
         return;
     }
     NotificationCreateArgs args;
@@ -2254,7 +2685,7 @@ void ShowPageInfoIfWanted(MainWindow* win) {
     // the message carries page labels and image entry names from the document
     args.plainText = true;
     wnd = ShowNotification(args);
-    UpdatePageInfoHelper(win, wnd, -1);
+    UpdatePageInfoHelper(win, wnd, win->currPageNo);
 }
 
 // --- the page info bar, PageInfoLocation = bottom / bottom-overlay (#6494) --
@@ -2424,34 +2855,42 @@ void OpenNextPrevFileInFolder(MainWindow* win, bool forward, Str pathToDelete) {
     MaybeSaveAnnotations(tab, MkFunc1(LoadNextPrevFile, c));
 }
 
+static void OnNextPrevFileLoaded(NextPrevLoadCtx* c, bool ok) {
+    AutoDelete delCtx(c);
+    MainWindow* win = c->win;
+    if (!IsMainWindowValidAndNotClosing(win)) {
+        return;
+    }
+    // superseded: next / prev again, or another open, while loading
+    WindowTab* tab = win->CurrentTab();
+    bool samePath = tab && (str::EqI(tab->filePath, c->path) || path::IsSame(tab->filePath, c->path));
+    if (!samePath) {
+        return;
+    }
+    if (ok) {
+        if (len(c->pathToDelete) > 0) {
+            DeleteFileFromDiskAndHistory(c->pathToDelete);
+        }
+        return;
+    }
+    // skip the file that failed to open and go on in the same direction
+    gFilesFailedToOpen.Append(c->path);
+    OpenNextPrevFileInFolder(win, c->forward, c->pathToDelete);
+}
+
 static void LoadNextPrevFile(NextPrevLoadCtx* c, bool canProceed) {
     MainWindow* win = c->win;
     WindowTab* tab = c->tab;
-    bool forward = c->forward;
-    TempStr chosenCopy = str::DupTemp(c->path);
-    // the load resets the temp arena and may free the pending request
-    Str toDelete = str::Dup(c->pathToDelete);
-    delete c;
     bool stillCurrent = IsMainWindowValidAndNotClosing(win) && win->CurrentTab() == tab;
     if (!canProceed || !stillCurrent) {
-        str::Free(toDelete);
+        delete c;
         return;
     }
     UpdateTabFileDisplayStateForTab(tab);
-    if (!LoadDocument(win, chosenCopy, LoadPrefs::Save, LoadReuse::CurrentTab)) {
-        // orig advances from the load callback. Stay put when this was the last file.
-        gFilesFailedToOpen.Append(chosenCopy);
-        OpenNextPrevFileInFolder(win, forward, toDelete);
-        str::Free(toDelete);
-        return;
-    }
-    // ng: orig deletes from the asynchronous load's callback
-    WindowTab* curr = IsMainWindowValidAndNotClosing(win) ? win->CurrentTab() : nullptr;
-    bool moved = curr && len(curr->filePath) > 0 && !path::IsSame(curr->filePath, toDelete);
-    if (len(toDelete) > 0 && moved) {
-        DeleteFileFromDiskAndHistory(toDelete);
-    }
-    str::Free(toDelete);
+    // loads on a thread; OnNextPrevFileLoaded deletes pathToDelete or skips a
+    // file that fails to open
+    TempStr path = str::DupTemp(c->path);
+    StartLoadDocument(win, path, LoadPrefs::Save, LoadReuse::CurrentTab, MkFunc1(OnNextPrevFileLoaded, c));
 }
 
 // --- annotations (step 13a) -------------------------------------------------
@@ -2486,6 +2925,44 @@ void RerenderTabPage(WindowTab* tab, int pageNo) {
     gRenderCache->RequestRendering(dm, pageNo);
     SidebarRefreshThumbnailPage(win, pageNo);
     AppShellInvalidate(win);
+}
+
+#if OS_WIN
+// Value of GetClipboardSequenceNumber() right after the last annotation copy.
+// If it still matches, our annotation is the most recent copy and Ctrl+V should
+// paste it; if something else copied since, that wins instead.
+static DWORD gAnnotClipboardSeqNo = 0;
+#endif
+
+// orig's: snapshot the annotation and put its contents on the OS clipboard.
+// `cut` also marks it as the one to delete once the copy is pasted.
+static bool CopyAnnotationToClipboard(MainWindow* win, Annotation* annot, bool cut) {
+    bool ok = cut ? CutAnnotation(annot) : CopyAnnotation(annot);
+    if (!ok) {
+        return false;
+    }
+    Str contents = Contents(annot);
+    if (!str::IsEmptyOrWhiteSpace(contents)) {
+        CopyTextToClipboard(win, contents);
+    }
+#if OS_WIN
+    gAnnotClipboardSeqNo = GetClipboardSequenceNumber();
+#endif
+    return true;
+}
+
+// true if our copied annotation is newer than whatever is on the OS clipboard.
+// ng off Windows has no clipboard counter: an image on the clipboard wins.
+static bool CopiedAnnotationIsFresh(Pixmap* clipboardImage) {
+    if (!HasCopiedAnnotation()) {
+        return false;
+    }
+#if OS_WIN
+    (void)clipboardImage;
+    return GetClipboardSequenceNumber() == gAnnotClipboardSeqNo;
+#else
+    return !clipboardImage;
+#endif
 }
 
 // A cut removes the original only after its copy has landed, so a failed paste
@@ -3103,6 +3580,7 @@ static void CloseDocumentInCurrentTab(MainWindow* win) {
     HideFindBar(win);
     HideSelectionToolbar(win);
     CloseAnnotationUiForTab(tab);
+    CloseMeasurement(win);
     ResetReadAloudStateForTab(tab);
     ReadingAutoScrollHideBar(win);
     ReadingBarCancelDrag(win);
@@ -3705,6 +4183,15 @@ void CopyTextToClipboard(MainWindow* win, Str s) {
     gp::ClipboardSetText(win->gpuiWin, ToGpui(s));
 }
 
+void CopyPngToClipboard(MainWindow* win, Str png) {
+    if (!win || !win->gpuiWin || len(png) == 0) {
+        return;
+    }
+    if (!gp::ClipboardSetImage(win->gpuiWin, (const u8*)png.s, len(png))) {
+        logf("CopyPngToClipboard: ClipboardSetImage() failed\n");
+    }
+}
+
 // takes ownership of bmp, as orig's PixmapFromRenderedBitmap does
 void CopyRenderedBitmapToClipboard(MainWindow*, RenderedBitmap* bmp) {
     if (!bmp) {
@@ -4165,6 +4652,9 @@ static bool PanelContentAvailable(MainWindow* win, SidebarContent content) {
     if (content == SidebarContent::Layers) {
         return SidebarHasLayers(win);
     }
+    if (content == SidebarContent::Signatures) {
+        return TabHasSignatures(win->CurrentTab());
+    }
     if (content == SidebarContent::Thumbnails) {
         return win->AsFixed() != nullptr;
     }
@@ -4567,6 +5057,43 @@ static void OnImagePicked(ImagePickCtx* ctx, Str path) {
     InsertImageAtPath(ctx->win, ctx->pt, path);
 }
 
+// orig's PickImageFilePathTemp filter
+static TempStr ImageFileFilterTemp() {
+    return fmt("%s\1*.png;*.jpg;*.jpeg;*.jfif;*.bmp;*.gif;*.tif;*.tiff;*.webp;*.heic;*.heif;*.ico\1%s\1*.*\1",
+               Tr("Image files"), Tr("All files"));
+}
+
+// the embedded image Replace Image... was picked for
+struct ImageReplacePick {
+    MainWindow* win = nullptr;
+    WindowTab* tab = nullptr;
+    int pageNo = 0;
+    int imageIdx = 0;
+};
+
+static ImageReplacePick gImageReplacePick;
+
+static void OnReplaceImagePicked(ImageReplacePick* p, Str path) {
+    ReplaceImageFromPath(p->win, p->tab, p->pageNo, p->imageIdx, path);
+}
+
+// Replace Image...: asks for the image file to draw in place of the image
+void ReplaceImageFromFile(MainWindow* win, IPageElement* imageEl) {
+    int pageNo = 0;
+    int imageIdx = 0;
+    if (!ImageElementPos(imageEl, &pageNo, &imageIdx) || !CanAccessDisk()) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    TempStr filter = ImageFileFilterTemp();
+    gImageReplacePick = {win, tab, pageNo, imageIdx};
+    if (AppShellPickFileAsync(win, Tr("Image files"), filter, MkFunc1(OnReplaceImagePicked, &gImageReplacePick))) {
+        return;
+    }
+    TempStr path = AppShellPromptForPathTemp(win, Tr("Image files"), filter);
+    ReplaceImageFromPath(win, tab, pageNo, imageIdx, path);
+}
+
 static void InsertImageFromFile(MainWindow* win, Point pt, ImageStampSource source) {
     WindowTab* tab = win->CurrentTab();
     DisplayModel* dm = win->AsFixed();
@@ -4584,9 +5111,7 @@ static void InsertImageFromFile(MainWindow* win, Point pt, ImageStampSource sour
     }
     if (len(path) == 0) {
         // orig's PickImageFilePathTemp
-        TempStr filter =
-            fmt("%s\1*.png;*.jpg;*.jpeg;*.jfif;*.bmp;*.gif;*.tif;*.tiff;*.webp;*.heic;*.heif;*.ico\1%s\1*.*\1",
-                Tr("Image files"), Tr("All files"));
+        TempStr filter = ImageFileFilterTemp();
         gImagePick = {win, tab, pt};
         if (AppShellPickFileAsync(win, Tr("Image files"), filter, MkFunc1(OnImagePicked, &gImagePick))) {
             return;
@@ -5160,6 +5685,9 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
     if (cmd != nullptr) {
         cmdId = cmd->origId;
     }
+    if (ToggleCmdIsNoOp(win, cmd, cmdId)) {
+        return;
+    }
     // a favorite in the Favorites menu carries its file path and page as args
     if (cmdId == CmdFavorite) {
         GoToFavoriteByCmd(win, cmd);
@@ -5169,8 +5697,11 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
     if (cmdId == CmdFileHistory && CanAccessDisk()) {
         Str filePath = GetCommandStringArg(cmd, kCmdArgFilePath, {});
         if (len(filePath) > 0) {
-            LoadDocument(win, filePath);
+            StartLoadDocument(win, filePath);
         }
+        return;
+    }
+    if (StripGroupCmd(win, tab, invokedCmdId)) {
         return;
     }
     // one of the viewers we detect ourselves (Explorer, Acrobat, ...)
@@ -5217,6 +5748,10 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
 
         case CmdCloseCurrentDocument:
             CloseCurrentTab(win, true);
+            break;
+
+        case CmdCloseWindow:
+            AppShellRequestCloseWindow(win);
             break;
 
         case CmdCloseAllTabs:
@@ -5486,14 +6021,14 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
 
         case CmdCopyAnnotation:
             if (tab && tab->selectedAnnotation && HasPermission(Perm::CopySelection)) {
-                CopyAnnotation(tab->selectedAnnotation);
+                CopyAnnotationToClipboard(win, tab->selectedAnnotation, false);
             }
             break;
 
         case CmdCutAnnotation:
             // The original stays until paste. CutAnnotation only marks it.
             if (tab && tab->selectedAnnotation && HasPermission(Perm::CopySelection)) {
-                if (CutAnnotation(tab->selectedAnnotation)) {
+                if (CopyAnnotationToClipboard(win, tab->selectedAnnotation, true)) {
                     ShowTemporaryNotification(tab->win, Tr("Annotation cut. Paste to move it."));
                 }
             }
@@ -5508,9 +6043,12 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
             // focused win32 edit; gpui's text fields consume Ctrl+V
             // themselves, so it never gets here. orig then prefers a copied
             // annotation while ours is the most recent copy
-            // (GetClipboardSequenceNumber); there is no such counter here, so
-            // an image on the clipboard wins
             Pixmap* image = ImageEditGetClipboard(win);
+            if (win->pdfAnnotationsToolbarEnabled && CopiedAnnotationIsFresh(image)) {
+                FreePixmap(image);
+                PasteAnnotationInTab(win, tab);
+                break;
+            }
 #if OS_WASM
             if (!image && ReadClipboardImage(win, ClipboardImageUse::Open)) {
                 break;
@@ -5527,6 +6065,26 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
         case CmdApplyRedactions:
             ApplyRedactionsInTab(tab);
             break;
+
+        case CmdEditAnnotationText: {
+            // the annotation under the cursor (context menu), else the selected one
+            Annotation* annot = tab ? win->annotationUnderCursor : nullptr;
+            if (!annot && tab) {
+                annot = tab->selectedAnnotation;
+            }
+            if (!annot || annot->type == AnnotationType::Widget) {
+                break;
+            }
+            // text is edited in Edit PDF, on the selected annotation: free
+            // text in place, other annotations in the contents editor
+            EnablePdfAnnotationsToolbar(win);
+            SetSelectedAnnotation(tab, annot);
+            if (annot->type == AnnotationType::FreeText && StartFreeTextInPlaceEdit(win, annot)) {
+                break;
+            }
+            PostForWindow(win, StartSelectedAnnotContentsEdit, "StartAnnotContentsEdit");
+            break;
+        }
 
         case CmdDeleteAnnotation:
             // A dialog owns the keyboard. Delete removes the selection, or
@@ -5643,15 +6201,11 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
             break;
 
         case CmdTogglePresentationMode:
-            if (ShouldToggle(cmd, win->InPresentation())) {
-                TogglePresentationMode(win);
-            }
+            TogglePresentationMode(win);
             break;
 
         case CmdToggleFullscreen:
-            if (ShouldToggle(cmd, win->IsFullScreen())) {
-                ToggleFullScreen(win);
-            }
+            ToggleFullScreen(win);
             break;
 
         case CmdPresentationBlackBackground:
@@ -5694,6 +6248,10 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
 
         case CmdToggleReadingBar:
             ReadingBarToggle(win);
+            break;
+
+        case CmdMeasure:
+            ToggleMeasurement(win);
             break;
 
         case CmdToggleReadingBarInvert:
@@ -6074,6 +6632,10 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
             SidebarToggleLayers(win);
             break;
 
+        case CmdShowSignatures:
+            SidebarShowSignatures(win);
+            break;
+
         // swaps the page colors for this session, whatever they are and
         // whatever the theme is (orig's comment: issue #5887)
         case CmdInvertColors:
@@ -6095,6 +6657,10 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
         case CmdToggleLightDarkTheme:
             ToggleLightDarkTheme();
             ScheduleSaveSettings();
+            break;
+
+        case CmdToggleLineWeights:
+            ToggleLineWeights();
             break;
 
         case CmdToggleEngineeringDrawingEnhance:
@@ -6211,7 +6777,7 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
                 break;
             }
             if (win->pdfAnnotationsToolbarEnabled && tab->selectedAnnotation) {
-                CopyAnnotation(tab->selectedAnnotation);
+                CopyAnnotationToClipboard(win, tab->selectedAnnotation, false);
             }
             break;
         }
@@ -6271,6 +6837,10 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
             ToggleSelectTextWithKeyboard(win);
             break;
 
+        case CmdToggleTextSelecting:
+            ToggleTextSelecting(win);
+            break;
+
         // no default shortcut: Ctrl+Shift+Left / Right and friends are taken, so
         // these exist for the user to bind in the Shortcuts settings (#5922)
         case CmdExtendSelectionCharLeft:
@@ -6287,6 +6857,24 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
 
         case CmdExtendSelectionWordRight:
             ExtendTextSelection(win, TextSelectUnit::Word, 1);
+            break;
+
+        // no default shortcut: for binding caret keys elsewhere (#6539)
+        case CmdCaretUp:
+        case CmdCaretDown:
+        case CmdCaretLeft:
+        case CmdCaretRight:
+        case CmdCaretWordLeft:
+        case CmdCaretWordRight:
+        case CmdCaretLineStart:
+        case CmdCaretLineEnd:
+        case CmdCaretPageUp:
+        case CmdCaretPageDown:
+        case CmdCaretDocStart:
+        case CmdCaretDocEnd:
+            if (int fallback = RunCaretCmd(win, cmdId, CanvasShiftPressed())) {
+                ExecuteCmd(win, fallback);
+            }
             break;
 
         case CmdToggleBookmarks:
@@ -6400,7 +6988,9 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
             break;
 
         case CmdSetDocumentColorsFollowTheme:
-            ShowSetDocumentColorsFollowThemeDialog(win);
+            if (!RunDocColorsFollowThemeCmd(cmd)) {
+                ShowSetDocumentColorsFollowThemeDialog(win);
+            }
             break;
 
         case CmdChangeBackgroundColor:
@@ -6800,6 +7390,14 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
             ShowPdfCompressDialog(win);
             break;
 
+        case CmdPdfWatermark:
+            ShowPdfWatermarkDialog(win);
+            break;
+
+        case CmdPdfAddPageNumbers:
+            ShowPdfPageNumbersDialog(win);
+            break;
+
         case CmdPdfDecompress:
             ShowPdfDecompressDialog(win);
             break;
@@ -6892,8 +7490,23 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
             return;
 
         case CmdSumatraPDFWeb:
-            ShowTemporaryNotification(win, StrL("SumatraPDF Web is not in this build yet."), kNotif5SecsTimeOut);
+            ShowSumatraPDFWebDialog(win);
             break;
+
+        // the home page's selected entry
+        case CmdUploadToServer:
+        case CmdDeleteFromServer: {
+            Str path = win->IsCurrentTabAbout() ? HomePageSelectedFilePathTemp(win) : Str{};
+            if (len(path) == 0) {
+                break;
+            }
+            if (cmdId == CmdUploadToServer) {
+                UploadFileToServer(win, path);
+            } else {
+                DeleteFileFromServer(win, path);
+            }
+            break;
+        }
 
         default:
             // ng: cmd/port-commands.ts reads this through the automation
@@ -7077,9 +7690,23 @@ static bool ForwardToExistingInstance(Flags& flags, HANDLE* hMutex) {
     HWND existingInstanceHwnd = FindExistingSumatraProcessHwnd(hMutex, &openInNewWindow);
     gOtherInstanceRunning = existingInstanceHwnd != nullptr;
 
+    // Explorer's Space preview goes to the running instance, ReuseInstance or not
+    if (flags.quickLook && existingInstanceHwnd && !gForTesting) {
+        bool ok = false;
+        for (Str path : flags.fileNames) {
+            if (SendExplorerQuickLookToExisting(existingInstanceHwnd, path)) {
+                ok = true;
+            }
+        }
+        if (ok || len(flags.fileNames) == 0) {
+            return true;
+        }
+    }
+
     HWND existingHwnd = nullptr;
-    if (flags.printDialog || flags.configureRestrictedUse || gForTesting) {
-        // the print dialog and the test runs always use this process
+    bool pluginOrStress = flags.hwndPluginParent || len(flags.stressTestPath) > 0;
+    if (flags.printDialog || pluginOrStress || flags.configureRestrictedUse || gForTesting) {
+        // the print dialog, a plugin, a stress test and the test runs always use this process
     } else if (flags.reuseDdeInstance || flags.dde) {
         Vec<HWND> hwnds;
         AppShellFindOtherInstanceWindows(0, hwnds);
@@ -7250,6 +7877,12 @@ static int MaybeRunCliTool(int argc, char** argv) {
         return kNoCliTool;
     }
     Str name(argv[1]);
+    // `SumatraPDF cli <command>`: src/shared/Cli.cpp
+    if (str::Eq(name, StrL("cli"))) {
+        fz_redirect_io_to_existing_console();
+        InstallEmbeddedFontLoader();
+        return CliMain(argc - 2, argv + 2);
+    }
     int (*fn)(int, char**) = nullptr;
     for (const CliTool& t : gCliTools) {
         if (str::EqI(name, Str(t.name))) {
@@ -7299,15 +7932,113 @@ static void TestExtractPages(const Flags& ci) {
 static bool WasmRenderApiStart();
 #endif
 
+#if OS_WIN
+static void DeleteStaleWinCachesAsync() {
+    DeleteStaleWinCaches(GetSumatraDataDirTemp());
+}
+#endif
+
+// What startup does once the session is restored: open the command line
+// files, apply the view flags and kick off background work.
+static void RunStartupActions(MainWindow* win, bool restoredSession) {
+    // Command-line order is the tab order. The last file stays current, as orig.
+    // -new-window: each file in its own window. -new-window-tabs keeps them
+    // as tabs of the first window.
+    bool newWindowEach = gFlags->inNewWindow && !gFlags->inNewWindowTabs;
+    MainWindow* docWin = win;
+    gApplyCliViewToEbookLayout = true;
+    for (Str path : gFlags->fileNames) {
+        // same path twice on the command line, or already restored: select it
+        TempStr fullPath = path::NormalizeTemp(path);
+        if (MainWindow* existing = FindMainWindowByFile(fullPath, true)) {
+            docWin = existing;
+            continue;
+        }
+        if (newWindowEach && docWin->IsDocLoaded()) {
+            MainWindow* next = CreateAndShowMainWindow(nullptr);
+            if (next) {
+                docWin = next;
+            }
+        }
+        LoadDocument(docWin, fullPath);
+        if (gFlags->printDialog) {
+            // one dialog per file, one after another: only the classic one is modal
+            PrintUI ui = len(gFlags->fileNames) > 1 ? PrintUI::Classic : PrintUI::Auto;
+            PrintCurrentFile(docWin, gFlags->exitWhenDone, false, ui);
+        }
+    }
+    gApplyCliViewToEbookLayout = false;
+#if OS_WASM
+    AddStartupHomeTab(win);
+    if (TempStr err = WasmStorageLoadErrorTemp(); len(err) > 0) {
+        TempStr msg =
+            fmt("%s (%s)", Tr("Stored documents and settings didn't load, changes in this tab won't be saved"), err);
+        ShowPlainWarningNotification(win, msg, kNotifNoTimeout);
+    }
+    PrefetchCommonFonts();
+#endif
+#if OS_DARWIN
+    AppShellOpenDocsReady();
+#endif
+#if OS_WIN
+    LoadDdeOpenOnStartup(win);
+    gIsStartup = false;
+#endif
+    // orig's LoadOnStartup: WindowState = 3 in the settings, then the command
+    // line flags, which win over it
+    if (!restoredSession && gSettings->windowState == WIN_STATE_FULLSCREEN) {
+        EnterFullScreen(win);
+    }
+    EnterFullScreenFromFlags(*gFlags, win);
+    ApplyStartupViewFlags(*gFlags, win);
+    if (gFlags->configureRestrictedUse) {
+        ShowConfigureRestrictedUseDialog(win);
+    }
+#if OS_WIN
+    if (gFlags->hwndPluginParent && !MaybeMakePluginWindow(win, gFlags->hwndPluginParent)) {
+        logf("MaybeMakePluginWindow() failed, quitting\n");
+        AppShellQuit();
+    }
+#endif
+    if (len(gFlags->stressTestPath) > 0) {
+        // don't save file history and preference changes
+        RestrictPolicies(Perm::SavePreferences);
+        RebuildMenuBar(win);
+        StartStressTest(gFlags, win);
+    }
+    // call this once it's clear whether Perm::SavePreferences has been granted
+    RegisterSettingsForFileChanges();
+    RegenerateMissingThumbnails();
+    // -forward-search <source file> <line>: jump to the matching place in the
+    // PDF and flash the mark there (orig does this in LoadOnStartup)
+    if (gFlags->forwardSearchOrigin && gFlags->forwardSearchLine && win->AsFixed() && win->AsFixed()->pdfSync) {
+        int page;
+        Vec<Rect> rects;
+        TempStr srcPath = path::NormalizeTemp(gFlags->forwardSearchOrigin);
+        int ret = win->AsFixed()->pdfSync->SourceToDoc(srcPath, gFlags->forwardSearchLine, 0, &page, rects);
+        ShowForwardSearchResult(win, srcPath, gFlags->forwardSearchLine, 0, ret, page, rects);
+    }
+    if (len(gFlags->search) > 0) {
+        StartSearchFromCommandLine(win, gFlags->search);
+    }
+#if !OS_WASM
+    // a web app is always the latest version
+    StartAsyncUpdateCheck(win, UpdateCheck::Automatic);
+#endif
+#if OS_WIN
+    // home-page bottom bar if we lost default-app status for registered extensions
+    if (win->IsCurrentTabAbout()) {
+        PostForWindow(win, MaybeShowDefaultAppNotification, "MaybeShowDefaultAppNotification");
+    }
+#endif
+}
+
 int GpuiMain(int argc, char** argv) {
     int toolRes = MaybeRunCliTool(argc, argv);
     if (toolRes != kNoCliTool) {
         return toolRes;
     }
     gAppStartTime = TimeGet();
-#if OS_DARWIN
-    AppShellDisableAutoTermination();
-#endif
 #if OS_WIN
     // ng: orig's WinMain does this; without it WIC and GDI+ decode nothing, so
     // e.g. reading a cached thumbnail back fails
@@ -7331,6 +8062,12 @@ int GpuiMain(int argc, char** argv) {
 #endif
     if (gFlags->forTesting) {
         gForTesting = true;
+        // tests mustn't open a browser or Finder in front of whoever uses the
+        // computer: neither our launches nor gpui's (a link in a tooltip)
+        gBlockExternalLaunch = true;
+        gp::SetOpenExternalHook([](gp::Str urlOrPath, bool) { return ExternalLaunchBlocked(FromGpui(urlOrPath)); });
+        // nor take the keyboard: what they type would go into the test's window
+        gp::AppSetActivates(false);
     }
     if (gFlags->perfLogFile) {
         SetPerfLogPath(gFlags->perfLogFile);
@@ -7515,6 +8252,19 @@ int GpuiMain(int argc, char** argv) {
         uitask::Destroy();
         return 0;
     }
+#elif !OS_WASM
+    if (ForwardToRunningInstance(*gFlags, &gOtherInstanceRunning)) {
+        CleanUpSettings();
+        trans::Destroy();
+        FreeAcceleratorTables();
+        delete gFlags;
+        gFlags = nullptr;
+        uitask::Destroy();
+        return 0;
+    }
+    // what a forwarding process sends runs once the loop starts, after the
+    // command line of this one is open
+    StartInstanceServer();
 #endif
 
 #if OS_WIN
@@ -7538,11 +8288,14 @@ int GpuiMain(int argc, char** argv) {
     FileWatcherInit();
     RunAsync(MkFunc0Void(DeleteStaleDviCache), StrL("DeleteStaleDviCache"));
     RunAsync(MkFunc0Void(DeleteStaleCajCache), StrL("DeleteStaleCajCache"));
+#if OS_WIN
+    RunAsync(MkFunc0Void(DeleteStaleWinCachesAsync), StrL("DeleteStaleWinCaches"));
+#endif
     gRenderCache = new RenderCache();
 
     gp::App* app = gp::AppNew();
 #if OS_DARWIN
-    AppShellHandleOpenDocs();
+    AppShellHandleOpenDocs(app);
 #endif
     gpc::Init(app);
     // the current theme's colors become gpui's before the first element is built
@@ -7550,7 +8303,11 @@ int GpuiMain(int argc, char** argv) {
     SumatraUpdateTheme();
 
     Size size = NewWindowSize(nullptr);
-    MainWindow* win = AppShellCreateWindow(app, size.dx, size.dy);
+    // macOS paints a window that isn't on screen yet, so the startup window
+    // comes on screen with page 1 drawn in it instead of a blank page. A
+    // Windows window gets no WM_PAINT while hidden.
+    bool hiddenUntilReady = OS_DARWIN && !gFlags->quickLook;
+    MainWindow* win = AppShellCreateWindow(app, size.dx, size.dy, hiddenUntilReady);
     win->pageInfoWanted = GetPageInfoBarMode() != PageInfoBarMode::Notification;
     if (!gFlags->quickLook) {
         PlaceMainWindow(win, nullptr, PlaceWindowWhen::Now);
@@ -7584,96 +8341,15 @@ int GpuiMain(int argc, char** argv) {
         // the first one, as orig does
         win = len(gWindows) > 0 ? gWindows[0] : win;
     }
-    // Command-line order is the tab order. The last file stays current, as orig.
-    // -new-window: each file in its own window. -new-window-tabs keeps them
-    // as tabs of the first window.
-    bool newWindowEach = gFlags->inNewWindow && !gFlags->inNewWindowTabs;
-    MainWindow* docWin = win;
-    gApplyCliViewToEbookLayout = true;
-    for (Str path : gFlags->fileNames) {
-        // same path twice on the command line, or already restored: select it
-        TempStr fullPath = path::NormalizeTemp(path);
-        if (MainWindow* existing = FindMainWindowByFile(fullPath, true)) {
-            docWin = existing;
-            continue;
-        }
-        if (newWindowEach && docWin->IsDocLoaded()) {
-            MainWindow* next = CreateAndShowMainWindow(nullptr);
-            if (next) {
-                docWin = next;
-            }
-        }
-        LoadDocument(docWin, fullPath);
-        if (gFlags->printDialog) {
-            // one dialog per file, one after another: only the classic one is modal
-            PrintUI ui = len(gFlags->fileNames) > 1 ? PrintUI::Classic : PrintUI::Auto;
-            PrintCurrentFile(docWin, gFlags->exitWhenDone, false, ui);
-        }
-    }
-    gApplyCliViewToEbookLayout = false;
-#if OS_WASM
-    AddStartupHomeTab(win);
-    if (TempStr err = WasmStorageLoadErrorTemp(); len(err) > 0) {
-        TempStr msg =
-            fmt("%s (%s)", Tr("Stored documents and settings didn't load, changes in this tab won't be saved"), err);
-        ShowPlainWarningNotification(win, msg, kNotifNoTimeout);
-    }
-    PrefetchCommonFonts();
-#endif
-#if OS_DARWIN
-    AppShellOpenDocsReady();
-#endif
+    // a DDE [CmdExit] can close every window while the session is restored
+    if (len(gWindows) > 0) {
+        RunStartupActions(win, restoredSession);
+    } else {
+        logf("GpuiMain: every window closed while restoring the session\n");
 #if OS_WIN
-    LoadDdeOpenOnStartup(win);
-    gIsStartup = false;
+        gIsStartup = false;
 #endif
-    // orig's LoadOnStartup: WindowState = 3 in the settings, then the command
-    // line flags, which win over it
-    if (!restoredSession && gSettings->windowState == WIN_STATE_FULLSCREEN) {
-        EnterFullScreen(win);
     }
-    EnterFullScreenFromFlags(*gFlags, win);
-    ApplyStartupViewFlags(*gFlags, win);
-    if (gFlags->configureRestrictedUse) {
-        ShowConfigureRestrictedUseDialog(win);
-    }
-#if OS_WIN
-    if (gFlags->hwndPluginParent && !MaybeMakePluginWindow(win, gFlags->hwndPluginParent)) {
-        logf("MaybeMakePluginWindow() failed, quitting\n");
-        AppShellQuit();
-    }
-#endif
-    if (len(gFlags->stressTestPath) > 0) {
-        // don't save file history and preference changes
-        RestrictPolicies(Perm::SavePreferences);
-        RebuildMenuBar(win);
-        StartStressTest(gFlags, win);
-    }
-    // call this once it's clear whether Perm::SavePreferences has been granted
-    RegisterSettingsForFileChanges();
-    RegenerateMissingThumbnails();
-    // -forward-search <source file> <line>: jump to the matching place in the
-    // PDF and flash the mark there (orig does this in LoadOnStartup)
-    if (gFlags->forwardSearchOrigin && gFlags->forwardSearchLine && win->AsFixed() && win->AsFixed()->pdfSync) {
-        int page;
-        Vec<Rect> rects;
-        TempStr srcPath = path::NormalizeTemp(gFlags->forwardSearchOrigin);
-        int ret = win->AsFixed()->pdfSync->SourceToDoc(srcPath, gFlags->forwardSearchLine, 0, &page, rects);
-        ShowForwardSearchResult(win, srcPath, gFlags->forwardSearchLine, 0, ret, page, rects);
-    }
-    if (len(gFlags->search) > 0) {
-        StartSearchFromCommandLine(win, gFlags->search);
-    }
-#if !OS_WASM
-    // a web app is always the latest version
-    StartAsyncUpdateCheck(win, UpdateCheck::Automatic);
-#endif
-#if OS_WIN
-    // home-page bottom bar if we lost default-app status for registered extensions
-    if (win->IsCurrentTabAbout()) {
-        PostForWindow(win, MaybeShowDefaultAppNotification, "MaybeShowDefaultAppNotification");
-    }
-#endif
     StartSumatraControl(gFlags->controlPipeName);
 
     // on by default in debug builds; release builds can opt in by calling
@@ -7683,16 +8359,17 @@ int GpuiMain(int argc, char** argv) {
     }
 
     int res = AppShellRun(app);
+#if !OS_WIN && !OS_WASM
+    // a process started while we shut down mustn't forward to us
+    StopInstanceServer();
+#endif
     StopUiHangDetector();
     SavePerfLog();
     UnregisterSettingsForFileChanges();
     ShutdownWin11Printing();
     TtsRelease();
     ClearPendingNextPrevNav();
-#if OS_WIN
-    DisconnectLastDragDataObject();
     NativeCursorsDelete();
-#endif
 
     // the window is off the screen but its model is still here, and the shell
     // cached its geometry on every frame, so the session snapshot SaveSettings

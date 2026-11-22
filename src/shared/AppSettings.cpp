@@ -67,6 +67,7 @@
 #include "Notifications.h"
 #include "ExplorerQuickLook.h"
 #include "Tabs.h"
+#include "StripGroups.h"
 #include "GlobalHotkeys.h"
 #include "PagePosition.h"
 #include "CachedObjects.h"
@@ -491,6 +492,10 @@ TabState* CloneTabState(const TabState* src) {
     dst->showToc = src->showToc;
     str::ReplaceWithCopy(&dst->sidebarView, src->sidebarView);
     dst->tocState = new Vec<int>(*src->tocState);
+    dst->group = src->group;
+    str::ReplaceWithCopy(&dst->groupName, src->groupName);
+    str::ReplaceWithCopy(&dst->groupColor.s, src->groupColor.s);
+    dst->groupCollapsed = src->groupCollapsed;
     return dst;
 }
 
@@ -569,7 +574,9 @@ static void RememberSessionState() {
                     src = FindSessionTabState(fp);
                 }
                 if (src) {
-                    VecAppend(*windowState->tabStates, CloneTabState(src));
+                    TabState* ts = CloneTabState(src);
+                    StripGroupSaveTab(win, tab, ts);
+                    VecAppend(*windowState->tabStates, ts);
                 }
                 continue;
             }
@@ -579,6 +586,7 @@ static void RememberSessionState() {
             str::ReplaceWithCopy(&fs->sidebarView, SidebarViewToStr(tab->sidebarView));
             *fs->tocState = tab->tocState;
             TabState* ts = NewTabState(fs);
+            StripGroupSaveTab(win, tab, ts);
             VecAppend(*windowState->tabStates, ts);
             DeleteFileState(fs);
         }
@@ -786,6 +794,7 @@ bool LoadSettings() {
         gSettings->showAnnotationAuthorInTooltip ? AnnotAuthorVisibility::Show : AnnotAuthorVisibility::Hide;
     EngineMupdfSetAnnotAuthorInTooltip(authorVisibility);
     SetEngineeringDrawingEnhanceMode(gSettings->engineeringDrawingEnhance);
+    SetShowLineWeights(gSettings->showLineWeights);
     ExplorerQuickLookApplyFromSettings();
 
     if (trans::ValidateLangCode(gprefs->uiLanguage)) {
@@ -1843,4 +1852,19 @@ void FreeParsedThemes(Themes* themes) {
         return;
     }
     FreeStruct(&gThemesInfo, themes);
+}
+
+// The *UI.WindowBgCol setting for the canvas around this engine's pages: PDF,
+// DjVu and XPS share FixedPageUI's, reflowed ebooks have EBookUI's (#6543)
+ParsedColor& CanvasBgColSetting(EngineBase* engine) {
+    if (engine->kind == kindEngineComicBooks) {
+        return gSettings->comicBookUI.windowBgCol;
+    }
+    if (engine->isImageCollection) {
+        return gSettings->imageUI.windowBgCol;
+    }
+    if (engine->isReflowable) {
+        return gSettings->eBookUI.windowBgCol;
+    }
+    return gSettings->fixedPageUI.windowBgCol;
 }

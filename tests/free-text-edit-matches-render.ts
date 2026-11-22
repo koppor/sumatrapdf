@@ -13,6 +13,7 @@ import {
   captureWindowPixels,
   enumChildWindows,
   getClassName,
+  localWindowPosArg,
   getControlText,
   packCoords,
   sendMessage,
@@ -132,7 +133,11 @@ export async function testit(): Promise<void> {
     "UiLanguage = en\nRestoreSession = false\nShowStartPage = false\nCheckForUpdates = false\n",
   );
 
+  // the right half of the work area, as in local runs: with Fit Page a bigger
+  // window zooms in, and the box can no longer show the line whole
   const { proc, client, frame } = await launchControlled([
+    "-window-pos",
+    localWindowPosArg(),
     "-appdata",
     appdata,
     "-view",

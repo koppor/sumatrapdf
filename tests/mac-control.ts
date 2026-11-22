@@ -2,8 +2,9 @@
 // async client already holds one connection, so window messages use a second
 // socket. The server polls both.
 
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { inflateSync } from "node:zlib";
 import { dlopen, FFIType, ptr, toArrayBuffer } from "bun:ffi";
 import { IS_WIN } from "./host.ts";
 
@@ -11,6 +12,9 @@ export const TestLayout = 70;
 const TestInvokeCommand = 87;
 const TestInput = 121;
 const TestDdeExecute = 129;
+const TestCaptureWindow = 170;
+const TestWindows = 172;
+const TestToolWindow = 125;
 const kCopyDataDdeW = 0x44646557;
 
 const WM_KILLFOCUS = 0x0008;
@@ -29,8 +33,13 @@ const WM_RBUTTONDBLCLK = 0x0206;
 const WM_MBUTTONDOWN = 0x0207;
 const WM_MBUTTONUP = 0x0208;
 const WM_MBUTTONDBLCLK = 0x0209;
+const WM_XBUTTONDOWN = 0x020b;
+const WM_XBUTTONUP = 0x020c;
+const WM_NULL = 0x0000;
 const WM_SYSCOMMAND = 0x0112;
 const SC_CLOSE = 0xf060;
+const SC_MINIMIZE = 0xf020;
+const SC_RESTORE = 0xf120;
 const WM_HSCROLL = 0x0114;
 const WM_VSCROLL = 0x0115;
 const WM_MOUSEWHEEL = 0x020a;
@@ -469,6 +478,142 @@ export function macClientToScreen(x: number, y: number): { x: number; y: number 
   return { x: x + Number(c[1]), y: y + Number(c[2]) };
 }
 
+// What EnumWindows and GetWindowText & co. tell a Windows test, for each frame
+// and tool window. hwnd is the app's id for the window: 1 is the first frame,
+// the one a test starts with. toolName: a tool window's TestToolWindow name.
+// Empty when no app is connected.
+export type MacWindow = {
+  hwnd: number;
+  className: string;
+  pid: number;
+  visible: boolean;
+  rect: { left: number; top: number; right: number; bottom: number };
+  title: string;
+  // a tool window's frame
+  owner: number;
+  toolName?: string;
+};
+
+export function macWindows(): MacWindow[] {
+  let raw = "";
+  try {
+    raw = String(macControlRequest(TestWindows, [])[1] ?? "");
+  } catch {
+    return [];
+  }
+  const out: MacWindow[] = [];
+  for (const line of raw.split("\n")) {
+    const m =
+      /^hwnd=(\d+) class=(\S*) pid=(\d+) visible=(\d) rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+) (?:owner=(\d+) name=(\S+) )?title=(.*)$/.exec(
+        line,
+      );
+    if (!m) {
+      continue;
+    }
+    const [x, y, dx, dy] = [+m[5]!, +m[6]!, +m[7]!, +m[8]!];
+    out.push({
+      hwnd: +m[1]!,
+      className: m[2]!,
+      pid: +m[3]!,
+      visible: m[4] === "1",
+      rect: { left: x, top: y, right: x + dx, bottom: y + dy },
+      title: m[11]!,
+      owner: m[9] ? +m[9] : 0,
+      toolName: m[10],
+    });
+  }
+  return out;
+}
+
+export function macWindow(hwnd: number): MacWindow | undefined {
+  return macWindows().find((w) => w.hwnd === hwnd);
+}
+
+// Runs fn with the app's requests aimed at frame hwnd. 1 (and 0) is the first
+// frame, which they go to anyway.
+export function macWithTarget<T>(hwnd: number, fn: () => T): T {
+  if (hwnd <= 1) {
+    return fn();
+  }
+  macControlRequest(TestWindows, ["target", hwnd]);
+  try {
+    return fn();
+  } finally {
+    macControlRequest(TestWindows, ["target", 0]);
+  }
+}
+
+// A message to a tool window: TestToolWindow input in its client dips, which
+// are a Windows test's client pixels at 100%. A dialog's IDOK / IDCANCEL is
+// Enter / Esc.
+export function macToolWindowMessage(
+  name: string,
+  msg: number,
+  wParam: number | bigint,
+  lParam: number | bigint,
+): bigint {
+  const wp = BigInt(wParam);
+  const lp = BigInt(lParam);
+  const tool = (args: ControlArg[]): string => {
+    const res = macControlRequest(TestToolWindow, args);
+    const raw = String(res[1] ?? "");
+    if (res[0] !== 0 || raw.startsWith("ERR")) {
+      throw new Error(`TestToolWindow ${args.join(" ")} failed: ${raw}`);
+    }
+    return raw;
+  };
+  const input = (kind: string, a: number, b = 0, c = 0, d = 0) => tool(["input", name, kind, a, b, c, d]);
+  if (msg === WM_CLOSE || (msg === WM_SYSCOMMAND && (wp & 0xfff0n) === BigInt(SC_CLOSE))) {
+    tool(["close", name]);
+    return 0n;
+  }
+  if (msg === WM_COMMAND && (wp & 0xffffn) <= 2n) {
+    input("key", (wp & 0xffffn) === 1n ? 0x0d : 0x1b);
+    return 0n;
+  }
+  if (msg === WM_KEYDOWN) {
+    const vk = Number(wp & 0xffffn);
+    const raw = input("key", vk);
+    // TranslateMessage: the key's character, unless the key was handled
+    const ch = keyChar(vk);
+    if (ch && !raw.includes("eaten=1")) {
+      input("char", ch);
+    }
+    return raw.includes("eaten=1") ? 1n : 0n;
+  }
+  if (msg === WM_KEYUP) {
+    input("keyup", Number(wp & 0xffffn));
+    return 0n;
+  }
+  if (msg === WM_CHAR) {
+    input("char", Number(wp & 0xffffn));
+    return 0n;
+  }
+  if (isMouseDown(msg)) {
+    const x = sign16(lp);
+    const y = sign16(lp >> 16n);
+    const w = Number(wp & 0xffffn);
+    const m = modsOf(w, { hwnd: 0, screenToClient: (a, b) => ({ x: a, y: b }) });
+    if (msg === WM_MOUSEMOVE) {
+      input("move", x, y, w & MK_LBUTTON ? 1 : w & MK_RBUTTON ? 2 : w & MK_MBUTTON ? 3 : 0, m);
+      return 0n;
+    }
+    const down =
+      msg === WM_LBUTTONDOWN ||
+      msg === WM_RBUTTONDOWN ||
+      msg === WM_MBUTTONDOWN ||
+      msg === WM_LBUTTONDBLCLK ||
+      msg === WM_RBUTTONDBLCLK ||
+      msg === WM_MBUTTONDBLCLK;
+    input(down ? "down" : "up", x, y, buttonOf(msg), m);
+    return 0n;
+  }
+  if (msg === WM_NULL) {
+    return 0n;
+  }
+  throw new Error(`macOS: tool window ${name} does not take msg 0x${msg.toString(16)}`);
+}
+
 export function macFrameVisible(): boolean {
   try {
     const res = macControlRequest(TestLayout, []);
@@ -477,6 +622,154 @@ export function macFrameVisible(): boolean {
   } catch {
     return false;
   }
+}
+
+// RGBA rows of an 8-bit gray, RGB or RGBA (with or without alpha),
+// non-interlaced PNG (what AppKit and mupdf write)
+function decodePng(png: Buffer): { w: number; h: number; rgba: Uint8Array } {
+  let pos = 8;
+  let w = 0;
+  let h = 0;
+  let channels = 0;
+  const idat: Buffer[] = [];
+  while (pos + 8 <= png.length) {
+    const n = png.readUInt32BE(pos);
+    const type = png.toString("latin1", pos + 4, pos + 8);
+    const data = png.subarray(pos + 8, pos + 8 + n);
+    if (type === "IHDR") {
+      w = data.readUInt32BE(0);
+      h = data.readUInt32BE(4);
+      const depth = data[8];
+      const colorType = data[9];
+      channels = ({ 0: 1, 2: 3, 4: 2, 6: 4 } as Record<number, number>)[colorType!] ?? 0;
+      if (depth !== 8 || !channels || data[12] !== 0) {
+        throw new Error(`decodePng: unsupported PNG (depth ${depth}, color type ${colorType}, interlace ${data[12]})`);
+      }
+    } else if (type === "IDAT") {
+      idat.push(data);
+    }
+    pos += 12 + n;
+  }
+  const raw = inflateSync(Buffer.concat(idat));
+  const stride = w * channels;
+  const out = new Uint8Array(w * h * 4);
+  let prev = new Uint8Array(stride);
+  for (let y = 0; y < h; y++) {
+    const filter = raw[y * (stride + 1)];
+    const line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    const cur = new Uint8Array(stride);
+    for (let i = 0; i < stride; i++) {
+      const a = i >= channels ? cur[i - channels]! : 0;
+      const b = prev[i]!;
+      const c = i >= channels ? prev[i - channels]! : 0;
+      let v = line[i]!;
+      if (filter === 1) {
+        v += a;
+      } else if (filter === 2) {
+        v += b;
+      } else if (filter === 3) {
+        v += (a + b) >> 1;
+      } else if (filter === 4) {
+        const p = a + b - c;
+        const pa = Math.abs(p - a);
+        const pb = Math.abs(p - b);
+        const pc = Math.abs(p - c);
+        v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      }
+      cur[i] = v & 0xff;
+    }
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      const gray = channels < 3;
+      out[o] = cur[x * channels]!;
+      out[o + 1] = cur[x * channels + (gray ? 0 : 1)]!;
+      out[o + 2] = cur[x * channels + (gray ? 0 : 2)]!;
+      out[o + 3] = channels === 4 || channels === 2 ? cur[x * channels + channels - 1]! : 255;
+    }
+    prev = cur;
+  }
+  return { w, h, rgba: out };
+}
+
+// getClipboardDibInfo on macOS: the pasteboard's image as a pasting app gets
+// it, PNG or else TIFF (re-encoded as PNG by AppKit). null when it has none.
+export function macClipboardImageInfo(): { width: number; height: number; bitCount: number; nonBlack: number } | null {
+  const dir = join(import.meta.dir, "..", ".work", "tests-tmp", "tmp");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `clipboard-${process.pid}.png`);
+  rmSync(path, { force: true });
+  const script = `ObjC.import("AppKit");
+const pb = $.NSPasteboard.generalPasteboard;
+let d = pb.dataForType($.NSPasteboardTypePNG);
+if (d.isNil()) {
+  const t = pb.dataForType($.NSPasteboardTypeTIFF);
+  if (!t.isNil()) d = $.NSBitmapImageRep.imageRepWithData(t).representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $());
+}
+d.isNil() ? "none" : d.writeToFileAtomically(${JSON.stringify(path)}, true) ? "ok" : "fail";`;
+  const r = Bun.spawnSync(["osascript", "-l", "JavaScript", "-e", script], { stdout: "pipe", stderr: "pipe" });
+  if (r.stdout.toString().trim() !== "ok") {
+    return null;
+  }
+  const png = decodePng(readFileSync(path));
+  rmSync(path, { force: true });
+  let nonBlack = 0;
+  for (let i = 0; i < png.w * png.h; i++) {
+    if ((png.rgba[i * 4]! | png.rgba[i * 4 + 1]! | png.rgba[i * 4 + 2]!) !== 0) {
+      nonBlack++;
+    }
+  }
+  return { width: png.w, height: png.h, bitCount: 32, nonBlack };
+}
+
+// captureWindowPixels on macOS: the first window as drawn, as BGRA (4 bytes a
+// pixel, top-down) in client coordinates, which are points: the capture is in
+// device pixels, sampled at each point's center
+export function macCaptureClientPixels(): { w: number; h: number; data: Uint8Array } | null {
+  const rc = macFrameClientRect();
+  const w = rc.right - rc.left;
+  const h = rc.bottom - rc.top;
+  if (w <= 0 || h <= 0) {
+    return null;
+  }
+  // util.ts's tmpPath() dir: util.ts imports this file
+  const dir = join(import.meta.dir, "..", ".work", "tests-tmp", "tmp");
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `capture-${process.pid}.png`);
+  const res = macControlRequest(TestCaptureWindow, [path]);
+  if (res[0] !== 0) {
+    return null;
+  }
+  // with web views in the window the PNG is written once their snapshots
+  // come back, after the request has answered
+  let png: ReturnType<typeof decodePng> | null = null;
+  const deadline = Date.now() + 5000;
+  while (!png) {
+    try {
+      png = decodePng(readFileSync(path));
+    } catch (e) {
+      if (Date.now() > deadline) {
+        throw e;
+      }
+      Bun.sleepSync(20);
+    }
+  }
+  rmSync(path, { force: true });
+  const sx = png.w / w;
+  const sy = png.h / h;
+  const data = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const py = Math.min(png.h - 1, Math.floor((y + 0.5) * sy));
+    for (let x = 0; x < w; x++) {
+      const px = Math.min(png.w - 1, Math.floor((x + 0.5) * sx));
+      const i = (py * png.w + px) * 4;
+      const o = (y * w + x) * 4;
+      data[o] = png.rgba[i + 2]!;
+      data[o + 1] = png.rgba[i + 1]!;
+      data[o + 2] = png.rgba[i]!;
+      data[o + 3] = png.rgba[i + 3]!;
+    }
+  }
+  return { w, h, data };
 }
 
 export function macFrameClientRect(): { left: number; top: number; right: number; bottom: number } {
@@ -562,6 +855,41 @@ function input(kind: string, a: number, b: number, c: number, d: number, target?
   return raw;
 }
 
+// the character TranslateMessage makes of an unshifted key, 0 for none
+function keyChar(vk: number): number {
+  if (vk >= 0x41 && vk <= 0x5a) {
+    return vk + 0x20;
+  }
+  if ((vk >= 0x30 && vk <= 0x39) || vk === 0x20) {
+    return vk;
+  }
+  return 0;
+}
+
+// A posted WM_KEYDOWN: the message loop's TranslateMessage types the key's
+// character unless the app handled the key, as ngInput does on Windows.
+export function macPostKeyDown(wParam: number | bigint, lParam: number | bigint): void {
+  const vk = Number(BigInt(wParam) & 0xffffn);
+  const repeat = (BigInt(lParam) & (1n << 30n)) !== 0n ? 8 : 0;
+  const raw = input("key", vk, repeat, 0, 0);
+  const ch = keyChar(vk);
+  if (ch && !raw.includes("eaten=1")) {
+    input("char", ch, 0, 0, 0);
+  }
+}
+
+// a key with Shift (VK_SHIFT), Ctrl (VK_CONTROL) or Alt (VK_MENU) held: TestInput
+// takes the modifiers with the key, where Windows reads them from the key state
+export function macPostKeyWithModifier(vk: number, modVk: number): void {
+  const mods = modVk === 0x10 ? 2 : modVk === 0x11 ? 1 : modVk === 0x12 ? 4 : 0;
+  input("key", vk, mods, 0, 0);
+}
+
+// ShowWindow on macOS: minimize, or bring the minimized frame back
+export function macShowWindow(minimize: boolean): void {
+  invoke(minimize ? "SC_MINIMIZE" : "SC_RESTORE");
+}
+
 function invoke(name: string, x?: number, y?: number): void {
   const args: ControlArg[] = x === undefined ? [name] : [name, x, y];
   const res = macControlRequest(TestInvokeCommand, args);
@@ -613,8 +941,13 @@ export function macSendMessage(
   }
   // The caption close button. DefWindowProc turns it into WM_CLOSE.
   if (msg === WM_SYSCOMMAND) {
-    if ((wp & 0xfff0n) === BigInt(SC_CLOSE)) {
+    const sc = wp & 0xfff0n;
+    if (sc === BigInt(SC_CLOSE)) {
       invoke("WM_CLOSE");
+    } else if (sc === BigInt(SC_MINIMIZE)) {
+      invoke("SC_MINIMIZE");
+    } else if (sc === BigInt(SC_RESTORE)) {
+      invoke("SC_RESTORE");
     }
     return 0n;
   }
@@ -691,6 +1024,19 @@ export function macSendMessage(
       msg === WM_RBUTTONDBLCLK ||
       msg === WM_MBUTTONDBLCLK;
     input(down ? "down" : "up", at.x, at.y, buttonOf(msg), m, target);
+    return 0n;
+  }
+  // a side button: XBUTTON1 / XBUTTON2 in the high word, TestInput's buttons 3 / 4
+  if (msg === WM_XBUTTONDOWN || msg === WM_XBUTTONUP) {
+    const px = sign16(lp);
+    const py = sign16(lp >> 16n);
+    const at = target ? { x: px, y: py } : dips(px, py, geom());
+    const button = Number((wp >> 16n) & 0xffffn) === 2 ? 4 : 3;
+    input(msg === WM_XBUTTONDOWN ? "down" : "up", at.x, at.y, button, modsOf(Number(wp & 0xffffn), target), target);
+    return 0n;
+  }
+  // Windows answers it once the window has handled what it was sent before
+  if (msg === WM_NULL) {
     return 0n;
   }
   throw new Error(`macOS sendMessage does not handle msg 0x${msg.toString(16)}`);

@@ -228,9 +228,26 @@ import { testit as autoScrollExtras } from "./auto-scroll-extras.ts";
 import { testit as toolbarWrap } from "./toolbar-wrap.ts";
 import { testit as reopenClosedWindow } from "./reopen-closed-window.ts";
 import { testit as tabGroupAutoSync } from "./tab-group-autosync.ts";
+import { testit as tabGroupEmptyPath } from "./tab-group-empty-path.ts";
 import { testit as replaceImage } from "./replace-image.ts";
 import { testit as readColumns } from "./read-columns.ts";
 import { testit as issue6486 } from "./issue-6486.ts";
+import { testit as cliRead } from "./cli-read.ts";
+import { testit as cliAnnotationsRender } from "./cli-annotations-render.ts";
+import { testit as cliPdfTools } from "./cli-pdf-tools.ts";
+import { testit as cliMarkdown } from "./cli-markdown.ts";
+import { testit as cliMarkdownCases } from "./cli-markdown-cases.ts";
+import { testit as cliMarkdownDocs } from "./cli-markdown-docs.ts";
+import { testit as cliStamp } from "./cli-stamp.ts";
+import { testit as cliImages } from "./cli-images.ts";
+import { testit as cliAnnotate } from "./cli-annotate.ts";
+import { testit as cliSign } from "./cli-sign.ts";
+import { testit as startupWindowShown } from "./startup-window-shown.ts";
+import { testit as noExternalLaunch } from "./no-external-launch.ts";
+import { testit as homePageMacDelete } from "./home-page-mac-delete.ts";
+import { testit as closeWindow } from "./close-window.ts";
+import { testit as dialogOwnerClosed } from "./dialog-owner-closed.ts";
+import { testit as pdfStampDialog } from "./pdf-stamp-dialog.ts";
 import { testit as issue6487 } from "./issue-6487.ts";
 import { testit as issue6488 } from "./issue-6488.ts";
 import { testit as issue6489 } from "./issue-6489.ts";
@@ -254,6 +271,9 @@ import { testit as backgroundTabReload } from "./background-tab-reload.ts";
 import { testit as sessionRestoreBrokenFile } from "./session-restore-broken-file.ts";
 import { testit as tabSwitchPresentation } from "./tab-switch-presentation.ts";
 import { testit as reloadKeepsFullscreenLayout } from "./reload-keeps-fullscreen-layout.ts";
+import { testit as fullscreenDisplayChange } from "./fullscreen-display-change.ts";
+import { testit as dpiDisplayChange } from "./dpi-display-change.ts";
+import { testit as presentationActivatingClick } from "./presentation-activating-click.ts";
 import { testit as closeWindowWithDialog } from "./close-window-with-dialog.ts";
 import { testit as captionCaptureLoss } from "./caption-capture-loss.ts";
 import { testit as menuBarArmedDeactivate } from "./menu-bar-armed-deactivate.ts";
@@ -261,6 +281,31 @@ import { testit as issue6509 } from "./issue-6509.ts";
 import { testit as issue6517 } from "./issue-6517.ts";
 import { testit as issue3940 } from "./issue-3940.ts";
 import { testit as issue6520 } from "./issue-6520.ts";
+import { testit as issue6522 } from "./issue-6522.ts";
+import { testit as issue6537 } from "./issue-6537.ts";
+import { testit as issue6539 } from "./issue-6539.ts";
+import { testit as issue6541 } from "./issue-6541.ts";
+import { testit as issue6540 } from "./issue-6540.ts";
+import { testit as issue6570 } from "./issue-6570.ts";
+import { testit as issue6542 } from "./issue-6542.ts";
+import { testit as toggleStateArg } from "./toggle-state-arg.ts";
+import { testit as discussion6543 } from "./discussion-6543.ts";
+import { testit as issue6544 } from "./issue-6544.ts";
+import { testit as issue6549 } from "./issue-6549.ts";
+import { testit as issue6550 } from "./issue-6550.ts";
+import { testit as issue6551 } from "./issue-6551.ts";
+import { testit as issue6556 } from "./issue-6556.ts";
+import { testit as issue6534 } from "./issue-6534.ts";
+import { testit as issue6558 } from "./issue-6558.ts";
+import { testit as issue6561 } from "./issue-6561.ts";
+import { testit as issue6563 } from "./issue-6563.ts";
+import { testit as issue6565 } from "./issue-6565.ts";
+import { testit as issue6566 } from "./issue-6566.ts";
+import { testit as issue6521 } from "./issue-6521.ts";
+import { testit as issue6560 } from "./issue-6560.ts";
+import { testit as issue6567 } from "./issue-6567.ts";
+import { testit as issue6568 } from "./issue-6568.ts";
+import { testit as issue5884 } from "./issue-5884.ts";
 import { testit as f7EndsPlacement } from "./f7-ends-placement.ts";
 import { testit as findUiOneAtATime } from "./find-ui-one-at-a-time.ts";
 import { testit as issue6477 } from "./issue-6477.ts";
@@ -282,6 +327,7 @@ import { testit as ttsEngineCrashRecovery } from "./tts-engine-crash-recovery.ts
 import { testit as readAloudCloseDuringSpeak } from "./read-aloud-close-during-speak.ts";
 import { testit as readAloudRestyleStalePage } from "./read-aloud-restyle-stale-page.ts";
 import { testit as readAloudLazyChapters } from "./read-aloud-lazy-chapters.ts";
+import { testit as readAloudLazyVoices } from "./read-aloud-lazy-voices.ts";
 import { testit as lazyTabStateAfterSave } from "./lazy-tab-state-after-save.ts";
 import { testit as lazyTabSelectPaint } from "./lazy-tab-select-paint.ts";
 import { testit as pendingTabFreedSessionState } from "./pending-tab-freed-session-state.ts";
@@ -291,12 +337,15 @@ import { testit as closeTabDuringPlacement } from "./close-tab-during-placement.
 import { testit as toggleZoomFailedTab } from "./toggle-zoom-failed-tab.ts";
 import { testit as restoreChmMissingTab } from "./restore-chm-missing-tab.ts";
 import { testit as restoreSessionCloseReentry } from "./restore-session-close-reentry.ts";
+import { testit as openSlowDrive } from "./open-slow-drive.ts";
 import { testit as issue5943 } from "./issue-5943.ts";
 import { testit as issue6117 } from "./issue-6117.ts";
 import { testit as issue6118 } from "./issue-6118.ts";
 import { testit as issue6120 } from "./issue-6120.ts";
 import { testit as issue6123 } from "./issue-6123.ts";
 import { testit as customZoomDialog } from "./custom-zoom-dialog.ts";
+import { testit as sumatrapdfWebDialog } from "./sumatrapdf-web-dialog.ts";
+import { testit as sumatrapdfWebHome } from "./sumatrapdf-web-home.ts";
 import { testit as issue1106 } from "./issue-1106.ts";
 import { testit as issue814 } from "./issue-814.ts";
 import { testit as issue1422 } from "./issue-1422.ts";
@@ -412,11 +461,15 @@ import { testit as issue5890 } from "./issue-5890.ts";
 import { testit as wheelWhileClosing } from "./wheel-while-closing.ts";
 import { testit as hwheelHome } from "./hwheel-home.ts";
 import { testit as tabMenuClose } from "./tab-menu-close.ts";
+import { testit as tabDragToWindow } from "./tab-drag-to-window.ts";
 import { testit as chapterNav } from "./chapter-nav.ts";
 import { testit as pageLinksFreshEngine } from "./page-links-fresh-engine.ts";
 import { testit as mouseButtonShortcuts } from "./mouse-button-shortcuts.ts";
 import { testit as issue6483 } from "./issue-6483.ts";
 import { testit as issue6485 } from "./issue-6485.ts";
+import { testit as issue6576 } from "./issue-6576.ts";
+import { testit as issue6572 } from "./issue-6572.ts";
+import { testit as issue6575 } from "./issue-6575.ts";
 import { testit as issue6500 } from "./issue-6500.ts";
 import { testit as fontDownload } from "./font-download.ts";
 import { testit as fontSystemSubstitutes } from "./font-system-substitutes.ts";
@@ -430,6 +483,15 @@ import { testit as commandPaletteAnnotations } from "./command-palette-annotatio
 import { testit as paletteDeleteAnnotation } from "./palette-delete-annotation.ts";
 import { testit as paletteCommandAvailability } from "./palette-command-availability.ts";
 import { testit as recentFilesMenu } from "./recent-files-menu.ts";
+import { testit as contextMenuParity } from "./context-menu-parity.ts";
+import { testit as mainMenuParity } from "./main-menu-parity.ts";
+import { testit as endSessionSaves } from "./end-session-saves.ts";
+import { testit as quicklookForward } from "./quicklook-forward.ts";
+import { testit as ddeGetMousePos } from "./dde-get-mouse-pos.ts";
+import { testit as copyRectSelectionImage } from "./copy-rect-selection-image.ts";
+import { testit as staleCacheCleanup } from "./stale-cache-cleanup.ts";
+import { testit as browserDocTheme } from "./browser-doc-theme.ts";
+import { testit as useTabsTransition } from "./use-tabs-transition.ts";
 import { testit as commandPaletteSettings } from "./command-palette-settings.ts";
 import { testit as settingsRestoreDefault } from "./settings-restore-default.ts";
 import { testit as palettePrefixKeys } from "./palette-prefix-keys.ts";
@@ -459,6 +521,7 @@ import { testit as issue6352 } from "./issue-6352.ts";
 import { testit as issue6354 } from "./issue-6354.ts";
 import { testit as issue6355 } from "./issue-6355.ts";
 import { testit as issue2423 } from "./issue-2423.ts";
+import { testit as uiaDocumentText } from "./uia-document-text.ts";
 import { testit as issue6167 } from "./issue-6167.ts";
 import { testit as issue6168 } from "./issue-6168.ts";
 import { testit as issue5918 } from "./issue-5918.ts";
@@ -522,6 +585,9 @@ import { testit as issue6080 } from "./issue-6080.ts";
 import { testit as issue6203 } from "./issue-6203.ts";
 import { testit as issue6205 } from "./issue-6205.ts";
 import { testit as advSettingsEnter } from "./adv-settings-enter.ts";
+import { testit as aichatCloseHidesWebview } from "./aichat-close-hides-webview.ts";
+import { testit as trackpadDiagonalScroll } from "./trackpad-diagonal-scroll.ts";
+import { testit as trackpadPinchZoom } from "./trackpad-pinch-zoom.ts";
 import { testit as hexView } from "./hex-view.ts";
 import { testit as codexProvider } from "./codex-provider.ts";
 import { testit as advSettingsFreshDefaults } from "./adv-settings-fresh-defaults.ts";
@@ -567,6 +633,8 @@ import { testit as cbrNetworkUnrar } from "./cbr-network-unrar.ts";
 import { testit as fileLinkNoDest } from "./file-link-no-dest.ts";
 import { testit as annotTextPopupReload } from "./annot-text-popup-reload.ts";
 import { testit as controlPipeBusy } from "./control-pipe-busy.ts";
+import { testit as touchLongPressSelect } from "./touch-long-press-select.ts";
+import { testit as penInput } from "./pen-input.ts";
 
 async function annotationClipboardTests(): Promise<void> {
   beginSharedControlledSession();
@@ -584,8 +652,28 @@ export const tests: NamedTest[] = [
   // first: it drives the home page, whose thumbnail selection follows the
   // mouse, so it is the one test that cares what the machine was doing before
   ["issue-5978", issue5978],
-  ["issue-6412", issue6412],
+  ["custom-zoom-dialog", customZoomDialog],
+  ["sumatrapdf-web-dialog", sumatrapdfWebDialog],
+  ["sumatrapdf-web-home", sumatrapdfWebHome],
+  ["ctx-menu-pick", ctxMenuPick],
+  ["cli-images", cliImages],
+  ["issue-1139", issue1139],
+  ["issue-6113", issue6113],
+  ["auto-scroll-extras", autoScrollExtras],
+  ["open-slow-drive", openSlowDrive],
   ["sidebar-thumbnails", sidebarThumbnails],
+  ["issue-6412", issue6412],
+  ["issue-4788", issue4788],
+  ["issue-5736", issue5736],
+  ["codex-provider", codexProvider],
+  ["issue-6405", issue6405],
+  ["issue-6236", issue6236],
+  ["issue-6169", issue6169],
+  ["issue-6055", issue6055],
+  ["issue-6323", issue6323],
+  ["pdf-only-menu-items", pdfOnlyMenuItems],
+  ["session-restore-search", sessionRestoreSearch],
+  ["issue-6419", issue6419],
   ["issue-1909", issue1909],
   ["issue-6474", issue6474],
   ["issue-6476", issue6476],
@@ -594,7 +682,6 @@ export const tests: NamedTest[] = [
   ["issue-6269", issue6269],
   ["issue-6385", issue6385],
   ["issue-6240", issue6240],
-  ["issue-4788", issue4788],
   ["issue-6373", issue6373],
   ["issue-6468", issue6468],
   ["issue-6230", issue6230],
@@ -616,6 +703,7 @@ export const tests: NamedTest[] = [
   ["epub-restyle-fit-content", epubRestyleFitContent],
   ["annot-text-popup-reload", annotTextPopupReload],
   ["read-aloud-lazy-chapters", readAloudLazyChapters],
+  ["read-aloud-lazy-voices", readAloudLazyVoices],
   ["jbig2-resize-overflow", jbig2ResizeOverflow],
   ["selection-toolbar-move", selectionToolbarMove],
   ["issue-6232-path-edit", issue6232PathEdit],
@@ -651,16 +739,15 @@ export const tests: NamedTest[] = [
   ["issue-4291", issue4291],
   ["issue-6279", issue6279],
   ["issue-2423", issue2423],
+  ["uia-document-text", uiaDocumentText],
   ["jpeg-xl-pdf", jpegXlPdf],
   ["issue-6276", issue6276],
   ["issue-6402", issue6402],
   ["toolbar-hover-dropdown", toolbarHoverDropdown],
   ["session-restore-tab-state", sessionRestoreTabState],
   ["exit-edit-pdf-deselects", exitEditPdfDeselects],
-  ["issue-6113", issue6113],
   ["issue-5933", issue5933],
   ["issue-6117", issue6117],
-  ["custom-zoom-dialog", customZoomDialog],
   ["annot-contents-click-away", annotContentsClickAway],
   ["issue-2799", issue2799],
   ["ink-thickness", inkThickness],
@@ -671,7 +758,6 @@ export const tests: NamedTest[] = [
   ["issue-6167", issue6167],
   ["issue-6168", issue6168],
   ["ctx-menu-reload", ctxMenuReload],
-  ["ctx-menu-pick", ctxMenuPick],
   ["home-two-windows", homeTwoWindows],
   ["issue-5870", issue5870],
   ["issue-6199", issue6199],
@@ -702,7 +788,6 @@ export const tests: NamedTest[] = [
   ["issue-6140", issue6140],
   ["ad-hoc-md-missing-file", mdMissingFile],
   ["issue-6142", issue6142],
-  ["issue-6419", issue6419],
   ["issue-6448", issue6448],
   ["issue-6148", issue6148],
   ["issue-6393", issue6393],
@@ -779,7 +864,6 @@ export const tests: NamedTest[] = [
   ["issue-6198", issue6198],
   ["create-annot-enters-edit-mode", createAnnotEntersEditMode],
   ["issue-6166", issue6166],
-  ["issue-6169", issue6169],
   ["issue-5771", issue5771],
   ["issue-6111", issue6111],
   ["annot-list-placement", annotListPlacement],
@@ -799,7 +883,6 @@ export const tests: NamedTest[] = [
   ["issue-6288", issue6288],
   ["issue-5718", issue5718],
   ["issue-5734", issue5734],
-  ["issue-5736", issue5736],
   ["issue-5529", issue5529],
   ["issue-4684", issue4684],
   ["issue-6302", issue6302],
@@ -819,8 +902,6 @@ export const tests: NamedTest[] = [
   ["find-ui-state", findUiState],
   ["goto-page-word-after-find", gotoPageWordAfterFind],
   ["issue-5874", issue5874],
-  ["issue-6055", issue6055],
-  ["session-restore-search", sessionRestoreSearch],
   ["issue-5869", issue5869],
   ["issue-5881", issue5881],
   ["rect-selection-drag", rectSelectionDrag],
@@ -859,7 +940,6 @@ export const tests: NamedTest[] = [
   ["epub-metadata-properties", epubMetadataProperties],
   ["issue-5950", issue5950],
   ["issue-3472", issue3472],
-  ["pdf-only-menu-items", pdfOnlyMenuItems],
   ["pdf-tools-encrypted", pdfToolsEncrypted],
   ["pdf-decrypt-remembered-key", pdfDecryptRememberedKey],
   ["security-ghsa-p2ph-2rvm-q37m", ghsaP2ph2rvmQ37m],
@@ -909,7 +989,6 @@ export const tests: NamedTest[] = [
   ["issue-6280", issue6280],
   ["issue-6322", issue6322],
   ["issue-6324", issue6324],
-  ["issue-6323", issue6323],
   ["issue-6270", issue6270],
   ["issue-5911", issue5911],
   ["issue-6088", issue6088],
@@ -951,7 +1030,6 @@ export const tests: NamedTest[] = [
   ["issue-6232-filter", issue6232Filter],
   ["issue-6232-refresh", issue6232Refresh],
   ["issue-6234", issue6234],
-  ["issue-6236", issue6236],
   ["issue-6414", issue6414],
   ["issue-5817", issue5817],
   ["issue-6238", issue6238],
@@ -974,10 +1052,14 @@ export const tests: NamedTest[] = [
   ["wheel-while-closing", wheelWhileClosing],
   ["hwheel-home", hwheelHome],
   ["tab-menu-close", tabMenuClose],
+  ["tab-drag-to-window", tabDragToWindow],
   ["chapter-nav", chapterNav],
   ["mouse-button-shortcuts", mouseButtonShortcuts],
   ["issue-6483", issue6483],
   ["issue-6485", issue6485],
+  ["issue-6576", issue6576],
+  ["issue-6572", issue6572],
+  ["issue-6575", issue6575],
   ["issue-6500", issue6500],
   ["font-download", fontDownload],
   ["font-system-substitutes", fontSystemSubstitutes],
@@ -991,6 +1073,15 @@ export const tests: NamedTest[] = [
   ["palette-delete-annotation", paletteDeleteAnnotation],
   ["palette-command-availability", paletteCommandAvailability],
   ["recent-files-menu", recentFilesMenu],
+  ["context-menu-parity", contextMenuParity],
+  ["main-menu-parity", mainMenuParity],
+  ["end-session-saves", endSessionSaves],
+  ["quicklook-forward", quicklookForward],
+  ["dde-get-mouse-pos", ddeGetMousePos],
+  ["copy-rect-selection-image", copyRectSelectionImage],
+  ["stale-cache-cleanup", staleCacheCleanup],
+  ["browser-doc-theme", browserDocTheme],
+  ["use-tabs-transition", useTabsTransition],
   ["command-palette-settings", commandPaletteSettings],
   ["settings-restore-default", settingsRestoreDefault],
   ["issue-6287", issue6287],
@@ -1023,7 +1114,6 @@ export const tests: NamedTest[] = [
   ["issue-4315", issue4315],
   ["issue-6399", issue6399],
   ["issue-6400", issue6400],
-  ["issue-6405", issue6405],
   ["issue-6406", issue6406],
   ["issue-6409", issue6409],
   ["issue-6411", issue6411],
@@ -1087,13 +1177,28 @@ export const tests: NamedTest[] = [
   ["issue-6480", issue6480],
   ["issue-6481", issue6481],
   ["issue-6482", issue6482],
-  ["auto-scroll-extras", autoScrollExtras],
   ["toolbar-wrap", toolbarWrap],
   ["reopen-closed-window", reopenClosedWindow],
   ["tab-group-autosync", tabGroupAutoSync],
+  ["tab-group-empty-path", tabGroupEmptyPath],
   ["replace-image", replaceImage],
   ["read-columns", readColumns],
   ["issue-6486", issue6486],
+  ["cli-read", cliRead],
+  ["cli-annotations-render", cliAnnotationsRender],
+  ["cli-pdf-tools", cliPdfTools],
+  ["cli-markdown", cliMarkdown],
+  ["cli-markdown-cases", cliMarkdownCases],
+  ["cli-markdown-docs", cliMarkdownDocs],
+  ["cli-stamp", cliStamp],
+  ["cli-annotate", cliAnnotate],
+  ["cli-sign", cliSign],
+  ["startup-window-shown", startupWindowShown],
+  ["no-external-launch", noExternalLaunch],
+  ["home-page-mac-delete", homePageMacDelete],
+  ["close-window", closeWindow],
+  ["dialog-owner-closed", dialogOwnerClosed],
+  ["pdf-stamp-dialog", pdfStampDialog],
   ["issue-6487", issue6487],
   ["issue-6488", issue6488],
   ["issue-6489", issue6489],
@@ -1104,7 +1209,6 @@ export const tests: NamedTest[] = [
   ["issue-6494", issue6494],
   ["issue-6495", issue6495],
   ["issue-6496", issue6496],
-  ["issue-1139", issue1139],
   ["issue-6497", issue6497],
   ["issue-6221", issue6221],
   ["issue-6505", issue6505],
@@ -1117,6 +1221,9 @@ export const tests: NamedTest[] = [
   ["session-restore-broken-file", sessionRestoreBrokenFile],
   ["tab-switch-presentation", tabSwitchPresentation],
   ["reload-keeps-fullscreen-layout", reloadKeepsFullscreenLayout],
+  ["fullscreen-display-change", fullscreenDisplayChange],
+  ["dpi-display-change", dpiDisplayChange],
+  ["presentation-activating-click", presentationActivatingClick],
   ["close-window-with-dialog", closeWindowWithDialog],
   ["caption-capture-loss", captionCaptureLoss],
   ["menu-bar-armed-deactivate", menuBarArmedDeactivate],
@@ -1124,12 +1231,41 @@ export const tests: NamedTest[] = [
   ["issue-6517", issue6517],
   ["issue-3940", issue3940],
   ["issue-6520", issue6520],
+  ["issue-6522", issue6522],
+  ["issue-6537", issue6537],
+  ["issue-6539", issue6539],
+  ["issue-6541", issue6541],
+  ["issue-6540", issue6540],
+  ["issue-6570", issue6570],
+  ["issue-6542", issue6542],
+  ["toggle-state-arg", toggleStateArg],
+  ["discussion-6543", discussion6543],
+  ["issue-6544", issue6544],
+  ["issue-6549", issue6549],
+  ["issue-6550", issue6550],
+  ["issue-6551", issue6551],
+  ["issue-6556", issue6556],
+  ["issue-6534", issue6534],
+  ["issue-6558", issue6558],
+  ["issue-6561", issue6561],
+  ["issue-6563", issue6563],
+  ["issue-6565", issue6565],
+  ["issue-6566", issue6566],
+  ["issue-6521", issue6521],
+  ["issue-6560", issue6560],
+  ["issue-6567", issue6567],
+  ["issue-6568", issue6568],
+  ["issue-5884", issue5884],
   ["f7-ends-placement", f7EndsPlacement],
   ["find-ui-one-at-a-time", findUiOneAtATime],
-  ["codex-provider", codexProvider],
   ["custom-ai", customAI],
   ["custom-ai-ui", customAIUI],
+  ["aichat-close-hides-webview", aichatCloseHidesWebview],
+  ["trackpad-diagonal-scroll", trackpadDiagonalScroll],
+  ["trackpad-pinch-zoom", trackpadPinchZoom],
   ["page-links-fresh-engine", pageLinksFreshEngine],
+  ["touch-long-press-select", touchLongPressSelect],
+  ["pen-input", penInput],
 ];
 
 export async function testit(opts?: SuiteOptions): Promise<void> {

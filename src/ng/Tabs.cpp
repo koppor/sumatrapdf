@@ -47,6 +47,7 @@
 #include "gui/TabsUI.h"
 #include "gui/DocCanvas.h"
 #include "AnnotPlacement.h"
+#include "MeasurementToolbar.h"
 #include "LinkFollow.h"
 #include "SelectTextKeyboard.h"
 
@@ -57,6 +58,7 @@
 #include "Tabs.h"
 #include "MenuDefs.h"
 #include "TabsCommon.h"
+#include "StripGroups.h"
 
 #include "SumatraLog.h"
 
@@ -154,6 +156,8 @@ void LoadModelIntoTab(WindowTab* tab) {
         return;
     }
     MainWindow* win = tab->win;
+    StripGroupOnSelected(win, tab);
+    CloseMeasurement(win);
     // as orig: the modes hold page positions of the outgoing document; end them
     // while win->ctrl is still that document
     if (win->currentTabTemp && win->currentTabTemp != tab) {
@@ -202,6 +206,7 @@ void LoadModelIntoTab(WindowTab* tab) {
     ShowPageInfoIfWanted(win);
     win->RedrawAll();
     LoadLazyTabIfNeeded(tab);
+    LoadPendingTab(tab);
     // its file changed while in the background: AutoReloadTick runs only for
     // the current tab, so arm it now
     if (tab->reloadOnFocus) {
@@ -237,6 +242,7 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab, bool deferUpdate) {
     }
 
     tab->canvasRc = win->canvasRc;
+    StripGroupOnTabAdded(win, tab);
     VecAppend(win->tabs, tab);
     if (!deferUpdate) {
         win->currentTabTemp = tab;
@@ -341,6 +347,8 @@ void RemoveTab(WindowTab* tab) {
         win->currentTabTemp = nullptr;
     }
     TabsUIOnTabsChanged(win);
+    // the tab's strip group may have no tabs left
+    StripGroupsFix(win);
 
     int nTabs = win->TabCount();
     if (nTabs < 1 || !closedCurrentTab) {
@@ -348,8 +356,13 @@ void RemoveTab(WindowTab* tab) {
         RebuildMenuBar(win);
         return;
     }
-    // select tab to the right or to the left if nothing to the right
+    // select tab to the right or to the left if nothing to the right, not one
+    // hidden in a collapsed strip group
     int newIdx = std::min(idx, nTabs - 1);
+    int visibleIdx = StripGroupNextVisible(win, newIdx);
+    if (visibleIdx >= 0) {
+        newIdx = visibleIdx;
+    }
     WindowTab* newTab = win->GetTab(newIdx);
     if (newTab && newTab->type != WindowTab::Type::None) {
         LoadModelIntoTab(newTab);
@@ -358,9 +371,6 @@ void RemoveTab(WindowTab* tab) {
 
 // orig's MaybeMigrateTab: a tab dropped outside its strip moves to `newWin`,
 // or to a window of its own when there is none.
-// ng: gpui captures the mouse for the window the drag started in, so a drop on
-// another window's strip never arrives; `newWin` is always null here (see
-// "gpui gaps"). Everything else is orig's.
 void MaybeMigrateTab(WindowTab* tab, MainWindow* newWin) {
     MainWindow* oldWin = tab->win;
     if (tab->IsNonDocumentTab()) {
@@ -468,21 +478,22 @@ void TabsOnCloseWindow(MainWindow* win) {
 }
 
 void MoveTab(MainWindow* win, int dir) {
-    if (!win) {
+    if (win) {
+        StripGroupMoveTab(win, dir);
+    }
+}
+
+// the strip shows `order`
+void TabsSetOrder(MainWindow* win, const Vec<WindowTab*>& order) {
+    if (len(order) != win->TabCount()) {
+        ReportIf(true);
         return;
     }
-    int nTabs = win->TabCount();
-    int idx = win->GetTabIdx(win->CurrentTab());
-    int newIdx = idx + dir;
-    if (idx < 0 || newIdx < 0 || newIdx >= nTabs) {
-        return;
-    }
-    if (win->GetTab(idx)->IsPinnedHomeTab() || win->GetTab(newIdx)->IsPinnedHomeTab()) {
-        return;
-    }
-    WindowTab* tmp = win->tabs[idx];
-    win->tabs[idx] = win->tabs[newIdx];
-    win->tabs[newIdx] = tmp;
+    win->tabs = order;
+    TabsStripGroupsChanged(win);
+}
+
+void TabsStripGroupsChanged(MainWindow* win) {
     TabsUIOnTabsChanged(win);
     win->RedrawAll();
 }
@@ -510,6 +521,53 @@ void TabsMoveTab(MainWindow* win, int from, int to) {
 
 // --- the tab context menu ---------------------------------------------------
 
+// a submenu of `items` right after the item with `afterCmdId`; none if empty
+static void InsertSubmenuAfter(MenuModel* menu, int afterCmdId, Str title, const Vec<StripGroupMenuItem>& items) {
+    if (!menu || len(items) == 0) {
+        return;
+    }
+    int n = len(menu->items);
+    int pos = 0;
+    while (pos < n && menu->items[pos].cmdId != afterCmdId) {
+        pos++;
+    }
+    if (pos == n) {
+        return;
+    }
+    auto* sub = new MenuModel();
+    for (const StripGroupMenuItem& it : items) {
+        MenuAppendString(sub, it.title, it.cmdId);
+        MenuSetChecked(sub, it.cmdId, it.checked);
+    }
+    MenuItemModel row;
+    row.title = str::Dup(title);
+    row.titleOwned = true;
+    row.submenu = sub;
+    VecInsertAt(menu->items, pos + 1, row);
+}
+
+// right-click on a strip group's chip; its commands act on the group's first tab
+MenuModel* BuildStripGroupMenu(MainWindow* win, int groupId) {
+    StripGroup* g = StripGroupFind(win, groupId);
+    WindowTab* tab = StripGroupFirstTab(win, groupId);
+    if (!g || !tab) {
+        return nullptr;
+    }
+    BuildMenuCtx* ctx = NewBuildMenuCtx(tab, Point{0, 0});
+    ctx->tab = tab;
+    ctx->isDocLoaded = true;
+    StripGroupSetFlags(*ctx);
+    MenuModel* menu = BuildMenuFromDef(menuDefStripGroup, ctx);
+    DeleteBuildMenuCtx(ctx);
+    if (g->collapsed) {
+        MenuSetText(menu, CmdStripGroupToggle, Tr("Expand Group"));
+    }
+    Vec<StripGroupMenuItem> items;
+    StripGroupColorItems(win, tab, items);
+    InsertSubmenuAfter(menu, CmdStripGroupToggle, Tr("Group Color"), items);
+    return menu;
+}
+
 MenuModel* BuildTabContextMenu(MainWindow* win, WindowTab* tabUnderMouse) {
     if (!win || !tabUnderMouse || tabUnderMouse->IsAboutTab()) {
         return nullptr;
@@ -535,8 +593,14 @@ MenuModel* BuildTabContextMenu(MainWindow* win, WindowTab* tabUnderMouse) {
     ctx->canCloseOtherTabs = len(toCloseOther) > 0;
     ctx->canCloseTabsToRight = len(toCloseRight) > 0;
     ctx->canCloseTabsToLeft = len(toCloseLeft) > 0;
+    StripGroupSetFlags(*ctx);
 
     MenuModel* menu = BuildMenuFromDef(menuDefContextTab, ctx);
+    if (ctx->tabCanGroup) {
+        Vec<StripGroupMenuItem> items;
+        StripGroupAddToItems(win, tabUnderMouse, items);
+        InsertSubmenuAfter(menu, CmdStripGroupNew, Tr("Add Tab to Group"), items);
+    }
     DeleteBuildMenuCtx(ctx);
 
     if (!tabUnderMouse->ctrl) {
@@ -563,6 +627,9 @@ void TabContextMenuCommand(MainWindow* win, WindowTab* tabUnderMouse, int cmdId)
     Vec<WindowTab*> toCloseLeft;
     CollectTabsToClose(win, tabUnderMouse, toCloseOther, toCloseRight, toCloseLeft);
 
+    if (StripGroupCmd(win, tabUnderMouse, cmdId)) {
+        return;
+    }
     switch (cmdId) {
         case CmdClose:
             CloseTab(tabUnderMouse, false);

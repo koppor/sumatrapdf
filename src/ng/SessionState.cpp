@@ -30,9 +30,11 @@
 #include "Tabs.h"
 #include "TableOfContents.h"
 #include "gui/Sidebar.h"
+#include "gui/TabsUI.h"
 #include "VirtualDesktop.h"
 #include "AppHelpersCommon.h"
 #include "SessionState.h"
+#include "StripGroups.h"
 #include "SumatraLog.h"
 
 static TabState* CloneSessionTabState(const TabState* src) {
@@ -45,6 +47,10 @@ static TabState* CloneSessionTabState(const TabState* src) {
     dst->scrollPos = src->scrollPos;
     dst->showToc = src->showToc;
     dst->tocState = new Vec<int>(*src->tocState);
+    dst->group = src->group;
+    str::ReplaceWithCopy(&dst->groupName, src->groupName);
+    str::ReplaceWithCopy(&dst->groupColor.s, src->groupColor.s);
+    dst->groupCollapsed = src->groupCollapsed;
     return dst;
 }
 
@@ -69,6 +75,7 @@ static void SyncInitialSessionData() {
         return;
     }
     FreeSessionDataVec(gInitialSessionData);
+    gInitialSessionDataGen++;
     for (SessionData* sd : *gSettings->sessionData) {
         VecAppend(*gInitialSessionData, CloneSessionData(sd));
     }
@@ -112,7 +119,9 @@ static void RememberSessionState() {
                     src = FindSessionTabState(fp);
                 }
                 if (src) {
-                    VecAppend(*windowState->tabStates, CloneSessionTabState(src));
+                    TabState* ts = CloneSessionTabState(src);
+                    StripGroupSaveTab(win, tab, ts);
+                    VecAppend(*windowState->tabStates, ts);
                 }
                 continue;
             }
@@ -121,6 +130,7 @@ static void RememberSessionState() {
             fs->showToc = tab->showToc;
             *fs->tocState = tab->tocState;
             TabState* ts = NewTabState(fs);
+            StripGroupSaveTab(win, tab, ts);
             VecAppend(*windowState->tabStates, ts);
             DeleteFileState(fs);
         }
@@ -292,16 +302,32 @@ void LoadLazyTabIfNeeded(WindowTab* tab) {
     if (!IsMainWindowValidAndNotClosing(win) || !IsCurrentTab(win, tab)) {
         return;
     }
-    // a file that has gone away keeps its placeholder tab
-    if (!DocumentPathExists(tab->filePath)) {
+    logf("LoadLazyTabIfNeeded: '%s'\n", tab->filePath);
+    StartLazyTabLoad(tab);
+}
+
+// The UI-thread half of a lazy tab's load. engine is what the background load
+// created; without one (browser view, password, failure) the regular load
+// runs, quickly now that the drive is awake.
+void FinishLazyTabLoad(WindowTab* tab, EngineBase* engine) {
+    MainWindow* win = tab->win;
+    // a file that has gone away keeps its tab, marked as failed, as orig's
+    if (!engine && !DocumentPathExists(tab->filePath)) {
+        logf("LoadLazyTabIfNeeded: file not found '%s'\n", tab->filePath);
+        FileHistoryDemote(tab->filePath, true);
+        tab->loadState = WindowTab::LoadState::Error;
+        TabsUIOnTabsChanged(win);
         return;
     }
     // RememberOpenedFiles = false frees the borrowed TabState on save.
     // The file still has to load; there is just no remembered view.
     TabState* state = tab->tabState;
-    logf("LoadLazyTabIfNeeded: '%s'\n", tab->filePath);
-    tab->loadState = WindowTab::LoadState::Loading;
-    ReloadDocument(win, false);
+    if (engine) {
+        // a copy: loading replaces tab->filePath, then uses the path again
+        LoadDocumentWithEngine(win, str::DupTemp(tab->filePath), engine);
+    } else {
+        ReloadDocument(win, false);
+    }
     WindowTab* curr = win->CurrentTab();
     if (curr && curr->ctrl) {
         if (state) {
@@ -319,12 +345,14 @@ void LoadLazyTabIfNeeded(WindowTab* tab) {
 // The placeholder path below is orig's, for a file that has gone away.
 static void RestoreTabOnStartup(MainWindow* win, TabState* state) {
     logf("RestoreTabOnStartup: state->filePath: '%s'\n", state->filePath);
-    if (!DocumentPathExists(state->filePath)) {
-        RestoreMissingTabOnStartup(win, state);
-        return;
-    }
+    // a lazy tab touches its file only when selected: checking every file here
+    // woke each sleeping drive of the session
     if (gSettings->lazyLoading && SettingsUseTabs()) {
         RestoreLazyTabOnStartup(win, state);
+        return;
+    }
+    if (!DocumentPathExists(state->filePath)) {
+        RestoreMissingTabOnStartup(win, state);
         return;
     }
     // a failed load already shows its error tab (or asks for a password)
@@ -388,6 +416,7 @@ bool RestoreSession(MainWindow* firstWin) {
 #if OS_WIN
     // each window goes back to the virtual desktop it was on (#6271)
     ISumatraVirtualDesktopManager* vdm = CreateVirtualDesktopManager();
+    int sessionGen = gInitialSessionDataGen;
 #endif
     for (SessionData* data : *gInitialSessionData) {
         MainWindow* win = nWindows == 0 ? firstWin : CreateAndShowMainWindow(data);
@@ -404,12 +433,17 @@ bool RestoreSession(MainWindow* firstWin) {
         }
         int nInWindow = 0;
         gRestoringSession = true;
+        StripGroupRestore groupsRestore;
         for (TabState* state : *data->tabStates) {
             if (len(state->filePath) == 0) {
                 logf("RestoreSession: skipping a TabState with an empty filePath\n");
                 continue;
             }
+            int nTabsBefore = win->TabCount();
             RestoreTabOnStartup(win, state);
+            if (win->TabCount() > nTabsBefore) {
+                StripGroupRestoreTab(win, win->GetTab(win->TabCount() - 1), state, groupsRestore);
+            }
             nInWindow++;
         }
         gRestoringSession = false;
@@ -422,6 +456,7 @@ bool RestoreSession(MainWindow* firstWin) {
             continue;
         }
         SelectRestoredTab(win, data->tabIndex);
+        StripGroupRestoreDone(win, groupsRestore);
         if (gSettings->lazyLoading) {
             // trigger loading of the document
             LoadLazyTabIfNeeded(win->CurrentTab());
@@ -429,11 +464,18 @@ bool RestoreSession(MainWindow* firstWin) {
         if (data->windowState == WIN_STATE_FULLSCREEN) {
             EnterFullScreen(win);
         }
-#if OS_WIN
-        MoveWindowToVirtualDesktop(vdm, MainWindowHwnd(win), data->virtualDesktopId);
-#endif
         nRestored += nInWindow;
         nWindows++;
+#if OS_WIN
+        // COM calls to the shell dispatch incoming sent messages: a DDE
+        // [CmdExit] can close win and re-save (free) the session data
+        TempStr desktopId = str::DupTemp(data->virtualDesktopId);
+        MoveWindowToVirtualDesktop(vdm, MainWindowHwnd(win), desktopId);
+        if (!IsMainWindowValid(win) || sessionGen != gInitialSessionDataGen) {
+            logf("RestoreSession: window closed or session re-saved while restoring, stopping\n");
+            break;
+        }
+#endif
     }
 #if OS_WIN
     if (vdm) {

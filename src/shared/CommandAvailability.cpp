@@ -70,6 +70,7 @@ static const i32 gNoDocWhitelist[] = {
     CmdToggleWindowsSearchFilter,
     CmdInvertColors,
     CmdToggleGrayscale,
+    CmdToggleLineWeights,
     CmdFavoriteToggle,
     CmdFavoriteShowInTab,
     CmdEditFavorites,
@@ -91,6 +92,8 @@ static const i32 gNoDocWhitelist[] = {
     CmdSetScreenshotHotkey,
     CmdStopReadAloud,
     CmdSumatraPDFWeb,
+    CmdUploadToServer,
+    CmdDeleteFromServer,
     0,
 };
 
@@ -212,6 +215,8 @@ static const i32 removeIfNoInternetPerms[] = {
     CmdSumatraPDFWeb,
     CmdOpenFromURL,
     CmdDebugShowDownloadedFonts,
+    CmdUploadToServer,
+    CmdDeleteFromServer,
     0,
 };
 
@@ -320,6 +325,7 @@ static const i32 removeIfAnnotsNotSupported[] = {
     // "this engine can be edited and re-saved" support annotations do
     CmdSignDocument,
     CmdDeleteAnnotation,
+    CmdEditAnnotationText,
     CmdShowAnnotations,
     CmdHideAnnotations,
     CmdToggleShowAnnotations,
@@ -400,6 +406,8 @@ static const i32 gBlacklistCommandsFromPalette[] = {
     CmdSetDocumentColorsFollowTheme,
     CmdFileHistory,
     CmdFavorite,
+    CmdUploadToServer,
+    CmdDeleteFromServer,
     0,
 };
 
@@ -561,6 +569,20 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     }
     if (CmdCloseTabsToTheLeft == cmdId) {
         return ctx.canCloseTabsToLeft ? CommandVisibility::Show : CommandVisibility::Hide;
+    }
+    int groupCmdId = origCmdId ? origCmdId : cmdId;
+    if (groupCmdId == CmdStripGroupNew) {
+        return ctx.tabCanGroup ? CommandVisibility::Show : CommandVisibility::Hide;
+    }
+    if (groupCmdId == CmdStripGroupAddTab) {
+        // the bare command has no group to add to: menus make one per group
+        bool ok = origCmdId && ctx.tabCanGroup && ctx.nOtherStripGroups > 0;
+        return ok ? CommandVisibility::Show : CommandVisibility::Hide;
+    }
+    if (groupCmdId == CmdStripGroupRemoveTab || groupCmdId == CmdStripGroupToggle ||
+        groupCmdId == CmdStripGroupRename || groupCmdId == CmdStripGroupColor || groupCmdId == CmdStripGroupUngroup ||
+        groupCmdId == CmdStripGroupClose) {
+        return ctx.tabInGroup ? CommandVisibility::Show : CommandVisibility::Hide;
     }
     if (CmdReopenLastClosedFile == cmdId) {
         return RecentlyCloseDocumentsCount() > 0 ? CommandVisibility::Show : CommandVisibility::Hide;
@@ -730,7 +752,8 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         if (cmdId == CmdPdfShowInfo || cmdId == CmdPdfBake || cmdId == CmdPdfCompress || cmdId == CmdPdfDecompress ||
             cmdId == CmdPdfEncrypt || cmdId == CmdPdfDecrypt || cmdId == CmdPdfDeletePages ||
             cmdId == CmdTogglePageBoxes || cmdId == CmdToggleEditPDF || cmdId == CmdMergePDF ||
-            cmdId == CmdRunPDFScript || cmdId == CmdSaveTrimmedPagesAs) {
+            cmdId == CmdRunPDFScript || cmdId == CmdSaveTrimmedPagesAs || cmdId == CmdPdfWatermark ||
+            cmdId == CmdPdfAddPageNumbers) {
             return CommandVisibility::Hide;
         }
         // XPS, EPUB, ... (anything MuPDF opened) extract to a new PDF (#6509)
@@ -774,9 +797,9 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         }
     }
 
-    bool isTextSelectCmd = cmdId == CmdSelectTextViaKeyboard || cmdId == CmdExtendSelectionCharLeft ||
-                           cmdId == CmdExtendSelectionCharRight || cmdId == CmdExtendSelectionWordLeft ||
-                           cmdId == CmdExtendSelectionWordRight;
+    bool isTextSelectCmd = cmdId == CmdSelectTextViaKeyboard || cmdId == CmdToggleTextSelecting ||
+                           cmdId == CmdExtendSelectionCharLeft || cmdId == CmdExtendSelectionCharRight ||
+                           cmdId == CmdExtendSelectionWordLeft || cmdId == CmdExtendSelectionWordRight;
     if (isTextSelectCmd) {
         // needs a fixed-page engine with extractable text: image collections
         // have none and CHM / markdown do their own selection (#4684, #4116)
@@ -844,13 +867,13 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     }
 
     if (cmdId == CmdReplaceImage || cmdId == CmdEditImageExternally) {
-#if defined(SUMATRA_NG)
+#if defined(SUMATRA_NG) && OS_WASM
+        // a browser has no other app to edit in, and no file path to replace from
         return CommandVisibility::Hide;
-#else
+#endif
         if (surface == CommandSurface::Palette || !ctx.isPdf) {
             return CommandVisibility::Hide;
         }
-#endif
     }
 
     if (surface == CommandSurface::Palette && ctx.engineKind != kindEngineImage) {
@@ -865,6 +888,12 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
 
     if (cmdId == CmdDeleteAnnotation && !ctx.annotationUnderCursor && !ctx.selectedAnnotation) {
         return MapForSurface(CommandVisibility::Disable, surface);
+    }
+    if (cmdId == CmdEditAnnotationText) {
+        // a form field's value is typed into the field itself
+        Annotation* annot = ctx.annotationUnderCursor ? ctx.annotationUnderCursor : ctx.selectedAnnotation;
+        bool can = AnnotationIsLive(annot) && annot->type != AnnotationType::Widget;
+        return can ? CommandVisibility::Show : MapForSurface(CommandVisibility::Disable, surface);
     }
 
     if (cmdId == CmdUndo || cmdId == CmdRedo) {
@@ -1036,7 +1065,8 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     }
 
     if (cmdId == CmdMeasure) {
-#if defined(SUMATRA_NG)
+#if defined(SUMATRA_NG) && OS_WASM
+        // ng: the Measure window needs a window of its own, which wasm has not
         return CommandVisibility::Hide;
 #else
         if (!ctx.isFixedPage) {

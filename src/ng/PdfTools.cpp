@@ -143,6 +143,8 @@ enum class PdfToolKind {
     Merge,
     ConvertEpubToPdf,
     ConvertCajToPdf,
+    Watermark,
+    PageNumbers,
 };
 
 // orig's three "Pages:" radios of the Convert PDF to Images dialog
@@ -258,6 +260,10 @@ struct PdfToolDlg {
     gpui::InputState* destEdit = nullptr;
     gpui::InputState* pagesEdit = nullptr;
     gpui::InputState* passwordEdit = nullptr;
+    // Add Watermark's text, Add Page Numbers' format ({n}, {total})
+    gpui::InputState* textEdit = nullptr;
+    // Add Page Numbers: where on the page
+    DialogSelect ddPosition;
     // Merge PDF as orig's window, where the platform can have one
     // (gui/ToolWindow.h); null: a dialog in the frame
     ToolWindow* tw = nullptr;
@@ -437,6 +443,10 @@ static Str ToolTitleFor(PdfToolKind kind) {
             return Tr("Convert EPUB to PDF");
         case PdfToolKind::ConvertCajToPdf:
             return Tr("Convert CAJ to PDF");
+        case PdfToolKind::Watermark:
+            return Tr("Add Watermark");
+        case PdfToolKind::PageNumbers:
+            return Tr("Add Page Numbers");
     }
     return {};
 }
@@ -478,6 +488,10 @@ static Str (*ToolTitleFn(PdfToolKind kind))() {
             return ToolTitleOf<PdfToolKind::SaveSelectionAsImage>;
         case PdfToolKind::ConvertEpubToPdf:
             return ToolTitleOf<PdfToolKind::ConvertEpubToPdf>;
+        case PdfToolKind::Watermark:
+            return ToolTitleOf<PdfToolKind::Watermark>;
+        case PdfToolKind::PageNumbers:
+            return ToolTitleOf<PdfToolKind::PageNumbers>;
         case PdfToolKind::ConvertCajToPdf:
             return ToolTitleOf<PdfToolKind::ConvertCajToPdf>;
         case PdfToolKind::Merge:
@@ -589,7 +603,8 @@ static void FreeToolState(gp::Window* toolWin) {
     MainWindow* win = gTool.win;
     // whichever of them has the focus: the window would keep a pointer to a
     // freed field (the page range of Delete Pages was left focused)
-    gp::InputState* edits[] = {gTool.destEdit, gTool.pagesEdit, gTool.passwordEdit, gTool.mergeAskEdit, gTool.dpiEdit};
+    gp::InputState* edits[] = {gTool.destEdit,     gTool.pagesEdit, gTool.passwordEdit,
+                               gTool.mergeAskEdit, gTool.dpiEdit,   gTool.textEdit};
     for (gp::InputState* e : edits) {
         if (e && win && win->gpuiWin && win->gpuiWin->input == e) {
             InputBlurWhereFocused(e, win->gpuiWin);
@@ -601,6 +616,7 @@ static void FreeToolState(gp::Window* toolWin) {
     delete gTool.destEdit;
     delete gTool.pagesEdit;
     delete gTool.passwordEdit;
+    delete gTool.textEdit;
     delete gTool.mergeAskEdit;
     delete gTool.dpiEdit;
     gTool.dpiEdit = nullptr;
@@ -609,7 +625,9 @@ static void FreeToolState(gp::Window* toolWin) {
     gTool.destEdit = nullptr;
     gTool.pagesEdit = nullptr;
     gTool.passwordEdit = nullptr;
+    gTool.textEdit = nullptr;
     gTool.ddFormat.Free();
+    gTool.ddPosition.Free();
     gTool.ddDpi.Free();
     DetachMergeThumbs();
     for (MergeSourceDlg& source : gTool.mergeSources) {
@@ -906,6 +924,28 @@ static void PdfEncryptDoIt() {
     MessageBoxWarning(win, StrL("Failed to encrypt PDF file."), Tr("Encrypt PDF"));
 }
 
+static void PdfStampDoIt() {
+    TempStr destPath = DestPathTemp();
+    MainWindow* win = gTool.win;
+    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    EngineBase* engine = tab ? tab->GetEngine() : nullptr;
+    Vec<int> pages;
+    if (len(destPath) == 0 || !engine || !ParseDeletePages(InputTextTemp(gTool.pagesEdit), gTool.pageCount, pages)) {
+        return;
+    }
+    Vec<PdfStamp> stamps;
+    DialogStamps(gTool.kind == PdfToolKind::Watermark, InputTextTemp(gTool.textEdit), pages, gTool.ddPosition.sel,
+                 stamps);
+    logf("PdfStampDoIt: %d pages of '%s' to '%s'\n", len(stamps), gTool.srcPath, destPath);
+    Str err;
+    if (StampPdfToFile(engine, stamps, destPath, &err)) {
+        CloseAndLoad(destPath);
+        return;
+    }
+    logf("PdfStampDoIt: failed: %s\n", err);
+    MessageBoxWarning(win, err, ToolTitle());
+}
+
 static void PdfDecryptDoIt() {
     TempStr destPath = DestPathTemp();
     if (len(destPath) == 0) {
@@ -983,13 +1023,15 @@ static void ConvertToPdfDoIt() {
     }
     DisplayModel* dm = win->AsFixed();
     EngineBase* engine = dm ? dm->GetEngine() : nullptr;
-    if (!engine || !engine->isImageCollection) {
+    bool isOfd = engine && EngineMupdfIsOfd(engine);
+    if (!engine || !(engine->isImageCollection || isOfd)) {
         MessageBoxWarning(win, Tr("Failed to save a file"), Tr("Convert to PDF"));
         return;
     }
 
     logf("ConvertToPdf: converting '%s' to '%s'\n", gTool.srcPath, destPath);
-    bool ok = ConvertImageCollectionToPdf(engine, destPath);
+    // OFD keeps its text and vector paths; image collections become one image per page
+    bool ok = isOfd ? EngineMupdfSaveAsPdf(engine, destPath) : ConvertImageCollectionToPdf(engine, destPath);
     if (ok) {
         logf("ConvertToPdf: converted successfully\n");
         CloseAndLoad(destPath);
@@ -2111,6 +2153,11 @@ static bool ActionEnabled() {
         // there is nothing to encrypt with until a password is typed
         return len(InputTextTemp(gTool.passwordEdit)) > 0;
     }
+    if (gTool.kind == PdfToolKind::Watermark || gTool.kind == PdfToolKind::PageNumbers) {
+        Vec<int> parsed;
+        return len(InputTextTemp(gTool.textEdit)) > 0 &&
+               ParseDeletePages(InputTextTemp(gTool.pagesEdit), gTool.pageCount, parsed);
+    }
     if (gTool.kind == PdfToolKind::ConvertEpubToPdf) {
         return EbookPdfFontSizeFromText(InputTextTemp(gTool.dpiEdit)) > 0;
     }
@@ -2194,6 +2241,10 @@ static void PdfToolDoIt() {
             break;
         case PdfToolKind::Merge:
             MergePdfDoIt();
+            break;
+        case PdfToolKind::Watermark:
+        case PdfToolKind::PageNumbers:
+            PdfStampDoIt();
             break;
     }
 }
@@ -2829,6 +2880,10 @@ static const char* ToolWindowName(PdfToolKind kind) {
             return "converttoimages";
         case PdfToolKind::SaveSelectionAsImage:
             return "saveselectionasimage";
+        case PdfToolKind::Watermark:
+            return "pdfwatermark";
+        case PdfToolKind::PageNumbers:
+            return "pdfpagenumbers";
         case PdfToolKind::Merge:
             break;
     }
@@ -3062,6 +3117,37 @@ void ShowPdfEncryptDialog(MainWindow* win) {
     AppShellInvalidate(win);
 }
 
+// Add Watermark / Add Page Numbers: text on the pages of a copy of the PDF
+static void ShowPdfStampDialog(MainWindow* win, PdfToolKind kind) {
+    ToolScope scope;
+    if (!CanShowToolDialog(win, true)) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    logf("ShowPdfStampDialog: opening for '%s'\n", tab->filePath);
+    if (!StartToolDialog(win, kind, MakeUniqueFilePathTemp(tab->filePath), StrL(".pdf"))) {
+        return;
+    }
+    bool watermark = kind == PdfToolKind::Watermark;
+    gTool.textEdit = NewInput(win, watermark ? StrL("DRAFT") : StrL("{n}"));
+    gTool.pagesEdit = NewInput(win, fmt("1-%d", gTool.pageCount));
+    if (!watermark) {
+        gTool.ddPosition.Init(win->gpuiWin ? win->gpuiWin->app : nullptr);
+        StrVec items;
+        PageNumberPositionLabels(items);
+        gTool.ddPosition.SetItems(items, 0);
+    }
+    AppShellInvalidate(win);
+}
+
+void ShowPdfWatermarkDialog(MainWindow* win) {
+    ShowPdfStampDialog(win, PdfToolKind::Watermark);
+}
+
+void ShowPdfPageNumbersDialog(MainWindow* win) {
+    ShowPdfStampDialog(win, PdfToolKind::PageNumbers);
+}
+
 void ShowPdfDecryptDialog(MainWindow* win) {
     ToolScope scope;
     if (!CanShowToolDialog(win, true)) {
@@ -3087,7 +3173,7 @@ void ShowConvertToPdfDialog(MainWindow* win) {
     }
     WindowTab* tab = win->CurrentTab();
     EngineBase* engine = tab->GetEngine();
-    if (!engine || !engine->isImageCollection) {
+    if (!engine || !(engine->isImageCollection || EngineMupdfIsOfd(engine))) {
         return;
     }
     if (!engine->AllowsPrinting()) {
@@ -3844,6 +3930,11 @@ static bool MergeToolOnKey(MainWindow* win, gp::Ctx* cx, const gp::KeyEvent* ev)
     return MergeOnKeyDown(win, ev->vk, ev->ctrl || ev->platform, ev->shift);
 }
 
+// PDFs dropped on the Merge PDF window
+static void MergeToolOnDropFiles(MainWindow* win, const Str* paths, int n, PointF pt) {
+    PdfToolDialogOnDropFiles(win, paths, n, &pt, DropHost::ToolWindow);
+}
+
 // the caption's close box, or the frame went away
 static void MergeToolOnClosed(MainWindow*) {
     gTool.tw = nullptr;
@@ -3859,7 +3950,7 @@ static ToolWindowDesc MergeToolDesc() {
     desc.resize = ToolWinResize::Resizable;
     desc.owner = ToolWinOwner::Owned;
     desc.minClient = Size(kMergeWinMinDx, kMergeWinMinDy);
-    desc.dropFiles = true;
+    desc.onDropFiles = MergeToolOnDropFiles;
     desc.build = MergeToolBuild;
     desc.onKey = MergeToolOnKey;
     desc.onClosed = MergeToolOnClosed;
@@ -4068,6 +4159,31 @@ static gp::El* PdfToolColumn(MainWindow* win, gp::Ctx* cx) {
                 ToolLine(cx, Tr("Password"))->Child(ToolLineInput(cx, GStrL("pdftool-pwd"), gTool.passwordEdit, true)));
             nLines++;
             break;
+        case PdfToolKind::Watermark:
+        case PdfToolKind::PageNumbers:
+            col->Child(ToolLine(cx, Tr("Text"))->Child(ToolLineInput(cx, GStrL("pdftool-text"), gTool.textEdit)));
+            nLines++;
+            if (gTool.kind == PdfToolKind::PageNumbers) {
+                col->Child(
+                    ToolLine(cx, Tr("Position"))
+                        ->Child(gp::Div(cx->a)
+                                    ->W(kToolDlgComboDx)
+                                    ->Shrink0()
+                                    ->Child(gTool.ddPosition.Build(cx, StrL("pdftool-position"), kToolDlgComboDx))));
+                nLines++;
+                hint = Tr("{n} is the page number, {total} the last one");
+            }
+            {
+                gp::El* line = ToolLine(cx, Tr("Pages"));
+                line->Child(ToolLineInput(cx, GStrL("pdftool-pages"), gTool.pagesEdit));
+                TempStr pages = InputTextTemp(gTool.pagesEdit);
+                Vec<int> parsed;
+                bool ok = ParseDeletePages(pages, gTool.pageCount, parsed);
+                line->Child(ToolMeta(cx, PageRangeCountTemp(pages, gTool.pageCount, true), ok));
+                col->Child(line);
+                nLines++;
+            }
+            break;
         case PdfToolKind::ConvertToImages:
             col->Child(ToolPagesModeLine(cx));
             col->Child(ToolLine(cx, Tr("Resolution (DPI)"))->Child(ToolDpiCombo(cx)));
@@ -4111,6 +4227,9 @@ static void PdfToolFocusFirst(gp::Ctx* cx) {
     if (gTool.kind == PdfToolKind::Encrypt) {
         focusOn = gTool.passwordEdit;
     }
+    if (gTool.textEdit) {
+        focusOn = gTool.textEdit;
+    }
     gp::InputFocus(focusOn, cx->app, cx->win);
     gp::InputSelectAll(focusOn, cx->app, cx->win);
     logf("PdfTool: %s\n", PdfToolStateTemp());
@@ -4135,11 +4254,14 @@ static gp::El* PdfToolBuildCurrent(MainWindow* win, gp::Ctx* cx) {
     if (gTool.kind == PdfToolKind::ConvertEpubToPdf) {
         gTool.ddFormat.PollChanged(cx->app);
     }
+    if (gTool.kind == PdfToolKind::PageNumbers) {
+        gTool.ddPosition.PollChanged(cx->app);
+    }
     if (HasDpiCombo()) {
         gTool.dpiEdit->onChange = gp::ListenTo(gToolView, &PdfToolView::OnInput);
         gTool.ddDpi.TakeComboPicked();
     }
-    for (gp::InputState* e : {gTool.destEdit, gTool.pagesEdit, gTool.passwordEdit}) {
+    for (gp::InputState* e : {gTool.destEdit, gTool.pagesEdit, gTool.passwordEdit, gTool.textEdit}) {
         if (e) {
             e->onChange = gp::ListenTo(gToolView, &PdfToolView::OnInput);
         }

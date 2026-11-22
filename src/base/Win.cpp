@@ -2165,8 +2165,20 @@ Run:
     SafeCloseHandle(&h);
 }
 
+bool gBlockExternalLaunch = false;
+int gExternalLaunchesBlocked = 0;
+
+bool ExternalLaunchBlocked(Str what) {
+    if (!gBlockExternalLaunch) {
+        return false;
+    }
+    logf("ExternalLaunchBlocked: not opening '%s' in test mode\n", what);
+    gExternalLaunchesBlocked++;
+    return true;
+}
+
 bool LaunchFileShell(Str path, Str params, Str verb, bool hidden) {
-    if (len(path) == 0) {
+    if (len(path) == 0 || ExternalLaunchBlocked(path)) {
         return false;
     }
 
@@ -2193,7 +2205,7 @@ bool LaunchBrowser(Str url) {
 }
 
 void OpenPathInDefaultFileManager(Str path) {
-    if (len(path) == 0) {
+    if (len(path) == 0 || ExternalLaunchBlocked(path)) {
         return;
     }
 
@@ -2287,6 +2299,29 @@ ChildProcess* StartChildProcess(Str cmdLine) {
 
 bool LaunchElevated(Str path, Str cmdline) {
     return LaunchFileShell(path, cmdline, StrL("runas"));
+}
+
+// Run elevated, wait for it to finish and return its exit code. 1 if it
+// couldn't start, e.g. the UAC prompt was declined.
+int RunElevatedAndWait(Str path, Str cmdline) {
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_FLAG_NO_UI | SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";
+    sei.lpFile = CWStrTemp(path);
+    sei.lpParameters = CWStrTemp(cmdline);
+    sei.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&sei) || !sei.hProcess) {
+        logf("RunElevatedAndWait: ShellExecuteExW failed for '%s' '%s'\n", path, cmdline);
+        LogLastError();
+        return 1;
+    }
+    WaitForSingleObject(sei.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(sei.hProcess, &exitCode);
+    CloseHandle(sei.hProcess);
+    logf("RunElevatedAndWait: '%s' exited with %d\n", path, (int)exitCode);
+    return (int)exitCode;
 }
 
 //--- console

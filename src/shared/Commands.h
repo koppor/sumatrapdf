@@ -376,9 +376,37 @@ enum {
     CmdViewAsHex = 570,
     CmdAIChatWithCustomAPI = 571,
     CmdSaveTrimmedPagesAs = 572,
-    CmdRefHoverPushToJabRef = 573,
+    CmdCaretUp = 573,
+    CmdCaretDown = 574,
+    CmdCaretLeft = 575,
+    CmdCaretRight = 576,
+    CmdCaretWordLeft = 577,
+    CmdCaretWordRight = 578,
+    CmdCaretLineStart = 579,
+    CmdCaretLineEnd = 580,
+    CmdCaretPageUp = 581,
+    CmdCaretPageDown = 582,
+    CmdCaretDocStart = 583,
+    CmdCaretDocEnd = 584,
+    CmdEditAnnotationText = 585,
+    CmdStripGroupNew = 586,
+    CmdStripGroupAddTab = 587,
+    CmdStripGroupRemoveTab = 588,
+    CmdStripGroupToggle = 589,
+    CmdStripGroupRename = 590,
+    CmdStripGroupColor = 591,
+    CmdStripGroupUngroup = 592,
+    CmdStripGroupClose = 593,
+    CmdToggleLineWeights = 594,
+    CmdToggleTextSelecting = 595,
+    CmdPdfWatermark = 596,
+    CmdPdfAddPageNumbers = 597,
+    CmdCloseWindow = 598,
+    CmdUploadToServer = 599,
+    CmdDeleteFromServer = 600,
+    CmdRefHoverPushToJabRef = 601,
 
-    CmdLast = 573,
+    CmdLast = 601,
     CmdFirstCustom = CmdLast + 100,
 
     // aliases, at the end to not mess ordering
@@ -394,6 +422,8 @@ enum {
 };
 // clang-format on
 // @gen-end cmd-enum
+
+struct MainWindow;
 
 struct CommandArg {
     enum class Type : u16 {
@@ -480,6 +510,7 @@ CustomCommand* CreateCommandFromDefinition(Str definition);
 CommandArg* GetCommandArg(CustomCommand*, Str argName);
 int GetCommandIntArg(CustomCommand* cmd, Str name, int defValue);
 bool GetCommandBoolArg(CustomCommand* cmd, Str name, bool defValue);
+bool ToggleCmdState(MainWindow* win, CustomCommand* cmd, int cmdId, bool& on);
 Str GetCommandStringArg(CustomCommand* cmd, Str name, Str defValue);
 void GetCommandsWithOrigId(Vec<CustomCommand*>& commands, int origId);
 

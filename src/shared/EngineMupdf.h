@@ -107,6 +107,7 @@ class EngineMupdf : public EngineBase {
 
     RenderedBitmap* GetImageForPageElement(IPageElement*) override;
     Str GetImageDataForPageElement(IPageElement*) override;
+    Str GetImagePngForPageElement(IPageElement*) override;
 
     IPageDestination* GetNamedDest(Str name) override;
     int GetOpenActionPageNo() override;
@@ -218,6 +219,10 @@ class EngineMupdf : public EngineBase {
     // used to track "dirty" state of annotations. not perfect because if we add and delete
     // the same annotation, we should be back to 0
     bool modifiedAnnotations = false;
+
+    // the free text being edited in place: left out of View rendering so the
+    // page shows through the edit box (#6534). Guarded by docLock.
+    pdf_annot* editedAnnot = nullptr;
 
     // set when a Redact annotation is created in this editing session. Apply
     // Redactions is offered for marks the user made, not for marks that came

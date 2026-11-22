@@ -383,6 +383,34 @@ const commandsRaw = [
     "CmdViewAsHex", "View As Hex",
     "CmdAIChatWithCustomAPI", "Custom AI chat...",
     "CmdSaveTrimmedPagesAs", "Save Trimmed Pages As...",
+    "CmdCaretUp", "Move Caret Up",
+    "CmdCaretDown", "Move Caret Down",
+    "CmdCaretLeft", "Move Caret Left",
+    "CmdCaretRight", "Move Caret Right",
+    "CmdCaretWordLeft", "Move Caret One Word Left",
+    "CmdCaretWordRight", "Move Caret One Word Right",
+    "CmdCaretLineStart", "Move Caret To Line Start",
+    "CmdCaretLineEnd", "Move Caret To Line End",
+    "CmdCaretPageUp", "Move Caret Page Up",
+    "CmdCaretPageDown", "Move Caret Page Down",
+    "CmdCaretDocStart", "Move Caret To Document Start",
+    "CmdCaretDocEnd", "Move Caret To Document End",
+    "CmdEditAnnotationText", "Edit Annotation Text",
+    "CmdStripGroupNew", "Add Tab to New Group",
+    "CmdStripGroupAddTab", "Add Tab to Group",
+    "CmdStripGroupRemoveTab", "Remove Tab from Group",
+    "CmdStripGroupToggle", "Collapse / Expand Group",
+    "CmdStripGroupRename", "Rename Group...",
+    "CmdStripGroupColor", "Change Group Color",
+    "CmdStripGroupUngroup", "Ungroup Tabs",
+    "CmdStripGroupClose", "Close Group",
+    "CmdToggleLineWeights", "Show Line Weights",
+    "CmdToggleTextSelecting", "Start / Stop Selecting Text",
+    "CmdPdfWatermark", "Add Watermark To PDF...",
+    "CmdPdfAddPageNumbers", "Add Page Numbers To PDF...",
+    "CmdCloseWindow", "Close Window",
+    "CmdUploadToServer", "Upload to Server",
+    "CmdDeleteFromServer", "Delete from Server",
     "CmdRefHoverPushToJabRef", "Push Reference to JabRef",
 ];
 
@@ -396,6 +424,42 @@ export const commandAltDescs: [string, string][] = [
     ["CmdNavigateFilesInFolder", "Browse Files In Folder..."],
     ["CmdAdvancedSettings", "Advanced Options..."],
 ];
+
+// Commands that switch something on and off. They take an optional bool
+// `state` argument: [CmdToggleToolbar off] turns it off, and does nothing when
+// it is already off; without it they toggle. Each app's ToggleCmdState() must
+// know their current state.
+const notToggles = new Set([
+  "CmdToggleZoom", // cycles zoom levels
+  "CmdToggleCursorPosition", // cycles units, then off
+  "CmdToggleLightDarkTheme", // picks a theme
+]);
+// prettier-ignore
+const extraToggles = [
+    "CmdFavoriteToggle", "CmdFindToggleMatchCase", "CmdFindToggleMatchWholeWord",
+    "CmdInvertColors", "CmdSelectTextViaKeyboard",
+];
+export const toggleCommands: string[] = [
+  ...commands.filter((c, i) => i % 2 === 0 && c.startsWith("CmdToggle") && !notToggles.has(c)),
+  ...extraToggles,
+];
+
+// [CmdToggleBoolSetting <name>] takes `state` after its name: Commands.cpp lists it by hand
+const toggleOwnArgs = new Set(["CmdToggleBoolSetting"]);
+
+function generateToggleArgs(): string {
+  const lines: string[] = [];
+  for (const c of toggleCommands) {
+    if (!commands.includes(c)) {
+      console.error(`toggleCommands: unknown command '${c}'`);
+      process.exit(1);
+    }
+    if (!toggleOwnArgs.has(c)) {
+      lines.push(`    {${c}, kCmdArgState, CommandArg::Type::Bool}, // default`);
+    }
+  }
+  return lines.join("\n");
+}
 
 function getNames(): string[] {
   const names: string[] = [];
@@ -516,6 +580,12 @@ export function main() {
 
   const arraysCode = generateArrays();
   cppContent = replaceBetweenMarkers(cppContent, "// @gen-start cmd-c", "// @gen-end cmd-c", arraysCode);
+  cppContent = replaceBetweenMarkers(
+    cppContent,
+    "// @gen-start cmd-toggle-args",
+    "// @gen-end cmd-toggle-args",
+    generateToggleArgs(),
+  );
   writeFileSync(cppPath, cppContent, "utf-8");
   console.log("Generated arrays in src/shared/Commands.cpp");
 }

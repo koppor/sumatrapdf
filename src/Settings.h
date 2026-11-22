@@ -406,6 +406,15 @@ struct TabState {
     // which table of contents items were expanded (see FileStates ->
     // TocState)
     Vec<int>* tocState;
+    // tabs with the same number form a group in the tab strip; 0 if the
+    // tab is in none
+    int group;
+    // name of the tab's group
+    Str groupName;
+    // color of the tab's group
+    ParsedColor groupColor;
+    // if true, the tab's group was collapsed
+    bool groupCollapsed;
 };
 
 // windows and tabs still open when SumatraPDF was last closed; reopened
@@ -619,7 +628,8 @@ struct AIChat {
 };
 
 // customization options for the ebook UI (EPUB, MOBI, FB2, PDB and
-// plain text)
+// plain text). text and page colors are FixedPageUI.TextColor and
+// BackgroundColor
 struct EBookUI {
     // default font family for ebooks (e.g. Segoe UI, Georgia, Microsoft
     // YaHei). empty uses the engine default (typically a serif). applied
@@ -756,9 +766,10 @@ struct FixedPageUI {
     // if true, render document pages in grayscale. Toggle with
     // CmdToggleGrayscale
     bool grayscale;
-    // color used instead of black for the document's text
+    // color used instead of black for the document's text, also in ebooks
     ParsedColor textColor;
-    // color used instead of white for the document's page background
+    // color used instead of white for the document's page background, also
+    // in ebooks
     ParsedColor backgroundColor;
     // color value for the text selection rectangle (also used to highlight
     // found text). Use an #aarrggbb value to control opacity: a smaller
@@ -777,7 +788,8 @@ struct FixedPageUI {
     // to give a subconscious sense of reading progress. Suggested values:
     // #2828aa #28aa28 #aa2828
     Vec<Str>* gradientColors;
-    // if given, sets the canvas background color for PDF files
+    // if given, sets the canvas background color for PDF, DjVu and XPS
+    // files
     ParsedColor windowBgCol;
     // measurement grid overlay (View > Page Grid). Spacing, slant and
     // style are saved; showing the grid is session-only. Drag a grid line
@@ -911,13 +923,23 @@ struct HtmlUI {
 
 // Preferences are persisted in SumatraPDF-settings.txt
 struct Settings {
+    // height in points of a thin bar along the bottom of the document that
+    // shows how far into it the current page is; 0 or less means no bar
+    float readingProgressBarDy;
     // what the sidebar's bottom panel shows: favorites (the default),
     // bookmarks or thumbnails
     Str sidebarBottomView;
+    // if false, opening a document with errors doesn't show the Errors in
+    // document notification. Show Errors stays in the context menu
+    bool showDocumentErrors;
     // if true, a PDF without an outline gets a table of contents built
     // from numbered headings in its text (Generate Table Of Contents
     // command does it on demand)
     bool autoGenerateTOC;
+    // if false, lines in documents are drawn one pixel wide, whatever
+    // their width, like Acrobat's Line Weights turned off. Only on screen.
+    // Toggle with CmdToggleLineWeights
+    bool showLineWeights;
     // list of handlers for selected text, shown in context menu when text
     // selection is active. See [docs for more
     // information](https://www.sumatrapdfreader.org/docs/Customize-search-translation-services)
@@ -1096,7 +1118,8 @@ struct Settings {
     // appearance of the AI chat sidebar, shared by all backends
     AIChat aiChat;
     // customization options for the ebook UI (EPUB, MOBI, FB2, PDB and
-    // plain text)
+    // plain text). text and page colors are FixedPageUI.TextColor and
+    // BackgroundColor
     EBookUI eBookUI;
     // customization options for Comic Book UI
     ComicBookUI comicBookUI;
@@ -1123,6 +1146,12 @@ struct Settings {
     // 3.0), 1 is normal speed; can also be changed from the Read Aloud
     // playback bar
     float readAloudSpeed;
+    // color of the line Read Aloud draws under the sentence being read
+    // (beside it in vertical text)
+    ParsedColor readAloudSentenceColor;
+    // color of the line Read Aloud draws under the word being read (beside
+    // it in vertical text)
+    ParsedColor readAloudWordColor;
     // pixels per second for Automatically Scroll (View menu /
     // Ctrl+Shift+H). 1 to 320; also changed from the auto-scroll bar and
     // the arrow keys while scrolling
@@ -1208,8 +1237,8 @@ struct Settings {
     bool escToExit;
     // if true, show the full path to the document in the title bar
     bool fullPathInTitle;
-    // if true, restoring a session delays loading each document until its
-    // tab is selected
+    // if true, restoring a session delays loading each document, and any
+    // access to its file, until its tab is selected
     bool lazyLoading;
     // if true, doesn't open Home tab
     bool noHomeTab;
@@ -1260,11 +1289,12 @@ struct Settings {
     // if true, open documents in the already running SumatraPDF instead of
     // starting a new one
     bool reuseInstance;
-    // if true, opening a document may reuse a SumatraPDF window on another
-    // virtual desktop, which makes Windows switch to that desktop; if
-    // false, the document opens on the current virtual desktop (Windows
-    // 10+)
-    bool reuseInstanceOnOtherDesktop;
+    // what happens when opening a document already open, or reusing a
+    // window, on another virtual desktop: switch switches to that desktop,
+    // move pulls the window onto the current desktop, copy opens the
+    // document again on the current desktop. a new window always opens on
+    // the current desktop (Windows 10+)
+    Str openOnOtherDesktop;
     // if true, show the menu bar (F9 toggles it; the choice is remembered
     // across sessions)
     bool showMenubar;
@@ -1413,6 +1443,10 @@ struct Settings {
     // ForwardSearch. Off when the destination is only a page with no
     // position
     bool highlightLinkDestination;
+    // if true, Find Next / Find Previous blinks a ring around the found
+    // text a few times, so it's easy to spot on a busy page. The color
+    // matches ForwardSearch
+    bool flashFindMatch;
     // if true, mouse wheel scrolling is faster when mouse is over a
     // scrollbar
     bool fastScrollOverScrollbar;

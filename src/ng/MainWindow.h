@@ -8,6 +8,7 @@ struct InputState;
 
 struct WindowTab;
 struct TabGroup;
+struct StripGroup;
 struct DocController;
 struct DocControllerCallback;
 struct ChmModel;
@@ -67,6 +68,15 @@ enum class MouseAction {
     SelectingText
 };
 
+// Which end of a touch text selection a finger is dragging (issue #538).
+// A long press over a word selects it and shows a handle under each end;
+// dragging a handle extends the selection from the other end.
+enum class TouchSelHandle {
+    None = 0,
+    Start,
+    End,
+};
+
 enum class SelectionDragEdge {
     None = 0,
     Left,
@@ -109,10 +119,10 @@ struct Annotation;
 struct AnnotEditToolbar;
 struct AnnotFilterToolbar;
 struct AnnotTextPopup;
+struct MeasurementToolbar;
 
-// ng: orig's cursors that are bitmaps, which gpui's CursorKind cannot name.
-// Windows only: the canvas asks gpui for a stand-in kind and the frame's
-// subclass sets the real cursor (gui/NativeCursors_win.cpp).
+// ng: orig's cursors that are bitmaps, which gpui's CursorKind cannot name;
+// the canvas shows them as gpui cursor images (gui/NativeCursors.cpp).
 enum class NativeCursor {
     None,
     // the hand of a drag-pan (orig's gCursorDrag)
@@ -230,6 +240,8 @@ struct MainWindow {
     // keeps the sequence of tab selection, for restoring the previous tab
     // when the current one is closed (points into tabs)
     Vec<WindowTab*>* tabSelectionHistory = nullptr;
+    // groups of tabs in the tab strip (owned), in strip order
+    Vec<StripGroup*> stripGroups;
     // ng: the gpui side of the tab strip (hover, drag, context menu); orig
     // keeps the same state in its TabsCtrl
     TabsUI* tabsUI = nullptr;
@@ -262,6 +274,9 @@ struct MainWindow {
     // gone, and the settings are written after it closes
     Rect frameRc;
     bool isMaximized = false;
+    // -dbg-control's handle for the window, standing in for the HWND a Windows
+    // test has: the first window is 1, the frame a macOS test starts with
+    int testId = 0;
     // last WM_DPICHANGED, rounded to 4. 0: not seen yet (use the monitor)
     int frameDpi = 0;
 
@@ -300,6 +315,9 @@ struct MainWindow {
     int scrollTargetY = 0;
     double scrollAnimY = 0;
     bool scrollAnimActive = false;
+    // the document and DisplayModel::viewChanges scrollTargetY was computed for
+    DisplayModel* scrollAnimDm = nullptr;
+    int scrollAnimViewChanges = 0;
     // a page was still rendering on the last paint, so paint again soon
     bool repaintPending = false;
 
@@ -345,6 +363,11 @@ struct MainWindow {
     Rect selectionEditOrig;
     // a drag after a double click extends the selection a word at a time
     bool selectingByWord = false;
+    // a long press with a finger selected a word and put a drag handle under
+    // each end of the selection (issue #538)
+    bool touchSelHandles = false;
+    // the handle a finger currently has hold of, if any
+    TouchSelHandle touchSelDragging = TouchSelHandle::None;
     // the time and place of the last double click, so a third one nearby is a
     // triple click (line selection)
     u64 lastWordSelectTime = 0;
@@ -497,13 +520,15 @@ struct MainWindow {
     // the property row under the selected annotation, and the annotation list
     AnnotEditToolbar* annotEditToolbar = nullptr;
     AnnotFilterToolbar* annotFilterToolbar = nullptr;
+    // the Measure window (CmdMeasure); null while it is closed
+    MeasurementToolbar* measurementToolbar = nullptr;
     // where the annotation list window was last (screen pixels), and whether
     // the user put it there; not saved to the settings file, as in orig
     Rect annotListFloatPos;
     bool annotListFloatPosUserSet = false;
     // read-only card with a clicked annotation's whole text
     AnnotTextPopup* annotTextPopup = nullptr;
-    // what the canvas' cursor is when canvasCursor is the stand-in kind
+    // the canvas' cursor image; canvasCursor is the kind shown without one
     NativeCursor nativeCursor = NativeCursor::None;
     // Edit PDF: the card with the properties of the annotation under the cursor
     AnnotationHoverOverlay* annotationHoverOverlay = nullptr;
@@ -577,6 +602,16 @@ struct MainWindow {
         // ng: orig arms kHideFwdSearchMarkTimerID; the tick counts this down
         Countdown hide;
     } fwdSearchMark;
+
+    // ring blinked around the match Find Next/Prev landed on (FlashFindMatch)
+    struct {
+        bool show = false; // ring visible in the current blink step
+        Vec<Rect> rects;   // match in user coordinates
+        int page = 0;
+        int step = 0;
+        // ng: orig arms kFindFlashTimerID; the tick counts this down
+        Countdown next;
+    } findFlash;
 
     StressTest* stressTest = nullptr;
 

@@ -596,7 +596,8 @@ bool WriteControlResponse(ControlConn h, ControlRequest* req) {
     return WriteExact(h, ToStr(packet));
 }
 
-// "OK page=<n> x=<x> y=<y>": the first window's scroll position, in page units
+// "OK page=<n> x=<x> y=<y> visible=<n>": the first window's scroll position, in
+// page units, and how many pages are on screen (0 = the view is blank)
 TempStr ScrollStateResultTemp(int* exitCodeOut) {
     *exitCodeOut = 2;
     MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
@@ -605,8 +606,94 @@ TempStr ScrollStateResultTemp(int* exitCodeOut) {
         return fmt("NOTREADY no-doc\n");
     }
     ScrollState ss = dm->GetScrollState();
+    int nVisible = 0;
+    for (int pageNo = 1; pageNo <= dm->PageCount(); pageNo++) {
+        if (dm->PageVisible(pageNo)) {
+            nVisible++;
+        }
+    }
     *exitCodeOut = 0;
-    return fmt("OK page=%d x=%g y=%g\n", ss.page, ss.x, ss.y);
+    return fmt("OK page=%d x=%g y=%g visible=%d\n", ss.page, ss.x, ss.y, nVisible);
+}
+
+// "CmdToggleMirror on" => "OK hasState=1 known=1 on=0": whether the definition
+// kept its state argument, and the command's state in the first window
+TempStr ToggleCmdResultTemp(Str definition, int* exitCodeOut) {
+    *exitCodeOut = 2;
+    MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+    if (!win) {
+        return fmt("NOTREADY no-window\n");
+    }
+    CustomCommand* cmd = CreateCommandFromDefinition(definition);
+    if (!cmd) {
+        return fmt("ERROR can't parse '%s'\n", definition);
+    }
+    bool hasState = GetCommandArg(cmd, kCmdArgState) != nullptr;
+    bool on = false;
+    bool known = ToggleCmdState(win, cmd, cmd->origId, on);
+    *exitCodeOut = 0;
+    return fmt("OK hasState=%d known=%d on=%d\n", (int)hasState, (int)known, (int)on);
+}
+
+// "OK differ=N": pixels of page 1 that a Clone() of the current document
+// renders differently from the document itself. Printing renders from a clone.
+TempStr CloneRenderDiffTemp(int* exitCodeOut) {
+    *exitCodeOut = 2;
+    MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    EngineBase* engine = tab ? tab->GetEngine() : nullptr;
+    if (!engine) {
+        return fmt("NOTREADY no-doc\n");
+    }
+    EngineBase* clone = engine->Clone();
+    if (!clone) {
+        return fmt("ERROR clone failed\n");
+    }
+    RenderPageArgs args(1, 1.f, 0, nullptr, RenderTarget::Export);
+    Pixmap* a = engine->RenderPage(args);
+    Pixmap* b = clone->RenderPage(args);
+    Pixmap* ra = EnsureReadablePixmap(a);
+    Pixmap* rb = EnsureReadablePixmap(b);
+    TempStr res;
+    if (!ra || !rb || ra->width != rb->width || ra->height != rb->height) {
+        res = fmt("ERROR render failed\n");
+    } else {
+        int differ = 0;
+        for (int y = 0; y < ra->height; y++) {
+            const u8* pa = ra->data + ((size_t)y * (size_t)ra->stride);
+            const u8* pb = rb->data + ((size_t)y * (size_t)rb->stride);
+            for (int x = 0; x < ra->width * 4; x += 4) {
+                differ += (pa[x] != pb[x] || pa[x + 1] != pb[x + 1] || pa[x + 2] != pb[x + 2]) ? 1 : 0;
+            }
+        }
+        *exitCodeOut = 0;
+        res = fmt("OK differ=%d\n", differ);
+    }
+    if (ra != a) {
+        FreePixmap(ra);
+    }
+    if (rb != b) {
+        FreePixmap(rb);
+    }
+    FreePixmap(a);
+    FreePixmap(b);
+    SafeEngineRelease(&clone);
+    return res;
+}
+
+// "OK errors=1 shown=0": whether the current document has load errors and
+// whether the "Errors in document" notification shows them
+TempStr DocErrorsResultTemp(int* exitCodeOut) {
+    *exitCodeOut = 2;
+    MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+    DisplayModel* dm = win && win->IsDocLoaded() ? win->AsFixed() : nullptr;
+    if (!dm) {
+        return str::DupTemp(StrL("NOTREADY no-doc\n"));
+    }
+    *exitCodeOut = 0;
+    int errors = dm->GetEngine()->HasErrors() ? 1 : 0;
+    int shown = IsDocErrorsNotifShown(win) ? 1 : 0;
+    return fmt("OK errors=%d shown=%d\n", errors, shown);
 }
 
 TempStr FavoriteNavResultTemp(Str action, int pageNo, int* exitCodeOut) {
@@ -739,7 +826,16 @@ TempStr PageInfoBarResultTemp(int* exitCodeOut) {
     TempStr left;
     TempStr right;
     PageInfoBarTextTemp(win, &left, &right);
-    return fmt("OK place=%s %s\nleft=%s\nright=%s\n", place, PageInfoBarGeometryTemp(win), left, right);
+    TempStr res = fmt("OK place=%s %s\nleft=%s\nright=%s\n", place, PageInfoBarGeometryTemp(win), left, right);
+
+    // the reading progress bar (#6572), in canvas coordinates
+    Rect done, rest;
+    if (!ProgressBarCanvasRects(win, &done, &rest)) {
+        return str::JoinTemp(res, StrL("progress=none\n"));
+    }
+    auto hex = [](Color c) { return fmt("%02x%02x%02x", (int)GetRed(c), (int)GetGreen(c), (int)GetBlue(c)); };
+    return fmt("%sprogress=%d,%d,%d,%d done=%d doneCol=%s restCol=%s\n", res, done.x, done.y, done.dx + rest.dx,
+               done.dy, done.dx, hex(ProgressBarDoneColor()), hex(ProgressBarRestColor()));
 }
 
 // action: "get" | "r2l" | "presentation" | "fullscreen"

@@ -363,6 +363,9 @@
     <ClInclude Include="..\src\shared\DocumentPropertiesCommon.h">
       <Filter>src\shared</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\shared\DropUrlCommon.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\shared\EbookDoc.h">
       <Filter>src\shared</Filter>
     </ClInclude>
@@ -450,6 +453,9 @@
     <ClInclude Include="..\src\shared\ImageReader.h">
       <Filter>src\shared</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\shared\ImageReplace.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\shared\ImageSaveCropResizeCommon.h">
       <Filter>src\shared</Filter>
     </ClInclude>
@@ -481,6 +487,9 @@
       <Filter>src\shared</Filter>
     </ClInclude>
     <ClInclude Include="..\src\shared\MarkdownToc.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\shared\MeasurementToolbarCommon.h">
       <Filter>src\shared</Filter>
     </ClInclude>
     <ClInclude Include="..\src\shared\MenuCommon.h">
@@ -618,7 +627,13 @@
     <ClInclude Include="..\src\shared\SignDocumentDialogCommon.h">
       <Filter>src\shared</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\shared\SignatureUICommon.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\shared\StressTesting.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\shared\StripGroups.h">
       <Filter>src\shared</Filter>
     </ClInclude>
     <ClInclude Include="..\src\shared\SumatraControl.h">
@@ -634,6 +649,9 @@
       <Filter>src\shared</Filter>
     </ClInclude>
     <ClInclude Include="..\src\shared\SumatraPDFCommon.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\shared\SumatraPDFWebCommon.h">
       <Filter>src\shared</Filter>
     </ClInclude>
     <ClInclude Include="..\src\shared\SumatraTest.h">
@@ -968,6 +986,9 @@
     <ClCompile Include="..\src\SimpleBrowserWindow.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\StripGroupDialog.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\SumatraControl.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -1268,6 +1289,9 @@
     <ClCompile Include="..\src\shared\DocumentPropertiesCommon.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\shared\DropUrlCommon.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\shared\EbookDoc.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
@@ -1364,6 +1388,9 @@
     <ClCompile Include="..\src\shared\ImageReader.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\shared\ImageReplace.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\shared\ImageSaveCropResizeCommon.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
@@ -1374,6 +1401,9 @@
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\KeyboardHelpCommon.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\shared\LaserPointerCursorCommon.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\LaserPointerCursor_win.cpp">
@@ -1392,6 +1422,9 @@
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\MarkdownToc.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\shared\MeasurementToolbarCommon.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\MenuCommon.cpp">
@@ -1544,7 +1577,13 @@
     <ClCompile Include="..\src\shared\SignDocumentDialogCommon.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\shared\SignatureUICommon.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\shared\StressTesting.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\shared\StripGroups.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\SumatraConfig.cpp">
@@ -1560,6 +1599,9 @@
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\SumatraPDFCommon.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\shared\SumatraPDFWebCommon.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\SumatraTestCommon.cpp">

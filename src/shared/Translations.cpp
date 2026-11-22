@@ -279,11 +279,7 @@ Str LangCodeFromLocale(Str locale) {
     }
     TempStr tag = str::DupTemp(Str(locale.s, n));
     str::ToLowerInPlace(tag);
-    for (int i = 0; i < len(tag); i++) {
-        if (tag.s[i] == '_') {
-            tag.s[i] = '-';
-        }
-    }
+    str::TransCharsInPlace(tag, StrL("_"), StrL("-"));
     while (len(tag) > 0) {
         int idx = FindLangIdxByTag(tag);
         if (idx >= 0) {
@@ -348,10 +344,6 @@ void Destroy() {
 }
 
 } // namespace trans
-
-#if !OS_WIN && !OS_DARWIN
-void GetSystemPreferredLocales(StrVec&) {}
-#endif
 
 #if IS_DEBUG
 // translations.txt keeps C escapes; unescaped they must equal the compiled Tr() literal

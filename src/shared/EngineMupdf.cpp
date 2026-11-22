@@ -452,7 +452,12 @@ static bool IsMupdfLocalFileLink(Str uri, TempStr* pathOut, Str* fragmentOut) {
     if (len(pathStr) == 0) {
         return false;
     }
+#if OS_WIN
     path = str::ReplaceTemp(pathStr, StrL("/"), StrL("\\"));
+#else
+    // ng: '/' is the separator here; a '\\' path is not found
+    path = str::DupTemp(pathStr);
+#endif
 
     FileType kind = GuessFileTypeFromName(path);
     if (!IsEngineMupdfSupportedFileType(kind)) {
@@ -1329,14 +1334,53 @@ static void MaybeDropTrailingSoftHyphen(str::Builder& s, Vec<GlyphBox>& boxes) {
     VecRemoveLast(boxes);
 }
 
+// Letter after which a right-to-left line's leading space is drawn, or null.
+// SOLIDWORKS writes the space first but draws it after a word (#6576).
+static fz_stext_char* MovedSpaceAfter(const fz_stext_line* line) {
+    fz_stext_char* space = line->first_char;
+    if (!space || space->c != ' ') {
+        return nullptr;
+    }
+    fz_stext_char* first = space->next;
+    if (!first || !IsRtlCodepoint(first->c)) {
+        return nullptr;
+    }
+
+    // drawn right of the first letter, i.e. where a leading space belongs
+    fz_rect sr = fz_rect_from_quad(space->quad);
+    float tolerance = std::max(space->size, 1.f) * 0.1f;
+    if (sr.x0 >= fz_rect_from_quad(first->quad).x1 - tolerance) {
+        return nullptr;
+    }
+
+    // the letter whose left edge the space touches
+    for (fz_stext_char* c = first; c; c = c->next) {
+        if (c->c == ' ' || c->c == 0xAD) {
+            continue;
+        }
+        fz_rect r = fz_rect_from_quad(c->quad);
+        if (fabsf(r.x0 - sr.x1) <= tolerance) {
+            return c;
+        }
+    }
+    return nullptr;
+}
+
 static void AppendStextTextBlock(const fz_stext_block* block, str::Builder& content, Vec<GlyphBox>& boxes,
                                  Vec<SeenGlyph>& seen, Str hardLineSep, Str softLineSep) {
     fz_stext_line* line = block->u.t.first_line;
     while (line) {
+        fz_stext_char* spaceAfter = MovedSpaceAfter(line);
+
         // Walk each line so tracking spaces can be dropped (issue #5627:
         // Turkish PDFs that space every syllable).
         fz_stext_char* c = line->first_char;
         while (c) {
+            // emitted after spaceAfter instead
+            if (spaceAfter && c == line->first_char) {
+                c = c->next;
+                continue;
+            }
             int rune = c->c;
             // Soft hyphens (U+00AD) are never typed by the user; drop them
             // so search for "softhyphen" matches text that contains SHY
@@ -1363,6 +1407,9 @@ static void AppendStextTextBlock(const fz_stext_block* block, str::Builder& cont
                 }
             }
             AddCharUtf8(line, c, content, boxes, seen);
+            if (c == spaceAfter) {
+                AddCharUtf8(line, line->first_char, content, boxes, seen);
+            }
             c = c->next;
         }
         // Soft-join reflow lines within a paragraph for better copy (#5793);
@@ -3702,8 +3749,10 @@ static void fz_print_cb(void* user, const char* msg) {
     // logged above, not shown as "Errors in document": epub 3.0 is rendered
     // fine, a missing system font falls back to a default (issue #6027),
     // Movie (etc.) appearance streams are a MuPDF limitation, not a PDF defect,
-    // and hyphen tables are compiled out (issue #6109)
+    // hyphen tables are compiled out (issue #6109), and iText's closepath
+    // with nothing to close draws nothing in any viewer (issue #6558)
     if (str::Contains(msgStr, StrL("unknown epub version")) ||
+        str::Contains(msgStr, StrL("closepath with no current point")) ||
         str::Contains(msgStr, StrL("couldn't find system font")) ||
         str::Contains(msgStr, StrL("cannot create appearance stream")) ||
         str::Contains(msgStr, StrL("no hyphenation table"))) {
@@ -4047,6 +4096,47 @@ class PasswordCloner : public PasswordUI {
     }
 };
 
+// A copy of a PDF with unsaved changes (filled in form fields, annotations),
+// loaded from the document as it is in memory: the file doesn't have them
+// (#6556). Unencrypted, since the copy never leaves this process. nullptr if
+// nothing is unsaved.
+static EngineMupdf* CloneUnsavedPdf(EngineMupdf* e) {
+    fz_context* ctx = e->Ctx();
+    fz_buffer* buf = nullptr;
+    fz_output* out = nullptr;
+    fz_var(buf);
+    fz_var(out);
+    {
+        ScopedRecursiveMutex scope(&e->docLock);
+        if (!e->pdfdoc || !pdf_has_unsaved_changes(ctx, e->pdfdoc)) {
+            return nullptr;
+        }
+        fz_try(ctx) {
+            pdf_write_options opts{};
+            opts.permissions = ~0;
+            opts.do_encrypt = PDF_ENCRYPT_NONE;
+            buf = fz_new_buffer(ctx, 1024 * 1024);
+            out = fz_new_output_with_buffer(ctx, buf);
+            pdf_write_document(ctx, e->pdfdoc, out, &opts);
+            fz_close_output(ctx, out);
+        }
+        fz_always(ctx) {
+            fz_drop_output(ctx, out);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            logf("CloneUnsavedPdf: writing '%s' to memory failed\n", e->FilePath());
+            fz_drop_buffer(ctx, buf);
+            return nullptr;
+        }
+    }
+    u8* data = nullptr;
+    size_t n = fz_buffer_storage(ctx, buf, &data);
+    auto* clone = (EngineMupdf*)CreateEngineMupdfFromData(Str((char*)data, (int)n), e->FilePath(), nullptr);
+    fz_drop_buffer(ctx, buf);
+    return clone;
+}
+
 EngineBase* EngineMupdf::Clone() {
     // use this document's encryption key (if any) to load the clone
     u8 cryptKey[32]{};
@@ -4069,8 +4159,8 @@ EngineBase* EngineMupdf::Clone() {
 
     // prefer re-loading from the file: it streams large documents on demand
     // rather than copying them, and is the cheapest path when the file is present.
-    EngineMupdf* clone = nullptr;
-    if (FilePath()) {
+    EngineMupdf* clone = CloneUnsavedPdf(this);
+    if (!clone && FilePath()) {
         clone = new EngineMupdf();
         if (!clone->Load(FilePath(), pwdUI, GuessFileTypeFromName(defaultExt, true))) {
             delete clone;
@@ -7728,6 +7818,8 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
     // The "View" rendering (no Print, no hideAnnotations) is what
     // fz_new_display_list_from_page produces; safe to cache and re-run lock-free.
     bool useCache = (args.target == RenderTarget::View) && !hideAnnotations;
+    // the annotation being edited in place is left out; the cached list has it
+    pdf_annot* skipAnnot = nullptr;
 
     fz_rect pRect;
     fz_matrix ctm;
@@ -7752,6 +7844,10 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
         ctm = viewctm(page, zoom, rotation);
         ibounds = fz_round_rect(fz_transform_rect(pRect, ctm));
 
+        if (editedAnnot && args.target == RenderTarget::View && pdf_annot_page(ctx, editedAnnot) == (pdf_page*)page) {
+            skipAnnot = editedAnnot;
+            useCache = false;
+        }
         if (useCache) {
             keptList = GetOrBuildPageDisplayList(pageInfo, ctx);
         }
@@ -7795,6 +7891,9 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
             }
             if (CadEnhanceActive()) {
                 dev = PdfCadEnhanceWrapDevice(ctx, dev);
+            }
+            if (args.target == RenderTarget::View && !GetShowLineWeights()) {
+                dev = PdfHairlineWrapDevice(ctx, dev);
             }
             fz_run_display_list(ctx, keptList, dev, fz_identity, pRect, fzcookie);
             if (RenderAborted(fzcookie)) {
@@ -7840,23 +7939,38 @@ Pixmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
     const char* usageZ = CStrTemp(usage);
 
     pdf_page* pdfpage = nullptr;
+    fz_device* drawDev = nullptr;
     fz_var(pdfpage);
+    fz_var(drawDev);
     if (pdfdoc) {
         fz_try(ctx) {
             pdfpage = pdf_page_from_fz_page(ctx, page);
             ClearRenderedPagePixmap(ctx, target.fz, args);
             dev = fz_new_draw_device(ctx, ctm, target.fz);
+            drawDev = dev;
             if (disableAntiAlias) {
                 fz_enable_device_hints(ctx, dev, FZ_DONT_INTERPOLATE_IMAGES);
             }
+            if (args.target == RenderTarget::View && !GetShowLineWeights()) {
+                dev = PdfHairlineWrapDevice(ctx, dev);
+            }
             if (hideAnnotations) {
                 pdf_run_page_contents_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
+                pdf_run_page_widgets_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
+            } else if (skipAnnot) {
+                ScopedRecursiveMutex docScope(&docLock);
+                pdf_run_page_contents_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
+                for (pdf_annot* a = pdf_first_annot(ctx, pdfpage); a; a = pdf_next_annot(ctx, a)) {
+                    if (a != skipAnnot) {
+                        pdf_run_annot(ctx, a, dev, fz_identity, fzcookie);
+                    }
+                }
                 pdf_run_page_widgets_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
             } else {
                 pdf_run_page_with_usage(ctx, pdfpage, dev, fz_identity, usageZ, fzcookie);
             }
             if (RenderAborted(fzcookie)) {
-                UnhookAbortedDevices(dev, nullptr);
+                UnhookAbortedDevices(drawDev, dev == drawDev ? nullptr : dev);
             } else {
                 fz_close_device(ctx, dev);
                 if (CadEnhanceActive() && cadRasterDominant) {
@@ -8388,6 +8502,52 @@ RenderedBitmap* EngineMupdf::GetPageImage(int pageNo, RectF rect, int imageIdx) 
 #endif
 }
 
+// the image as GetImageForPageElement draws it (oriented as on the page), as
+// a PNG. PNG takes only gray and RGB, so CMYK and the rest become RGB.
+Str EngineMupdf::GetImagePngForPageElement(IPageElement* ipel) {
+    if (!ipel || ipel->GetKind() != kindPageElementImage) {
+        return {};
+    }
+    auto* pel = (PageElementImage*)ipel;
+    int pageNo = pel->loc.IsValid() ? PageNoFromLocation(pel->loc) : pel->pageNo;
+    auto* ctx = Ctx();
+    fz_pixmap* pix = FzLoadOrientedImage(this, pageNo, pel->rect, pel->imageID);
+    if (!pix) {
+        return {};
+    }
+    fz_pixmap* rgb = nullptr;
+    fz_buffer* buf = nullptr;
+    Str res;
+    fz_var(rgb);
+    fz_var(buf);
+    fz_var(res);
+    fz_try(ctx) {
+        fz_pixmap* src = pix;
+        fz_colorspace* cs = fz_pixmap_colorspace(ctx, pix);
+        if (!cs || !(fz_colorspace_is_gray(ctx, cs) || fz_colorspace_is_rgb(ctx, cs))) {
+            rgb = fz_convert_pixmap(ctx, pix, fz_device_rgb(ctx), nullptr, nullptr, fz_default_color_params, 1);
+            src = rgb;
+        }
+        buf = fz_new_buffer_from_pixmap_as_png(ctx, src, fz_default_color_params);
+        unsigned char* data = nullptr;
+        size_t n = fz_buffer_storage(ctx, buf, &data);
+        if (data && n > 0 && n <= (size_t)INT_MAX) {
+            res = str::Dup(Str((char*)data, (int)n));
+        }
+    }
+    fz_always(ctx) {
+        fz_drop_buffer(ctx, buf);
+        fz_drop_pixmap(ctx, rgb);
+        fz_drop_pixmap(ctx, pix);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        str::Free(res);
+        res = {};
+    }
+    return res;
+}
+
 static PageText ExtractPageTextLocked(EngineMupdf* e, FzPageInfo* pageInfo) {
     auto* ctx = e->Ctx();
     // callers hold pagesLock + renderLock; docLock is needed too because this
@@ -8803,11 +8963,30 @@ static RectF SigFieldRect(fz_context* ctx, pdf_obj* field) {
 
 static int PageNoForSigField(fz_context* ctx, pdf_document* pdfdoc, pdf_obj* field) {
     pdf_obj* page = pdf_dict_get(ctx, field, PDF_NAME(P));
-    if (!page) {
-        return 0;
+    if (page) {
+        int pageNo = pdf_lookup_page_number(ctx, pdfdoc, page);
+        return pageNo >= 0 ? pageNo + 1 : 0;
     }
-    int pageNo = pdf_lookup_page_number(ctx, pdfdoc, page);
-    return pageNo >= 0 ? pageNo + 1 : 0;
+    // /P is optional (mupdf doesn't write it for a field it makes): the page
+    // whose /Annots has the field, or one of its widgets
+    pdf_obj* kids = pdf_dict_get(ctx, field, PDF_NAME(Kids));
+    int nPages = pdf_count_pages(ctx, pdfdoc);
+    for (int i = 0; i < nPages; i++) {
+        pdf_obj* annots = pdf_dict_get(ctx, pdf_lookup_page_obj(ctx, pdfdoc, i), PDF_NAME(Annots));
+        int n = pdf_array_len(ctx, annots);
+        for (int k = 0; k < n; k++) {
+            pdf_obj* a = pdf_array_get(ctx, annots, k);
+            if (pdf_objcmp(ctx, a, field) == 0) {
+                return i + 1;
+            }
+            for (int j = 0; j < pdf_array_len(ctx, kids); j++) {
+                if (pdf_objcmp(ctx, a, pdf_array_get(ctx, kids, j)) == 0) {
+                    return i + 1;
+                }
+            }
+        }
+    }
+    return 0;
 }
 
 static void AppendSigDictText(fz_context* ctx, str::Builder& out, pdf_obj* sigDict, Str label, pdf_obj* key) {
@@ -8921,6 +9100,18 @@ static void AppendSigValidation(str::Builder& out, pdf_signature_error certErr, 
 }
 #endif
 
+static const char* SigSubFilter(fz_context* ctx, pdf_obj* vDict) {
+    pdf_obj* sf = pdf_dict_get(ctx, vDict, PDF_NAME(SubFilter));
+    if (!sf) {
+        return nullptr;
+    }
+    return pdf_to_name(ctx, sf);
+}
+
+static bool SubFilterIsDocTimeStamp(const char* sf) {
+    return sf && str::Eq(Str(sf), StrL("ETSI.RFC3161"));
+}
+
 #if OS_WIN
 static const EutlLookup* gEutlLookup = nullptr;
 
@@ -8997,18 +9188,6 @@ static bool PdfHasDssRevocation(fz_context* ctx, pdf_document* pdfdoc) {
     int nCrl = crls ? pdf_array_len(ctx, crls) : 0;
     int nOcsp = ocsps ? pdf_array_len(ctx, ocsps) : 0;
     return nCrl > 0 || nOcsp > 0;
-}
-
-static const char* SigSubFilter(fz_context* ctx, pdf_obj* vDict) {
-    pdf_obj* sf = pdf_dict_get(ctx, vDict, PDF_NAME(SubFilter));
-    if (!sf) {
-        return nullptr;
-    }
-    return pdf_to_name(ctx, sf);
-}
-
-static bool SubFilterIsDocTimeStamp(const char* sf) {
-    return sf && str::Eq(Str(sf), StrL("ETSI.RFC3161"));
 }
 
 static bool SubFilterIsCades(const char* sf) {
@@ -9441,8 +9620,14 @@ static void AppendSignatureFieldInfo(fz_context* ctx, str::Builder& s, pdf_pkcs7
         s.Append(StrL("  Signed by: (unknown)\n"));
     }
 
-    pdf_obj* mObj = pdf_dict_get(ctx, vDict, PDF_NAME(M));
-    TempStr signedAt = FormatPdfDateRawTemp(ctx, mObj);
+    // a document timestamp's /M isn't proof of anything: ETSI EN 319 142-1 5.4.3
+    // says to ignore it and use the token's time
+    TempStr signedAt;
+    if (isDocTs && provenTime > 0) {
+        signedAt = FormatUnixTimeTemp(provenTime);
+    } else if (!isDocTs) {
+        signedAt = FormatPdfDateRawTemp(ctx, pdf_dict_get(ctx, vDict, PDF_NAME(M)));
+    }
     if (len(signedAt) == 0 && info.gen_time_unix > 0) {
         signedAt = FormatUnixTimeTemp(info.gen_time_unix);
     }
@@ -9506,9 +9691,12 @@ static void AppendSignatureFieldInfo(fz_context* ctx, str::Builder& s, pdf_pkcs7
     bool isCades = SubFilterIsCades(subFilter) || info.has_cades_attr;
     AppendPadesLevel(s, isCades, info.has_timestamp, ltv, docHasDocTs, isDocTs, info.has_sig_policy_attr);
 
-    AppendSigDictText(ctx, s, vDict, StrL("reason"), PDF_NAME(Reason));
-    AppendSigDictText(ctx, s, vDict, StrL("location"), PDF_NAME(Location));
-    AppendSigDictText(ctx, s, vDict, StrL("contact"), PDF_NAME(ContactInfo));
+    // ignored for document timestamps (ETSI EN 319 142-1 5.4.3)
+    if (!isDocTs) {
+        AppendSigDictText(ctx, s, vDict, StrL("reason"), PDF_NAME(Reason));
+        AppendSigDictText(ctx, s, vDict, StrL("location"), PDF_NAME(Location));
+        AppendSigDictText(ctx, s, vDict, StrL("contact"), PDF_NAME(ContactInfo));
+    }
     AppendSigCertification(ctx, s, vDict);
 
     for (int ti = 0; ti < info.n_ts; ti++) {
@@ -9952,9 +10140,12 @@ static void AppendOpenSslSigText(fz_context* ctx, str::Builder& out, pdf_pkcs7_v
     if (!value) {
         value = field;
     }
-    AppendSigDictText(ctx, out, value, StrL("reason"), PDF_NAME(Reason));
-    AppendSigDictText(ctx, out, value, StrL("location"), PDF_NAME(Location));
-    AppendSigDictText(ctx, out, value, StrL("contact"), PDF_NAME(ContactInfo));
+    // ignored for document timestamps (ETSI EN 319 142-1 5.4.3)
+    if (!SubFilterIsDocTimeStamp(SigSubFilter(ctx, value))) {
+        AppendSigDictText(ctx, out, value, StrL("reason"), PDF_NAME(Reason));
+        AppendSigDictText(ctx, out, value, StrL("location"), PDF_NAME(Location));
+        AppendSigDictText(ctx, out, value, StrL("contact"), PDF_NAME(ContactInfo));
+    }
     AppendSigCertification(ctx, out, value);
 }
 #endif
@@ -10033,6 +10224,90 @@ static TempStr GetSignatures(EngineMupdf* e, PdfSigResult* res) {
 #else
     (void)e;
     return {};
+#endif
+}
+
+PdfSigCheck::~PdfSigCheck() {
+    str::Free(signer);
+    str::Free(certError);
+}
+
+// each signature field: signed?, by whom, are the signed bytes intact, is the
+// signer's certificate trusted, was the file changed after. With the
+// platform's verifier, so on every platform that has one
+bool EngineMupdfVerifySignatures(EngineBase* engine, Vec<PdfSigCheck*>& out) {
+#if OS_WIN || OS_DARWIN || defined(SUMATRA_HAVE_OPENSSL)
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        return false;
+    }
+    fz_context* ctx = e->Ctx();
+    pdf_document* doc = e->pdfdoc;
+    ScopedRecursiveMutex scope(&e->docLock);
+    pdf_pkcs7_verifier* verifier = nullptr;
+    Vec<pdf_obj*> fields;
+    bool ok = true;
+    fz_var(verifier);
+    fz_var(ok);
+    fz_try(ctx) {
+#if OS_WIN
+        verifier = pkcs7_windows_new_verifier(ctx);
+#elif OS_DARWIN
+        verifier = pkcs7_mac_new_verifier(ctx);
+#else
+        verifier = pkcs7_openssl_new_verifier(ctx);
+#endif
+        CollectSignatureFields(ctx, doc, fields);
+        for (pdf_obj* field : fields) {
+            auto* c = new PdfSigCheck();
+            VecAppend(out, c);
+            c->pageNo = PageNoForSigField(ctx, doc, field);
+            c->isSigned = pdf_signature_is_signed(ctx, doc, field);
+            if (!c->isSigned) {
+                continue;
+            }
+            pdf_obj* value = pdf_dict_get(ctx, field, PDF_NAME(V));
+            c->isTimestamp = SubFilterIsDocTimeStamp(SigSubFilter(ctx, value ? value : field));
+            pdf_pkcs7_distinguished_name* name = pdf_signature_get_signatory(ctx, verifier, doc, field);
+            if (name) {
+                char* formatted = pdf_signature_format_distinguished_name(ctx, name);
+                // without the parts the certificate leaves empty ("o=, ou=")
+                StrVec parts;
+                Split(&parts, Str(formatted ? formatted : ""), StrL(", "), true);
+                str::Builder signer;
+                for (Str part : parts) {
+                    if (!str::EndsWith(part, StrL("="))) {
+                        signer.Append(fmt("%s%s", len(signer) > 0 ? StrL(", ") : StrL(""), part));
+                    }
+                }
+                c->signer = str::Dup(ToStr(signer));
+                fz_free(ctx, formatted);
+                pdf_signature_drop_distinguished_name(ctx, name);
+            }
+            pdf_signature_error certErr = pdf_check_certificate(ctx, verifier, doc, field);
+            c->digestOk = pdf_check_digest(ctx, verifier, doc, field) == PDF_SIGNATURE_ERROR_OKAY;
+            c->certOk = certErr == PDF_SIGNATURE_ERROR_OKAY;
+            if (!c->certOk) {
+                c->certError = str::Dup(Str(pdf_signature_error_description(certErr)));
+            }
+            c->changedAfter = pdf_signature_incremental_change_since_signing(ctx, doc, field) != 0;
+        }
+    }
+    fz_always(ctx) {
+        for (pdf_obj* field : fields) {
+            pdf_drop_obj(ctx, field);
+        }
+        pdf_drop_verifier(ctx, verifier);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        ok = false;
+    }
+    return ok;
+#else
+    (void)engine;
+    (void)out;
+    return false;
 #endif
 }
 
@@ -10602,6 +10877,202 @@ bool EngineMupdfSaveCopy(EngineBase* engine, Str path) {
     fz_catch(ctx) {
         fz_report_error(ctx);
         logf("EngineMupdfSaveCopy: saving '%s' failed: '%s'\n", path, Str(fz_caught_message(ctx)));
+    }
+    return ok;
+}
+
+// PDF bytes of a string in the stamp font's WinAnsi encoding, (escaped) for a
+// PDF string; false if it has a character WinAnsi lacks
+static bool StampTextToWinAnsi(Str text, str::Builder& out, Vec<int>& codepoints) {
+    const u8* p = (const u8*)text.s;
+    const u8* end = p + len(text);
+    while (p < end) {
+        int n = utf8RuneLen(p);
+        if (n < 1 || p + n > end) {
+            return false;
+        }
+        int cp = p[0];
+        if (n == 2) {
+            cp = ((p[0] & 0x1f) << 6) | (p[1] & 0x3f);
+        } else if (n == 3) {
+            cp = ((p[0] & 0x0f) << 12) | ((p[1] & 0x3f) << 6) | (p[2] & 0x3f);
+        } else if (n == 4) {
+            cp = ((p[0] & 0x07) << 18) | ((p[1] & 0x3f) << 12) | ((p[2] & 0x3f) << 6) | (p[3] & 0x3f);
+        }
+        p += n;
+        int b = cp < 0x80 ? cp : fz_windows_1252_from_unicode(cp);
+        if (b <= 0) {
+            return false;
+        }
+        VecAppend(codepoints, cp);
+        if (b == '(' || b == ')' || b == '\\') {
+            out.AppendChar('\\');
+            out.AppendChar((char)b);
+        } else if (b < 0x20 || b >= 0x80) {
+            out.Append(fmt("\\%03o", b));
+        } else {
+            out.AppendChar((char)b);
+        }
+    }
+    return len(codepoints) > 0;
+}
+
+// pdf_page_obj's resource dictionary of `type` (Font, ExtGState), made a
+// dictionary of the page itself if it was inherited or missing
+static pdf_obj* PageResourceDict(fz_context* ctx, pdf_document* doc, pdf_obj* pageObj, pdf_obj* type) {
+    pdf_obj* res = pdf_dict_get(ctx, pageObj, PDF_NAME(Resources));
+    if (!res) {
+        pdf_obj* inherited = pdf_dict_get_inheritable(ctx, pageObj, PDF_NAME(Resources));
+        res = inherited ? pdf_copy_dict(ctx, inherited) : pdf_new_dict(ctx, doc, 2);
+        pdf_dict_put_drop(ctx, pageObj, PDF_NAME(Resources), res);
+    }
+    pdf_obj* dict = pdf_dict_get(ctx, res, type);
+    if (!dict) {
+        dict = pdf_dict_put_dict(ctx, res, type, 2);
+    }
+    return dict;
+}
+
+bool EngineMupdfStampText(EngineBase* engine, const Vec<PdfStamp>& stamps, Str* errOut) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || !e->pdfdoc) {
+        *errOut = StrL("not a PDF");
+        return false;
+    }
+    auto* ctx = e->Ctx();
+    pdf_document* doc = e->pdfdoc;
+    ScopedRecursiveMutex pagesScope(&e->pagesLock);
+    ScopedRecursiveMutex docScope(&e->docLock);
+    fz_font* font = nullptr;
+    pdf_obj* fontRef = nullptr;
+    bool ok = true;
+    bool inOperation = false;
+    fz_var(font);
+    fz_var(fontRef);
+    fz_var(ok);
+    fz_var(inOperation);
+    fz_try(ctx) {
+        // one step of the undo journal the document keeps
+        pdf_begin_operation(ctx, doc, "Stamp text");
+        inOperation = true;
+        font = fz_new_base14_font(ctx, "Helvetica");
+        fontRef = pdf_add_simple_font(ctx, doc, font, PDF_SIMPLE_ENCODING_LATIN);
+        for (int i = 0; i < len(stamps) && ok; i++) {
+            const PdfStamp& st = stamps[i];
+            str::Builder encoded;
+            Vec<int> cps;
+            if (!StampTextToWinAnsi(st.text, encoded, cps)) {
+                *errOut = str::DupTemp(fmt("'%s' has a character the stamp's font (Latin) lacks", st.text));
+                ok = false;
+                break;
+            }
+            pdf_page* page = pdf_load_page(ctx, doc, st.pageNo - 1);
+            fz_try(ctx) {
+                // the page as it shows: rotated, from its top left, y down
+                fz_rect mediabox;
+                fz_matrix ctm;
+                pdf_page_transform(ctx, page, &mediabox, &ctm);
+                fz_rect vis = fz_transform_rect(mediabox, ctm);
+                float W = vis.x1 - vis.x0;
+                float H = vis.y1 - vis.y0;
+                float em = 0;
+                for (int cp : cps) {
+                    em += fz_advance_glyph(ctx, font, fz_encode_character(ctx, font, cp), 0);
+                }
+                float size = st.size;
+                bool diagonal = st.pos == PdfStampPos::Diagonal;
+                float angle = diagonal ? atan2f(H, W) : 0;
+                if (size <= 0) {
+                    // a watermark across 60% of the diagonal
+                    size = diagonal && em > 0 ? 0.6f * hypotf(W, H) / em : 10;
+                }
+                float w = em * size;
+                // glyph space (y up) into the page as shown (y down), turned
+                // counter-clockwise by angle
+                float c = cosf(angle), s = sinf(angle);
+                fz_point dir = {c, -s};
+                fz_point down = {s, c};
+                fz_point at;
+                if (diagonal) {
+                    // centered, the baseline a third of the size below the middle
+                    at.x = vis.x0 + W / 2 - dir.x * w / 2 + down.x * size * 0.35f;
+                    at.y = vis.y0 + H / 2 - dir.y * w / 2 + down.y * size * 0.35f;
+                } else {
+                    float m = st.margin;
+                    bool top = st.pos == PdfStampPos::TopLeft || st.pos == PdfStampPos::TopCenter ||
+                               st.pos == PdfStampPos::TopRight;
+                    bool left = st.pos == PdfStampPos::TopLeft || st.pos == PdfStampPos::BottomLeft;
+                    bool right = st.pos == PdfStampPos::TopRight || st.pos == PdfStampPos::BottomRight;
+                    at.x = vis.x0 + (left ? m : right ? W - m - w : (W - w) / 2);
+                    at.y = vis.y0 + (top ? m + size * 0.75f : H - m);
+                }
+                fz_matrix text = {c, -s, -s, -c, at.x, at.y};
+                fz_matrix tm = fz_concat(text, fz_invert_matrix(ctm));
+                pdf_obj* pageObj = page->obj;
+                TempStr fontName = fmt("SumatraStampF%d", i);
+                TempStr gsName = fmt("SumatraStampGS%d", i);
+                pdf_dict_puts(ctx, PageResourceDict(ctx, doc, pageObj, PDF_NAME(Font)), CStrTemp(fontName), fontRef);
+                pdf_obj* gs = pdf_new_dict(ctx, doc, 3);
+                pdf_dict_put(ctx, gs, PDF_NAME(Type), PDF_NAME(ExtGState));
+                pdf_dict_put_real(ctx, gs, PDF_NAME(ca), st.opacity);
+                pdf_dict_put_real(ctx, gs, PDF_NAME(CA), st.opacity);
+                pdf_dict_puts_drop(ctx, PageResourceDict(ctx, doc, pageObj, PDF_NAME(ExtGState)), CStrTemp(gsName),
+                                   pdf_add_object_drop(ctx, doc, gs));
+                // the page's own content in q / Q, so what it leaves set
+                // doesn't move or color the stamp
+                TempStr content = fmt(
+                    "\nQ\nq /%s gs %.3f %.3f %.3f rg BT /%s %.2f Tf %.4f %.4f %.4f %.4f %.2f %.2f Tm (%s) Tj ET Q\n",
+                    gsName, st.r / 255.f, st.g / 255.f, st.b / 255.f, fontName, size, tm.a, tm.b, tm.c, tm.d, tm.e,
+                    tm.f, ToStr(encoded));
+                fz_buffer* pre = fz_new_buffer_from_copied_data(ctx, (const unsigned char*)"q\n", 2);
+                fz_buffer* post = fz_new_buffer_from_copied_data(ctx, (const unsigned char*)content.s, len(content));
+                pdf_obj* preRef = pdf_add_stream(ctx, doc, pre, nullptr, 0);
+                pdf_obj* postRef = pdf_add_stream(ctx, doc, post, nullptr, 0);
+                fz_drop_buffer(ctx, pre);
+                fz_drop_buffer(ctx, post);
+                pdf_obj* old = pdf_dict_get(ctx, pageObj, PDF_NAME(Contents));
+                pdf_obj* arr = pdf_new_array(ctx, doc, 3);
+                pdf_array_push_drop(ctx, arr, preRef);
+                if (pdf_is_array(ctx, old)) {
+                    for (int k = 0; k < pdf_array_len(ctx, old); k++) {
+                        pdf_array_push(ctx, arr, pdf_array_get(ctx, old, k));
+                    }
+                } else if (old) {
+                    pdf_array_push(ctx, arr, old);
+                }
+                pdf_array_push_drop(ctx, arr, postRef);
+                pdf_dict_put_drop(ctx, pageObj, PDF_NAME(Contents), arr);
+            }
+            fz_always(ctx) {
+                fz_drop_page(ctx, (fz_page*)page);
+            }
+            fz_catch(ctx) {
+                fz_rethrow(ctx);
+            }
+        }
+        if (ok) {
+            pdf_end_operation(ctx, doc);
+        } else {
+            pdf_abandon_operation(ctx, doc);
+        }
+        inOperation = false;
+    }
+    fz_always(ctx) {
+        pdf_drop_obj(ctx, fontRef);
+        fz_drop_font(ctx, font);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        *errOut = str::DupTemp(Str(fz_caught_message(ctx)));
+        ok = false;
+        if (inOperation) {
+            fz_try(ctx) {
+                pdf_abandon_operation(ctx, doc);
+            }
+            fz_catch(ctx) {
+                fz_report_error(ctx);
+            }
+        }
     }
     return ok;
 }
@@ -11777,6 +12248,142 @@ void EngineMupdfRefreshModifiedState(EngineBase* engine) {
         return;
     }
     e->modifiedAnnotations = (pos != e->savedUndoPos);
+}
+
+StyledPage::~StyledPage() {
+    for (StyledSpan& s : spans) {
+        str::Free(s.text);
+    }
+    for (StyledImage& i : images) {
+        str::Free(i.png);
+    }
+}
+
+// the pictures mupdf keeps in the structured text; a smaller one is an
+// ornament or a rule, not worth a file
+constexpr int kStyledImageMinPx = 24;
+
+bool EngineMupdfGetStyledPage(EngineBase* engine, int pageNo, StyledPage& out) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e) {
+        return false;
+    }
+    ScopedRecursiveMutex pagesScope(&e->pagesLock);
+    ScopedMutex renderScope(&e->renderLock);
+    FzPageInfo* pageInfo = GetFzPageInfoLocked(e, e->LocationFromPageNo(pageNo), true, nullptr);
+    if (!pageInfo || !pageInfo->page) {
+        return false;
+    }
+    auto* ctx = e->Ctx();
+    ScopedRecursiveMutex docScope(&e->docLock);
+    fz_stext_page* stext = nullptr;
+    fz_var(stext);
+    // contents only: annotations and form fields aren't the document's text
+    fz_stext_options opts = NewTextPageOptions(FZ_STEXT_PRESERVE_IMAGES);
+    fz_try(ctx) {
+        stext = NewStextPage(ctx, pageInfo->page, &opts, nullptr, StextRun::Contents);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+    }
+    if (!stext) {
+        return false;
+    }
+    out.mediabox = ToRectF(stext->mediabox);
+    int blockNo = 0;
+    int lineNo = 0;
+    str::Builder run;
+    for (fz_stext_block* b = stext->first_block; b; b = b->next, blockNo++) {
+        if (b->type == FZ_STEXT_BLOCK_IMAGE) {
+            fz_image* img = b->u.i.image;
+            if (!img || img->w < kStyledImageMinPx || img->h < kStyledImageMinPx) {
+                continue;
+            }
+            fz_buffer* buf = nullptr;
+            fz_var(buf);
+            fz_try(ctx) {
+                buf = fz_new_buffer_from_image_as_png(ctx, img, fz_default_color_params);
+                unsigned char* data = nullptr;
+                size_t n = fz_buffer_storage(ctx, buf, &data);
+                if (data && n > 0 && n <= (size_t)INT_MAX) {
+                    StyledImage si;
+                    si.block = blockNo;
+                    si.box = ToRectF(b->bbox);
+                    si.png = str::Dup(Str((char*)data, (int)n));
+                    VecAppend(out.images, si);
+                }
+            }
+            fz_always(ctx) {
+                fz_drop_buffer(ctx, buf);
+            }
+            fz_catch(ctx) {
+                fz_report_error(ctx);
+            }
+            continue;
+        }
+        if (b->type != FZ_STEXT_BLOCK_TEXT) {
+            continue;
+        }
+        for (fz_stext_line* l = b->u.t.first_line; l; l = l->next, lineNo++) {
+            StyledSpan cur;
+            bool have = false;
+            auto flush = [&]() {
+                if (have && len(run) > 0) {
+                    cur.text = str::Dup(ToStr(run));
+                    VecAppend(out.spans, cur);
+                }
+                run.Reset();
+                have = false;
+            };
+            float prevRight = 0;
+            int prevC = ' ';
+            for (fz_stext_char* ch = l->first_char; ch; ch = ch->next) {
+                // a word gap the PDF has no space for (each word placed on its
+                // own): the space goes with the text before it
+                float gap = ch->quad.ll.x - prevRight;
+                if (have && prevC != ' ' && ch->c != ' ' && gap > ch->size * 0.2f) {
+                    run.AppendChar(' ');
+                }
+                // a gap wider than a few spaces starts a new span, so the
+                // cells of a table row each have their box
+                bool wideGap = have && gap > ch->size;
+                prevRight = ch->quad.lr.x;
+                prevC = ch->c;
+                // an EPUB's bold without a bold face is drawn as fake bold
+                fz_font_flags_t* ff = ch->font ? fz_font_flags(ch->font) : nullptr;
+                bool bold = (ch->flags & FZ_STEXT_BOLD) != 0 || (ch->font && fz_font_is_bold(ctx, ch->font)) ||
+                            (ff && ff->fake_bold);
+                bool italic = (ch->font && fz_font_is_italic(ctx, ch->font)) || (ff && ff->fake_italic);
+                bool mono = ch->font && fz_font_is_monospaced(ctx, ch->font);
+                // one span per style; sizes within half a point are one style
+                bool same = have && !wideGap && cur.bold == bold && cur.italic == italic && cur.mono == mono &&
+                            fabsf(cur.size - ch->size) < 0.5f;
+                if (!same) {
+                    flush();
+                    cur = StyledSpan();
+                    cur.size = ch->size;
+                    cur.bold = bold;
+                    cur.italic = italic;
+                    cur.mono = mono;
+                    cur.block = blockNo;
+                    cur.line = lineNo;
+                    cur.lineBox = ToRectF(l->bbox);
+                    cur.box = RectF();
+                    have = true;
+                }
+                if (ch->c != ' ') {
+                    RectF cb = ToRectF(fz_rect_from_quad(ch->quad));
+                    cur.box = cur.box.IsEmpty() ? cb : cur.box.Union(cb);
+                }
+                char buf[8];
+                int n = fz_runetochar(buf, ch->c);
+                run.Append(Str(buf, n));
+            }
+            flush();
+        }
+    }
+    fz_drop_stext_page(ctx, stext);
+    return true;
 }
 
 // the mupdf engine also renders epub, mobi, fb2, xps, svg and more; only a real
@@ -12992,4 +13599,17 @@ TempStr EngineMupdfGetPdfInfo(Str path, Str password) {
     fz_drop_buffer(ctx, buf);
     fz_drop_context(ctx);
     return res;
+}
+
+// The free text being edited in place is left out of rendering, so the page
+// shows through the edit box without the annotation's text doubled (#6534).
+// nullptr ends that. The caller re-renders the page.
+void EngineMupdfSetEditedAnnot(EngineBase* engine, Annotation* annot) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e) {
+        return;
+    }
+    ScopedMutex render(&e->renderLock);
+    ScopedRecursiveMutex doc(&e->docLock);
+    e->editedAnnot = annot ? annot->pdfannot : nullptr;
 }

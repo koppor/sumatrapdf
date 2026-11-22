@@ -5,9 +5,8 @@
 // ng: orig's Selection.cpp. The model (SelectionOnPage, the text and
 // rectangular selection state machine, select-all, copy) is orig's; what was
 // win32 is gpui here: Gfx -> gpui::PaintCtx, SetCapture / KillTimer ->
-// DocCanvas, the clipboard -> gpui::ClipboardSetText. Copy-as-image, the UIA
-// notification and the touch selection handles are not ported; see
-// docs/port-progress.md.
+// DocCanvas, the clipboard -> gpui::ClipboardSetText. Copy-as-image and the
+// UIA notification are not ported; see docs/port-progress.md.
 
 #include "gui/GpuiBridge.h"
 #else
@@ -20,6 +19,10 @@
 #include <uiautomationcore.h>
 #endif
 #include "gui/Dpi.h"
+#if defined(SUMATRA_NG) && OS_WIN
+// the clipboard: gpui's is text only
+#include "base/Win.h"
+#endif
 #if !defined(SUMATRA_NG)
 #include "base/AutoWin.h"
 #include "base/Win.h"
@@ -154,12 +157,10 @@ void DeleteOldSelectionInfo(MainWindow* win, bool alsoTextSel) {
     win->showSelection = false;
     win->selectionMeasure = SizeF();
     win->selectionDragEdge = SelectionDragEdge::None;
-#if !defined(SUMATRA_NG)
     // the handles belong to the selection: a later keyboard or menu selection
     // must not show them
     win->touchSelHandles = false;
     win->touchSelDragging = TouchSelHandle::None;
-#endif
     WindowTab* tab = win->CurrentTab();
     if (!tab) {
         return;
@@ -564,14 +565,13 @@ static void PaintTransparentQuads(Gfx* gfx, Rect screenRc, Vec<Point>& pts, Colo
 #endif
 }
 
-#if defined(SUMATRA_NG)
-void PaintSelection(MainWindow* win, gp::PaintCtx* ctx) {
-#else
 // Touch selection handles: a dot under each end of the selection, big enough
 // to grab with a fingertip. kTouchSelHandleDip is the dot's diameter; the
 // touchable area around it is padded so a slightly-off tap still lands.
 constexpr int kTouchSelHandleDip = 14;
 constexpr int kTouchSelHandleHitPadDip = 10;
+// How far from the word a long press may land and still count as meaning it.
+constexpr int kTouchLongPressMaxDistDip = 40;
 
 bool GetTouchSelHandleRects(MainWindow* win, Rect& startOut, Rect& endOut) {
     DisplayModel* dm = win->AsFixed();
@@ -626,17 +626,111 @@ void HideTouchSelHandles(MainWindow* win) {
     win->RedrawCanvas();
 }
 
+// A long press over a word selects it and puts a drag handle under each end.
+// Returns true when it selected something near (x, y), in canvas coordinates.
+bool TouchSelectWordAt(MainWindow* win, int x, int y) {
+    DisplayModel* dm = win->AsFixed();
+    Point pt(x, y);
+    int pageNo = dm->GetPageNoByPoint(pt);
+    logf("touch: long press overText=%d pageNo=%d\n", (int)dm->IsOverText(pt), pageNo);
+    if (!win->ctrl->ValidPageNo(pageNo)) {
+        return false;
+    }
+    PointF ptf = dm->CvtFromScreen(pt, pageNo);
+    dm->textSelection->SelectWordAt(pageNo, ptf.x, ptf.y);
+
+    DeleteOldSelectionInfo(win, false);
+    WindowTab* tab = win->CurrentTab();
+    tab->selectionOnPage = SelectionOnPage::FromTextSelect(&dm->textSelection->result);
+    int nRects = tab->selectionOnPage ? len(*tab->selectionOnPage) : 0;
+    logf("touch: long press selected %d rect(s)\n", nRects);
+    if (nRects == 0) {
+        return false;
+    }
+    // SelectWordAt() snaps to the nearest glyph, which is what a fingertip
+    // needs -- it is far bigger than a letter and IsOverText() rejects most
+    // presses that plainly meant a word. The nearest word can be anywhere on
+    // the page though, so it only counts if the press landed near it.
+    Rect wordRc = (*tab->selectionOnPage)[0].GetRect(dm);
+    for (SelectionOnPage& s : *tab->selectionOnPage) {
+        wordRc = wordRc.Union(s.GetRect(dm));
+    }
+    int maxDist = DpiScale(kTouchLongPressMaxDistDip);
+    Rect nearRc = wordRc;
+    nearRc.Inflate(maxDist, maxDist);
+    if (!nearRc.Contains(pt)) {
+        logf("touch: nearest word at %d,%d %dx%d is too far from %d,%d, ignoring\n", wordRc.x, wordRc.y, wordRc.dx,
+             wordRc.dy, x, y);
+        DeleteOldSelectionInfo(win, true);
+        return false;
+    }
+    win->showSelection = true;
+    win->touchSelHandles = true;
+    win->touchSelDragging = TouchSelHandle::None;
+    ScheduleRepaint(win, 0);
+    return true;
+}
+
+// Dragging a touch selection handle: the other end stays put and the selection
+// is extended from it to wherever the finger is now.
+void DragTouchSelHandle(MainWindow* win, int x, int y) {
+    DisplayModel* dm = win->AsFixed();
+    if (!dm || !dm->textSelection) {
+        return;
+    }
+    // aim at the text the handle belongs to, not at the fingertip below it
+    int handleDy = DpiScale(8);
+    Point pt(x, y - handleDy);
+    int pageNo = dm->GetPageNoByPoint(pt);
+    if (!win->ctrl->ValidPageNo(pageNo)) {
+        logf("touch: DragTouchSelHandle at %d,%d: no page there\n", x, y);
+        return;
+    }
+    int fromPage, fromGlyph, toPage, toGlyph;
+    dm->textSelection->GetGlyphRange(&fromPage, &fromGlyph, &toPage, &toGlyph);
+    // anchor on the end that isn't moving
+    if (win->touchSelDragging == TouchSelHandle::Start) {
+        dm->textSelection->StartAt(toPage, toGlyph);
+    } else {
+        dm->textSelection->StartAt(fromPage, fromGlyph);
+    }
+    PointF ptf = dm->CvtFromScreen(pt, pageNo);
+    dm->textSelection->SelectUpTo(pageNo, ptf.x, ptf.y);
+
+    // the selection is rebuilt under the handles: they and the drag stay
+    TouchSelHandle dragging = win->touchSelDragging;
+    DeleteOldSelectionInfo(win, false);
+    win->touchSelHandles = true;
+    win->touchSelDragging = dragging;
+    WindowTab* tab = win->CurrentTab();
+    tab->selectionOnPage = SelectionOnPage::FromTextSelect(&dm->textSelection->result);
+    win->showSelection = tab->selectionOnPage != nullptr;
+    ScheduleRepaint(win, 0);
+}
+
+#if defined(SUMATRA_NG)
+static void PaintTouchSelHandles(MainWindow* win, gp::PaintCtx* ctx) {
+#else
 static void PaintTouchSelHandles(MainWindow* win, Gfx* gfx) {
+#endif
     Rect start, end;
     if (!win->touchSelHandles || !GetTouchSelHandleRects(win, start, end)) {
         return;
     }
     ParsedColor* parsedCol = GetPrefsColor(gSettings->fixedPageUI.selectionColor);
     Color col = parsedCol->col;
+#if defined(SUMATRA_NG)
+    CanvasDrawEllipse(ctx, start, col, 0);
+    CanvasDrawEllipse(ctx, end, col, 0);
+#else
     gfx->FillEllipse(start, col);
     gfx->FillEllipse(end, col);
+#endif
 }
 
+#if defined(SUMATRA_NG)
+void PaintSelection(MainWindow* win, gp::PaintCtx* ctx) {
+#else
 void PaintSelection(MainWindow* win, Gfx* gfx) {
 #endif
     ReportIf(!win->AsFixed());
@@ -723,7 +817,9 @@ void PaintSelection(MainWindow* win, Gfx* gfx) {
         PaintTransparentRectangles(gfx, win->canvasRc, rects, parsedCol->col, alpha, 1, /*drawBorder*/ true);
 #endif
     }
-#if !defined(SUMATRA_NG)
+#if defined(SUMATRA_NG)
+    PaintTouchSelHandles(win, ctx);
+#else
     PaintTouchSelHandles(win, gfx);
 #endif
 }
@@ -872,15 +968,13 @@ Pixmap* RenderSelectionsAsPixmap(DisplayModel* dm, const Vec<SelectionOnPage>& s
     return combined;
 }
 
-#if defined(SUMATRA_NG)
-// ng: orig also puts the first selection rectangle on the clipboard as a
-// bitmap (CF_BITMAP); gpui's clipboard is text only, so only the text goes.
-void CopySelectionToClipboard(MainWindow* win) {
-#else
+#if !defined(SUMATRA_NG)
 RenderedBitmap* RenderSelectionsAsRenderedBitmap(DisplayModel* dm, const Vec<SelectionOnPage>& selections) {
     return RenderedBitmapFromPixmap(RenderSelectionsAsPixmap(dm, selections));
 }
+#endif
 
+#if OS_WIN
 static bool CopySelectionImageToOpenClipboard(WindowTab* tab, bool appendOnly) {
     DisplayModel* dm = tab->AsFixed();
     if (!dm || !tab->selectionOnPage || len(*tab->selectionOnPage) == 0) {
@@ -913,29 +1007,35 @@ static bool CopySelectionImageToOpenClipboard(WindowTab* tab, bool appendOnly) {
     delete rbmp;
     return ok;
 }
+#endif
 
+#if !defined(SUMATRA_NG)
 void CopySelectionAsImageToClipboard(MainWindow* win) {
-#endif
     WindowTab* tab = win->CurrentTab();
-#if defined(SUMATRA_NG)
-    if (!tab || !tab->selectionOnPage) {
-#else
     if (!tab || !HasPermission(Perm::CopySelection)) {
-#endif
         return;
     }
-#if !defined(SUMATRA_NG)
     if (!OpenClipboardForUpdate()) {
         return;
     }
     AutoCall closeClipboard(CloseClipboardAfterUpdate);
     CopySelectionImageToOpenClipboard(tab, false);
 }
+#endif
 
+// the selection's text and, unless it is a text selection, an image of its
+// first rectangle. Off Windows, gpui's clipboard is text only.
 void CopySelectionToClipboard(MainWindow* win) {
     WindowTab* tab = win->CurrentTab();
+#if defined(SUMATRA_NG)
+    if (!tab || !tab->selectionOnPage) {
+        return;
+    }
+#else
     ReportIf(len(*tab->selectionOnPage) == 0 && win->mouseAction != MouseAction::SelectingText);
+#endif
 
+#if OS_WIN
     if (!OpenClipboardForUpdate()) {
         return;
     }
@@ -953,29 +1053,25 @@ void CopySelectionToClipboard(MainWindow* win) {
         args.hwndParent = win->hwndCanvas;
         args.msg = Tr("Copying text was denied (copying as image only)");
         ShowNotification(args);
+#endif
     } else {
         selText = GetSelectedTextTemp(tab, StrL("\r\n"), isTextOnlySelectionOut);
     }
 
+#if OS_WIN
     if (len(selText) > 0) {
         AppendTextToClipboard(selText);
     }
-
     if (isTextOnlySelectionOut) {
         // don't also copy the first line of a text selection as an image
-#endif
         return;
     }
-#if defined(SUMATRA_NG)
-    selText = GetSelectedTextTemp(tab, StrL("\r\n"), isTextOnlySelectionOut);
-    logf("CopySelectionToClipboard: %d bytes, text-only selection: %d\n", len(selText), isTextOnlySelectionOut ? 1 : 0);
-    if (len(selText) == 0) {
-        return;
-    }
-    CanvasSetClipboardText(win, selText);
-#else
-
     CopySelectionImageToOpenClipboard(tab, true);
+#else
+    logf("CopySelectionToClipboard: %d bytes, text-only selection: %d\n", len(selText), isTextOnlySelectionOut ? 1 : 0);
+    if (len(selText) > 0) {
+        CanvasSetClipboardText(win, selText);
+    }
 #endif
 }
 

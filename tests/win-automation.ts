@@ -14,7 +14,7 @@
 
 import { IS_MAC } from "./host.ts";
 import { macClick } from "./mac-control.ts";
-import { cmdId, drainProcStderr, EXE, SLOW_BUILD_FACTOR, setFailureContext, USE_NG } from "./util.ts";
+import { cmdId, drainProcStderr, EXE, pollUntil, SLOW_BUILD_FACTOR, setFailureContext, USE_NG } from "./util.ts";
 import {
   testWindowPos,
   injectTouch,
@@ -303,6 +303,26 @@ export function waitForFrame(pid: number, timeoutMs = 12000): Promise<number> {
 }
 
 // the document canvas (child of the frame)
+export type CanvasBox = { x: number; y: number; w: number; h: number };
+
+// Where the document is drawn in captureWindowPixels(canvas), in its client
+// coordinates: all of orig's canvas window; ng draws the document in the frame,
+// under its tabs and toolbar, at the canvas rect of the layout.
+export async function canvasBox(client: ControlClient, canvas: number): Promise<CanvasBox> {
+  if (!USE_NG) {
+    const rc = getClientRect(canvas);
+    return { x: 0, y: 0, w: rc.right - rc.left, h: rc.bottom - rc.top };
+  }
+  const lay = String((await client.request(ControlCommand.TestLayout, []))[1] ?? "");
+  const scale = Number(/scale=([0-9.]+)/.exec(lay)?.[1] ?? "1") || 1;
+  const m = /item name=canvas visible=\d+ rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+)/.exec(lay);
+  if (!m) {
+    throw new Error(`canvasBox: no canvas in the layout:\n${lay}`);
+  }
+  const [x, y, w, h] = m.slice(1).map((v) => Math.round(Number(v) / scale)) as [number, number, number, number];
+  return { x, y, w, h };
+}
+
 export function findCanvas(frame: number): number {
   if (IS_MAC) {
     return frame;
@@ -565,6 +585,41 @@ export async function readContextMenuTree(hwnd: number): Promise<MenuItem[]> {
   return items;
 }
 
+// Orig only: each top-level menu of the menu bar, read from its popup (the bar is
+// a toolbar, not an HMENU). Turns the menu bar on first; it is off with tabs.
+export async function readMenuBarTree(frame: number): Promise<MenuItem[][]> {
+  const kMenuBarCmdFirst = 50000; // Menu.cpp: the bar posts this + top-level index
+  const kMenuReopenMs = 550; // the bar ignores a re-open this soon after a close
+  sendMessage(frame, WM_COMMAND, cmdId("CmdToggleMenuBar"), 0);
+  await sleep(300);
+  const out: MenuItem[][] = [];
+  for (let i = 0; i < 20; i++) {
+    postMessage(frame, WM_COMMAND, kMenuBarCmdFirst + i, 0);
+    const popup = await waitForContextMenu(1500);
+    if (!popup) {
+      break;
+    }
+    const hmenu = getPopupMenuHandle(popup);
+    out.push(hmenu ? readMenuTree(hmenu) : []);
+    postMessage(popup, WM_KEYDOWN, VK_ESCAPE, 0);
+    await pollUntil(findVisiblePopupMenu, (h) => !h, { timeoutMs: 2000, error: "menu bar popup did not close" });
+    await sleep(kMenuReopenMs);
+  }
+  return out;
+}
+
+function findVisiblePopupMenu(): number {
+  let menu = 0;
+  enumWindows((h) => {
+    if (getClassName(h) === "#32768" && isWindowVisible(h)) {
+      menu = h;
+      return false;
+    }
+    return true;
+  });
+  return menu;
+}
+
 // Depth-first search for a submenu by its label (exact, & already stripped).
 export function findSubMenu(items: MenuItem[], label: string): MenuItem | null {
   for (const it of items) {
@@ -608,9 +663,21 @@ export async function waitForPalette(
 ): Promise<{ palette: number; edit: number }> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    // macOS has no HWNDs to find: the control channel says when the palette is
+    // up, and 1 stands in for the handles, as for launchControlled's frame
+    if (IS_MAC) {
+      if ((await client.request(ControlCommand.TestCommandPalette, []))[0] === 0) {
+        return { palette: 1, edit: 1 };
+      }
+      if (Date.now() > deadline) {
+        return { palette: 0, edit: 0 };
+      }
+      await sleep(50);
+      continue;
+    }
     const handles = findPalette(frame);
     let ready = handles.palette !== 0 && handles.edit !== 0;
-    if (ready && USE_NG && !IS_MAC) {
+    if (ready && USE_NG) {
       ready = (await client.request(ControlCommand.TestCommandPalette, []))[0] === 0;
     }
     if (ready) {

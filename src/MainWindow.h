@@ -3,6 +3,7 @@
 
 struct DoubleBuffer;
 struct TabGroup;
+struct StripGroup;
 struct Edit;
 struct WebviewWnd;
 struct LinkHandler;
@@ -385,6 +386,8 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     // keeps the sequence of tab selection. This is needed for restoration
     // of the previous tab when the current one is closed. (Points into tabs.)
     Vec<WindowTab*>* tabSelectionHistory = nullptr;
+    // groups of tabs in the tab strip (owned), in strip order
+    Vec<StripGroup*> stripGroups;
 
     ButtonInfo captionBtn[CB_BTN_COUNT];
     // where a caption button was pressed (client coords): dragging the app icon
@@ -394,6 +397,8 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     Rect captionRect;
     HWND hwndCaptionOverlay = nullptr;
     bool captionOverlayShown = false;
+    // docked toolbar's y before the revealed caption pushed it down; -1 if not
+    int toolbarYBeforeCaption = -1;
     // SidebarAutoHide: the sidebar floats over the canvas in sidebarOverlayRc
     // (frame client coords), shown while the mouse or the focus is in it
     bool sidebarOverlayShown = false;
@@ -755,6 +760,9 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     LARGE_INTEGER scrollAnimLastTime{};
     bool scrollAnimActive = false;
     bool scrollAnimHiResTimer = false; // timeBeginPeriod(1) while animating
+    // the document and DisplayModel::viewChanges scrollTargetY was computed for
+    DisplayModel* scrollAnimDm = nullptr;
+    int scrollAnimViewChanges = 0;
 
     // suppress Read Aloud user-scroll detection during programmatic follow scrolling
     mutable bool readAloudScrollFromCode = false;
@@ -768,6 +776,14 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
         int page = 0;
         int hideStep = 0; // value used to gradually hide the markers
     } fwdSearchMark;
+
+    // ring blinked around the match Find Next/Prev landed on (FlashFindMatch)
+    struct {
+        bool show = false; // ring visible in the current blink step
+        Vec<Rect> rects;   // match in user coordinates
+        int page = 0;
+        int step = 0;
+    } findFlash;
 
     StressTest* stressTest = nullptr;
 

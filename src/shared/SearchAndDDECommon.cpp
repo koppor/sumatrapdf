@@ -34,6 +34,7 @@
 #include "AppTools.h"
 #include "ExplorerQuickLook.h"
 #include "Selection.h"
+#include "SelectTextKeyboard.h"
 #include "FindBar.h"
 #include "FindWindow.h"
 #include "Favorites.h"
@@ -1154,6 +1155,40 @@ LRESULT OnDDExecute(HWND hwnd, WPARAM wp, LPARAM lp) {
 
 #endif // OS_WIN
 
+// Blink a ring around the match: a highlight on a busy page (a PCB drawing)
+// is easy to miss, a blinking one isn't (#6536)
+static void StartFindFlash(MainWindow* win, Vec<TextSel>* result) {
+    auto& ff = win->findFlash;
+    ff.show = false;
+    VecReset(ff.rects);
+    if (!gSettings->flashFindMatch) {
+        return;
+    }
+    // a match spanning pages rings only its first part
+    ff.page = (*result)[0].pageNo;
+    for (int i = 0; i < len(*result); i++) {
+        TextSel& ts = (*result)[i];
+        if (ts.pageNo == ff.page) {
+            VecAppend(ff.rects, ts.rect);
+        }
+    }
+    ff.step = 0;
+    ff.show = true;
+    ArmFindFlashTimer(win, kFindFlashIntervalMs);
+}
+
+// advance the blink; false when it's over and the timer should stop
+bool FindFlashStep(MainWindow* win) {
+    auto& ff = win->findFlash;
+    ff.step++;
+    if (ff.step >= kFindFlashSteps || len(ff.rects) == 0) {
+        ff.show = false;
+        return false;
+    }
+    ff.show = (ff.step % 2) == 0;
+    return true;
+}
+
 // goToPage: scroll to the match's page even when it's already shown (a new
 // search). Moving between matches never adds a nav point: the search's start
 // view is already in the history (MarkSearchStart), so Back returns there
@@ -1178,13 +1213,19 @@ void ShowSearchResult(MainWindow* win, Vec<TextSel>* result, bool goToPage) {
     // selection highlight is separate and survives searching (issue #5737).
     dm->ShowResultRectToScreen(result);
     InvalidateFindMatchPaintCache();
+    StartFindFlash(win, result);
+    // a find's own match (not the DDE GotoPageWord one) carries its glyph range
+    if (result == &dm->textSearch->result) {
+        SelectTextWithKeyboardOnFindResult(win, dm->textSearch);
+    }
     ScheduleRepaint(win, 0);
 }
 
 void ClearSearchResult(MainWindow* win) {
     // clear only the find-match highlights, never the user's text selection:
     // find and selection highlights are tracked independently (issue #5737)
-    ClearFindMatches(win); // also invalidates the find-match paint cache
+    ClearFindMatches(win);          // also invalidates the find-match paint cache
+    VecReset(win->findFlash.rects); // also stops the blink
     ScheduleRepaint(win, 0);
 }
 
@@ -1627,13 +1668,17 @@ static void CountEndTask(CountEndTaskData* d) {
     AutoDelete delData(d);
     MainWindow* win = d->win;
     CountThreadData* ctd = d->ctd;
-    if (!IsMainWindowValidAndNotClosing(win)) {
+    if (!IsMainWindowValid(win)) {
         return;
     }
     if (win->findCountThread != ctd->thread) {
         return; // superseded (or already joined by AbortCount)
     }
+    // the handle goes away with ctd: a closing window's AbortCount would wait on it
     win->findCountThread = nullptr;
+    if (win->isBeingClosed) {
+        return;
+    }
     if (win->findCountEpoch == ctd->epoch) {
         // not canceled: install the freshly built cache (steal text from ctd)
         str::FreePtr(&win->findCountText);
@@ -2537,6 +2582,45 @@ Str HandleCmdCommand(HWND hwnd, Str cmd, bool* ack) {
 
 #if OS_WIN
 
+// returns the document position currently under the mouse cursor, in PDF points
+// -- the same unit as the "pt" cursor-position notification and .smx files
+// (issue #1411). page is 0 if the cursor isn't over a page.
+static Str HandleGetMousePosCmd(Str cmd, bool* ack, str::Builder& res) {
+    Str next = str::Parse(cmd, "[GetMousePos()]");
+    if (str::IsNull(next)) {
+        next = str::Parse(cmd, "[GetMousePos]");
+    }
+    if (str::IsNull(next)) {
+        return {};
+    }
+    *ack = true;
+    Point pos;
+    DisplayModel* dm = DdeMousePosModel(&pos);
+    if (!dm) {
+        res.Append(StrL("error: no document\n"));
+        return next;
+    }
+    int pageNo = dm->GetPageNoByPoint(pos);
+    bool validPage = dm->ValidPageNo(pageNo);
+    PointF pt = dm->CvtFromScreen(pos);
+    // match FormatCursorPositionTemp's "pt" computation exactly
+    EngineBase* engine = dm->GetEngine();
+    float dpi = engine->fileDPI;
+    float x = pt.x < 0 ? 0 : pt.x;
+    float y = pt.y < 0 ? 0 : pt.y;
+    double xPt = (double)x / dpi * 72.0;
+    double yPt = (double)y / dpi * 72.0;
+    res.Append(fmt("page: %d\n", validPage ? pageNo : 0));
+    res.Append(fmt("x: %.2f\n", xPt));
+    res.Append(fmt("y: %.2f\n", yPt)); // MuPDF convention: origin top-left, y down
+    if (validPage) {
+        // also provide PDF/Adobe coordinates: origin bottom-left, y up (#1411)
+        double pageHeightPt = (double)engine->PageMediabox(pageNo).dy / dpi * 72.0;
+        res.Append(fmt("ypdf: %.2f\n", pageHeightPt - yPt));
+    }
+    return next;
+}
+
 static bool HandleRequestCmds(Str cmd, str::Builder& rsp) {
     bool didHandle = false;
     while (cmd) {
@@ -2547,7 +2631,7 @@ static bool HandleRequestCmds(Str cmd, str::Builder& rsp) {
             nextCmd = HandleGetOpenFilesCmd(cmd, &didHandle, rsp);
         }
         if (str::IsNull(nextCmd)) {
-            nextCmd = HandleAppRequestCmd(cmd, &didHandle, rsp);
+            nextCmd = HandleGetMousePosCmd(cmd, &didHandle, rsp);
         }
         if (str::IsNull(nextCmd)) {
             TempStr tmp;
@@ -2893,4 +2977,46 @@ void PaintForwardSearchMark(MainWindow* win, PaintRef ctx) {
         (u8)(0x5f * 1.0f * (float)(kHideFwdSearchMarkSteps - win->fwdSearchMark.hideStep) / kHideFwdSearchMarkSteps);
     ParsedColor* parsedCol = GetPrefsColor(gSettings->forwardSearch.highlightColor);
     PaintTransparentRectangles(ctx, FindPaintClipRc(win, dm), rects, parsedCol->col, alpha);
+}
+
+static void AppendRing(Vec<Rect>& out, Rect r, int thick) {
+    VecAppend(out, Rect(r.x, r.y, r.dx, thick));
+    VecAppend(out, Rect(r.x, r.y + r.dy - thick, r.dx, thick));
+    VecAppend(out, Rect(r.x, r.y + thick, thick, r.dy - 2 * thick));
+    VecAppend(out, Rect(r.x + r.dx - thick, r.y + thick, thick, r.dy - 2 * thick));
+}
+
+// ring around the match, drawn outside the text so it doesn't hide it. The
+// white halo keeps it visible when the page is the ring's color (#6536)
+void PaintFindFlash(MainWindow* win, PaintRef ctx) {
+    auto& ff = win->findFlash;
+    DisplayModel* dm = win->AsFixed();
+    if (!ff.show || !dm || len(ff.rects) == 0) {
+        return;
+    }
+    PageInfo* pageInfo = dm->GetPageInfo(ff.page);
+    if (!pageInfo || 0.0 == pageInfo->visibleRatio) {
+        return;
+    }
+
+    Rect r = dm->CvtToScreen(ff.page, ToRectF(ff.rects[0]));
+    for (int i = 1; i < len(ff.rects); i++) {
+        r = r.Union(dm->CvtToScreen(ff.page, ToRectF(ff.rects[i])));
+    }
+    constexpr int kGap = 5;
+    constexpr int kThick = 3;
+    constexpr int kHalo = 2;
+    r.Inflate(kGap + kThick, kGap + kThick);
+
+    Rect clipRc = FindPaintClipRc(win, dm);
+    Vec<Rect> halo;
+    Rect haloRc = r;
+    haloRc.Inflate(kHalo, kHalo);
+    AppendRing(halo, haloRc, kThick + 2 * kHalo);
+    PaintTransparentRectangles(ctx, clipRc, halo, kColWhite, 0xff, 0);
+
+    Vec<Rect> ring;
+    AppendRing(ring, r, kThick);
+    ParsedColor* parsedCol = GetPrefsColor(gSettings->forwardSearch.highlightColor);
+    PaintTransparentRectangles(ctx, clipRc, ring, parsedCol->col, 0xff, 0);
 }

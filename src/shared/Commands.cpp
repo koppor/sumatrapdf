@@ -382,6 +382,34 @@ const CommandInfo gCommands[] = {
     {CmdViewAsHex, "CmdViewAsHex\0", StrL("View As Hex")},
     {CmdAIChatWithCustomAPI, "CmdAIChatWithCustomAPI\0", StrL("Custom AI chat...")},
     {CmdSaveTrimmedPagesAs, "CmdSaveTrimmedPagesAs\0", StrL("Save Trimmed Pages As...")},
+    {CmdCaretUp, "CmdCaretUp\0", StrL("Move Caret Up")},
+    {CmdCaretDown, "CmdCaretDown\0", StrL("Move Caret Down")},
+    {CmdCaretLeft, "CmdCaretLeft\0", StrL("Move Caret Left")},
+    {CmdCaretRight, "CmdCaretRight\0", StrL("Move Caret Right")},
+    {CmdCaretWordLeft, "CmdCaretWordLeft\0", StrL("Move Caret One Word Left")},
+    {CmdCaretWordRight, "CmdCaretWordRight\0", StrL("Move Caret One Word Right")},
+    {CmdCaretLineStart, "CmdCaretLineStart\0", StrL("Move Caret To Line Start")},
+    {CmdCaretLineEnd, "CmdCaretLineEnd\0", StrL("Move Caret To Line End")},
+    {CmdCaretPageUp, "CmdCaretPageUp\0", StrL("Move Caret Page Up")},
+    {CmdCaretPageDown, "CmdCaretPageDown\0", StrL("Move Caret Page Down")},
+    {CmdCaretDocStart, "CmdCaretDocStart\0", StrL("Move Caret To Document Start")},
+    {CmdCaretDocEnd, "CmdCaretDocEnd\0", StrL("Move Caret To Document End")},
+    {CmdEditAnnotationText, "CmdEditAnnotationText\0", StrL("Edit Annotation Text")},
+    {CmdStripGroupNew, "CmdStripGroupNew\0", StrL("Add Tab to New Group")},
+    {CmdStripGroupAddTab, "CmdStripGroupAddTab\0", StrL("Add Tab to Group")},
+    {CmdStripGroupRemoveTab, "CmdStripGroupRemoveTab\0", StrL("Remove Tab from Group")},
+    {CmdStripGroupToggle, "CmdStripGroupToggle\0", StrL("Collapse / Expand Group")},
+    {CmdStripGroupRename, "CmdStripGroupRename\0", StrL("Rename Group...")},
+    {CmdStripGroupColor, "CmdStripGroupColor\0", StrL("Change Group Color")},
+    {CmdStripGroupUngroup, "CmdStripGroupUngroup\0", StrL("Ungroup Tabs")},
+    {CmdStripGroupClose, "CmdStripGroupClose\0", StrL("Close Group")},
+    {CmdToggleLineWeights, "CmdToggleLineWeights\0", StrL("Show Line Weights")},
+    {CmdToggleTextSelecting, "CmdToggleTextSelecting\0", StrL("Start / Stop Selecting Text")},
+    {CmdPdfWatermark, "CmdPdfWatermark\0", StrL("Add Watermark To PDF...")},
+    {CmdPdfAddPageNumbers, "CmdPdfAddPageNumbers\0", StrL("Add Page Numbers To PDF...")},
+    {CmdCloseWindow, "CmdCloseWindow\0", StrL("Close Window")},
+    {CmdUploadToServer, "CmdUploadToServer\0", StrL("Upload to Server")},
+    {CmdDeleteFromServer, "CmdDeleteFromServer\0", StrL("Delete from Server")},
     {CmdRefHoverPushToJabRef, "CmdRefHoverPushToJabRef\0", StrL("Push Reference to JabRef")},
 };
 const int gCommandsCount = dimofi(gCommands);
@@ -439,24 +467,77 @@ static const ArgSpec argSpecs[] = {
 
     {CmdCommandPalette, kCmdArgMode, CommandArg::Type::String}, // default
 
+    // off, smart, legacy or toggle; without it the dialog opens
+    {CmdSetDocumentColorsFollowTheme, kCmdArgMode, CommandArg::Type::String}, // default
+
     {CmdSignDocument, kCmdArgCertify, CommandArg::Type::Bool},
 
     // toggle commands accept an optional bool to force a state (issue #5067),
-    // e.g. [CmdToggleFullscreen on] / [CmdToggleToolbar state=off]
-    {CmdToggleContinuousView, kCmdArgState, CommandArg::Type::Bool},   // default
-    {CmdToggleToolbar, kCmdArgState, CommandArg::Type::Bool},          // default
-    {CmdToggleCaption, kCmdArgState, CommandArg::Type::Bool},          // default
-    {CmdToggleMenuBar, kCmdArgState, CommandArg::Type::Bool},          // default
-    {CmdToggleFullscreen, kCmdArgState, CommandArg::Type::Bool},       // default
+    // e.g. [CmdToggleFullscreen on] / [CmdToggleToolbar state=off].
+    // From toggleCommands in cmd/gen-commands.ts
+    // clang-format off
+// @gen-start cmd-toggle-args
+    {CmdToggleContinuousView, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleMangaMode, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleBookmarks, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleTableOfContents, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleFullscreen, kCmdArgState, CommandArg::Type::Bool}, // default
     {CmdTogglePresentationMode, kCmdArgState, CommandArg::Type::Bool}, // default
-    {CmdToggleBookmarks, kCmdArgState, CommandArg::Type::Bool},        // default
-    {CmdToggleTableOfContents, kCmdArgState, CommandArg::Type::Bool},  // default
-#ifndef NO_THUMBNAIL_STATE_ARG
+    {CmdToggleToolbar, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleMenuBar, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdTogglePdfPreviewLogging, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleKeyboardHelp, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleLinks, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleShowAnnotations, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdTogglePageInfo, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleInverseSearch, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleWindowsPreviewer, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleWindowsSearchFilter, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleReadAloud, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleToolbarShowReadAloud, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleEngineeringDrawingEnhance, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdTogglePreservePdfImages, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleFavoritesSort, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleKeyboardLinkFollowing, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleImages, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleFilePicker, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleLaserPointer, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleHoverPreview, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleDisableLinks, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleHighlightFormFields, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdTogglePageBoxes, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleUniformPageWidth, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleTransparencyGrid, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdTogglePageGrid, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleEditPDF, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleTrimEmptyMargins, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleAutomaticallyScroll, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleReadingBar, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleReadingBarInvert, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleFreePan, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleGrayscale, kCmdArgState, CommandArg::Type::Bool}, // default
     {CmdToggleThumbnails, kCmdArgState, CommandArg::Type::Bool}, // default
-#endif
+    {CmdToggleAutoRotateWidePages, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleCaption, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleSidebarAutoHide, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleLayers, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleFacingStepOne, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleMirror, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleReadColumns, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleColumnsWholePage, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleLineWeights, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdToggleTextSelecting, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdFavoriteToggle, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdFindToggleMatchCase, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdFindToggleMatchWholeWord, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdInvertColors, kCmdArgState, CommandArg::Type::Bool}, // default
+    {CmdSelectTextViaKeyboard, kCmdArgState, CommandArg::Type::Bool}, // default
+// @gen-end cmd-toggle-args
+    // clang-format on
 
     // default string is the setting name, e.g. [CmdToggleBoolSetting Fullscreen.ShowMenubar]
     {CmdToggleBoolSetting, kCmdArgName, CommandArg::Type::String}, // default
+    {CmdToggleBoolSetting, kCmdArgState, CommandArg::Type::Bool},
 
     // extension including leading dot, e.g. [CmdFixDefaultApp .pdf]
     {CmdFixDefaultApp, kCmdArgExt, CommandArg::Type::String}, // default
@@ -467,6 +548,11 @@ static const ArgSpec argSpecs[] = {
     // a favorite in the Favorites menu, e.g. [CmdFavorite C:\dir\file.pdf page=3]
     {CmdFavorite, kCmdArgFilePath, CommandArg::Type::String}, // default
     {CmdFavorite, kCmdArgPage, CommandArg::Type::String},
+
+    // 1-based position of the group in the tab strip, e.g. [CmdStripGroupAddTab 2]
+    {CmdStripGroupAddTab, kCmdArgN, CommandArg::Type::Int}, // default
+    // without a color it moves to the next one, e.g. [CmdStripGroupColor #1a73e8]
+    {CmdStripGroupColor, kCmdArgColor, CommandArg::Type::Color}, // default
 
     {CmdNone, StrL(""), CommandArg::Type::None}, // sentinel
 };

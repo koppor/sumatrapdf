@@ -365,6 +365,23 @@ export function makeTopBottomPdf(pageCount: number): Buffer {
   return Buffer.from(assemblePdf(objs, { header: "%PDF-1.5\n" }), "latin1");
 }
 
+// A page per line, each in 18pt Helvetica at (72, 700).
+export function makeLinesPdf(lines: string[]): Buffer {
+  const objs = ["<< /Type /Catalog /Pages 2 0 R >>", "", HELVETICA];
+  const kids: string[] = [];
+  for (const line of lines) {
+    const pageNum = objs.length + 1;
+    kids.push(`${pageNum} 0 R`);
+    objs.push(
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ` +
+        `/Resources << /Font << /F1 3 0 R >> >> /Contents ${pageNum + 1} 0 R >>`,
+    );
+    objs.push(contentStream(`BT /F1 18 Tf 72 700 Td (${line}) Tj ET`));
+  }
+  objs[1] = `<< /Type /Pages /Kids [${kids.join(" ")}] /Count ${lines.length} >>`;
+  return Buffer.from(assemblePdf(objs, { header: "%PDF-1.5\n" }), "latin1");
+}
+
 // One page with `line` in 18pt Helvetica at (72, 700). Objects 4, 5, 7-9, 11
 // and 12 are null: tests that add annotations rely on the object numbering.
 export function makeTextPdf(line: string): Buffer {
@@ -505,6 +522,36 @@ export function requireDpiShrank(name: string, high: number, low: number): void 
 export function tmpPath(name: string): string {
   mkdirSync(TMP_DIR, { recursive: true });
   return join(TMP_DIR, name);
+}
+
+// Test files too big or too private for the repo (see agents.md) live in OneDrive.
+export const ONEDRIVE_DIR = IS_WIN
+  ? join(process.env.USERPROFILE || "C:\\Users\\kjk", "OneDrive")
+  : "/Users/kjk/OneDrive";
+
+// <OneDrive>/<relPath> with this platform's separators; relPath uses "/"
+export function oneDrivePath(relPath: string): string {
+  return join(ONEDRIVE_DIR, ...relPath.split("/"));
+}
+
+// Copies <OneDrive>/<relPath> to dst, which the test then opens: a OneDrive file
+// can be a cloud placeholder, and opening one blocks until it downloads. False,
+// after a warning, when it couldn't: the caller stops the test (or the part of
+// it that needs the file).
+export function copyFromOneDrive(relPath: string, dst: string): boolean {
+  const src = oneDrivePath(relPath);
+  if (!existsSync(src)) {
+    console.log(`  warning: ${src} isn't there (a test file from OneDrive)`);
+    return false;
+  }
+  try {
+    mkdirSync(dirname(dst), { recursive: true });
+    copyFileSync(src, dst);
+  } catch (e) {
+    console.log(`  warning: couldn't copy ${src}: ${(e as Error).message}`);
+    return false;
+  }
+  return true;
 }
 
 export function crc32(buf: Uint8Array): number {
@@ -896,8 +943,23 @@ function checkInteractiveDesktop(): void {
   process.exit(1);
 }
 
+// the test scripts are type checked with tsc
+function checkTsc(): void {
+  if (Bun.which("tsc")) {
+    return;
+  }
+  const install = IS_MAC
+    ? "brew install typescript"
+    : IS_WIN
+      ? "npm install -g typescript   (needs Node.js: winget install OpenJS.NodeJS)"
+      : "npm install -g typescript";
+  console.error(`\n❌ tsc (the TypeScript compiler) isn't on PATH. Install it with:\n     ${install}`);
+  process.exit(1);
+}
+
 export async function runSuiteMain(testit: (opts: SuiteOptions) => Promise<void>): Promise<void> {
   const silent = isSilentArg();
+  checkTsc();
   checkInteractiveDesktop();
   // an exe named with -exe is the one to test, so don't build over it
   if (!process.argv.includes("--no-build") && !EXE_FROM_ARGV) {
@@ -943,6 +1005,7 @@ export function buildApp(opts?: { silent?: boolean }): void {
 // builds (unless --no-build), runs testit(), exits 0 on pass / 1 on failure.
 export async function runStandalone(testit: () => void | Promise<void>, name?: string): Promise<void> {
   const label = name ?? (process.argv[1] ?? "test").replace(/\\/g, "/").split("/").pop()!.replace(/\.ts$/, "");
+  checkTsc();
   // a single test is worth running locked (most don't touch the cursor), but
   // say so, or a cursor-driven failure reads as a bug in the code
   if (!hasInteractiveDesktop()) {

@@ -179,6 +179,9 @@ bool WriteControlResponse(ControlConn h, ControlRequest* req);
 
 TempStr FavoriteNavResultTemp(Str action, int pageNo, int* exitCodeOut);
 TempStr ScrollStateResultTemp(int* exitCodeOut);
+TempStr ToggleCmdResultTemp(Str definition, int* exitCodeOut);
+TempStr CloneRenderDiffTemp(int* exitCodeOut);
+TempStr DocErrorsResultTemp(int* exitCodeOut);
 TempStr DisplayModeResultTemp(Str action, int* exitCodeOut);
 TempStr WordCountResultTemp(int* exitCodeOut);
 TempStr PageInfoTextResultTemp(int* exitCodeOut);

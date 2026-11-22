@@ -86,6 +86,7 @@ EngineBase* CreateEngineCbxFromFile(Str path, PasswordUI* pwdUI = nullptr, FileT
                                     Str realPath = {});
 EngineBase* CreateEngineCbxFromData(Str data);
 bool EngineCbxHasComicInfoToc(EngineBase*);
+void WaitForCbxPrefetches();
 
 bool IsEngineImages(EngineBase*);
 void EngineImagesGetImageProperties(EngineBase*, int pageNo, Vec<PropValue>& propsOut);
@@ -139,6 +140,7 @@ enum class EngineWait {
 bool EngineCanUndoRedo(EngineBase*, UndoDir, EngineWait);
 bool EngineUndoRedo(EngineBase*, UndoDir, Vec<Annotation*>& removedOut);
 void EngineMupdfRefreshModifiedState(EngineBase*);
+void EngineMupdfSetEditedAnnot(EngineBase*, Annotation*);
 // a PDF EngineMupdfMergePdfs() reads pages from
 struct PdfMergeSource {
     Str path;
@@ -154,6 +156,61 @@ struct PdfMergePage {
 bool EngineMupdfMergePdfs(const Vec<PdfMergeSource>& srcs, const Vec<PdfMergePage>& pages, Str destPath);
 
 bool EngineMupdfIsPdf(EngineBase* engine);
+
+// text drawn on a page of a PDF over its content: a watermark (Diagonal: across
+// the middle, rising from the bottom left) or a page number (the others)
+enum class PdfStampPos : u8 {
+    Diagonal,
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+};
+struct PdfStamp {
+    int pageNo = 0;
+    Str text; // Latin (WinAnsi) only
+    PdfStampPos pos = PdfStampPos::Diagonal;
+    // points; 0: Diagonal across 60% of the page's diagonal, else 10
+    float size = 0;
+    u8 r = 0, g = 0, b = 0;
+    float opacity = 1;
+    // from the page's edges, points
+    float margin = 36;
+};
+// stamps the engine's document in memory (save it with EngineMupdfSaveCopy);
+// false with *errOut set if one can't be made
+bool EngineMupdfStampText(EngineBase* engine, const Vec<PdfStamp>& stamps, Str* errOut);
+
+// a page's text with its styles and its pictures, in mupdf's reading order,
+// for an export (cli markdown). The text is a span per run of one style;
+// spans of one line have the same `line`, lines of one block the same `block`.
+struct StyledSpan {
+    Str text; // owned
+    float size = 0;
+    bool bold = false;
+    bool italic = false;
+    bool mono = false;
+    int block = 0;
+    int line = 0;
+    RectF lineBox;
+    // the span's characters, spaces aside
+    RectF box;
+};
+struct StyledImage {
+    int block = 0;
+    RectF box;
+    Str png; // owned
+};
+struct StyledPage {
+    RectF mediabox;
+    Vec<StyledSpan> spans;
+    Vec<StyledImage> images;
+    ~StyledPage();
+};
+// false if the page has no structured text (not a mupdf document, an error)
+bool EngineMupdfGetStyledPage(EngineBase* engine, int pageNo, StyledPage& out);
 bool EngineMupdfIsEncrypted(EngineBase* engine);
 bool EngineMupdfHeadingTocPending(EngineBase* engine);
 // IfEnabled: only when the AutoGenerateTOC setting is on; Always: on demand
@@ -212,6 +269,23 @@ bool EngineMupdfSaveAsPdf(EngineBase*, Str destPath);
 bool EngineMupdfExtractPagesToPdf(EngineBase*, const Vec<int>& pages, Str destPath);
 bool IsUnsignedSignatureWidget(Annotation*, TempStr* fieldNameOut);
 bool EngineMupdfSignDocument(EngineBase*, const PdfSignArgs&, Str* errOut);
+// a signature field's check, for `cli verify`
+struct PdfSigCheck {
+    int pageNo = 0; // 0: not on a page
+    bool isSigned = false;
+    bool isTimestamp = false;
+    Str signer; // owned
+    // the signed bytes are as they were signed
+    bool digestOk = false;
+    // the signer's certificate chains to a trusted root
+    bool certOk = false;
+    Str certError; // owned, why not
+    // the file was changed (an incremental update) after this signature
+    bool changedAfter = false;
+    ~PdfSigCheck();
+};
+// false if the signatures can't be checked (not a PDF, no verifier)
+bool EngineMupdfVerifySignatures(EngineBase*, Vec<PdfSigCheck*>& out);
 void ListWindowsSigningCertificates(StrVec& thumbprints, StrVec& labels);
 
 enum class SigVerdict {

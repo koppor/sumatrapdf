@@ -258,6 +258,10 @@ void HideFwdSearchMarkAfter(MainWindow* win, int delayMs) {
     SetTimer(win->hwndCanvas, kHideFwdSearchMarkTimerID, delayMs, nullptr);
 }
 
+void ArmFindFlashTimer(MainWindow* win, int delayMs) {
+    SetTimer(win->hwndCanvas, kFindFlashTimerID, delayMs, nullptr);
+}
+
 void ShowForwardSearchResult(MainWindow* win, Str fileName, int line, int /* col */, int ret, int page,
                              Vec<Rect>& rects) {
     if (ReportIf(!win->AsFixed())) {
@@ -346,19 +350,46 @@ Go to a page and select the search term, but only if it's found on that page
 [GotoPageWord("<pdffile>",<page>,"<search-term>")]
 */
 
-// An empty window is only a good reuse target when focusing it won't switch
-// virtual desktops, the very thing #5630 avoids for the main window.
+// An empty window is only a good reuse target when it is on the current virtual
+// desktop: a new-window request exists to avoid a desktop switch (#5630), in every
+// OpenOnOtherDesktop mode. Under move, an empty window elsewhere is pulled here.
 static MainWindow* FindEmptyWinToReuse() {
+    MainWindow* elsewhere = nullptr;
     for (auto& w : gWindows) {
         if (w->HasDocsLoaded()) {
             continue;
         }
-        if (!CanFocusWithoutDesktopSwitch(w->hwndFrame)) {
-            continue;
+        if (IsOnCurrentDesktop(w->hwndFrame)) {
+            return w;
         }
-        return w;
+        elsewhere = w;
+    }
+    if (elsewhere && BringToCurrentDesktop(elsewhere->hwndFrame)) {
+        return elsewhere;
     }
     return nullptr;
+}
+
+// Window to load a new document into: the last active one, unless focusing it
+// would switch desktops; then another window here, the last active one pulled
+// here (move), or a new window (copy).
+static MainWindow* FindWinToLoadInto() {
+    MainWindow* last = FindMainWindowByHwnd(gLastActiveFrameHwnd);
+    if (!last && len(gWindows) > 0) {
+        last = gWindows[0];
+    }
+    if (!last || CanFocusWithoutDesktopSwitch(last->hwndFrame)) {
+        return last;
+    }
+    for (auto& w : gWindows) {
+        if (CanFocusWithoutDesktopSwitch(w->hwndFrame)) {
+            return w;
+        }
+    }
+    if (BringToCurrentDesktop(last->hwndFrame)) {
+        return last;
+    }
+    return CreateAndShowMainWindow(nullptr);
 }
 
 /*
@@ -570,47 +601,18 @@ error: <error message>
 if file doesn't exist or no opened file
 */
 
-// returns the document position currently under the mouse cursor, in PDF points
-// -- the same unit as the "pt" cursor-position notification and .smx files
-// (issue #1411). page is 0 if the cursor isn't over a page.
-static Str HandleGetMousePosCmd(Str cmd, bool* ack, str::Builder& res) {
-    Str next = str::Parse(cmd, "[GetMousePos()]");
-    if (str::IsNull(next)) {
-        next = str::Parse(cmd, "[GetMousePos]");
-    }
-    if (str::IsNull(next)) {
-        return {};
-    }
-    *ack = true;
+// the window the last DDE command applies to and the mouse cursor in its
+// canvas, for the shared [GetMousePos] request
+DisplayModel* DdeMousePosModel(Point* posOut) {
     MainWindow* win = FindMainWindowByHwnd(gLastActiveFrameHwnd);
     if (!win && len(gWindows) > 0) {
         win = gWindows[0];
     }
     DisplayModel* dm = win ? win->AsFixed() : nullptr;
-    if (!dm) {
-        res.Append(StrL("error: no document\n"));
-        return next;
+    if (dm) {
+        *posOut = HwndGetCursorPos(win->hwndCanvas);
     }
-    Point pos = HwndGetCursorPos(win->hwndCanvas);
-    int pageNo = dm->GetPageNoByPoint(pos);
-    bool validPage = dm->ValidPageNo(pageNo);
-    PointF pt = dm->CvtFromScreen(pos);
-    // match FormatCursorPositionTemp's "pt" computation exactly
-    EngineBase* engine = dm->GetEngine();
-    float dpi = engine->fileDPI;
-    float x = pt.x < 0 ? 0 : pt.x;
-    float y = pt.y < 0 ? 0 : pt.y;
-    double xPt = (double)x / dpi * 72.0;
-    double yPt = (double)y / dpi * 72.0;
-    res.Append(fmt("page: %d\n", validPage ? pageNo : 0));
-    res.Append(fmt("x: %.2f\n", xPt));
-    res.Append(fmt("y: %.2f\n", yPt)); // MuPDF convention: origin top-left, y down
-    if (validPage) {
-        // also provide PDF/Adobe coordinates: origin bottom-left, y up (#1411)
-        double pageHeightPt = (double)engine->PageMediabox(pageNo).dy / dpi * 72.0;
-        res.Append(fmt("ypdf: %.2f\n", pageHeightPt - yPt));
-    }
-    return next;
+    return dm;
 }
 
 /*
@@ -622,11 +624,6 @@ eg: [CmdClose] or [CmdCreateAnnotHighlight #00ff00 openEdit]
 // a new batch of commands forgets the document the last one opened
 void DdeExecuteBegin() {
     gMostRecentlyOpenedDoc = nullptr;
-}
-
-// requests only orig answers
-Str HandleAppRequestCmd(Str cmd, bool* ack, str::Builder& res) {
-    return HandleGetMousePosCmd(cmd, ack, res);
 }
 
 static void OpenManyCopyDataAsyncRun(OpenManyCopyDataAsync* d) {
@@ -657,6 +654,18 @@ static void OpenCopyDataAsyncRun(OpenCopyDataAsync* d) {
     // had to wait on us in the first place.
     MainWindow* win = nullptr;
     if (d->newWindow) {
+        // Under OpenOnOtherDesktop = move, pull the window already showing the
+        // document here instead of opening it twice (#5630 forces newWindow
+        // when every window is on another desktop).
+        if (GetOtherDesktopOpen() == OtherDesktopOpen::Move) {
+            win = FindMainWindowToActivate(d->path);
+            if (win) {
+                win->Focus();
+                str::Free(d->path);
+                delete d;
+                return;
+            }
+        }
         MainWindow* emptyExistingWin = FindEmptyWinToReuse();
         win = emptyExistingWin ? emptyExistingWin : CreateAndShowMainWindow(nullptr);
     } else {
@@ -676,18 +685,14 @@ static void OpenCopyDataAsyncRun(OpenCopyDataAsync* d) {
             delete d;
             return;
         }
-        win = FindMainWindowByHwnd(gLastActiveFrameHwnd);
-        if (!win && len(gWindows) > 0) {
-            win = gWindows[0];
-        }
+        win = FindWinToLoadInto();
     }
     LoadArgs args(d->path, win);
     args.activateExisting = d->newWindow == 0;
     // Match the legacy DDE Open(..., setFocus=1) behavior used by
     // shell/reuseInstance launches: opening into an existing instance should
-    // bring that window to the foreground. Not across virtual desktops: that
-    // would switch the user away from the desktop they opened the file on.
-    if (win && CanFocusWithoutDesktopSwitch(win->hwndFrame)) {
+    // bring that window to the foreground.
+    if (win) {
         win->Focus();
     }
     StartLoadDocument(&args);

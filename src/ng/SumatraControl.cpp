@@ -14,7 +14,7 @@
 // so the rest can be filled in later; an unimplemented one answers
 // "NOTPORTED <n>" instead of silently doing nothing.
 
-#include "base/Base.h"
+#include "gui/GpuiBridge.h"
 #include "base/Pixmap.h"
 #include "base/UITask.h"
 #include "base/File.h"
@@ -55,6 +55,7 @@
 #endif
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "ImageReplace.h"
 #include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "HomePage.h"
@@ -80,13 +81,12 @@
 #include "Tabs.h"
 #include "Toolbar.h"
 #include "gui/AppShell.h"
-#include "gui/ToolWindowPlat.h"
 #include "gui/ToolWindow.h"
 #include "gui/NativeFileDlg.h"
-#include "gui/NativeMsgBox.h"
 #include "gui/DocCanvas.h"
 #include "gui/TabsUI.h"
 #include "gui/Sidebar.h"
+#include "SignatureUI.h"
 #if OS_WIN
 #include "gui/Dpi.h"
 #include "gui/PlatformFont.h"
@@ -110,13 +110,13 @@
 #include "RefHover.h"
 #include "PerfLog.h"
 #include "AnnotTextPopup.h"
+#include "MeasurementToolbar.h"
 #include "ReadAloud.h"
 #include "ReadingAutoScroll.h"
 #include "ReadingBar.h"
-#include "gui/OleDragDrop.h"
-#include "gui/NativeCursors.h"
 #include "SumatraControl.h"
 #include "SumatraControlCommon.h"
+#include "StripGroups.h"
 #include "BrightnessContrastDialogCommon.h"
 #include "OpenFromUrlCommon.h"
 
@@ -152,6 +152,75 @@ void ControlToggleFullScreen(MainWindow* win) {
 void GoToTocItem(MainWindow*, TocItem*);
 
 // orig's TocNavigateResultTemp: follow one outline dest and report the page
+// Drag-selects `word` on page 1 from its first glyph's outer edge to its last
+// glyph's (issue #6488): in right-to-left text the first glyph's outer edge is
+// its right one. Reports the selected text and the glyph range.
+TempStr SelectWordEdgesResultTemp(Str word, int* exitCodeOut) {
+    str::Builder out;
+    auto fail = [&](Str msg) -> Str {
+        out.Append(msg);
+        out.AppendChar('\n');
+        if (exitCodeOut) {
+            *exitCodeOut = 1;
+        }
+        return ToStrTemp(out);
+    };
+
+    if (len(gWindows) == 0) {
+        return fail(StrL("NOTREADY no-window"));
+    }
+    DisplayModel* dm = gWindows[0]->AsFixed();
+    if (!dm || !dm->textSelection) {
+        return fail(StrL("NOTREADY no-doc"));
+    }
+    const int pageNo = 1;
+    Rect* coords = nullptr;
+    int textLen = 0;
+    Str text = dm->GetEngine()->GetTextForPage(pageNo, &textLen, &coords);
+    int wordLen = Utf8CodepointCount(word);
+    int first = -1;
+    for (int i = 0; i <= textLen - wordLen; i++) {
+        if (str::Eq(Utf8SliceByCodepoints(text, i, wordLen), word)) {
+            first = i;
+            break;
+        }
+    }
+    if (first < 0 || wordLen < 2) {
+        return fail(StrL("ERROR word-not-found"));
+    }
+    int last = first + wordLen - 1;
+
+    // a point inside glyph i, near its edge away from glyph `other`
+    auto outerEdge = [&](int i, int other) -> PointF {
+        const Rect& r = coords[i];
+        float cx = (float)r.x + ((float)r.dx / 2.f);
+        float ocx = (float)coords[other].x + ((float)coords[other].dx / 2.f);
+        float dx = (float)r.dx * 0.4f;
+        return {ocx < cx ? cx + dx : cx - dx, (float)r.y + ((float)r.dy / 2.f)};
+    };
+    PointF p0 = outerEdge(first, first + 1);
+    PointF p1 = outerEdge(last, last - 1);
+
+    for (int i = std::max(first - 2, 0); i <= std::min(last + 2, textLen - 1); i++) {
+        const Rect& r = coords[i];
+        out.Append(fmt("glyph %d: x=%d dx=%d y=%d dy=%d\n", i, r.x, r.dx, r.y, r.dy));
+    }
+    out.Append(fmt("p0=%g,%g p1=%g,%g\n", p0.x, p0.y, p1.x, p1.y));
+
+    TextSelection* sel = dm->textSelection;
+    sel->Reset();
+    sel->StartAt(pageNo, p0.x, p0.y);
+    sel->SelectUpTo(pageNo, p1.x, p1.y);
+    TempStr selected = sel->ExtractTextTemp(StrL(" "));
+    out.Append(
+        fmt("OK first=%d last=%d start=%d end=%d\ntext=%s\n", first, last, sel->startGlyph, sel->endGlyph, selected));
+    sel->Reset();
+    if (exitCodeOut) {
+        *exitCodeOut = 0;
+    }
+    return ToStrTemp(out);
+}
+
 TempStr TocNavigateResultTemp(int destNo, int* exitCodeOut) {
     str::Builder out;
     auto fail = [&](Str msg, int code) -> TempStr {
@@ -507,6 +576,8 @@ TempStr ResolveUnsavedChangesResultTemp(Str action, Str path, int* exitCodeOut) 
 }
 
 enum class ControlCmd : u16 {
+    // [word]: drag-selects word on page 1 from its first glyph's outer edge to its last's
+    TestSelectWordEdges = 153,
     Ping = 1,
     Quit = 2,
     TestSynctex = 10,
@@ -655,12 +726,17 @@ enum class ControlCmd : u16 {
     TestScrollState = 144,
     TestDrawRectSelection = 145,
     // the first window's tab widths, one "dx=<n> text=<title>" line per tab
+    // [panel | close | row <n> | open <n>]: the signature bar, the sidebar
+    // view, the mark and the dialog (SignatureUiStateTemp)
+    TestSignatureStatus = 148,
     TestTabWidths = 149,
     // [url, dir]: Open from URL as the dialog's Download starts it
     TestOpenFromUrl = 150,
     // [srcWin, tabIdx, dstWin]: move a tab as a drag does (-1 = new window);
     // tabIdx < 0 only lists every window's tabs
     TestMigrateTab = 151,
+    // [toggle <row> | show | colors]: the Layers pane's rows (see SidebarTestLayers)
+    TestLayers = 152,
     // the word count notification's text
     TestWordCount = 154,
     // the page info tip's text
@@ -675,6 +751,30 @@ enum class ControlCmd : u16 {
     TestPerfStats = 161,
     // ng: not one of orig's; the state of the six canvas overlays
     TestOverlayState = 162,
+    // [definition]: does "CmdToggleX on" parse, and the command's on/off state
+    TestToggleCmd = 165,
+    // page 1 pixels a Clone() of the current document renders differently
+    TestCloneRender = 166,
+    // does the document have load errors, does the Errors notification show
+    TestDocErrors = 167,
+    // [pageNo, idx, value]: pick value in the idx-th combo / list box
+    TestSetFormChoice = 168,
+    // [action, a, b, c]: "drop" from to groupPos, "move" dir, "select" idx, or
+    // "" for the state; answers with the strip groups and tabs (StripGroupsStateTemp)
+    TestStripGroups = 169,
+    // ng only (macOS): [path, mode]: a PNG of the first window as drawn ("all": with its other windows)
+    TestCaptureWindow = 170,
+    // [ms]: every document open waits this long first, like a sleeping drive
+    TestLoadDelay = 171,
+    TestWindows = 172,
+    // [path, value]: sets a setting the way the palette's "= settings" rows do
+    TestSetSetting = 173,
+    // [action, word]: touch selection probe (TouchSelResultTemp)
+    TestTouchSel = 174,
+    // [action, pageNo, x, y, length, unit]: drives the Measure tool
+    TestMeasurement = 159,
+    // [replace <path> | edit, pageNo, imageIdx]: an image embedded in a PDF
+    TestImageReplace = 160,
 };
 
 static_assert((u16)ControlCmd::Quit == (u16)ControlFrameCmd::Quit);
@@ -746,8 +846,44 @@ bool ParseArg(PacketReader& r, ControlArg** argOut) {
     return false;
 }
 
+// TestWindows target <id> aims the requests that follow at that frame instead
+// of the first one, until target 0. A macOS test has no HWND to aim with.
+static int gTestTargetId = 0;
+
 static MainWindow* FirstWindow() {
+    if (gTestTargetId != 0) {
+        for (MainWindow* w : gWindows) {
+            if (w && w->testId == gTestTargetId) {
+                return w;
+            }
+        }
+        return nullptr;
+    }
     return len(gWindows) > 0 ? gWindows[0] : nullptr;
+}
+
+// a line a window: what EnumWindows, GetWindowText and the like tell a Windows
+// test. The title is last, as it may have spaces.
+static TempStr TestWindowsListTemp() {
+    str::Builder out;
+#if OS_WIN || OS_WASM
+    int pid = 0;
+#else
+    int pid = (int)getpid();
+#endif
+    for (MainWindow* w : gWindows) {
+        if (!w || w->isBeingClosed) {
+            continue;
+        }
+        Rect r = AppShellWindowScreenRect(w);
+        WindowTab* tab = w->CurrentTab();
+        Str title = tab ? tab->frameTitle : Str{};
+        out.Append(fmt("hwnd=%d class=GpuiSystemMonitor pid=%d visible=1 rect=%d,%d,%d,%d title=%s\n", w->testId, pid,
+                       r.x, r.y, r.dx, r.dy, title));
+    }
+    // and the tool windows, with name= for TestToolWindow
+    out.Append(ToolWindowsTestListTemp(pid));
+    return str::DupTemp(ToStr(out));
 }
 
 static Str MarkupTypeName(AnnotationType tp) {
@@ -1315,8 +1451,8 @@ TempStr FrameNcStripsResultTemp(int* exitCodeOut) {
     if (!win || !win->gpuiWin) {
         return finish(2, str::DupTemp(StrL("NOTREADY no-window")));
     }
-    wr = ToolWinNativeFrame(win->gpuiWin);
-    Rect cr = ToolWinNativeContentRect(win->gpuiWin);
+    wr = FromGpui(gp::WindowFrameBounds(win->gpuiWin));
+    Rect cr = FromGpui(gp::WindowContentBounds(win->gpuiWin));
     if (wr.IsEmpty() || cr.IsEmpty()) {
         return finish(2, str::DupTemp(StrL("NOTREADY no-window")));
     }
@@ -1409,6 +1545,16 @@ static TempStr DpiResultTemp(Str action, int* exitCodeOut) {
         DpiSet(prevX, prevY);
         out.Append(fmt("layout=%d window=%d font=%d\n", layoutDpi, windowDpi, fontDy));
         return finish(layoutDpi == 240 && windowDpi == 240 && fontDy >= 24 ? 0 : 1);
+    }
+
+    // "override 125": DpiGetForHwnd reports 125% with no WM_DPICHANGED, as
+    // after an RDP connect; "override 0" goes back to the real DPI
+    if (str::StartsWith(action, StrL("override "))) {
+        int pct = 0;
+        str::Parse(Str(action.s + 9, len(action) - 9), "%d", &pct);
+        gDpiOverride = pct;
+        out.Append(fmt("override=%d\n", pct));
+        return finish(0);
     }
 
     if (!str::Eq(action, StrL("state")) || len(gWindows) == 0) {
@@ -1671,15 +1817,19 @@ static void ExecuteControlRequest(ControlRequest* req) {
         case ControlCmd::TestRenderPageColors: {
             Str path = StringArg(req, 0);
             if (len(path) == 0) {
-                AppendError(req, StrL("TestRenderPageColors expects string path [, int pageNo] [, int zoomPercent]"));
+                AppendError(req, StrL("TestRenderPageColors expects string path [, int pageNo] [, int zoomPercent] "
+                                      "[, int view]"));
                 break;
             }
             i32 pageNo = 1;
             i32 zoomPercent = 100;
+            i32 view = 0;
             IntArg(req, 1, pageNo);
             IntArg(req, 2, zoomPercent);
+            IntArg(req, 3, view);
+            RenderTarget target = view ? RenderTarget::View : RenderTarget::Export;
             int exitCode = 0;
-            Str res = PageRenderColorsResultTemp(path, &exitCode, pageNo, zoomPercent);
+            Str res = PageRenderColorsResultTemp(path, &exitCode, pageNo, zoomPercent, target);
             AppendTestResult(req, exitCode, res);
             break;
         }
@@ -1836,6 +1986,25 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestSignatureStatus: {
+            MainWindow* win = FirstWindow();
+            AppendTestResult(req, 0, win ? SignatureUiStateTemp(win, StringArg(req, 0)) : TempStr{});
+            break;
+        }
+
+        case ControlCmd::TestLayers: {
+            MainWindow* win = FirstWindow();
+            AppendTestResult(req, 0, win ? SidebarTestLayers(win, StringArg(req, 0)) : TempStr{});
+            break;
+        }
+
+        case ControlCmd::TestSelectWordEdges: {
+            int exitCode = 0;
+            Str res = SelectWordEdgesResultTemp(StringArg(req, 0), &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestTocNavigate: {
             i32 destNo = 1;
             if (!IntArg(req, 0, destNo)) {
@@ -1954,6 +2123,111 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestStripGroups: {
+            if (len(gWindows) == 0 || !gWindows[0]) {
+                AppendTestResult(req, 2, StrL("NOTREADY no-window"));
+                break;
+            }
+            MainWindow* win = gWindows[0];
+            Str action = StringArg(req, 0);
+            i32 a = 0;
+            i32 b = 0;
+            i32 c = 0;
+            IntArg(req, 1, a);
+            IntArg(req, 2, b);
+            IntArg(req, 3, c);
+            if (str::Eq(action, StrL("drop"))) {
+                int groupId = (c >= 1 && c <= len(win->stripGroups)) ? win->stripGroups[c - 1]->id : 0;
+                StripGroupDropTab(win, a, b, groupId);
+            } else if (str::Eq(action, StrL("move"))) {
+                StripGroupMoveTab(win, a);
+            } else if (str::Eq(action, StrL("select")) && a >= 0 && a < win->TabCount()) {
+                TabsSelect(win, a);
+            }
+            AppendTestResult(req, 0, StripGroupsStateTemp(win));
+            break;
+        }
+
+        case ControlCmd::TestTouchSel: {
+            int exitCode = 0;
+            Str res = TouchSelResultTemp(StringArg(req, 0), StringArg(req, 1), &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestSetSetting: {
+            bool ok = SetSettingsValueFromStr(StringArg(req, 0), StringArg(req, 1));
+            AppendTestResult(req, ok ? 0 : 1, ok ? StrL("OK") : StrL("ERROR unknown setting"));
+            break;
+        }
+
+        case ControlCmd::TestLoadDelay: {
+            i32 ms = 0;
+            IntArg(req, 0, ms);
+            AtomicIntSet(&gTestLoadDelayMs, ms);
+            AppendTestResult(req, 0, fmt("%d", ms));
+            break;
+        }
+
+        case ControlCmd::TestWindows: {
+            if (str::EqI(StringArg(req, 0), StrL("target"))) {
+                i32 id = 0;
+                IntArg(req, 1, id);
+                gTestTargetId = id;
+                AppendTestResult(req, 0, StrL("OK"));
+                break;
+            }
+            AppendTestResult(req, 0, TestWindowsListTemp());
+            break;
+        }
+
+        case ControlCmd::TestCaptureWindow: {
+            Str path = StringArg(req, 0);
+            if (len(path) == 0) {
+                AppendError(req, StrL("TestCaptureWindow expects string path [, string mode]"));
+                break;
+            }
+            MainWindow* win = FirstWindow();
+            bool all = str::Eq(StringArg(req, 1), StrL("all"));
+            Str res = FromGpui(gp::WindowCapturePngTemp(win ? win->gpuiWin : nullptr, ToGpui(path), all));
+            AppendTestResult(req, str::StartsWith(res, StrL("OK")) ? 0 : 1, res);
+            break;
+        }
+
+        case ControlCmd::TestSetFormChoice: {
+            i32 pageNo = 1;
+            i32 idx = 0;
+            if (!IntArg(req, 0, pageNo) || !IntArg(req, 1, idx)) {
+                AppendError(req, StrL("TestSetFormChoice expects int pageNo, int idx, string value"));
+                break;
+            }
+            int exitCode = 0;
+            Str res = SetFormChoiceResultTemp(pageNo, idx, StringArg(req, 2), &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestDocErrors: {
+            int exitCode = 0;
+            Str res = DocErrorsResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestCloneRender: {
+            int exitCode = 0;
+            Str res = CloneRenderDiffTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestToggleCmd: {
+            int exitCode = 0;
+            Str res = ToggleCmdResultTemp(StringArg(req, 0), &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestPageInfoBar: {
             int exitCode = 0;
             Str res = PageInfoBarResultTemp(&exitCode);
@@ -2051,10 +2325,10 @@ static void ExecuteControlRequest(ControlRequest* req) {
         case ControlCmd::TestSaveFileName: {
 #if OS_WIN
             SetTestSaveFileName(StringArg(req, 0));
-            AppendTestResult(req, 0, StrL("OK"));
-#else
-            AppendError(req, StrL("TestSaveFileName: Windows only"));
 #endif
+            // the port's own dialog, where the native one is off or there is none
+            SetTestSavePath(StringArg(req, 0));
+            AppendTestResult(req, 0, StrL("OK"));
             break;
         }
 
@@ -2517,6 +2791,18 @@ static void ExecuteControlRequest(ControlRequest* req) {
                 AppendTestResult(req, 0, StrL("OK"));
                 break;
             }
+            // macOS: what a test's WM_SYSCOMMAND or ShowWindow does to the frame
+            if (str::EqI(name, StrL("SC_MINIMIZE")) || str::EqI(name, StrL("SC_RESTORE"))) {
+                if (win->gpuiWin) {
+                    if (str::EqI(name, StrL("SC_MINIMIZE"))) {
+                        AppShellMinimizeWindow(win);
+                    } else {
+                        gp::AppActivate(win->gpuiWin);
+                    }
+                }
+                AppendTestResult(req, 0, StrL("OK"));
+                break;
+            }
             // A favorite or another custom command has no name in Commands.h.
             // Tests send its id as "#123".
             int cmdId = 0;
@@ -2596,7 +2882,7 @@ static void ExecuteControlRequest(ControlRequest* req) {
 #if !OS_WIN && !OS_WASM
             // frame-client dips plus this origin are screen pixels, which is
             // what a drop-down's box is reported in
-            Rect content = ToolWinNativeContentRect(win->gpuiWin);
+            Rect content = FromGpui(gp::WindowContentBounds(win->gpuiWin));
             out.Append(fmt("content origin=%d,%d\n", content.x, content.y));
 #endif
             Rect sysMenu;
@@ -2695,10 +2981,13 @@ static void ExecuteControlRequest(ControlRequest* req) {
             CanvasBmpWrapStats(wrapMs, wrapCount);
             int nEntries = 0;
             i64 cacheBytes = gRenderCache ? gRenderCache->CacheBytes(nEntries) : 0;
-            AppendTestResult(
-                req, 0,
-                fmt("%s bmpWrapMs=%.0f bmpWrapCount=%d cacheEntries=%d/%d cacheKB=%d firstPaintMs=%.0f", frames, wrapMs,
-                    wrapCount, nEntries, kMaxBitmapsCached, (int)(cacheBytes / 1024), CanvasFirstPaintMs()));
+            const char* shownWhy = "";
+            AppendTestResult(req, 0,
+                             fmt("%s bmpWrapMs=%.0f bmpWrapCount=%d cacheEntries=%d/%d cacheKB=%d firstPaintMs=%.0f "
+                                 "windowShownMs=%.0f "
+                                 "windowShownWhy=%s",
+                                 frames, wrapMs, wrapCount, nEntries, kMaxBitmapsCached, (int)(cacheBytes / 1024),
+                                 CanvasFirstPaintMs(), AppShellStartupShownMs(&shownWhy), Str(shownWhy)));
             break;
         }
 
@@ -2821,7 +3110,14 @@ static void ExecuteControlRequest(ControlRequest* req) {
                 break;
             }
             int page = tab->ctrl ? tab->ctrl->CurrentPageNo() : 0;
-            AppendTestResult(req, 0, fmt("path=%s page=%d", tab->filePath, page));
+            TempStr res = fmt("path=%s page=%d", tab->filePath, page);
+            if (tab->loadCopyBytesCopied >= 0) {
+                res = fmt("%s copied=%d/%d", res, tab->loadCopyBytesCopied, tab->loadCopyBytesTotal);
+            }
+            if (tab->loadState == WindowTab::LoadState::Loading) {
+                res = fmt("%s msg=%s", res, LoadingMessageTemp(tab));
+            }
+            AppendTestResult(req, 0, res);
             break;
         }
 
@@ -3313,6 +3609,27 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestImageReplace: {
+            i32 pageNo = 0, imageIdx = 0;
+            IntArg(req, 1, pageNo);
+            IntArg(req, 2, imageIdx);
+            AppendTestResult(req, 0,
+                             TestImageReplace(FirstWindow(), StringArg(req, 0), pageNo, imageIdx, StringArg(req, 3)));
+            break;
+        }
+
+        case ControlCmd::TestMeasurement: {
+            i32 pageNo = 0, x = 0, y = 0;
+            IntArg(req, 1, pageNo);
+            IntArg(req, 2, x);
+            IntArg(req, 3, y);
+            MainWindow* win = FirstWindow();
+            Str res = TestMeasurement(win, StringArg(req, 0), pageNo, PointF((float)x, (float)y), StringArg(req, 1),
+                                      StringArg(req, 2));
+            AppendTestResult(req, 0, res);
+            break;
+        }
+
         case ControlCmd::TestDpi: {
 #if OS_WIN
             Str action = StringArg(req, 0);
@@ -3646,10 +3963,8 @@ void StartSumatraControl(Str pipeName) {
         return;
     }
     logf("StartSumatraControl: pipe '%s'\n", pipeName);
-#if OS_WIN
     // a script cannot answer a system message box: it gets the port's own
     NativeMsgBoxSetEnabled(false);
-#endif
     auto* arg = new ControlThreadArg{str::Dup(pipeName)};
     RunAsync(MkFunc0(SumatraControlThread, arg), StrL("SumatraControl"));
 }

@@ -1479,6 +1479,7 @@
     <ClInclude Include="..\src\shared\DocumentLayout.h" />
     <ClInclude Include="..\src\shared\DocumentProperties.h" />
     <ClInclude Include="..\src\shared\DocumentPropertiesCommon.h" />
+    <ClInclude Include="..\src\shared\DropUrlCommon.h" />
     <ClInclude Include="..\src\shared\EbookDoc.h" />
     <ClInclude Include="..\src\shared\EbookFormatter.h" />
     <ClInclude Include="..\src\shared\EbookSettingsDialogCommon.h" />
@@ -1508,6 +1509,7 @@
     <ClInclude Include="..\src\shared\HomePageCommon.h" />
     <ClInclude Include="..\src\shared\HtmlFormatter.h" />
     <ClInclude Include="..\src\shared\ImageReader.h" />
+    <ClInclude Include="..\src\shared\ImageReplace.h" />
     <ClInclude Include="..\src\shared\ImageSaveCropResizeCommon.h" />
     <ClInclude Include="..\src\shared\InstallerUtil.h" />
     <ClInclude Include="..\src\shared\JxlReader.h" />
@@ -1519,6 +1521,7 @@
     <ClInclude Include="..\src\shared\MainWindowCommon.h" />
     <ClInclude Include="..\src\shared\MarkdownModel.h" />
     <ClInclude Include="..\src\shared\MarkdownToc.h" />
+    <ClInclude Include="..\src\shared\MeasurementToolbarCommon.h" />
     <ClInclude Include="..\src\shared\MenuCommon.h" />
     <ClInclude Include="..\src\shared\MenuDefs.h" />
     <ClInclude Include="..\src\shared\MobiDoc.h" />
@@ -1564,12 +1567,15 @@
     <ClInclude Include="..\src\shared\SelectionTranslateCommon.h" />
     <ClInclude Include="..\src\shared\ShortcutParse.h" />
     <ClInclude Include="..\src\shared\SignDocumentDialogCommon.h" />
+    <ClInclude Include="..\src\shared\SignatureUICommon.h" />
     <ClInclude Include="..\src\shared\StressTesting.h" />
+    <ClInclude Include="..\src\shared\StripGroups.h" />
     <ClInclude Include="..\src\shared\SumatraControl.h" />
     <ClInclude Include="..\src\shared\SumatraControlCommon.h" />
     <ClInclude Include="..\src\shared\SumatraCrashCommon.h" />
     <ClInclude Include="..\src\shared\SumatraLog.h" />
     <ClInclude Include="..\src\shared\SumatraPDFCommon.h" />
+    <ClInclude Include="..\src\shared\SumatraPDFWebCommon.h" />
     <ClInclude Include="..\src\shared\SumatraTest.h" />
     <ClInclude Include="..\src\shared\SvgIcons.h" />
     <ClInclude Include="..\src\shared\TabGroupsManage.h" />
@@ -1709,6 +1715,7 @@
     <ClCompile Include="..\src\SignDocumentDialog.cpp" />
     <ClCompile Include="..\src\SignatureUI.cpp" />
     <ClCompile Include="..\src\SimpleBrowserWindow.cpp" />
+    <ClCompile Include="..\src\StripGroupDialog.cpp" />
     <ClCompile Include="..\src\SumatraControl.cpp" />
     <ClCompile Include="..\src\SumatraDialogs.cpp" />
     <ClCompile Include="..\src\SumatraPDF.cpp" />
@@ -2123,6 +2130,7 @@
     <ClCompile Include="..\src\shared\DocProperties.cpp" />
     <ClCompile Include="..\src\shared\DocumentLayout.cpp" />
     <ClCompile Include="..\src\shared\DocumentPropertiesCommon.cpp" />
+    <ClCompile Include="..\src\shared\DropUrlCommon.cpp" />
     <ClCompile Include="..\src\shared\EbookDoc.cpp" />
     <ClCompile Include="..\src\shared\EbookFormatter.cpp" />
     <ClCompile Include="..\src\shared\EbookSettingsDialogCommon.cpp" />
@@ -2162,10 +2170,14 @@
     <ClCompile Include="..\src\shared\HomePageCommon.cpp" />
     <ClCompile Include="..\src\shared\HtmlFormatter.cpp" />
     <ClCompile Include="..\src\shared\ImageReader.cpp" />
+    <ClCompile Include="..\src\shared\ImageReplace.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\src\shared\ImageSaveCropResizeCommon.cpp" />
     <ClCompile Include="..\src\shared\InstallerUtil_win.cpp" />
     <ClCompile Include="..\src\shared\JxlReader.cpp" />
     <ClCompile Include="..\src\shared\KeyboardHelpCommon.cpp" />
+    <ClCompile Include="..\src\shared\LaserPointerCursorCommon.cpp" />
     <ClCompile Include="..\src\shared\LaserPointerCursor_win.cpp" />
     <ClCompile Include="..\src\shared\LinkFollow.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -2174,6 +2186,7 @@
     <ClCompile Include="..\src\shared\MainWindowCommon.cpp" />
     <ClCompile Include="..\src\shared\MarkdownModel.cpp" />
     <ClCompile Include="..\src\shared\MarkdownToc.cpp" />
+    <ClCompile Include="..\src\shared\MeasurementToolbarCommon.cpp" />
     <ClCompile Include="..\src\shared\MenuCommon.cpp" />
     <ClCompile Include="..\src\shared\MenuDefs.cpp" />
     <ClCompile Include="..\src\shared\MobiDoc.cpp" />
@@ -2234,12 +2247,15 @@
     <ClCompile Include="..\src\shared\SelectionTranslateCommon.cpp" />
     <ClCompile Include="..\src\shared\ShortcutParse.cpp" />
     <ClCompile Include="..\src\shared\SignDocumentDialogCommon.cpp" />
+    <ClCompile Include="..\src\shared\SignatureUICommon.cpp" />
     <ClCompile Include="..\src\shared\StressTesting.cpp" />
+    <ClCompile Include="..\src\shared\StripGroups.cpp" />
     <ClCompile Include="..\src\shared\SumatraConfig.cpp" />
     <ClCompile Include="..\src\shared\SumatraControlCommon.cpp" />
     <ClCompile Include="..\src\shared\SumatraCrashCommon.cpp" />
     <ClCompile Include="..\src\shared\SumatraLog.cpp" />
     <ClCompile Include="..\src\shared\SumatraPDFCommon.cpp" />
+    <ClCompile Include="..\src\shared\SumatraPDFWebCommon.cpp" />
     <ClCompile Include="..\src\shared\SumatraTestCommon.cpp" />
     <ClCompile Include="..\src\shared\SvgIcons.cpp" />
     <ClCompile Include="..\src\shared\TableOfContentsCommon.cpp" />

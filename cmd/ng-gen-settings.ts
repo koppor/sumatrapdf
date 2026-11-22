@@ -525,12 +525,17 @@ const fixedPageUI: Field[] = [
   field("Grayscale", Bool, false, "if true, render document pages in grayscale. Toggle with CmdToggleGrayscale").ver(
     "3.7",
   ),
-  field("TextColor", Color, rgb(0x00, 0x00, 0x00), "color used instead of black for the document's text"),
+  field(
+    "TextColor",
+    Color,
+    rgb(0x00, 0x00, 0x00),
+    "color used instead of black for the document's text, also in ebooks",
+  ),
   field(
     "BackgroundColor",
     Color,
     rgb(0xff, 0xff, 0xff),
-    "color used instead of white for the document's page background",
+    "color used instead of white for the document's page background, also in ebooks",
   ),
   field(
     "SelectionColor",
@@ -559,7 +564,7 @@ const fixedPageUI: Field[] = [
       "background is meant to give a subconscious sense of reading progress. " +
       "Suggested values: #2828aa #28aa28 #aa2828",
   ),
-  field("WindowBgCol", Color, "", "if given, sets the canvas background color for PDF files").ver("3.7"),
+  field("WindowBgCol", Color, "", "if given, sets the canvas background color for PDF, DjVu and XPS files").ver("3.7"),
   struct(
     "PageGrid",
     pageGrid,
@@ -1321,7 +1326,6 @@ const fileState: Field[] = [
     null,
     "visibility of the PDF's layers (optional content groups), if changed: 1 (shown) or 0 (hidden) for each layer, in document order",
   ).ver("3.7"),
-  // ng doesn't calibrate measurements, but keeps what orig saved in the shared settings file
   field("MeasurementScale", Float, 0, "calibrated measurement units per document coordinate; 0 uses points"),
   field("MeasurementUnit", Str, null, "unit name for calibrated measurements"),
   compactArray(
@@ -1411,6 +1415,10 @@ const tabState: Field[] = [
     .emptyMeans("bookmarks")
     .ver("3.7"),
   compactArray("TocState", Int, null, "which table of contents items were expanded (see FileStates -> TocState)"),
+  field("Group", Int, 0, "tabs with the same number form a group in the tab strip; 0 if the tab is in none").ver("3.7"),
+  field("GroupName", Str, null, "name of the tab's group").ver("3.7"),
+  field("GroupColor", Color, "", "color of the tab's group").ver("3.7"),
+  field("GroupCollapsed", Bool, false, "if true, the tab's group was collapsed").ver("3.7"),
 ];
 
 const sessionData: Field[] = [
@@ -1483,7 +1491,7 @@ const globalPrefs: Field[] = [
     "LazyLoading",
     Bool,
     false,
-    "if true, restoring a session delays loading each document until its tab is selected",
+    "if true, restoring a session delays loading each document, and any access to its file, until its tab is selected",
   ).ver("3.6"),
   field(
     "MainWindowBackground",
@@ -1623,13 +1631,16 @@ const globalPrefs: Field[] = [
     "if true, open documents in the already running SumatraPDF instead of starting a new one",
   ),
   field(
-    "ReuseInstanceOnOtherDesktop",
-    Bool,
-    true,
-    "if true, opening a document may reuse a SumatraPDF window on another virtual desktop, which " +
-      "makes Windows switch to that desktop; if false, the document opens on the current virtual " +
-      "desktop (Windows 10+)",
-  ).ver("3.7"),
+    "OpenOnOtherDesktop",
+    Str,
+    "switch",
+    "what happens when opening a document already open, or reusing a window, on another virtual " +
+      "desktop: switch switches to that desktop, move pulls the window onto the current desktop, " +
+      "copy opens the document again on the current desktop. a new window always opens on the " +
+      "current desktop (Windows 10+)",
+  )
+    .enum(["switch", "move", "copy"])
+    .ver("3.7"),
   field(
     "ShowMenubar",
     Bool,
@@ -1699,6 +1710,13 @@ const globalPrefs: Field[] = [
   )
     .enum(["notification", "legacy", "bottom", "bottom-overlay"])
     .ver("3.7"),
+  field(
+    "ReadingProgressBarDy",
+    Float,
+    0,
+    "height in points of a thin bar along the bottom of the document that shows how far into it the " +
+      "current page is; 0 or less means no bar",
+  ).ver("3.7"),
   field(
     "SearchUIFloating",
     Bool,
@@ -1783,6 +1801,13 @@ const globalPrefs: Field[] = [
     .emptyMeans("keep")
     .ver("3.7"),
   field("ShowLinks", Bool, false, "if true, draw a blue border around links in the document").ver("3.6"),
+  field(
+    "ShowDocumentErrors",
+    Bool,
+    true,
+    "if false, opening a document with errors doesn't show the Errors in document notification. " +
+      "Show Errors stays in the context menu",
+  ).ver("3.7"),
   field(
     "HighlightFormFields",
     Bool,
@@ -1959,6 +1984,13 @@ const globalPrefs: Field[] = [
       "destination is only a page with no position",
   ).ver("3.7"),
   field(
+    "FlashFindMatch",
+    Bool,
+    true,
+    "if true, Find Next / Find Previous blinks a ring around the found text a few times, " +
+      "so it's easy to spot on a busy page. The color matches ForwardSearch",
+  ).ver("3.7"),
+  field(
     "CitationHoverDelay",
     Int,
     -1,
@@ -1977,6 +2009,18 @@ const globalPrefs: Field[] = [
     Float,
     1,
     "playback speed multiplier for Read Aloud text-to-speech (0.5 .. 3.0), 1 is normal speed; can also be changed from the Read Aloud playback bar",
+  ).ver("3.7"),
+  field(
+    "ReadAloudSentenceColor",
+    Color,
+    "#3b82f6",
+    "color of the line Read Aloud draws under the sentence being read (beside it in vertical text)",
+  ).ver("3.7"),
+  field(
+    "ReadAloudWordColor",
+    Color,
+    "#f59e0b",
+    "color of the line Read Aloud draws under the word being read (beside it in vertical text)",
   ).ver("3.7"),
   field(
     "ReadingAutoScrollSpeed",
@@ -2138,6 +2182,13 @@ const globalPrefs: Field[] = [
     .enum(["off", "auto", "on"])
     .ver("3.7"),
   field(
+    "ShowLineWeights",
+    Bool,
+    true,
+    "if false, lines in documents are drawn one pixel wide, whatever their width, like Acrobat's " +
+      "Line Weights turned off. Only on screen. Toggle with CmdToggleLineWeights",
+  ).ver("3.7"),
+  field(
     "DisableAutoLinks",
     Bool,
     false,
@@ -2215,7 +2266,12 @@ const globalPrefs: Field[] = [
 
   struct("FixedPageUI", fixedPageUI, "customization options for PDF, XPS, DjVu and PostScript UI"),
   emptyLine(),
-  struct("EBookUI", ebookUI, "customization options for the ebook UI (EPUB, MOBI, FB2, PDB and plain text)"),
+  struct(
+    "EBookUI",
+    ebookUI,
+    "customization options for the ebook UI (EPUB, MOBI, FB2, PDB and plain text). " +
+      "text and page colors are FixedPageUI.TextColor and BackgroundColor",
+  ),
   emptyLine(),
   struct("ComicBookUI", comicBookUI, "customization options for Comic Book UI"),
   emptyLine(),
@@ -2473,6 +2529,8 @@ const globalPrefsLayout = [
   "SaveMemory",
   "CitationHoverDelay",
   "ReadAloudSpeed",
+  "ReadAloudSentenceColor",
+  "ReadAloudWordColor",
   "ReadingAutoScrollSpeed",
   "ReadingAutoScrollMinutes",
   "ReadingBar",
@@ -2518,7 +2576,7 @@ const globalPrefsLayout = [
   "RestoreSession",
   "KeepMissingSessionTabs",
   "ReuseInstance",
-  "ReuseInstanceOnOtherDesktop",
+  "OpenOnOtherDesktop",
   "ShowMenubar",
   "ShowMenubarWithTabs",
   "ShowChaptersInEbooks",
@@ -2558,6 +2616,7 @@ const globalPrefsLayout = [
   "ContinuousScrollFollowsRotation",
   "IgnoreDestinationZoom",
   "HighlightLinkDestination",
+  "FlashFindMatch",
   "FastScrollOverScrollbar",
   "PreventSleepInFullscreen",
   "ToolbarShowReadAloud",
@@ -2828,7 +2887,7 @@ const desktopOnlySettings = new Set([
   "DownloadDirectory",
   "TemporaryFileAutoMove",
   "ReuseInstance",
-  "ReuseInstanceOnOtherDesktop",
+  "OpenOnOtherDesktop",
   "ExplorerQuickLook",
   "ClaudeCode",
   "GrokBuild",

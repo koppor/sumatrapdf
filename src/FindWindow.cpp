@@ -525,7 +525,8 @@ void FindWindowWnd::DrawResultItem(VirtListBox::DrawItemEvent* ev) {
     // stays stable while the window is resized; long snippets ellipsize into it
     // instead of fighting a per-row measured width (#5692 / #5796).
     const FindMatch& fm = win->findMatches[ev->itemIndex];
-    TempStr pageStr = fmt("%s", win->ctrl->GetPageLabeTemp(fm.startPage));
+    // ctrl is null between closing a document and loading the next one in the tab
+    TempStr pageStr = win->ctrl ? fmt("%s", win->ctrl->GetPageLabeTemp(fm.startPage)) : TempStr{};
     int pageGap = DpiScale(10);
     int pageColDx = DpiScale(40);
     Size pageSize = gfx->MeasureText(pageStr, lb->font);
@@ -908,6 +909,9 @@ static void PositionFindWindow(FindWindowWnd* w) {
 }
 
 void ShowFindWindow(MainWindow* win) {
+    // hiding the bar aborts a running search or count (e.g. -search); restart below
+    bool wasFinding = win->findThread != nullptr;
+    bool wasCounting = win->findCountThread != nullptr;
     // one find UI at a time: SearchUIFloating can change while the bar is up
     if (IsFindBarVisible(win)) {
         HideFindBar(win);
@@ -945,6 +949,12 @@ void ShowFindWindow(MainWindow* win) {
     // populate the results list: show what's cached, and (re)run the search for
     // the current term so snippets get built now that the window is visible
     w->RefreshResults();
+    if (wasFinding && !win->findThread && len(term) > 0) {
+        FindTextOnThread(win, TextSearch::Direction::Forward, term, true, true);
+    }
+    if (wasCounting && !win->findCountThread) {
+        EnsureFindSnippets(win);
+    }
     // a CLI/DDE search still running fills the list itself: FindEndTask ->
     // UpdateMatchCount requests snippets now that the window is visible
     if (CbGetTextLen(win->findEdit) == 0 || win->findThread) {

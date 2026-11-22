@@ -65,7 +65,9 @@
 #include "MainWindow.h"
 #include "Selection.h"
 #include "Tabs.h"
+#include "StripGroups.h"
 #include "MainWindowCommon.h"
+#include "SignatureUICommon.h"
 #include "SignatureUI.h"
 #include "LayersUI.h"
 #include "PageInfoBar.h"
@@ -132,6 +134,7 @@ MainWindow::~MainWindow() {
     FinishStressTest(this);
 
     ReportIf(TabCount() > 0);
+    StripGroupsDelete(this);
     RemoveNotificationsForHwnd(hwndCanvas);
     // ReportIf(ctrl); // TODO: seen in crash report
     ReportIf(linkOnLastButtonDown);

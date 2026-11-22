@@ -13,7 +13,10 @@ struct MouseMoveEvent;
 struct MainWindow;
 
 // creates the gpui window, its root view and the MainWindow that owns them
-MainWindow* AppShellCreateWindow(gpui::App* app, int dipW, int dipH);
+// hiddenUntilReady: the startup window, shown once it can show page 1
+MainWindow* AppShellCreateWindow(gpui::App* app, int dipW, int dipH, bool hiddenUntilReady = false);
+// when the startup window came on screen, ms from process start (-1: not yet)
+double AppShellStartupShownMs(const char** whyOut);
 // the app the first window was created with, so a second one needs no plumbing
 gpui::App* AppShellGetApp();
 // ng: the theme is installed before the first window opens, so the app has to
@@ -52,6 +55,7 @@ void AppShellQuit();
 // brings the window to the foreground (orig's MainWindow::Focus())
 void AppShellActivateWindow(MainWindow* win);
 void AppShellMinimizeWindow(MainWindow* win);
+void AppShellRequestCloseWindow(MainWindow* win);
 bool AppShellIsFrameFocused(MainWindow* win);
 void AppShellFocusFrame(MainWindow* win);
 void AppShellClearEatChar(MainWindow* win);
@@ -94,6 +98,7 @@ void SetTabsInTitlebar(MainWindow* win, bool inTitleBar);
 // where the caption puts the menu bar and the tab strip, and how tall it is;
 // false when the frame has no caption of the port's (TestLayout)
 bool AppShellCaptionRects(MainWindow* win, Rect* menuOut, Rect* tabsOut, int* dyOut);
+int AppShellRevealedCaptionDy(MainWindow* win);
 bool AppShellSysMenuRect(MainWindow* win, Rect* out);
 // the border the frame keeps around its content while it has the caption
 int AppShellFrameBorder(MainWindow* win);
@@ -109,13 +114,6 @@ void AppShellOpenSystemMenu(MainWindow* win, Rect below);
 // the app's small icon; null where there is none to ask for (off Windows)
 struct Pixmap;
 Pixmap* AppShellAppIconPixmap(MainWindow* win);
-// Windows: the cursor of win->nativeCursor, when the pointer is on the canvas
-// (gpui's cursor is the canvas' stand-in kind); see gui/NativeCursors_win.cpp
-bool AppShellNativeCursorActive(MainWindow* win);
-void AppShellApplyNativeCursor(MainWindow* win);
-// DoDragDrop (gui/OleDragDrop_win.cpp) ate the button-up that ends the press
-// gpui saw begin: tell gpui the button is up
-void AppShellAfterNativeDrag(MainWindow* win);
 void AppShellForgetNativeHwnd(MainWindow* win);
 // ng: gpui has no fullscreen window state (see "gpui gaps"). On Windows this
 // is orig's EnterFullScreen / ExitFullScreen on the native frame
@@ -156,12 +154,8 @@ void AppShellOnDpiChanged(MainWindow* win, int dpi);
 #if OS_WIN
 void AppShellToggleDpiOverride();
 #endif
-#if OS_DARWIN || OS_WASM
-float AppShellRenderScale(gpui::Window* win);
-#endif
 #if OS_DARWIN
-void AppShellDisableAutoTermination();
-void AppShellHandleOpenDocs();
+void AppShellHandleOpenDocs(gpui::App* app);
 void AppShellOpenDocsReady();
 #endif
 // presentation mode's auto-hidden cursor (orig hides it with SetCursor(null))
@@ -177,6 +171,8 @@ void AppShellPreventSleep(bool on);
 HWND AppShellNativeHwnd(MainWindow* win);
 MainWindow* AppShellWindowFromHwnd(HWND hwnd);
 bool AppShellOnWmContextMenu(MainWindow* win, int screenX, int screenY);
+// a tool window's handle: command ids sent at it run on its owner
+void AppShellClaimToolHwnd(HWND hwnd);
 // the top-level windows of another SumatraPDF process: `procId`, or with 0 any
 // process running this exe (orig: FindWindowW(kFrameClassName))
 void AppShellFindOtherInstanceWindows(DWORD procId, Vec<HWND>& out);

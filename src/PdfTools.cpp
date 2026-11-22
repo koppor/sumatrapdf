@@ -60,6 +60,15 @@ static int CalcDlgWidth(PlatformFont* font, Str path, int minW, int padding) {
 // process runs so the next one opens that wide, as Advanced Settings does
 static int gToolDlgLastClientDx = 0;
 
+// shows a tool's output in the file manager; a -for-testing run must not leave
+// file manager windows behind
+static void ShowToolOutput(Str path) {
+    if (gForTesting) {
+        return;
+    }
+    OpenPathInDefaultFileManager(path);
+}
+
 // the Sumatra app icon, shown in each tool dialog's title bar / taskbar
 static HICON GetAppIcon() {
     return LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
@@ -638,7 +647,7 @@ void PdfExtractTextDialog::DoIt(VirtMouseEvent*) {
         logf("PdfExtractTextDoIt: extracted successfully\n");
         TempStr path = str::DupTemp(destPath);
         Close();
-        OpenPathInDefaultFileManager(path);
+        ShowToolOutput(path);
     } else {
         logf("PdfExtractTextDoIt: failed to extract text, isPdf: %d\n", (int)isPdf);
         MessageBoxWarning(hwnd, StrL("Failed to extract text."), Tr("Extract Text"));
@@ -1071,6 +1080,120 @@ void ShowPdfEncryptDialog(MainWindow* win) {
     if (!dlg->Create(win, tab)) {
         delete dlg;
     }
+}
+
+// --- Add Watermark / Add Page Numbers dialogs ---
+
+// text on the pages of a copy of the PDF: a watermark across them, or page
+// numbers ({n}, {total}) at a place picked
+struct PdfStampDialog : PdfPagesDialog {
+    bool watermark = true;
+    Edit* textEdit = nullptr;
+    DropDown* dropPosition = nullptr;
+
+    bool Create(MainWindow* win, WindowTab* tab, bool watermark);
+    void DoIt(VirtMouseEvent* ev = nullptr) override;
+    void UpdateButton();
+};
+
+void PdfStampDialog::UpdateButton() {
+    TempStr pages = pagesEdit->GetTextTemp();
+    Vec<int> parsed;
+    bool ok = ParseDeletePages(pages, pageCount, parsed);
+    SetMeta(PageRangeCountTemp(pages, pageCount, true), ok);
+    SetActionEnabled(ok && len(textEdit->GetTextTemp()) > 0);
+}
+
+void PdfStampDialog::DoIt(VirtMouseEvent*) {
+    TempStr destPath = destEdit->GetTextTemp();
+    Vec<int> pages;
+    if (len(destPath) == 0 || !ParseDeletePages(pagesEdit->GetTextTemp(), pageCount, pages)) {
+        return;
+    }
+    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    EngineBase* engine = tab ? tab->GetEngine() : nullptr;
+    if (!engine) {
+        return;
+    }
+    int posIdx = dropPosition ? CbGetCurrentSelection(dropPosition) : 0;
+    Vec<PdfStamp> stamps;
+    DialogStamps(watermark, textEdit->GetTextTemp(), pages, posIdx, stamps);
+    logf("PdfStampDialog: %d pages of '%s' to '%s'\n", len(stamps), srcPath, destPath);
+    Str err;
+    HCURSOR prev = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+    bool ok = StampPdfToFile(engine, stamps, destPath, &err);
+    SetCursor(prev);
+    if (!ok) {
+        logf("PdfStampDialog: failed: %s\n", err);
+        MessageBoxWarning(hwnd, err, watermark ? Tr("Add Watermark") : Tr("Add Page Numbers"));
+        return;
+    }
+    MainWindow* w = win;
+    TempStr path = str::DupTemp(destPath);
+    Close();
+    LoadArgs args(path, w);
+    StartLoadDocument(&args);
+}
+
+bool PdfStampDialog::Create(MainWindow* w, WindowTab* tab, bool watermarkArg) {
+    watermark = watermarkArg;
+    Str title = watermark ? Tr("Add Watermark") : Tr("Add Page Numbers");
+    if (!CreateToolDialog(w, tab, title)) {
+        return false;
+    }
+    pageCount = w->ctrl ? w->ctrl->PageCount() : 0;
+    AddLine(Tr("Text"));
+    textEdit = AddLineEdit(watermark ? StrL("DRAFT") : StrL("{n}"));
+    if (!watermark) {
+        AddLine(Tr("Position"));
+        auto* dd = new DropDown();
+        DropDown::CreateArgs args;
+        args.parent = hwnd;
+        args.font = fontText;
+        args.isRtl = IsUIRtl();
+        dd->Create(args);
+        StrVec items;
+        PageNumberPositionLabels(items);
+        dd->SetItems(items);
+        CbSetCurrentSelection(dd, 0);
+        dd->SetColors(ThemeWindowTextColor(), ThemeWindowControlBackgroundColor());
+        dropPosition = dd;
+        lastLine->AddChild(dropPosition);
+    }
+    AddPagesLine(fmt("1-%d", pageCount));
+    AddFilesBlock(MakeUniqueFilePathTemp(srcPath), L"PDF Files\0*.pdf\0All Files\0*.*\0", L"pdf");
+    Str hint = watermark ? Str{} : Tr("{n} is the page number, {total} the last one");
+    AddFooter(title, hint);
+    FinishDialog(textEdit);
+    // the change handlers only now that actionBtn exists (Edit::Create fires
+    // onTextChanged on the initial text)
+    textEdit->onTextChanged = MkMethod0<PdfStampDialog, &PdfStampDialog::UpdateButton>(this);
+    pagesEdit->onTextChanged = MkMethod0<PdfStampDialog, &PdfStampDialog::UpdateButton>(this);
+    UpdateButton();
+    return true;
+}
+
+static void ShowPdfStampDialog(MainWindow* win, bool watermark) {
+    if (!win || !win->IsDocLoaded()) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    if (!tab || len(tab->filePath) == 0 || !IsPdfDoc(tab)) {
+        return;
+    }
+    logf("ShowPdfStampDialog: opening for '%s'\n", tab->filePath);
+    auto* dlg = new PdfStampDialog();
+    if (!dlg->Create(win, tab, watermark)) {
+        delete dlg;
+    }
+}
+
+void ShowPdfWatermarkDialog(MainWindow* win) {
+    ShowPdfStampDialog(win, true);
+}
+
+void ShowPdfPageNumbersDialog(MainWindow* win) {
+    ShowPdfStampDialog(win, false);
 }
 
 // --- Decrypt PDF dialog ---
@@ -1687,7 +1810,7 @@ void ConvertPdfToImagesDialog::DoIt(VirtMouseEvent*) {
     TempStr openPath = str::DupTemp(firstPath);
     str::Free(firstPath);
     Close();
-    OpenPathInDefaultFileManager(openPath);
+    ShowToolOutput(openPath);
 }
 
 bool ConvertPdfToImagesDialog::Create(MainWindow* w, WindowTab* tab) {

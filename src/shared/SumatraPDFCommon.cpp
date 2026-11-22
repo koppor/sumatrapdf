@@ -22,6 +22,7 @@
 #include "base/CmdLineArgs.h"
 #include "gui/UIModels.h"
 #include "gui/BrowserView.h"
+#include "gui/PlatformFont.h"
 #include "Settings.h"
 #include "DisplayMode.h"
 #include "DocProperties.h"
@@ -44,6 +45,7 @@
 #include "FileHistory.h"
 #include "PdfSync.h"
 #include "RenderCache.h"
+#include "PdfCad.h"
 #include "ProgressUpdateUI.h"
 #include "TextSelection.h"
 #include "TextSearch.h"
@@ -58,6 +60,7 @@
 #include "AppSettings.h"
 #include "AppTools.h"
 #include "RefHover.h"
+#include "CanvasCommon.h"
 #include "ExternalViewers.h"
 #include "Favorites.h"
 #include "FileThumbnails.h"
@@ -161,6 +164,7 @@ void SetCurrentLang(Str langCode) {
     }
     str::ReplaceWithCopy(&gSettings->uiLanguage, langCode);
     trans::SetCurrentLangByCode(gSettings->uiLanguage);
+    SetGuiFontLang(gSettings->uiLanguage);
 }
 
 void InitializePolicies(bool restrict) {
@@ -544,6 +548,38 @@ bool PageInfoBarShown(MainWindow* win) {
         return false;
     }
     return win->windowMode != WindowMode::PresentationBlack && win->windowMode != WindowMode::PresentationWhite;
+}
+
+//--- the reading progress bar (ReadingProgressBarDy, #6572)
+
+Color ProgressBarDoneColor() {
+    return ThemeWindowLinkColor();
+}
+
+Color ProgressBarRestColor() {
+    return ThemeControlBackgroundColor();
+}
+
+// A thin bar along the bottom of the canvas, ending bottomInset px above it, with
+// the done part as far across as the current page is through the document.
+// dpi converts the setting's points to px.
+bool ProgressBarRects(MainWindow* win, Size canvas, int dpi, int bottomInset, Rect* doneOut, Rect* restOut) {
+    float pt = gSettings->readingProgressBarDy;
+    if (pt <= 0 || !win || !win->IsDocLoaded() || !win->AsFixed() || win->InPresentation()) {
+        return false;
+    }
+    int dy = std::max((int)lroundf(pt * (float)dpi / 72.f), 1);
+    int y = canvas.dy - bottomInset - dy;
+    if (canvas.dx <= 0 || y < 0) {
+        return false;
+    }
+    DocController* ctrl = win->ctrl;
+    int nPages = std::max(ctrl->PageCount(), 1);
+    int pageNo = limitValue(ctrl->CurrentPageNo(), 1, nPages);
+    int doneDx = (int)(((i64)canvas.dx * pageNo) / nPages);
+    *doneOut = Rect{0, y, doneDx, dy};
+    *restOut = Rect{doneDx, y, canvas.dx - doneDx, dy};
+    return true;
 }
 
 // the left half only changes with the document, and reads the disk and the
@@ -1633,15 +1669,191 @@ void TocItemToText(str::Builder& s, TocItem* item, int level) {
     }
 }
 
-// for toggle commands that accept an optional "state" bool arg (issue #5067):
-// returns false if the command asked for a state that already matches the
-// current one (so the toggle should be skipped); true otherwise (no explicit
-// state given, or the requested state differs and a flip is needed)
-bool ShouldToggle(CustomCommand* cmd, bool curState) {
-    if (!GetCommandArg(cmd, kCmdArgState)) {
-        return true; // no explicit state: always toggle
+// Current on/off state of a toggle command (see toggleCommands in
+// cmd/gen-commands.ts). False when it doesn't apply now, e.g. a document
+// setting with no document. The palette and the `state` argument use it.
+bool ToggleCmdState(MainWindow* win, CustomCommand* cmd, int cmdId, bool& on) {
+    if (AppToggleCmdState(win, cmdId, on)) {
+        return true;
     }
-    return GetCommandBoolArg(cmd, kCmdArgState, !curState) != curState;
+    DisplayModel* dm = win->AsFixed();
+    WindowTab* tab = win->CurrentTab();
+    switch (cmdId) {
+        case CmdToggleFullscreen:
+            on = win->IsFullScreen();
+            return true;
+        case CmdTogglePresentationMode:
+            on = win->InPresentation();
+            return true;
+        case CmdToggleToolbar:
+            on = win->IsFullScreen() ? FullscreenToolbarModeFromPrefs() != kToolbarHide : !ToolbarModeIsHidden();
+            return true;
+        case CmdToggleCaption:
+            on = gSettings->showCaption;
+            return true;
+        case CmdToggleSidebarAutoHide:
+            on = gSettings->sidebarAutoHide;
+            return true;
+        case CmdToggleLinks:
+            on = gSettings->showLinks;
+            return true;
+        case CmdToggleHighlightFormFields:
+            on = gSettings->highlightFormFields;
+            return true;
+        case CmdToggleDisableLinks:
+            on = gSettings->disableLinks;
+            return true;
+        case CmdToggleHoverPreview:
+            on = gSettings->citationHoverDelay >= 0;
+            return true;
+        case CmdToggleAutoRotateWidePages:
+            on = gSettings->comicBookUI.autoRotateWidePages;
+            return true;
+        case CmdToggleGrayscale:
+            on = gSettings->fixedPageUI.grayscale;
+            return true;
+        case CmdToggleLineWeights:
+            on = gSettings->showLineWeights;
+            return true;
+        case CmdToggleFavoritesSort:
+            on = gSettings->sortFavoritesByName;
+            return true;
+        case CmdToggleReadingBarInvert:
+            on = gSettings->readingBar.invert;
+            return true;
+        case CmdToggleToolbarShowReadAloud:
+            on = gSettings->toolbarShowReadAloud;
+            return true;
+        case CmdToggleFilePicker:
+            on = FilePickerIsSumatraPDF();
+            return true;
+        case CmdToggleInverseSearch:
+            on = !gDisableInteractiveInverseSearch;
+            return true;
+        case CmdTogglePreservePdfImages:
+            on = GetPreservePdfImagesInDarkMode();
+            return true;
+        case CmdInvertColors:
+            on = GetInvertPageColors();
+            return true;
+        case CmdToggleKeyboardHelp:
+            on = IsKeyboardHelpVisible();
+            return true;
+        case CmdToggleReadAloud:
+            on = TtsIsSpeaking();
+            return true;
+        case CmdFindToggleMatchCase:
+            on = win->findMatchCase;
+            return true;
+        case CmdFindToggleMatchWholeWord:
+            on = win->findMatchWholeWord;
+            return true;
+        case CmdTogglePageInfo:
+            on = win->pageInfoWanted;
+            return true;
+        case CmdTogglePageBoxes:
+            on = win->showPageBoxes;
+            return true;
+        case CmdToggleEditPDF:
+            on = win->pdfAnnotationsToolbarEnabled;
+            return true;
+        case CmdToggleKeyboardLinkFollowing:
+            on = win->linkFollowActive;
+            return true;
+        case CmdToggleAutomaticallyScroll:
+            on = ReadingAutoScrollIsOn(win);
+            return true;
+        case CmdToggleReadingBar:
+            on = ReadingBarIsOn(win);
+            return true;
+        case CmdSelectTextViaKeyboard:
+            on = SelectTextWithKeyboardActive(win);
+            return true;
+        case CmdToggleTextSelecting:
+            on = TextSelectingActive(win);
+            return true;
+        case CmdToggleBoolSetting: {
+            bool* p = FindSettingsBoolSetting(GetCommandStringArg(cmd, kCmdArgName, {}));
+            on = p && *p;
+            return p != nullptr;
+        }
+        case CmdToggleContinuousView:
+            on = win->ctrl && IsContinuous(win->ctrl->GetDisplayMode());
+            return win->ctrl != nullptr;
+        case CmdToggleShowAnnotations:
+            on = tab && !tab->hideAnnotations;
+            return tab != nullptr;
+    }
+
+    if (!dm) {
+        return false;
+    }
+    switch (cmdId) {
+        case CmdToggleMangaMode:
+            on = dm->GetDisplayR2L();
+            return true;
+        case CmdToggleUniformPageWidth:
+            on = dm->GetUniformPageWidth();
+            return true;
+        case CmdToggleTrimEmptyMargins:
+            on = dm->GetTrimEmptyMargins();
+            return true;
+        case CmdToggleFreePan:
+            on = dm->GetFreePan();
+            return true;
+        case CmdToggleFacingStepOne:
+            on = dm->GetFacingStepOne();
+            return true;
+        case CmdToggleMirror:
+            on = dm->GetMirror();
+            return true;
+        case CmdToggleReadColumns:
+            on = dm->GetReadColumns();
+            return true;
+        case CmdToggleColumnsWholePage:
+            on = dm->ShowsColumnsWholePage();
+            return true;
+        case CmdToggleEngineeringDrawingEnhance:
+            on = EngineMupdfCadEnhanceActive(dm->GetEngine());
+            return true;
+    }
+    return false;
+}
+
+// [CmdSetDocumentColorsFollowTheme smart] sets the mode without the dialog
+// (#6575); toggle goes off <-> smart. False when no mode is given.
+bool RunDocColorsFollowThemeCmd(CustomCommand* cmd) {
+    Str mode = GetCommandStringArg(cmd, kCmdArgMode, {});
+    if (len(mode) == 0) {
+        return false;
+    }
+    DocumentColorsFollowTheme want = DocumentColorsFollowThemeFromString(mode);
+    if (str::EqI(mode, StrL("toggle"))) {
+        bool isOff = GetDocumentColorsFollowTheme() == DocumentColorsFollowTheme::Off;
+        want = isOff ? DocumentColorsFollowTheme::Smart : DocumentColorsFollowTheme::Off;
+    } else if (want == DocumentColorsFollowTheme::Off && !str::EqI(mode, StrL("off"))) {
+        // the parser takes anything unknown as off
+        MaybeDelayedWarningNotification(
+            fmt("CmdSetDocumentColorsFollowTheme: unknown mode '%s', use off, smart, legacy or toggle", mode));
+        return true;
+    }
+    SetDocumentColorsFollowTheme(want);
+    UpdateDocumentColors();
+    ScheduleSaveSettings();
+    return true;
+}
+
+// A toggle command given the state it is already in, e.g. [CmdToggleToolbar off]
+// with the toolbar hidden, does nothing (#5067).
+bool ToggleCmdIsNoOp(MainWindow* win, CustomCommand* cmd, int cmdId) {
+    if (!GetCommandArg(cmd, kCmdArgState)) {
+        return false;
+    }
+    bool on = false;
+    if (!ToggleCmdState(win, cmd, cmdId, on)) {
+        return false;
+    }
+    return GetCommandBoolArg(cmd, kCmdArgState, !on) == on;
 }
 
 // The image file the current tab is showing, or empty when it isn't showing
@@ -2284,19 +2496,82 @@ bool IsWindowOnCurrentDesktop(ISumatraVirtualDesktopManager* vdm, HWND hwnd) {
     return onCurrent != FALSE;
 }
 
-// Focusing a window on another virtual desktop makes Windows switch the user
-// to that desktop, so a window there is not a usable activation target (#5630).
-// reuseInstanceOnOtherDesktop opts back in to switching.
-bool CanFocusWithoutDesktopSwitch(HWND hwnd) {
-    if (gSettings->reuseInstanceOnOtherDesktop) {
-        return true;
+OtherDesktopOpen GetOtherDesktopOpen() {
+    Str v = gSettings->openOnOtherDesktop;
+    if (str::Eq(v, StrL("move"))) {
+        return OtherDesktopOpen::Move;
     }
+    if (str::Eq(v, StrL("copy"))) {
+        return OtherDesktopOpen::Copy;
+    }
+    return OtherDesktopOpen::Switch;
+}
+
+// True if hwnd is on the current virtual desktop, regardless of OpenOnOtherDesktop.
+bool IsOnCurrentDesktop(HWND hwnd) {
     ISumatraVirtualDesktopManager* vdm = CreateVirtualDesktopManager();
     bool res = IsWindowOnCurrentDesktop(vdm, hwnd);
     if (vdm) {
         vdm->Release();
     }
     return res;
+}
+
+// Focusing a window on another virtual desktop makes Windows switch the user
+// to that desktop, so a window there is not a usable activation target (#5630).
+// OpenOnOtherDesktop = switch opts back in to switching.
+bool CanFocusWithoutDesktopSwitch(HWND hwnd) {
+    if (GetOtherDesktopOpen() == OtherDesktopOpen::Switch) {
+        return true;
+    }
+    return IsOnCurrentDesktop(hwnd);
+}
+
+static bool ReadDesktopIdFromReg(const WCHAR* key, GUID* out) {
+    DWORD cb = sizeof(GUID);
+    LSTATUS res = RegGetValueW(HKEY_CURRENT_USER, key, L"CurrentVirtualDesktop", RRF_RT_REG_BINARY, nullptr, out, &cb);
+    return res == ERROR_SUCCESS && cb == sizeof(GUID) && !IsEqualGUID(*out, GUID{});
+}
+
+// The desktop the user is looking at, from the shell's registry value: Windows 11
+// keeps it under VirtualDesktops, Windows 10 under SessionInfo\<session>. The
+// foreground window's desktop is the fallback (the value can be missing until
+// the user first switches desktops).
+static bool GetCurrentDesktopId(ISumatraVirtualDesktopManager* vdm, GUID* out) {
+    if (ReadDesktopIdFromReg(L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VirtualDesktops", out)) {
+        return true;
+    }
+    DWORD sessionId = 0;
+    if (ProcessIdToSessionId(GetCurrentProcessId(), &sessionId)) {
+        TempWStr key =
+            ToWStrTemp(fmt("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\SessionInfo\\%d\\VirtualDesktops",
+                           (int)sessionId));
+        if (ReadDesktopIdFromReg(key.s, out)) {
+            return true;
+        }
+    }
+    HWND fg = GetForegroundWindow();
+    if (fg && SUCCEEDED(vdm->GetWindowDesktopId(fg, out)) && !IsEqualGUID(*out, GUID{})) {
+        return true;
+    }
+    return false;
+}
+
+// Under OpenOnOtherDesktop = move, pull hwnd onto the user's current virtual
+// desktop so focusing it won't switch desktops. False in the other modes.
+bool BringToCurrentDesktop(HWND hwnd) {
+    if (GetOtherDesktopOpen() != OtherDesktopOpen::Move) {
+        return false;
+    }
+    ISumatraVirtualDesktopManager* vdm = CreateVirtualDesktopManager();
+    if (!vdm) {
+        return false;
+    }
+    GUID id{};
+    bool ok = GetCurrentDesktopId(vdm, &id) && SUCCEEDED(vdm->MoveWindowToDesktop(hwnd, id));
+    vdm->Release();
+    logf("BringToCurrentDesktop: %s, hwnd: 0x%p\n", ok ? StrL("ok") : StrL("failed"), hwnd);
+    return ok;
 }
 
 // the virtual desktop hwnd is on, as "{GUID}". Empty when the shell can't
@@ -3072,38 +3347,10 @@ void OpenUsingDDE(HWND targetHwnd, Str path, Flags& i, bool isFirstWin) {
         // fall through to the DDE grammar path if WM_COPYDATA wasn't handled
     }
 
-    str::Builder cmd;
-    cmd.Append(fmt("[Open(\"%s\", %d, 1, 0)]", fullPath, newWindow));
-    if (i.namedDest && isFirstWin) {
-        cmd.Append(fmt("[GotoNamedDest(\"%s\", \"%s\")]", fullPath, i.namedDest));
-    } else if (i.pageNumber > 0 && isFirstWin) {
-        cmd.Append(fmt("[GotoPage(\"%s\", %d)]", fullPath, i.pageNumber));
-    }
-    if ((i.startView != DisplayMode::Automatic || i.startZoom != kInvalidZoom ||
-         i.startScroll.x != -1 && i.startScroll.y != -1) &&
-        isFirstWin) {
-        Str viewModeStr = DisplayModeToString(i.startView);
-        cmd.Append(fmt("[SetView(\"%s\", \"%s\", %.2f, %d, %d)]", fullPath, viewModeStr, i.startZoom, i.startScroll.x,
-                       i.startScroll.y));
-    }
-    if (i.forwardSearchOrigin && i.forwardSearchLine) {
-        TempStr srcPath = path::NormalizeTemp(i.forwardSearchOrigin);
-        cmd.Append(fmt("[ForwardSearch(\"%s\", \"%s\", %d, 0, 0, 1)]", fullPath, srcPath, i.forwardSearchLine));
-    }
-    if (i.search) {
-        // HandleSearchCmd unescapes "" to "
-        TempStr term = str::ReplaceTemp(i.search, StrL("\""), StrL("\"\""));
-        cmd.Append(fmt("[Search(\"%s\",\"%s\")]", fullPath, term));
-    }
-    if ((i.enterPresentation || i.enterFullScreen) && isFirstWin) {
-        Str name = i.enterPresentation ? StrL("Presentation") : StrL("FullScreen");
-        cmd.Append(fmt("[%s(\"%s\")]", name, fullPath));
-    }
-
     if (i.reuseDdeInstance) {
         targetHwnd = nullptr; // force DDEExecute
     }
-    SendMyselfDDE(ToStr(cmd), targetHwnd);
+    SendMyselfDDE(OpenDdeCmdTemp(fullPath, i, isFirstWin, newWindow), targetHwnd);
 }
 
 bool SetupPluginMode(Flags& i) {
@@ -3232,13 +3479,17 @@ static Pixmap* RenderFileThumbnail(CreateThumbnailFromFileData* d) {
         SafeEngineRelease(&d->engine);
         engine = CreateEngineForThumbnail(cover);
     }
-    // the cover the book itself declares, which isn't always page 1
-    if (!engine && GuessFileTypeFromName(d->filePath, true) == FileType::Epub) {
+    // the cover the book itself declares, which isn't always page 1 of the
+    // loaded engine (d->engine)
+    bool noSiblingCover = len(cover) == 0;
+    if (noSiblingCover && GuessFileTypeFromName(d->filePath, true) == FileType::Epub) {
         Str coverData = EpubCoverImageData(d->filePath);
-        if (len(coverData) > 0) {
-            engine = CreateEngineImageFromData(coverData);
-        }
+        EngineBase* coverEngine = len(coverData) > 0 ? CreateEngineImageFromData(coverData) : nullptr;
         str::Free(coverData);
+        if (coverEngine) {
+            SafeEngineRelease(&d->engine);
+            engine = coverEngine;
+        }
     }
     if (!engine) {
         SetLoadThreadFileEBookUI(d->fileEBookUI);
@@ -3585,4 +3836,18 @@ void OnTemporaryFileNotifClosed(NotificationClosedEvent* ev) {
         ScheduleSaveSettings();
     }
     RemoveNotification(ev->wnd);
+}
+
+// CmdToggleLineWeights: lines at their width, or all one pixel wide
+void ToggleLineWeights() {
+    gSettings->showLineWeights = !gSettings->showLineWeights;
+    SetShowLineWeights(gSettings->showLineWeights);
+    // pages cached in any tab were drawn the other way
+    if (gRenderCache) {
+        gRenderCache->BumpDarkModeEpoch();
+    }
+    for (MainWindow* win : gWindows) {
+        MainWindowRerender(win);
+    }
+    ScheduleSaveSettings();
 }

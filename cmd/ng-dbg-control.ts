@@ -56,12 +56,14 @@ export const controlCommands: Record<string, number> = {
   TestMainMenu: 117,
   TestPerfStats: 161,
   TestOverlayState: 162,
+  TestMeasurement: 159,
   TestInput: 121,
   TestUiState: 122,
   TestToolWindow: 125,
   TestContextMenuAt: 127,
   TestOpenFiles: 132,
   TestPageAdjust: 138,
+  TestCaptureWindow: 170,
 };
 
 const argTypeEnd = 0;

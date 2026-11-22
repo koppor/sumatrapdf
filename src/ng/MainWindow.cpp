@@ -41,6 +41,7 @@
 #include "AIChatPanel.h"
 #include "OverlayScrollbar.h"
 #include "MainWindow.h"
+#include "StripGroups.h"
 #include "Selection.h"
 #include "SearchAndDDECommon.h"
 #include "WindowTab.h"
@@ -61,6 +62,7 @@
 #include "Toolbar.h"
 #include "TableOfContents.h"
 #include "gui/Sidebar.h"
+#include "SignatureUICommon.h"
 #include "gui/TabsUI.h"
 #include "gui/TabSwitcher.h"
 #include "HomePage.h"
@@ -311,6 +313,8 @@ void SelectTocItemInTree(MainWindow* win, TocItem* tocItem) {
 }
 
 MainWindow::MainWindow(gpui::Window* w) {
+    static int nextTestId = 1;
+    testId = nextTestId++;
     gpuiWin = w;
     sidebarBottomContent =
         SidebarContentFromStr(gSettings ? gSettings->sidebarBottomView : Str{}, SidebarContent::Favorites);
@@ -326,6 +330,7 @@ MainWindow::MainWindow(gpui::Window* w) {
 
 MainWindow::~MainWindow() {
     isBeingClosed = true;
+    StripGroupsDelete(this);
     FinishStressTest(this);
     // the find / count workers hold this window; join them before it goes away
     AbortFinding(this, true);
@@ -458,6 +463,9 @@ void FillAppCommandCtx(AppCommandCtx& ctx, MainWindow* win) {
     ctx.clipboardHasImage = ImageEditHasClipboard(win);
     ctx.clipboardReadAsync = OS_WASM;
     ctx.hasLayers = SidebarHasLayers(win);
+    ctx.hasSignatures = TabHasSignatures(ctx.tab);
+    EngineBase* engine = ctx.tab ? ctx.tab->GetEngine() : nullptr;
+    ctx.isOfd = engine && EngineMupdfIsOfd(engine);
 }
 
 // (0, 0) is "no point": keep the hover. A real point is hit-tested

@@ -33,6 +33,7 @@
 #include "SumatraTest.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "ImageReplace.h"
 #include "AnnotPlacement.h"
 #include "Canvas.h"
 #include "Tabs.h"
@@ -65,6 +66,7 @@
 #include "Menu.h"
 #include "EngineAll.h"
 #include "EutlTrust.h"
+#include "SignatureUICommon.h"
 #include "SignatureUI.h"
 #include "LayersUI.h"
 #include "CommandPalette.h"
@@ -80,6 +82,7 @@
 #include "OpenFromUrlCommon.h"
 #include "SumatraControl.h"
 #include "SumatraControlCommon.h"
+#include "StripGroups.h"
 
 extern bool gIsStartup;
 TempStr FindHistoryResultTemp(int* exitCodeOut);
@@ -114,6 +117,16 @@ static TempStr DpiResultTemp(Str action, int* exitCodeOut) {
         DpiSet(prevX, prevY);
         out.Append(fmt("layout=%d window=%d font=%d\n", layoutDpi, windowDpi, fontDy));
         return finish(layoutDpi == 240 && windowDpi == 240 && fontDy >= 24 ? 0 : 1);
+    }
+
+    // "override 125": DpiGetForHwnd reports 125% with no WM_DPICHANGED, as
+    // after an RDP connect; "override 0" goes back to the real DPI
+    if (str::StartsWith(action, StrL("override "))) {
+        int pct = 0;
+        str::Parse(Str(action.s + 9, len(action) - 9), "%d", &pct);
+        gDpiOverride = pct;
+        out.Append(fmt("override=%d\n", pct));
+        return finish(0);
     }
 
     if (!str::Eq(action, StrL("state")) || len(gWindows) == 0) {
@@ -306,6 +319,16 @@ static TempStr LayoutInfoResultTemp(Str action, int* exitCodeOut) {
         AppendHwndLayoutRect(out, win, panelNames[i], panels[i] ? panels[i]->hwnd : nullptr);
     }
     AppendHwndLayoutRect(out, win, StrL("aiChat"), win->hwndAiChatBox);
+    AppendHwndLayoutRect(out, win, StrL("captionOverlay"), win->hwndCaptionOverlay);
+    // an owned popup, not a child: report it in frame client coordinates
+    HWND sbV = win->overlayScrollV ? win->overlayScrollV->hwnd : nullptr;
+    Rect sbRc;
+    if (sbV) {
+        Rect wr = HwndWindowRect(sbV);
+        Point tl = HwndScreenToClient(win->hwndFrame, wr.TL());
+        sbRc = {tl.x, tl.y, wr.dx, wr.dy};
+    }
+    AppendLayoutRect(out, StrL("overlayScrollV"), sbV && HwndIsVisible(sbV), sbRc);
 
     AppendLayoutTree(out, StrL("chrome"), win->chromeLayout);
     AppendLayoutTree(out, StrL("frameLayout"), win->frameLayout);
@@ -693,12 +716,31 @@ enum class ControlCmd : u16 {
     TestMeasurement = 159,
     // [action, pageNo, imageIdx, path]: replace / edit an image embedded in the PDF
     TestImageReplace = 160,
-    // 161, 162: ng only (TestPerfStats, TestOverlayState); tests/lint-control-ids.ts
-    // checks ids mean the same command in both apps and tests/control.ts
+    // 161, 162, 170, 172: ng only (TestPerfStats, TestOverlayState, TestCaptureWindow,
+    // TestWindows); tests/lint-control-ids.ts checks ids mean the same command
+    // in both apps and tests/control.ts
     // [timeoutMs]: blocks until the home page painted after startup
     WaitHomePainted = 163,
     // [idx]: select tab idx; idx < 0 only reports the current tab and count
     TestSelectTab = 164,
+    // [definition]: does "CmdToggleX on" parse, and the command's on/off state
+    TestToggleCmd = 165,
+    // page 1 pixels a Clone() of the current document renders differently
+    TestCloneRender = 166,
+    // does the document have load errors, does the Errors notification show
+    TestDocErrors = 167,
+    // [pageNo, idx, value]: pick value in the idx-th combo / list box
+    TestSetFormChoice = 168,
+    // [action, a, b, c]: "drop" from to groupPos, "move" dir, "select" idx, or
+    // "" for the state; answers with the strip groups and tabs (StripGroupsStateTemp)
+    TestStripGroups = 169,
+    // 170 is ng's TestCaptureWindow
+    // [ms]: every document open waits this long first, like a sleeping drive
+    TestLoadDelay = 171,
+    // [path, value]: sets a setting the way the palette's "= settings" rows do
+    TestSetSetting = 173,
+    // [action, word]: touch selection probe (TouchSelResultTemp)
+    TestTouchSel = 174,
 };
 
 static_assert((u16)ControlCmd::Quit == (u16)ControlFrameCmd::Quit);
@@ -1287,15 +1329,19 @@ static void ExecuteControlRequest(ControlRequest* req) {
         case ControlCmd::TestRenderPageColors: {
             Str path = StringArg(req, 0);
             if (len(path) == 0) {
-                AppendError(req, StrL("TestRenderPageColors expects string path [, int pageNo] [, int zoomPercent]"));
+                AppendError(req, StrL("TestRenderPageColors expects string path [, int pageNo] [, int zoomPercent] "
+                                      "[, int view]"));
                 break;
             }
             i32 pageNo = 1;
             i32 zoomPercent = 100;
+            i32 view = 0;
             IntArg(req, 1, pageNo);
             IntArg(req, 2, zoomPercent);
+            IntArg(req, 3, view);
+            RenderTarget target = view ? RenderTarget::View : RenderTarget::Export;
             int exitCode = 0;
-            Str res = PageRenderColorsResultTemp(path, &exitCode, pageNo, zoomPercent);
+            Str res = PageRenderColorsResultTemp(path, &exitCode, pageNo, zoomPercent, target);
             AppendTestResult(req, exitCode, res);
             break;
         }
@@ -1400,6 +1446,86 @@ static void ExecuteControlRequest(ControlRequest* req) {
         case ControlCmd::TestSelectedText: {
             int exitCode = 0;
             Str res = SelectedTextResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestTouchSel: {
+            int exitCode = 0;
+            Str res = TouchSelResultTemp(StringArg(req, 0), StringArg(req, 1), &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestSetSetting: {
+            bool ok = SetSettingsValueFromStr(StringArg(req, 0), StringArg(req, 1));
+            AppendTestResult(req, ok ? 0 : 1, ok ? StrL("OK") : StrL("ERROR unknown setting"));
+            break;
+        }
+
+        case ControlCmd::TestLoadDelay: {
+            i32 ms = 0;
+            IntArg(req, 0, ms);
+            AtomicIntSet(&gTestLoadDelayMs, ms);
+            AppendTestResult(req, 0, fmt("%d", ms));
+            break;
+        }
+
+        case ControlCmd::TestStripGroups: {
+            if (len(gWindows) == 0 || !gWindows[0]) {
+                AppendTestResult(req, 2, StrL("NOTREADY no-window"));
+                break;
+            }
+            MainWindow* win = gWindows[0];
+            Str action = StringArg(req, 0);
+            i32 a = 0;
+            i32 b = 0;
+            i32 c = 0;
+            IntArg(req, 1, a);
+            IntArg(req, 2, b);
+            IntArg(req, 3, c);
+            if (str::Eq(action, StrL("drop"))) {
+                int groupId = (c >= 1 && c <= len(win->stripGroups)) ? win->stripGroups[c - 1]->id : 0;
+                StripGroupDropTab(win, a, b, groupId);
+            } else if (str::Eq(action, StrL("move"))) {
+                StripGroupMoveTab(win, a);
+            } else if (str::Eq(action, StrL("select")) && a >= 0 && a < win->TabCount()) {
+                TabsSelect(win, a);
+            }
+            AppendTestResult(req, 0, StripGroupsStateTemp(win));
+            break;
+        }
+
+        case ControlCmd::TestSetFormChoice: {
+            i32 pageNo = 1;
+            i32 idx = 0;
+            if (!IntArg(req, 0, pageNo) || !IntArg(req, 1, idx)) {
+                AppendError(req, StrL("TestSetFormChoice expects int pageNo, int idx, string value"));
+                break;
+            }
+            int exitCode = 0;
+            Str res = SetFormChoiceResultTemp(pageNo, idx, StringArg(req, 2), &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestDocErrors: {
+            int exitCode = 0;
+            Str res = DocErrorsResultTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestCloneRender: {
+            int exitCode = 0;
+            Str res = CloneRenderDiffTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestToggleCmd: {
+            int exitCode = 0;
+            Str res = ToggleCmdResultTemp(StringArg(req, 0), &exitCode);
             AppendTestResult(req, exitCode, res);
             break;
         }
@@ -1793,7 +1919,14 @@ static void ExecuteControlRequest(ControlRequest* req) {
                 break;
             }
             int page = tab->ctrl ? tab->ctrl->CurrentPageNo() : 0;
-            AppendTestResult(req, 0, fmt("path=%s page=%d", tab->filePath, page));
+            TempStr res = fmt("path=%s page=%d", tab->filePath, page);
+            if (tab->loadCopyBytesCopied >= 0) {
+                res = fmt("%s copied=%d/%d", res, tab->loadCopyBytesCopied, tab->loadCopyBytesTotal);
+            }
+            if (tab->loadState == WindowTab::LoadState::Loading) {
+                res = fmt("%s msg=%s", res, LoadingMessageTemp(tab));
+            }
+            AppendTestResult(req, 0, res);
             break;
         }
 

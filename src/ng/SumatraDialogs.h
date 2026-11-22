@@ -57,6 +57,7 @@ constexpr int MbRetYes = 6;
 constexpr int MbRetNo = 7;
 
 void MsgBox(MainWindow* win, Str text, Str caption, uint flags, Func1<int> onResult = {});
+void NativeMsgBoxSetEnabled(bool enabled);
 // ng: a message box raised while a tool window of `win` is the active window
 // is drawn in that window (gui/ToolWindow.cpp asks for it and gives it keys)
 struct ToolWindow;
@@ -77,8 +78,8 @@ void MessageBoxWarning(MainWindow* win, Str msg, Str title = {});
 
 // --- the dialogs ------------------------------------------------------------
 
-// ng: gpui has no save-file prompt. On Windows this is orig's GetSaveFileNameW
-// (gui/NativeFileDlg_win.cpp); elsewhere the port's own dialog
+// ng: on Windows gpui's save prompt with orig's GetSaveFileNameW fields
+// (gui/NativeFileDlg.cpp); elsewhere the port's own dialog
 struct SavePathArgs {
     MainWindow* win = nullptr;
     Str title;       // owned
@@ -105,12 +106,16 @@ void CloseSavePathDialog();
 void CloseSavePathDialogFor(MainWindow* win);
 bool IsSavePathDialogVisible();
 // -dbg-control's stand-in for picking a name in the dialog ({} is Cancel)
+void SetTestSavePath(Str path);
 gpui::El* SavePathDialogBuild(MainWindow* win, gpui::Ctx* cx);
 
 void ShowGoToPageDialog(MainWindow* win);
 void CloseGoToPageDialog();
 bool IsGoToPageDialogVisible();
 gpui::El* GoToPageDialogBuild(MainWindow* win, gpui::Ctx* cx);
+void CloseRenameStripGroupDialog();
+bool IsRenameStripGroupDialogVisible();
+gpui::El* RenameStripGroupDialogBuild(MainWindow* win, gpui::Ctx* cx);
 
 void ShowAddFavoriteDialog(MainWindow* win, Str filePath, int pageNo, Str pageLabel, Str name);
 void ShowEditFavoritesDialog(MainWindow* win);
@@ -120,6 +125,10 @@ gpui::El* AddFavoriteDialogBuild(MainWindow* win, gpui::Ctx* cx);
 void CloseOpenFromUrlDialog();
 bool IsOpenFromUrlDialogVisible();
 gpui::El* OpenFromUrlDialogBuild(MainWindow* win, gpui::Ctx* cx);
+void ShowSumatraPDFWebDialog(MainWindow* win);
+void CloseSumatraPDFWebDialog();
+bool IsSumatraPDFWebDialogVisible();
+gpui::El* SumatraPDFWebDialogBuild(MainWindow* win, gpui::Ctx* cx);
 
 // what the user typed in the password dialog; only valid during the callback
 struct PasswordDialogResult {

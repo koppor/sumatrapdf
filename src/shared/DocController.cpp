@@ -176,8 +176,13 @@ void BrowserDocController::ScrollTo(int pageNo, RectF rect, float zoom) {
     GoToPage(pageNo, false);
 }
 
-bool BrowserDocController::HandleLink(IPageDestination* link, ILinkHandler*) {
+bool BrowserDocController::HandleLink(IPageDestination* link, ILinkHandler* linkHandler) {
     Kind kind = link->GetKind();
+    // a ToC entry for an external url (NewBrowserDestination) opens in the browser
+    if (kind == kindDestinationLaunchURL && linkHandler) {
+        linkHandler->GotoLink(link);
+        return true;
+    }
     if (kind != kindDestinationScrollTo) {
         logf("BrowserDocController::HandleLink: unsupported kind '%s'\n", Str(kind));
         ReportIf(kind != kindDestinationScrollTo);
@@ -428,6 +433,7 @@ void BrowserDocController::UpdateTheme() {
     if (!docView || len(currentPageUrl) == 0) {
         return;
     }
+    logf("BrowserDocController::UpdateTheme: reloading '%s'\n", currentPageUrl);
     SaveHtmlScrollPos();
     restoreHtmlScrollPos = true;
     DisplayPage(currentPageUrl);

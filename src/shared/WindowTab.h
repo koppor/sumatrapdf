@@ -21,15 +21,17 @@ struct LoadArgs;
 #endif
 struct ReadAloudHighlightMap;
 
+struct PdfSigResult;
+
 #if defined(SUMATRA_NG)
 enum class SidebarContent {
     Bookmarks,
     Thumbnails,
     Favorites,
+    Signatures,
     Layers,
 };
 #else
-struct PdfSigResult;
 
 // what a sidebar panel shows
 enum class SidebarView {
@@ -108,10 +110,10 @@ struct WindowTab {
     DocController* ctrl = nullptr;
     HexView* hex = nullptr;
     u64 loadStartedAt = 0;
-#if !defined(SUMATRA_NG)
     // network-drive copy progress while loading (-1 = not in copy phase)
     i64 loadCopyBytesCopied = -1;
     i64 loadCopyBytesTotal = 0;
+#if !defined(SUMATRA_NG)
     LoadArgs* pendingLoadArgs = nullptr;
 #endif
     // FileWatcher token for unsubscribing
@@ -159,6 +161,8 @@ struct WindowTab {
     Color bgColor = kColorUnset;
     // per-document tab color from FileState; kColorUnset = use default
     Color tabColor = kColorUnset;
+    // id of the window's StripGroup the tab is in; 0: none
+    int stripGroupId = 0;
 
     // which AI chat sidebar is open for this tab
     // (-1 = none; 0 = Claude, 1 = Grok, 2 = Codex, 3 = AntiGravity)
@@ -190,9 +194,9 @@ struct WindowTab {
 #else
     // what the sidebar's top panel shows (showToc: whether it does)
     SidebarView sidebarView = SidebarView::Bookmarks;
+#endif
     // what checking the signatures found; set by a background job. Owned
     PdfSigResult* signatures = nullptr;
-#endif
     // whether to auto-reload the document when the tab is selected
     bool reloadOnFocus = false;
     // opened via CmdOpenFileNoHistory: do not write File History / Windows Recent
@@ -275,3 +279,4 @@ bool IsPdfDoc(WindowTab* tab);
 bool IsEpubDoc(WindowTab* tab);
 bool IsMupdfNonPdfDoc(WindowTab* tab);
 bool IsCajDoc(WindowTab* tab);
+TempStr LoadingMessageTemp(WindowTab* tab);

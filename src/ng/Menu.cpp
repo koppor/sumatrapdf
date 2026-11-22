@@ -26,6 +26,7 @@
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "ImageReplace.h"
 #include "ReadingBar.h"
 #include "ReadingAutoScroll.h"
 #include "AIChatTypes.h"
@@ -45,19 +46,18 @@
 #include "GoogleLens.h"
 #include "gui/DocCanvas.h"
 #include "gui/Sidebar.h"
+#include "gui/AppShell.h"
 #include "Menu.h"
 #include "MenuCommon.h"
 #include "MenuDefs.h"
+#include "HomePage.h"
+#include "ServerFiles.h"
 
 #include "SumatraLog.h"
 
 // clang-format off
 //[ ACCESSKEY_GROUP Context Menu (Selection)
 static MenuDef menuDefSelection[] = {
-    {
-        TrN("Select &All"),
-        CmdSelectAll,
-    },
     {
         TrN("&Copy To Clipboard"),
         CmdCopySelection,
@@ -81,6 +81,10 @@ static MenuDef menuDefSelection[] = {
     {
         TrN("&Zoom To Selection"),
         CmdZoomToSelection,
+    },
+    {
+        TrN("&Trim Pages To Selection"),
+        CmdTrimPagesToSelection,
     },
     {
         TrN("Count &Words"),
@@ -163,6 +167,10 @@ static MenuDef menuDefContext[] = {
     {
         TrN("Show &Bookmarks"),
         CmdToggleBookmarks,
+    },
+    {
+        TrN("Show &Thumbnails"),
+        CmdToggleThumbnails,
     },
     {
         TrN("Sh&ow Toolbar"),
@@ -573,14 +581,37 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
         }
         if (ctx) {
             removeMenu |= (menuDef == menuDefMainSelection) && !ctx->hasTextSelection && cmdIdInList(selectionTextCmds);
+            removeMenu |= !ctx->isCursorOnPage && (subMenuDef == menuDefCreateAnnotUnderCursor);
+            // these annotations need text to mark up, except Highlight, which can
+            // fill a drawn rectangle
+            bool canMarkUp = ctx->hasTextSelection || ctx->hasDrawnRectSelection;
+            removeMenu |= (!canMarkUp || !ctx->supportsAnnots) && (subMenuDef == menuDefCreateAnnotFromSelection);
             // in the context menu only show translate / search items for a text
             // selection (the menubar variant is live-updated via
             // SetMenuStateForSelection instead)
             bool isTextSelSubMenu = (subMenuDef == menuDefTranslateWith) || (subMenuDef == menuDefSearchWith);
             removeMenu |= (menuDef == menuDefSelection) && !ctx->hasTextSelection && isTextSelSubMenu;
+            bool isRectSel = ctx->hasSelection && !ctx->hasTextSelection;
+            if (menuDef == menuDefSelection) {
+                removeMenu |= !ctx->hasSelection && cmdId == CmdCopySelection;
+                if (!isRectSel) {
+                    removeMenu |= cmdId == CmdCopySelectionAsImage || cmdId == CmdSaveSelectionAsImage ||
+                                  cmdId == CmdPrintSelection || cmdId == CmdSearchGoogleLens ||
+                                  cmdId == CmdZoomToSelection;
+                }
+            }
+            if (menuDef == menuDefGoogleLens) {
+                removeMenu |= cmdId == CmdSearchGoogleLens && !ctx->hasSelection;
+                removeMenu |= cmdId == CmdSearchGoogleLensPage && !ctx->isCursorOnPage;
+                bool onImage = ctx->cursorOnImage || ctx->engineKind == kindEngineImage;
+                removeMenu |= cmdId == CmdSearchGoogleLensImage && !onImage;
+            }
         }
         removeMenu |= !isSubMenu && cmdId == CmdSignWithImage && len(gSettings->annotations.signatureImage) == 0;
         removeMenu |= ((subMenuDef == menuDefDebug) && !ShowDebugMenu());
+        // orig builds the home page's menu bar without a tab, which hides all of
+        // Read Aloud; with a window its disabled Stop row would keep the menu
+        removeMenu |= ctx && !ctx->isDocLoaded && (subMenuDef == menuDefReadAloud);
         if (removeMenu) {
             continue;
         }
@@ -608,6 +639,8 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
                 if (subMenuDef == menuDefReadAloud) {
                     RebuildReadAloudMenu(ctx->win, subMenu);
                 } else if (subMenuDef == menuDefContextReadAloud) {
+                    // a context menu is built as it opens
+                    ReadAloudLoadVoices();
                     RebuildReadAloudMenu(ctx->win, subMenu, true, ctx->win->contextMenuPtValid);
                 }
             }
@@ -637,6 +670,36 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
     }
     RemoveBadMenuSeparators(menu);
     return menu;
+}
+
+// true if `it` is one of the page-layout toggles orig's MenuUpdateDisplayMode updates
+static bool SetFixedLayoutState(MenuItemModel& it, DisplayModel* dm) {
+    bool hasCrop = !dm->GetUserCrop().IsEmpty();
+    switch (it.cmdId) {
+        case CmdToggleMangaMode:
+            it.checked = dm->GetDisplayR2L();
+            return true;
+        case CmdToggleUniformPageWidth:
+            it.checked = dm->GetUniformPageWidth();
+            return true;
+        case CmdToggleTrimEmptyMargins:
+            it.checked = dm->GetTrimEmptyMargins();
+            return true;
+        case CmdShowWholePages:
+            it.disabled = !hasCrop;
+            return true;
+        case CmdSaveTrimmedPagesAs:
+            it.disabled = !hasCrop && !dm->GetTrimEmptyMargins();
+            return true;
+        case CmdToggleReadColumns:
+            it.checked = dm->GetReadColumns();
+            return true;
+        case CmdToggleColumnsWholePage:
+            it.disabled = !dm->GetReadColumns();
+            it.checked = dm->ShowsColumnsWholePage();
+            return true;
+    }
+    return false;
 }
 
 // ng: orig checks the radio items through MENUITEMINFO; here the model carries
@@ -698,6 +761,11 @@ static void SetMenuChecks(MenuModel* menu, MainWindow* win) {
             it.checked = dmMirror && dmMirror->GetMirror();
             continue;
         }
+        // orig's MenuUpdateDisplayMode: the page-layout toggles of a fixed document
+        DisplayModel* dm = win->CurrentTab() ? win->AsFixed() : nullptr;
+        if (dm && SetFixedLayoutState(it, dm)) {
+            continue;
+        }
         if (it.cmdId == CmdTogglePageGrid) {
             it.checked = ShowPageGrid();
             continue;
@@ -734,6 +802,10 @@ static void SetMenuChecks(MenuModel* menu, MainWindow* win) {
             it.checked = ShowTransparencyGrid();
             continue;
         }
+        if (it.cmdId == CmdMeasure) {
+            it.checked = win->measurementToolbar != nullptr;
+            continue;
+        }
         if (it.cmdId == CmdToggleImages) {
             it.checked = ShowImageOutlines();
             continue;
@@ -760,9 +832,85 @@ static void SetMenuChecks(MenuModel* menu, MainWindow* win) {
     }
 }
 
+#if OS_DARWIN
+// The Edit menu of every Mac application. In a text field its rows edit the
+// text (SendEditToInput in AppShell.cpp).
+// clang-format off
+static MenuDef menuDefEditMac[] = {
+    {TrN("&Undo"), CmdUndo},
+    {TrN("&Redo"), CmdRedo},
+    {StrL(kMenuSeparator), 0},
+    {TrN("Cu&t"), CmdCutAnnotation},
+    {TrN("&Copy"), CmdCopySelection},
+    {TrN("&Paste"), CmdPasteClipboardImage},
+    {TrN("Select &All"), CmdSelectAll},
+    {{}, 0},
+};
+// clang-format on
+
+// Rows for the commands, after the row of afterCmd, wherever that is.
+static void InsertMenuRowsAfter(MenuModel* menu, int afterCmd, const int* cmds, int nCmds) {
+    MenuItemModel* after = MenuFind(menu, afterCmd);
+    for (MenuItemModel& top : menu->items) {
+        MenuModel* sub = top.submenu;
+        int idx = -1;
+        for (int i = 0; sub && after && i < len(sub->items); i++) {
+            if (&sub->items[i] == after) {
+                idx = i;
+            }
+        }
+        if (idx < 0) {
+            continue;
+        }
+        for (int i = 0; i < nCmds; i++) {
+            MenuItemModel row;
+            row.title = trans::GetTranslation(GetCommandDescription(cmds[i]));
+            row.cmdId = cmds[i];
+            VecInsertAt(sub->items, ++idx, row);
+        }
+        return;
+    }
+}
+
+// The macOS menu bar has About, Settings and Quit in the application menu
+// (AppShell.cpp's InstallNativeMenu) and Copy and Select All in Edit. The
+// menu bar is the system's: there is no Show Menu.
+static void AdaptMenuToMac(MenuModel* menu, BuildMenuCtx* ctx) {
+    static const int kMoved[] = {CmdExit, CmdOptions, CmdHelpAbout, CmdToggleMenuBar, CmdCopySelection, CmdSelectAll};
+    for (int cmdId : kMoved) {
+        MenuRemove(menu, cmdId);
+    }
+    MenuSetText(menu, CmdShowInFolder, Tr("Show in Finder"));
+    MenuSetText(menu, CmdOpenFileWithOSFilePicker, Tr("Open using macOS File Picker..."));
+    for (MenuItemModel& it : menu->items) {
+        if (it.submenu) {
+            RemoveBadMenuSeparators(it.submenu);
+        }
+    }
+
+    // Find Next (⌘G) and the rest after Find, so the menu shows their keys
+    static const int kFindCmds[] = {CmdFindNext, CmdFindPrev, CmdFindNextSel};
+    InsertMenuRowsAfter(menu, CmdFindFirst, kFindCmds, dimof(kFindCmds));
+    // File > Close Window (⇧⌘W) after Close (⌘W)
+    static const int kCloseCmds[] = {CmdCloseWindow};
+    InsertMenuRowsAfter(menu, CmdClose, kCloseCmds, dimof(kCloseCmds));
+
+    MenuItemModel edit;
+    edit.title = Tr("&Edit");
+    edit.submenu = BuildMenuFromDef(menuDefEditMac, ctx);
+    constexpr int kAfterFile = 1;
+    VecInsertAt(menu->items, kAfterFile, edit);
+}
+#endif
+
 MenuModel* BuildMenu(MainWindow* win) {
     AppCommandCtx ctx = NewAppCommandCtx(win);
     MenuModel* menu = BuildMenuFromDef(menuDefMenubar, &ctx);
+#if OS_DARWIN
+    if (AppShellNativeMenu()) {
+        AdaptMenuToMac(menu, &ctx);
+    }
+#endif
     SetMenuChecks(menu, win);
     return menu;
 }
@@ -863,7 +1011,18 @@ TempStr ContextMenuAtPointResultTemp(MainWindow* win, int x, int y) {
     if (!win) {
         return StrL("NOTREADY no-window\n");
     }
-    MenuModel* menu = BuildWindowContextMenu(win, Point{x, y});
+    MenuModel* menu = nullptr;
+    if (win->IsCurrentTabAbout()) {
+        // the home page: the menu of the selected entry, else the first
+        Str path = HomePageSelectedFilePathTemp(win);
+        if (len(path) == 0) {
+            HomePageSelectFirst(win);
+            path = HomePageSelectedFilePathTemp(win);
+        }
+        menu = BuildHomeContextMenu(win, path);
+    } else {
+        menu = BuildWindowContextMenu(win, Point{x, y});
+    }
     if (!menu) {
         return Str{};
     }
@@ -982,6 +1141,10 @@ MenuModel* BuildWindowContextMenu(MainWindow* win, Point cursorPos) {
         }
         if (!onImage) {
             MenuRemove(popup, CmdSaveImage);
+        }
+        if (!pageEl || !pageEl->Is(kindPageElementImage)) {
+            MenuRemove(popup, CmdReplaceImage);
+            MenuRemove(popup, CmdEditImageExternally);
         }
         if (!isImageEngine && !onImage) {
             MenuRemove(popup, CmdCropImage);
@@ -1139,6 +1302,12 @@ void WindowContextMenuCommand(MainWindow* win, int cmdId) {
         case CmdSearchGoogleLensImage:
             SearchGoogleLensImage(tab, pageEl);
             return;
+        case CmdReplaceImage:
+            ReplaceImageFromFile(win, pageEl);
+            return;
+        case CmdEditImageExternally:
+            EditImageExternally(win, pageEl);
+            return;
 
         case CmdSaveImage:
         case CmdCropImage:
@@ -1197,10 +1366,17 @@ void WindowContextMenuCommand(MainWindow* win, int cmdId) {
         }
         case CmdCopyImage: {
             if (pageEl) {
+#if OS_WIN
                 RenderedBitmap* bmp = engine->GetImageForPageElement(pageEl);
                 if (bmp) {
                     CopyRenderedBitmapToClipboard(win, bmp);
                 }
+#else
+                // ng: off Windows the clipboard takes the image as a PNG
+                Str png = engine->GetImagePngForPageElement(pageEl);
+                CopyPngToClipboard(win, png);
+                str::Free(png);
+#endif
             }
             return;
         }
@@ -1220,6 +1396,23 @@ void WindowContextMenuCommand(MainWindow* win, int cmdId) {
 
 // --- the home page's context menu (orig's OnAboutContextMenu) ---------------
 
+// ng: the website's Upload to server / Delete from server. While linked,
+// Delete File reads Delete local. A changed server copy can be replaced.
+static void AppendServerItems(MenuModel* popup, Str filePath) {
+    if (!ServerFilesListed()) {
+        return;
+    }
+    MenuSetText(popup, CmdDeleteFile, Tr("Delete local"));
+    MenuAppendSeparator(popup);
+    ServerFileState st = GetServerFileState(filePath, file::GetSize(filePath));
+    if (st != ServerFileState::Same) {
+        MenuAppendString(popup, Tr("Upload to server"), CmdUploadToServer);
+    }
+    if (st != ServerFileState::None) {
+        MenuAppendString(popup, Tr("Delete from server"), CmdDeleteFromServer);
+    }
+}
+
 MenuModel* BuildHomeContextMenu(MainWindow* win, Str filePath) {
     if (!HasPermission(Perm::SavePreferences | Perm::DiskAccess) || !SettingsRememberOpenedFiles() ||
         !gSettings->showStartPage) {
@@ -1227,6 +1420,13 @@ MenuModel* BuildHomeContextMenu(MainWindow* win, Str filePath) {
     }
     if (len(filePath) == 0 || !path::IsAbsolute(filePath)) {
         return nullptr;
+    }
+    // ng: a server-only file: open (downloads it) or delete the server copy
+    if (IsServerOnlyFile(filePath)) {
+        auto* popup = new MenuModel();
+        MenuAppendString(popup, Tr("&Open Document"), CmdOpenSelectedDocument);
+        MenuAppendString(popup, Tr("Delete from server"), CmdDeleteFromServer);
+        return popup;
     }
     FileState* fs = FileHistoryFindByPath(filePath);
     if (!fs) {
@@ -1245,6 +1445,7 @@ MenuModel* BuildHomeContextMenu(MainWindow* win, Str filePath) {
         str::Free(it->accel);
         it->accel = str::Dup(StrL("Del"));
     }
+    AppendServerItems(popup, filePath);
     logf("BuildHomeContextMenu: '%s': %s\n", path::GetBaseNameTemp(filePath), MenuRowsTemp(popup));
     return popup;
 }
@@ -1259,7 +1460,11 @@ void HomeContextMenuCommand(MainWindow* win, Str filePathIn, int cmdId) {
     FileState* fs = FileHistoryFindByPath(path);
     switch (cmdId) {
         case CmdOpenSelectedDocument:
-            LoadDocument(win, path);
+            if (IsServerOnlyFile(path)) {
+                OpenServerFile(win, path);
+                return;
+            }
+            StartLoadDocument(win, path);
             return;
         case CmdShowInFolder:
             ShowFileInFolder(win, path);
@@ -1276,6 +1481,12 @@ void HomeContextMenuCommand(MainWindow* win, Str filePathIn, int cmdId) {
             return;
         case CmdDeleteFile:
             DeleteFileFromHomePage(win, path);
+            return;
+        case CmdUploadToServer:
+            UploadFileToServer(win, path);
+            return;
+        case CmdDeleteFromServer:
+            DeleteFileFromServer(win, path);
             return;
     }
     ExecuteCmd(win, cmdId);

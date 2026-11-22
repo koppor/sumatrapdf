@@ -294,6 +294,12 @@ void DialogSelect::Free() {
 }
 
 void DialogSelect::SetItems(const StrVec& strings, int selected) {
+    // the select borrows `items`: it lets go of them before they are freed and
+    // gets the new ones, it reads the old ones to keep its selection
+    gpc::SelectState* selState = app && state.IsValid() ? state.Get(app) : nullptr;
+    if (selState) {
+        selState->SetItems(nullptr, 0);
+    }
     VecReset(items);
     titles.Reset();
     for (Str s : strings) {
@@ -306,6 +312,10 @@ void DialogSelect::SetItems(const StrVec& strings, int selected) {
         VecAppend(items, it);
     }
     sel = selected;
+    if (selState) {
+        selState->SetItems(items.els, len(items));
+        selState->SetSelectedIndex(selected, nullptr);
+    }
 }
 
 void DialogSelect::SetSel(gp::App* app, int selected) {
@@ -832,6 +842,24 @@ gp::El* DlgAccelText(gp::Ctx* cx, gp::Str text) {
     return DlgAccelUnderline(cx, gp::TextEl(cx->a, text), text);
 }
 
+// focuses the element with click id `clickId` or its nearest focusable ancestor:
+// a gpui slider takes the focus on its root, not on the element with its id
+static void FocusClickTarget(gp::Window* win, int clickId) {
+    const auto& hits = win->paint.hits;
+    for (int i = 0; i < len(hits); i++) {
+        if (hits[i].id != clickId) {
+            continue;
+        }
+        for (int j = i; j >= 0; j = hits[j].parent) {
+            if (hits[j].focusId) {
+                gp::WindowSetFocusId(win, hits[j].focusId);
+                return;
+            }
+        }
+    }
+    gp::WindowSetFocusId(win, clickId);
+}
+
 // Alt + letter, or the letter alone while no text field has the focus
 bool DlgAccelOnKey(gp::Ctx* cx, int vk, bool alt, bool ctrl, bool editFocused) {
     if (ctrl || vk < 'A' || vk > 'Z' || len(gDlgAccels) == 0) {
@@ -868,7 +896,7 @@ bool DlgAccelOnKey(gp::Ctx* cx, int vk, bool alt, bool ctrl, bool editFocused) {
                 }
                 break;
             case DlgAccelKind::Focus:
-                gp::WindowSetFocusId(cx->win, acc.focusId);
+                FocusClickTarget(cx->win, acc.focusId);
                 break;
             case DlgAccelKind::None:
                 break;

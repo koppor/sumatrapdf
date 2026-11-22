@@ -1438,8 +1438,51 @@ TempStr ToggleFormButtonResultTemp(int pageNo, int idx, int* exitCodeOut) {
     return ToStrTemp(out);
 }
 
+// Set the idx-th combo box / list box on a page to `value` as picking it does:
+// "OK before='a' after='b'"
+TempStr SetFormChoiceResultTemp(int pageNo, int idx, Str value, int* exitCodeOut) {
+    if (exitCodeOut) {
+        *exitCodeOut = 1;
+    }
+    MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    if (!dm) {
+        if (exitCodeOut) {
+            *exitCodeOut = 2;
+        }
+        return str::DupTemp(StrL("NOTREADY no-doc\n"));
+    }
+    if (!dm->ValidPageNo(pageNo)) {
+        return fmt("ERROR invalid-page pageNo=%d\n", pageNo);
+    }
+    Vec<Annotation*> widgets;
+    EngineMupdfGetPageWidgets(dm->GetEngine(), pageNo, widgets);
+    Annotation* choice = nullptr;
+    int n = 0;
+    for (Annotation* w : widgets) {
+        int wt = GetWidgetType(w);
+        if (wt != PDF_WIDGET_TYPE_COMBOBOX && wt != PDF_WIDGET_TYPE_LISTBOX) {
+            continue;
+        }
+        if (n == idx) {
+            choice = w;
+        }
+        n++;
+    }
+    if (!choice) {
+        return fmt("ERROR no-choice idx=%d choices=%d\n", idx, n);
+    }
+    TempStr before = str::DupTemp(GetWidgetValue(choice));
+    bool ok = SetWidgetChoiceValue(choice, value);
+    TempStr after = str::DupTemp(GetWidgetValue(choice));
+    if (exitCodeOut) {
+        *exitCodeOut = ok ? 0 : 1;
+    }
+    return fmt("OK before='%s' after='%s'\n", before, after);
+}
+
 // Render one page and count red / non-white pixels (issue #3415: WebP in EPUB paints).
-TempStr PageRenderColorsResultTemp(Str path, int* exitCodeOut, int pageNo, int zoomPercent) {
+TempStr PageRenderColorsResultTemp(Str path, int* exitCodeOut, int pageNo, int zoomPercent, RenderTarget target) {
     str::Builder out;
     auto fail = [&out, exitCodeOut](Str msg) {
         if (exitCodeOut) {
@@ -1484,7 +1527,7 @@ TempStr PageRenderColorsResultTemp(Str path, int* exitCodeOut, int pageNo, int z
     }
 
     float zoom = zoomPercent > 0 ? (float)zoomPercent / 100.f : 1.f;
-    RenderPageArgs rargs(pageNo, zoom, 0, nullptr, RenderTarget::Export);
+    RenderPageArgs rargs(pageNo, zoom, 0, nullptr, target);
     Pixmap* bmp = engine->RenderPage(rargs);
     if (!bmp || !bmp->data) {
         FreePixmap(bmp);
@@ -1605,6 +1648,42 @@ Pixmap* EnsureReadablePixmap(Pixmap* p) {
 }
 
 // a spot on pageNo with no text under it, in canvas pixels
+// tests/touch-long-press-select.ts: where to touch, in screen pixels.
+// "word <w>": the center of word w on page 1. "state": the touch selection
+// handles, their centers when shown.
+TempStr TouchSelResultTemp(Str action, Str word, int* exitCodeOut) {
+    auto finish = [&](TempStr msg, int code) -> TempStr {
+        if (exitCodeOut) {
+            *exitCodeOut = code;
+        }
+        return msg;
+    };
+    MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    if (!dm) {
+        return finish(str::DupTemp(StrL("NOTREADY no-doc")), 2);
+    }
+    if (str::Eq(action, StrL("word"))) {
+        double wx = 0, wy = 0;
+        if (!FindWordCenter(dm->GetEngine(), 1, word, &wx, &wy)) {
+            return finish(str::DupTemp(StrL("ERROR word-not-found")), 1);
+        }
+        Point pt = CanvasToScreenPt(win, dm->CvtToScreen(1, PointF((float)wx, (float)wy)));
+        return finish(fmt("OK %d %d", pt.x, pt.y), 0);
+    }
+    if (!str::Eq(action, StrL("state"))) {
+        return finish(str::DupTemp(StrL("ERROR unknown action")), 1);
+    }
+    Rect start, end;
+    if (!win->touchSelHandles || !GetTouchSelHandleRects(win, start, end)) {
+        return finish(str::DupTemp(StrL("OK handles=0")), 0);
+    }
+    Point s = CanvasToScreenPt(win, Point(start.x + start.dx / 2, start.y + start.dy / 2));
+    Point e = CanvasToScreenPt(win, Point(end.x + end.dx / 2, end.y + end.dy / 2));
+    return finish(fmt("OK handles=1 dragging=%d start=%d,%d end=%d,%d", (int)win->touchSelDragging, s.x, s.y, e.x, e.y),
+                  0);
+}
+
 Point FindEmptySpotOnPage(MainWindow* win, DisplayModel* dm, int pageNo) {
     Rect client = Rect(0, 0, win->canvasRc.dx, win->canvasRc.dy);
     constexpr int kStep = 8;

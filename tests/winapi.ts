@@ -18,11 +18,20 @@ import { IS_MAC, IS_WIN } from "./host.ts";
 import {
   macClientToScreen,
   macControlRequest,
+  macCaptureClientPixels,
+  macClipboardImageInfo,
   macDdeExecute,
   macFrameClientRect,
   macFrameVisible,
+  macPostKeyDown,
+  macPostKeyWithModifier,
   macSendMessage,
   macSendText,
+  macShowWindow,
+  macToolWindowMessage,
+  macWindow,
+  macWindows,
+  macWithTarget,
   TestLayout,
   type InputTarget,
 } from "./mac-control.ts";
@@ -64,7 +73,7 @@ const user32 = loadDll("user32.dll", {
     returns: FFIType.bool,
   },
   SetWindowPos: {
-    args: [FFIType.ptr, FFIType.ptr, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.u32],
+    args: [FFIType.ptr, FFIType.i64, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32, FFIType.u32],
     returns: FFIType.bool,
   },
   GetWindowLongW: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
@@ -87,6 +96,8 @@ const user32 = loadDll("user32.dll", {
   ClientToScreen: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
   GetWindowTextW: { args: [FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
   GetWindowRect: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
+  MonitorFromWindow: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.u64 },
+  GetMonitorInfoW: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.bool },
   IsWindowVisible: { args: [FFIType.ptr], returns: FFIType.bool },
   IsWindowEnabled: { args: [FFIType.ptr], returns: FFIType.bool },
   WindowFromPoint: { args: [FFIType.i64], returns: FFIType.u64 },
@@ -99,8 +110,11 @@ const user32 = loadDll("user32.dll", {
   GetSystemMetrics: { args: [FFIType.i32], returns: FFIType.i32 },
   SystemParametersInfoW: { args: [FFIType.u32, FFIType.u32, FFIType.ptr, FFIType.u32], returns: FFIType.bool },
   SetProcessDpiAwarenessContext: { args: [FFIType.i64], returns: FFIType.bool },
+  GetDpiForWindow: { args: [FFIType.ptr], returns: FFIType.u32 },
   InitializeTouchInjection: { args: [FFIType.u32, FFIType.u32], returns: FFIType.bool },
   InjectTouchInput: { args: [FFIType.u32, FFIType.ptr], returns: FFIType.bool },
+  CreateSyntheticPointerDevice: { args: [FFIType.u32, FFIType.u32, FFIType.u32], returns: FFIType.u64 },
+  InjectSyntheticPointerInput: { args: [FFIType.u64, FFIType.ptr, FFIType.u32], returns: FFIType.bool },
   GetCursorPos: { args: [FFIType.ptr], returns: FFIType.bool },
   GetGUIThreadInfo: { args: [FFIType.u32, FFIType.ptr], returns: FFIType.bool },
   GetCursorInfo: { args: [FFIType.ptr], returns: FFIType.bool },
@@ -126,6 +140,7 @@ const user32 = loadDll("user32.dll", {
   GetMenuStringW: { args: [FFIType.u64, FFIType.u32, FFIType.ptr, FFIType.i32, FFIType.u32], returns: FFIType.i32 },
   GetMenuState: { args: [FFIType.u64, FFIType.u32, FFIType.u32], returns: FFIType.u32 },
   OpenClipboard: { args: [FFIType.ptr], returns: FFIType.bool },
+  IsClipboardFormatAvailable: { args: [FFIType.u32], returns: FFIType.bool },
   CloseClipboard: { args: [], returns: FFIType.bool },
   GetClipboardData: { args: [FFIType.u32], returns: FFIType.u64 },
   EnumClipboardFormats: { args: [FFIType.u32], returns: FFIType.u32 },
@@ -227,6 +242,8 @@ const kernel32 = loadDll("kernel32.dll", {
   CreateToolhelp32Snapshot: { args: [FFIType.u32, FFIType.u32], returns: FFIType.u64 },
   Process32FirstW: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.bool },
   Process32NextW: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.bool },
+  Module32FirstW: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.bool },
+  Module32NextW: { args: [FFIType.u64, FFIType.ptr], returns: FFIType.bool },
   OpenProcess: { args: [FFIType.u32, FFIType.bool, FFIType.u32], returns: FFIType.u64 },
   TerminateProcess: { args: [FFIType.u64, FFIType.u32], returns: FFIType.bool },
   WaitForSingleObject: { args: [FFIType.u64, FFIType.u32], returns: FFIType.u32 },
@@ -373,6 +390,8 @@ export const SRCCOPY = 0x00cc0020;
 export const COLORONCOLOR = 3; // StretchBlt mode: no smoothing
 // ShowWindow commands
 export const SW_SHOWMINNOACTIVE = 7;
+export const SW_MINIMIZE = 6;
+export const SW_SHOWMINIMIZED = 2;
 export const SW_SHOWNOACTIVATE = 4;
 export const SW_RESTORE = 9;
 export const SW_MAXIMIZE = 3;
@@ -536,6 +555,15 @@ export function testWindowPos(): WindowPos {
   return { x: wa.left + dx, y: wa.top, dx, dy };
 }
 
+// -window-pos for the "rightHalf" layout whatever the runner asks for: for a
+// test whose Fit Page / Fit Visible zoom must stay in the range it was written for
+export function localWindowPosArg(): string {
+  const wa = getWorkArea();
+  const dx = Math.floor((wa.right - wa.left) / 2);
+  const dy = Math.floor(((wa.bottom - wa.top) * 3) / 4);
+  return `${dx}x${dy}@${wa.left + dx}x${wa.top}`;
+}
+
 export function sleep(ms: number): Promise<void> {
   return Bun.sleep(ms);
 }
@@ -546,6 +574,9 @@ export function packCoords(x: number, y: number): number {
 }
 
 export function getClassName(hwnd: number): string {
+  if (IS_MAC) {
+    return macWindow(hwnd)?.className ?? "";
+  }
   if (!IS_WIN) {
     return "";
   }
@@ -559,6 +590,9 @@ export function getClassName(hwnd: number): string {
 }
 
 export function getWindowPid(hwnd: number): number {
+  if (IS_MAC) {
+    return macWindow(hwnd)?.pid ?? 0;
+  }
   const out = new Uint32Array(1);
   user32.symbols.GetWindowThreadProcessId(hwnd, ptr(out));
   return out[0];
@@ -584,6 +618,15 @@ export function getFocusedHwnd(hwndInSameThread: number): number {
 
 // visit returns false to stop enumeration early
 export function enumWindows(visit: (hwnd: number) => boolean): void {
+  // macOS: the frames of the app the test is connected to
+  if (IS_MAC) {
+    for (const w of macWindows()) {
+      if (!visit(w.hwnd)) {
+        return;
+      }
+    }
+    return;
+  }
   if (!IS_WIN) {
     return;
   }
@@ -682,7 +725,7 @@ export async function waitForChildWindow(parent: number, className: string, time
 
 export function getClientRect(hwnd: number): Rect {
   if (IS_MAC) {
-    return macFrameClientRect();
+    return macWithTarget(hwnd, macFrameClientRect);
   }
   const buf = new Int32Array(4);
   user32.symbols.GetClientRect(hwnd, ptr(buf));
@@ -691,7 +734,7 @@ export function getClientRect(hwnd: number): Rect {
 
 export function clientToScreen(hwnd: number, x: number, y: number): { x: number; y: number } {
   if (IS_MAC) {
-    return macClientToScreen(x, y);
+    return macWithTarget(hwnd, () => macClientToScreen(x, y));
   }
   const buf = new Int32Array([x, y]);
   user32.symbols.ClientToScreen(hwnd, ptr(buf));
@@ -823,7 +866,21 @@ export function postMessage(hwnd: number, msg: number, wParam: number, lParam: n
     return true;
   }
   if (IS_MAC) {
-    macSendMessage(msg, wParam, lParam);
+    // 1000 and up: a tool window. One that is gone drops the message, as Windows does
+    if (hwnd >= 1000) {
+      const tw = macWindow(hwnd)?.toolName;
+      if (tw) {
+        macToolWindowMessage(tw, msg, wParam, lParam);
+      }
+      return !!tw;
+    }
+    macWithTarget(hwnd, () => {
+      if (msg === WM_KEYDOWN) {
+        macPostKeyDown(wParam, lParam);
+      } else {
+        macSendMessage(msg, wParam, lParam);
+      }
+    });
     return true;
   }
   return user32.symbols.PostMessageW(hwnd, msg, BigInt(wParam), BigInt(lParam));
@@ -855,7 +912,11 @@ export function sendMessage(hwnd: number, msg: number, wParam: number | bigint, 
     return 0n;
   }
   if (IS_MAC) {
-    return macSendMessage(msg, wParam, lParam);
+    if (hwnd >= 1000) {
+      const tw = macWindow(hwnd)?.toolName;
+      return tw ? macToolWindowMessage(tw, msg, wParam, lParam) : 0n;
+    }
+    return macWithTarget(hwnd, () => macSendMessage(msg, wParam, lParam));
   }
   return user32.symbols.SendMessageW(hwnd, msg, BigInt(wParam), BigInt(lParam)) as bigint;
 }
@@ -870,6 +931,22 @@ export function sendCopyDataW(hwnd: number, dataId: number, text: string): bigin
   const cds = new Uint8Array(24);
   const view = new DataView(cds.buffer);
   view.setBigUint64(0, BigInt(dataId), true);
+  view.setUint32(8, payload.byteLength, true);
+  view.setBigUint64(16, BigInt(ptr(payload)), true);
+  return sendMessage(hwnd, WM_COPYDATA, 0, BigInt(ptr(cds)));
+}
+
+// The reuse-instance open request (kCopyDataOpen): u32 newWindow, then the
+// UTF-8 path, NUL-terminated. The receiver loads it after replying.
+export function sendOpenCopyData(hwnd: number, path: string, newWindow = 0): bigint {
+  const kCopyDataOpen = 0x4f70656e;
+  const utf8 = new TextEncoder().encode(path + "\0");
+  const payload = new Uint8Array(4 + utf8.byteLength);
+  new DataView(payload.buffer).setUint32(0, newWindow, true);
+  payload.set(utf8, 4);
+  const cds = new Uint8Array(24);
+  const view = new DataView(cds.buffer);
+  view.setBigUint64(0, BigInt(kCopyDataOpen), true);
   view.setUint32(8, payload.byteLength, true);
   view.setBigUint64(16, BigInt(ptr(payload)), true);
   return sendMessage(hwnd, WM_COPYDATA, 0, BigInt(ptr(cds)));
@@ -960,6 +1037,7 @@ export function moveWindow(hwnd: number, x: number, y: number, w: number, h: num
 }
 
 // SWP_* flags (subset)
+export const HWND_TOPMOST = -1;
 export const SWP_NOZORDER = 0x0004;
 export const SWP_NOACTIVATE = 0x0010;
 export const SWP_FRAMECHANGED = 0x0020;
@@ -996,12 +1074,20 @@ export function setWindowPos(
   w: number,
   h: number,
   flags = SWP_NOZORDER | SWP_NOACTIVATE,
+  insertAfter = 0,
 ): boolean {
-  return user32.symbols.SetWindowPos(hwnd, 0, x, y, w, h, flags);
+  return user32.symbols.SetWindowPos(hwnd, insertAfter, x, y, w, h, flags);
 }
 
 export function showWindow(hwnd: number, cmd: number): boolean {
   if (IS_MAC) {
+    if (cmd === SW_SHOWMINNOACTIVE || cmd === SW_MINIMIZE || cmd === SW_SHOWMINIMIZED) {
+      macShowWindow(true);
+      return true;
+    }
+    if (isIconic(hwnd)) {
+      macShowWindow(false);
+    }
     if (cmd === SW_RESTORE && isZoomed(hwnd)) {
       return moveWindow(hwnd, 80, 80, 1200, 900);
     }
@@ -1052,7 +1138,13 @@ export function isKeyDownAsync(vk: number): boolean {
 
 const KEYEVENTF_KEYUP = 0x0002;
 
+// ControlCommand.TestUiState (control.ts imports this file)
+const TestUiState = 122;
+
 export function isIconic(hwnd: number): boolean {
+  if (IS_MAC) {
+    return / minimized=1/.test(String(macControlRequest(TestUiState, [])[1] ?? ""));
+  }
   return user32.symbols.IsIconic(hwnd);
 }
 
@@ -1069,6 +1161,10 @@ export function postKeyWithShift(hwnd: number, vk: number): () => void {
 
 // postKeyWithShift for any modifier (VK_CONTROL for a Ctrl shortcut)
 export function postKeyWithModifier(hwnd: number, vk: number, modVk: number): () => void {
+  if (IS_MAC) {
+    macPostKeyWithModifier(vk, modVk);
+    return () => {};
+  }
   const appThread = user32.symbols.GetWindowThreadProcessId(hwnd, null);
   const ourThread = kernel32.symbols.GetCurrentThreadId();
   if (!user32.symbols.AttachThreadInput(ourThread, appThread, true)) {
@@ -1226,6 +1322,9 @@ export function tryDeleteFile(path: string): { ok: boolean; error: number } {
 
 export function getWindowText(hwnd: number): string {
   if (IS_MAC) {
+    if (hwnd > 1) {
+      return macWindow(hwnd)?.title ?? "";
+    }
     const text = String(macControlRequest(TestLayout, [])[1] ?? "");
     return /^windowTitle=(.*)$/m.exec(text)?.[1] ?? "";
   }
@@ -1290,6 +1389,9 @@ export function getClipboardFormats(): number[] | null {
 // pixels are not black, read from the header and pixel bytes. null when there
 // is no CF_DIB (or the clipboard can't be opened).
 export function getClipboardDibInfo(): { width: number; height: number; bitCount: number; nonBlack: number } | null {
+  if (IS_MAC) {
+    return macClipboardImageInfo();
+  }
   if (!user32.symbols.OpenClipboard(null)) {
     return null;
   }
@@ -1336,6 +1438,9 @@ export function getClipboardDibInfo(): { width: number; height: number; bitCount
 
 // Puts `text` on the clipboard as CF_UNICODETEXT, verbatim (no line ending conversion).
 export function setClipboardText(text: string): boolean {
+  if (IS_MAC) {
+    return Bun.spawnSync(["pbcopy"], { stdin: Buffer.from(text, "utf8") }).exitCode === 0;
+  }
   const CF_UNICODETEXT = 13;
   const GMEM_MOVEABLE = 0x2;
   if (!user32.symbols.OpenClipboard(null)) {
@@ -1367,10 +1472,31 @@ export function setClipboardText(text: string): boolean {
 
 // Changes on every clipboard update; reading it doesn't open the clipboard.
 export function clipboardSeqNo(): number {
+  if (IS_MAC) {
+    // NSPasteboard's changeCount
+    const r = Bun.spawnSync(
+      ["osascript", "-l", "JavaScript", "-e", 'ObjC.import("AppKit"); $.NSPasteboard.generalPasteboard.changeCount'],
+      { stdout: "pipe", stderr: "ignore" },
+    );
+    return Number(r.stdout.toString().trim()) || 0;
+  }
   return user32.symbols.GetClipboardSequenceNumber();
 }
 
+// Windows only: an image (CF_BITMAP) is on the clipboard
+export function clipboardHasImage(): boolean {
+  const CF_BITMAP = 2;
+  return user32.symbols.IsClipboardFormatAvailable(CF_BITMAP);
+}
+
 export function emptyClipboard(): boolean {
+  if (IS_MAC) {
+    const r = Bun.spawnSync(
+      ["osascript", "-l", "JavaScript", "-e", 'ObjC.import("AppKit"); $.NSPasteboard.generalPasteboard.clearContents'],
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    return r.exitCode === 0;
+  }
   if (!user32.symbols.OpenClipboard(null)) {
     return false;
   }
@@ -1384,6 +1510,11 @@ export function emptyClipboard(): boolean {
 // Keeps the clipboard open for `ms`, as a clipboard listener (rdpclip,
 // clipboard history) does after a change.
 export async function holdClipboard(ms: number): Promise<boolean> {
+  // the macOS pasteboard has no open / close to hold
+  if (IS_MAC) {
+    await sleep(ms);
+    return true;
+  }
   if (!user32.symbols.OpenClipboard(null)) {
     return false;
   }
@@ -1457,7 +1588,7 @@ export function getWindowTextFull(hwnd: number, maxChars = 16384): string {
 // window rectangle in screen coordinates (vs getClientRect's client-relative one)
 export function getWindowRect(hwnd: number): Rect {
   if (IS_MAC) {
-    const text = String(macControlRequest(TestLayout, [])[1] ?? "");
+    const text = String(macWithTarget(hwnd, () => macControlRequest(TestLayout, []))[1] ?? "");
     const m = /window rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+)/.exec(text);
     if (!m) {
       return { left: 0, top: 0, right: 0, bottom: 0 };
@@ -1485,7 +1616,7 @@ export function getExtendedFrameBounds(hwnd: number): Rect {
 // it rather than resizing it to nothing). Ask the OS instead.
 export function isWindowVisible(hwnd: number): boolean {
   if (IS_MAC) {
-    return macFrameVisible();
+    return hwnd > 1 ? !!macWindow(hwnd)?.visible : macFrameVisible();
   }
   return user32.symbols.IsWindowVisible(hwnd);
 }
@@ -1503,6 +1634,9 @@ export function getWindow(hwnd: number, cmd: number): number {
 }
 
 export function getWindowOwner(hwnd: number): number {
+  if (IS_MAC) {
+    return macWindow(hwnd)?.owner ?? 0;
+  }
   return Number(user32.symbols.GetWindow(hwnd, GW_OWNER));
 }
 
@@ -1544,6 +1678,11 @@ export function getRootWindow(hwnd: number): number {
   return Number(user32.symbols.GetAncestor(hwnd, GA_ROOT)) || hwnd;
 }
 
+// the window's DPI: 96 at 100% scaling
+export function getDpiForWindow(hwnd: number): number {
+  return user32.symbols.GetDpiForWindow(hwnd) || 96;
+}
+
 export function getParentWindow(hwnd: number): number {
   const GA_PARENT = 1;
   return Number(user32.symbols.GetAncestor(hwnd, GA_PARENT));
@@ -1551,6 +1690,17 @@ export function getParentWindow(hwnd: number): number {
 
 export function setForegroundWindow(hwnd: number): boolean {
   return user32.symbols.SetForegroundWindow(hwnd);
+}
+
+// the full rectangle (not the work area) of the monitor the window is on
+export function monitorRectOfWindow(hwnd: number): Rect {
+  const MONITOR_DEFAULTTONEAREST = 2;
+  const mon = user32.symbols.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+  // MONITORINFO: cbSize, rcMonitor, rcWork, dwFlags
+  const buf = new Int32Array(10);
+  buf[0] = 40;
+  user32.symbols.GetMonitorInfoW(mon, ptr(buf));
+  return { left: buf[1], top: buf[2], right: buf[3], bottom: buf[4] };
 }
 
 // the window the user is currently working with (across processes). Use it to
@@ -1606,6 +1756,59 @@ export function injectTouch(x: number, y: number, flag: number): boolean {
   v.setInt32(32, x, true);
   v.setInt32(36, y, true);
   return user32.symbols.InjectTouchInput(1, ptr(buf));
+}
+
+// Pen injection through a synthetic pointer device (Windows 10 1809+).
+// flag is POINTER_FLAG_DOWN / UPDATE / UP; an UPDATE with contact false is
+// the pen hovering in range, with inRange false too it leaves. A pen flips
+// to its eraser end only out of range.
+export const PEN_FLAG_BARREL = 0x1;
+// the eraser end; Windows adds PEN_FLAG_ERASER while it touches
+export const PEN_FLAG_INVERTED = 0x2;
+export type PenOpts = { contact?: boolean; inRange?: boolean; penFlags?: number };
+const PT_PEN = 3;
+const POINTER_FLAG_FIRSTBUTTON = 0x10;
+const POINTER_FLAG_SECONDBUTTON = 0x20;
+const POINTER_FEEDBACK_NONE = 3;
+// sizeof(POINTER_TYPE_INFO) on x64: type, padding, then the POINTER_PEN_INFO
+// union member (POINTER_INFO is 96 bytes, penFlags follows it)
+const kPointerTypeInfoSize = 152;
+const kPenInfoOffset = 8;
+let penDevice = 0n;
+
+export function injectPen(x: number, y: number, flag: number, opts: PenOpts = {}): boolean {
+  if (!IS_WIN) {
+    return false;
+  }
+  if (!penDevice) {
+    penDevice = BigInt(user32.symbols.CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_NONE));
+    if (!penDevice) {
+      return false;
+    }
+  }
+  const penFlags = opts.penFlags ?? 0;
+  const contact = flag !== POINTER_FLAG_UP && (opts.contact ?? true);
+  let flags = flag;
+  if (opts.inRange ?? true) {
+    flags |= POINTER_FLAG_INRANGE;
+  }
+  if (contact) {
+    flags |= POINTER_FLAG_INCONTACT;
+    flags |= penFlags & PEN_FLAG_BARREL ? POINTER_FLAG_SECONDBUTTON : POINTER_FLAG_FIRSTBUTTON;
+  }
+  const buf = new Uint8Array(kPointerTypeInfoSize);
+  const v = new DataView(buf.buffer);
+  v.setUint32(0, PT_PEN, true);
+  const o = kPenInfoOffset;
+  v.setUint32(o, PT_PEN, true);
+  v.setUint32(o + 12, flags, true);
+  v.setInt32(o + 32, x, true);
+  v.setInt32(o + 36, y, true);
+  v.setUint32(o + 96, penFlags, true);
+  // PEN_MASK_PRESSURE, half way
+  v.setUint32(o + 100, 1, true);
+  v.setUint32(o + 104, contact ? 512 : 0, true);
+  return user32.symbols.InjectSyntheticPointerInput(penDevice as unknown as number, ptr(buf), 1);
 }
 
 // The real cursor position, in screen (physical, when this process is DPI
@@ -1795,6 +1998,10 @@ export function captureWindowPixels(
   hwnd: number,
   area: "client" | "window" = "client",
 ): { w: number; h: number; data: Uint8Array } | null {
+  // the app draws the window into a PNG; there is no non-client area
+  if (IS_MAC) {
+    return macCaptureClientPixels();
+  }
   const rc = area === "client" ? getClientRect(hwnd) : getWindowRect(hwnd);
   const w = rc.right - rc.left;
   const h = rc.bottom - rc.top;
@@ -1847,6 +2054,28 @@ export function captureWindowDCRegionPixels(
 ): Uint8Array | null {
   if (w <= 0 || h <= 0) {
     return null;
+  }
+  // macOS: that region of the window's capture
+  if (IS_MAC) {
+    const cap = macCaptureClientPixels();
+    if (!cap) {
+      return null;
+    }
+    const out = new Uint8Array(w * h * 4);
+    for (let row = 0; row < h; row++) {
+      const sy = y + row;
+      if (sy < 0 || sy >= cap.h) {
+        continue;
+      }
+      for (let col = 0; col < w; col++) {
+        const sx = x + col;
+        if (sx < 0 || sx >= cap.w) {
+          continue;
+        }
+        out.set(cap.data.subarray((sy * cap.w + sx) * 4, (sy * cap.w + sx) * 4 + 4), (row * w + col) * 4);
+      }
+    }
+    return out;
   }
   const src = openWindowDC(hwnd);
   const winDC = src.dc;
@@ -2308,6 +2537,34 @@ export function listPidsByExeName(exeName: string): number[] {
   }
 }
 
+const TH32CS_SNAPMODULE = 0x00000008;
+// x64 MODULEENTRY32W: szModule (WCHAR[256]) at 48, szExePath (WCHAR[260]) after it
+const MODULEENTRY32W_SIZE = 1080;
+const MODULEENTRY32W_NAME = 48;
+
+// lower-case names of the DLLs loaded in pid, e.g. "sapi.dll"
+export function listProcessModules(pid: number): string[] {
+  const snap = kernel32.symbols.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
+  if (!snap || snap === INVALID_HANDLE_VALUE) {
+    return [];
+  }
+  try {
+    const buf = new Uint8Array(MODULEENTRY32W_SIZE);
+    new DataView(buf.buffer).setUint32(0, MODULEENTRY32W_SIZE, true);
+    const names: string[] = [];
+    for (
+      let ok = kernel32.symbols.Module32FirstW(snap, ptr(buf));
+      ok;
+      ok = kernel32.symbols.Module32NextW(snap, ptr(buf))
+    ) {
+      names.push(readWideZ(buf, MODULEENTRY32W_NAME).toLowerCase());
+    }
+    return names;
+  } finally {
+    kernel32.symbols.CloseHandle(snap);
+  }
+}
+
 // Terminate a pid and block until it is gone. Already-exited is success.
 export function killPid(pid: number, timeoutMs = 5000): boolean {
   if (!pid) {
@@ -2539,4 +2796,70 @@ export function getWindowVirtualDesktopId(hwnd: number): string {
     return "";
   }
   return guidString(guid);
+}
+
+// --- DDE client (DDEML): a request as a DDE client like Acrobat's would send ---
+
+const APPCMD_CLIENTONLY = 0x10;
+const CP_WINUNICODE = 1200;
+const CF_UNICODETEXT = 13;
+const XTYP_REQUEST = 0x20b0;
+const kDdeTimeoutMs = 5000;
+
+const ddeml = IS_WIN
+  ? dlopen("user32.dll", {
+      DdeInitializeW: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32, FFIType.u32], returns: FFIType.u32 },
+      DdeUninitialize: { args: [FFIType.u32], returns: FFIType.i32 },
+      DdeCreateStringHandleW: { args: [FFIType.u32, FFIType.ptr, FFIType.i32], returns: FFIType.u64 },
+      DdeFreeStringHandle: { args: [FFIType.u32, FFIType.u64], returns: FFIType.i32 },
+      DdeConnect: { args: [FFIType.u32, FFIType.u64, FFIType.u64, FFIType.ptr], returns: FFIType.u64 },
+      DdeDisconnect: { args: [FFIType.u64], returns: FFIType.i32 },
+      DdeClientTransaction: {
+        args: [FFIType.ptr, FFIType.u32, FFIType.u64, FFIType.u64, FFIType.u32, FFIType.u32, FFIType.u32, FFIType.ptr],
+        returns: FFIType.u64,
+      },
+      DdeGetData: { args: [FFIType.u64, FFIType.ptr, FFIType.u32, FFIType.u32], returns: FFIType.u32 },
+      DdeFreeDataHandle: { args: [FFIType.u64], returns: FFIType.i32 },
+    })
+  : null;
+
+// Sends one XTYP_REQUEST for `item` to the SUMATRA / control DDE server and
+// returns the answer, or null if there is no server or it doesn't answer.
+export function ddeRequest(item: string, service = "SUMATRA", topic = "control"): string | null {
+  if (!ddeml) {
+    return null;
+  }
+  const dde = ddeml.symbols;
+  const cb = new JSCallback(() => 0n, {
+    args: [FFIType.u32, FFIType.u32, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64, FFIType.u64],
+    returns: FFIType.u64,
+  });
+  const inst = new Uint32Array(1);
+  if (dde.DdeInitializeW(ptr(inst), cb.ptr, APPCMD_CLIENTONLY, 0) !== 0) {
+    cb.close();
+    return null;
+  }
+  const wz = (s: string) => Buffer.from(s + "\0", "utf16le");
+  const hszService = dde.DdeCreateStringHandleW(inst[0]!, ptr(wz(service)), CP_WINUNICODE);
+  const hszTopic = dde.DdeCreateStringHandleW(inst[0]!, ptr(wz(topic)), CP_WINUNICODE);
+  const hszItem = dde.DdeCreateStringHandleW(inst[0]!, ptr(wz(item)), CP_WINUNICODE);
+  let answer: string | null = null;
+  const conv = dde.DdeConnect(inst[0]!, hszService, hszTopic, null);
+  if (conv) {
+    const data = dde.DdeClientTransaction(null, 0, conv, hszItem, CF_UNICODETEXT, XTYP_REQUEST, kDdeTimeoutMs, null);
+    if (data) {
+      const n = dde.DdeGetData(data, null, 0, 0);
+      const buf = Buffer.alloc(n);
+      dde.DdeGetData(data, ptr(buf), n, 0);
+      answer = buf.toString("utf16le").replace(/\0+$/, "");
+      dde.DdeFreeDataHandle(data);
+    }
+    dde.DdeDisconnect(conv);
+  }
+  for (const h of [hszService, hszTopic, hszItem]) {
+    dde.DdeFreeStringHandle(inst[0]!, h);
+  }
+  dde.DdeUninitialize(inst[0]!);
+  cb.close();
+  return answer;
 }

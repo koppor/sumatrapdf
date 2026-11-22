@@ -1,7 +1,7 @@
 Project         Version    Date
 ----------------------------------
-mupdf           1.28.5     2026-09-24
-  https://github.com/ArtifexSoftware/mupdf/releases/tag/1.28.5
+mupdf           1.28.6     2026-10-29
+  https://github.com/ArtifexSoftware/mupdf/releases/tag/1.28.6
   our changes to the vendored tree are recorded in ext/patches/ (see its README)
 
 tesseract       5.5.2      2026-10-14
@@ -41,9 +41,9 @@ mujs           1.3.10
 bzip2           1.0.8      2019-07-21
   https://www.sourceware.org/bzip2/
 
-chmdec          dist       2026-11-01
+chmdec          dist       2026-11-19
   https://github.com/kjk/chmdec
-  commit 9eb7527e6a89a3fefab357985b13e6cd61b781aa
+  commit cbefd45bf52f0aba11608099e7f3c5c21d81336e
   amalgamated dist/chm.c + dist/chm.h only (was ext/libchm)
 
 freetype        2.14.3
@@ -94,9 +94,9 @@ MinHook         master     20201-01-1
 openjpeg        2.5.4      (post-release dev snapshot)
   mupdf thirdparty submodule, commit 957029eb875eee1118743f200cb86da9d8289de2
 
-brotli          1.2.0
+brotli          1.2.1
   https://github.com/google/brotli
-  mupdf thirdparty submodule, commit 4328e148b38241843f0cab041ade2efee338e9ba
+  mupdf thirdparty submodule, commit 05d2263409056fde56805e9cdabd2d31a1f1d427
   amalgamated into ext/a-brotli by cmd/amalgam.ts -brotli, see ext/a-brotli/version.txt
 
 cmark-gfm       0.29.0.gfm.13
@@ -122,9 +122,9 @@ zlib-ng         2.0.6      2021-12-24
 extract         trunk
   https://github.com/ArtifexSoftware/extract
 
-dav1d           1.5.4      2026-07-14
+dav1d           1.5.5      2026-11-17
   https://code.videolan.org/videolan/dav1d
-  https://code.videolan.org/videolan/dav1d/-/tags/1.5.4
+  https://code.videolan.org/videolan/dav1d/-/tags/1.5.5
 
 heicdec         dist       2026-10-27
   https://github.com/kjk/heicdec

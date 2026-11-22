@@ -98,7 +98,9 @@ async function ngUi(client: ControlClient) {
   const click = async (node: Node) =>
     request("input", "pdfscript", "click", Math.round(node.x), Math.round(node.y), 0, 0);
   await pollUntil(layout, (list) => list.some((n) => n.label === "Run Script"), { error: "script dialog" });
-  const editorWidth = (await layout()).find((n) => n.role === 31)!.w;
+  // the column's width, to tell the list is laid out beside it: an argument field
+  // fills the column, the editor reports its content's width instead
+  const columnWidth = (await layout()).find((n) => n.role === 17)!.w;
   return {
     async argumentIds() {
       return [] as number[];
@@ -119,9 +121,10 @@ async function ngUi(client: ControlClient) {
     },
     async argumentHeight() {
       const list = await layout();
-      // the editor's top: it shrinks once there is output, which moves its center up
-      const editor = list.find((n) => n.role === 31)!;
-      return editor.y - editor.h / 2 - list.find((n) => n.role === 17)!.y;
+      // Add argument sits under the last row. The editor's bounds are its text's,
+      // so its top moves with the script
+      const add = list.find((n) => n.label === "Add argument")!;
+      return add.y - list.find((n) => n.role === 17)!.y;
     },
     async checkBorder() {},
     async add() {
@@ -163,7 +166,7 @@ async function ngUi(client: ControlClient) {
       name = name.replace(/\.$/, "");
       const list = await pollUntil(
         layout,
-        (list) => list.some((n) => n.label === name) && list.find((n) => n.role === 31)?.w === editorWidth,
+        (list) => list.some((n) => n.label === name) && list.find((n) => n.role === 17)?.w === columnWidth,
         {
           error: (list) =>
             `script list not shown: ${list
@@ -395,7 +398,12 @@ export async function testit(): Promise<void> {
         await ui.setArg(value);
       }
     }
-    const args = await ui.args();
+    // ng reads the fields off the last frame, which may not have the last char yet
+    const args = await pollUntil(
+      () => ui.args(),
+      (got) => got.length === 2 && got[0] === input && got[1] === stem + ".3.pdf",
+      { timeoutMs: 3000, error: (got) => `bad default arguments: ${JSON.stringify(got)}` },
+    );
     const initialHeight = await ui.argumentHeight();
     const gap = await ui.argumentGap();
     const maxGapRows = 2;

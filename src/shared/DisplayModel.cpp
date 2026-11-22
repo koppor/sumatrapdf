@@ -361,6 +361,7 @@ void DisplayModel::SetTrimEmptyMargins(bool enable) {
 
 // Lays the pages out again after the part of them that is shown changed.
 void DisplayModel::RelayoutForTrim() {
+    viewChanges++;
     // restoring a document's remembered state sets this before the first
     // layout, when there is nothing to lay out and no zoom yet; the initial
     // layout picks the flag up on its own
@@ -3026,6 +3027,7 @@ void DisplayModel::GoToPage(int pageNo, int scrollY, bool addNavPt, int scrollX)
 }
 
 void DisplayModel::SetDisplayMode(DisplayMode newDisplayMode, bool keepContinuous) {
+    viewChanges++;
     if (keepContinuous && IsContinuous(displayMode)) {
         if (newDisplayMode == DisplayMode::SinglePage) {
             newDisplayMode = DisplayMode::Continuous;
@@ -3659,6 +3661,7 @@ float DisplayModel::MaxZoomForDocument() const {
 }
 
 void DisplayModel::SetZoomVirtual(float zoomLevel, Point* fixPt) {
+    viewChanges++;
     if (zoomLevel > 0) {
         zoomLevel = limitValue(zoomLevel, kZoomMin, kZoomMax);
         if (zoomLevel > kZoomMaxDefault) {
@@ -3799,9 +3802,17 @@ float DisplayModel::GetNextZoomStep(float towardsLevel) const {
     float pageZoom = ZoomRealFromVirtualForPage(kZoomFitPage, pageNo);
     float widthZoom = ZoomRealFromVirtualForPage(kZoomFitWidth, pageNo);
     ReportIf(pageZoom <= 0 || widthZoom <= 0);
-    ReportIf(pageZoom > widthZoom);
     pageZoom *= 100 / dpiFactor;
     widthZoom *= 100 / dpiFactor;
+    // FitWidthPercent < 100 can make Fit Width smaller than Fit Page
+    float loZoom = pageZoom, hiZoom = widthZoom;
+    float loVirt = kZoomFitPage, hiVirt = kZoomFitWidth;
+    if (pageZoom > widthZoom) {
+        loZoom = widthZoom;
+        hiZoom = pageZoom;
+        loVirt = kZoomFitWidth;
+        hiVirt = kZoomFitPage;
+    }
 
     const float FUZZ = 0.01f;
     float newZoom = towardsLevel;
@@ -3813,10 +3824,10 @@ float DisplayModel::GetNextZoomStep(float towardsLevel) const {
                 break;
             }
         }
-        if (currZoom + FUZZ < pageZoom && pageZoom < newZoom - FUZZ) {
-            newZoom = kZoomFitPage;
-        } else if (currZoom + FUZZ < widthZoom && widthZoom < newZoom - FUZZ) {
-            newZoom = kZoomFitWidth;
+        if (currZoom + FUZZ < loZoom && loZoom < newZoom - FUZZ) {
+            newZoom = loVirt;
+        } else if (currZoom + FUZZ < hiZoom && hiZoom < newZoom - FUZZ) {
+            newZoom = hiVirt;
         }
     } else if (currZoom - FUZZ > towardsLevel) {
         for (int i = nZoomLevels - 1; i >= 0; i--) {
@@ -3826,11 +3837,11 @@ float DisplayModel::GetNextZoomStep(float towardsLevel) const {
                 break;
             }
         }
-        // skip Fit Width if it results in the same value as Fit Page (same as when zooming in)
-        if (newZoom + FUZZ < widthZoom && widthZoom < currZoom - FUZZ && widthZoom != pageZoom) {
-            newZoom = kZoomFitWidth;
-        } else if (newZoom + FUZZ < pageZoom && pageZoom < currZoom - FUZZ) {
-            newZoom = kZoomFitPage;
+        // skip the larger fit stop if it equals the smaller one (same as when zooming in)
+        if (newZoom + FUZZ < hiZoom && hiZoom < currZoom - FUZZ && hiZoom != loZoom) {
+            newZoom = hiVirt;
+        } else if (newZoom + FUZZ < loZoom && loZoom < currZoom - FUZZ) {
+            newZoom = loVirt;
         }
     }
 
@@ -3841,6 +3852,7 @@ float DisplayModel::GetNextZoomStep(float towardsLevel) const {
        (i.e. 100.0 is original size) or one of virtual values kZoomFitPage,
 kZoomFitWidth or kZoomFitContent, whose real value depends on draw area size */
 void DisplayModel::RotateBy(int newRotation) {
+    viewChanges++;
     newRotation = NormalizeRotation(newRotation);
     ReportIf(0 == newRotation);
     if (0 == newRotation) {
@@ -4138,8 +4150,10 @@ bool DisplayModel::AtExactScroll() const {
     if (!hasExactScroll) {
         return false;
     }
+    // a page single page mode doesn't show keeps a stale position that can
+    // match the shown page's (#6568)
     PageInfo* pi = GetPageInfo(exactScrollPageNo);
-    if (!pi) {
+    if (!pi || !pi->isShown) {
         return false;
     }
     Point off(viewPort.x - pi->pos.x, viewPort.y - pi->pos.y);

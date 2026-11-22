@@ -37,6 +37,7 @@
 #include "CommandPalette.h"
 #include "CommandPaletteCommon.h"
 #include "SvgIcons.h"
+#include "StripGroups.h"
 #include "AppUnitTests.h"
 #include "Theme.h"
 #include "PDFScript.h"
@@ -58,6 +59,8 @@ void ParseCommandLineTest();
 void RestrictedUseConfigTest();
 void ControlFrameActionTest();
 void HexViewTest();
+void SumatraPDFWebTest();
+void HttpTransferTest();
 void OpenDdeCmdTest();
 void UpdateCheckDecisionTest();
 
@@ -349,11 +352,84 @@ static void OnlineURLAllowedTest() {
     utassert(!OnlineURLAllowed(StrL("https://user@web.sumatrapdfreader.org/api/files")));
 }
 
+static bool OrderIs(const Vec<int>& order, std::initializer_list<int> want) {
+    if (len(order) != (int)want.size()) {
+        return false;
+    }
+    int i = 0;
+    for (int v : want) {
+        if (order[i++] != v) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// a group's tabs gather where its first tab is
+static void StripGroupOrderTest() {
+    Vec<int> ids;
+    Vec<int> order;
+    utassert(!StripGroupOrder(ids, order));
+    utassert(len(order) == 0);
+
+    for (int id : {0, 1, 1, 0, 2, 2}) {
+        VecAppend(ids, id);
+    }
+    utassert(!StripGroupOrder(ids, order));
+    utassert(OrderIs(order, {0, 1, 2, 3, 4, 5}));
+
+    // ids [0 A 0 A B]
+    VecReset(ids);
+    for (int id : {0, 7, 0, 7, 9}) {
+        VecAppend(ids, id);
+    }
+    utassert(StripGroupOrder(ids, order));
+    utassert(OrderIs(order, {0, 1, 3, 2, 4}));
+
+    // ids [A B A B]
+    VecReset(ids);
+    for (int id : {3, 4, 3, 4}) {
+        VecAppend(ids, id);
+    }
+    utassert(StripGroupOrder(ids, order));
+    utassert(OrderIs(order, {0, 2, 1, 3}));
+}
+
+// a CJK UI language on a Windows whose UI font is Segoe UI gets that script's UI font
+static void GuiFontLangTest() {
+    NONCLIENTMETRICS ncm{};
+    ncm.cbSize = sizeof(ncm);
+    SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
+    if (!str::EqI(ToUtf8Temp(WStr(ncm.lfMessageFont.lfFaceName)), StrL("Segoe UI"))) {
+        return;
+    }
+    struct {
+        Str lang;
+        Str face;
+    } cases[] = {
+        {StrL("cn"), StrL("Microsoft YaHei UI")}, {StrL("tw"), StrL("Microsoft JhengHei UI")},
+        {StrL("ja"), StrL("Yu Gothic UI")},       {StrL("kr"), StrL("Malgun Gothic")},
+        {StrL("en"), StrL("Segoe UI")},
+    };
+    for (auto& c : cases) {
+        SetGuiFontLang(c.lang);
+        PlatformFont* font = GetUserGuiFont(StrL("auto"), 17);
+        LOGFONTW lf{};
+        GetObjectW(font->GetHFont(), sizeof(lf), &lf);
+        utassert(str::EqI(ToUtf8Temp(WStr(lf.lfFaceName)), c.face));
+    }
+    SetGuiFontLang({});
+}
+
 static void SumatraPDF_UnitTests() {
+    GuiFontLangTest();
+    StripGroupOrderTest();
     OnlineURLAllowedTest();
     RestrictedUseConfigTest();
     ControlFrameActionTest();
     HexViewTest();
+    SumatraPDFWebTest();
+    HttpTransferTest();
     OpenDdeCmdTest();
     UpdateCheckDecisionTest();
     CachedObjects_UnitTests();

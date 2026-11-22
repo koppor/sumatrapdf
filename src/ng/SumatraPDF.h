@@ -22,6 +22,7 @@ struct MainWindow;
 struct WindowTab;
 struct DocController;
 struct DocControllerCallback;
+class EngineBase;
 
 DocControllerCallback* CreateControllerCallbackHandler(MainWindow* win);
 void DeleteControllerAsync(DocController* ctrl);
@@ -65,6 +66,7 @@ struct RenderedBitmap;
 void CopyTextToClipboard(MainWindow* win, Str s);
 // takes ownership of bmp
 void CopyRenderedBitmapToClipboard(MainWindow* win, RenderedBitmap* bmp);
+void CopyPngToClipboard(MainWindow* win, Str png);
 // orig's SaveDataToFile: asks where, then writes (the prompt does not block)
 void SaveDataToFile(MainWindow* win, Str fileName, Str data);
 void DeleteFileFromDiskAndHistory(Str path);
@@ -114,6 +116,10 @@ MainWindow* LoadDocument(MainWindow* win, Str path, LoadPrefs prefs = LoadPrefs:
 void OpenDroppedFiles(MainWindow* win, const Str* paths, int n);
 void SelectTabInWindow(WindowTab* tab);
 MainWindow* FindMainWindowByFile(Str file, bool focusTab, MainWindow* limitWin = nullptr);
+MainWindow* FindMainWindowToActivate(Str file, MainWindow* limitWin = nullptr);
+bool IsWinOnCurrentDesktop(MainWindow* win);
+bool CanFocusWinHere(MainWindow* win);
+bool BringWinHere(MainWindow* win);
 MainWindow* FindMainWindowBySyncFile(Str path, bool focusTab);
 struct SessionData;
 MainWindow* CreateAndShowMainWindow(SessionData* data = nullptr);
@@ -126,6 +132,12 @@ void PlaceMainWindowLater(MainWindow* win, Rect pos, bool maximize);
 void DuplicateTabInNewWindow(WindowTab* tab);
 void DuplicateTabInNewTab(WindowTab* tab);
 void ReloadDocument(MainWindow* win, bool autoRefresh);
+void StartLazyTabLoad(WindowTab* tab);
+WindowTab* StartLoadDocument(MainWindow* win, Str path, LoadPrefs prefs = LoadPrefs::Save,
+                             LoadReuse reuse = LoadReuse::NewTab, const Func1<bool>& onFinished = {});
+void LoadPendingTab(WindowTab* tab);
+void LoadDocumentWithEngine(MainWindow* win, Str path, EngineBase* engine);
+extern AtomicInt gTestLoadDelayMs;
 bool ForwardBrowserMsg(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp);
 bool ScrollBrowserDocKey(MainWindow* win, int vk);
 // the shell's tick: the delayed reload the file watcher asked for
@@ -138,6 +150,10 @@ void ShowPageInfoIfWanted(MainWindow* win);
 bool PageInfoBarTakesRow(MainWindow* win);
 bool PageInfoBarOverlays(MainWindow* win);
 void PageInfoBarTextTemp(MainWindow* win, TempStr* leftOut, TempStr* rightOut);
+Color ProgressBarDoneColor();
+Color ProgressBarRestColor();
+bool ProgressBarRects(MainWindow* win, Size canvas, int dpi, int bottomInset, Rect* doneOut, Rect* restOut);
+bool ProgressBarCanvasRects(MainWindow* win, Rect* doneOut, Rect* restOut);
 #if OS_WIN
 void ShowDefaultAppNotification(MainWindow* win, const StrVec& missing);
 // orig's window picker. hwndRestore gets focus back when the picker closes.

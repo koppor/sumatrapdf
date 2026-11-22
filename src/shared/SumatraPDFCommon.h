@@ -35,8 +35,15 @@ void PageInfoBarTextTemp(MainWindow* win, TempStr* leftOut, TempStr* rightOut);
 void PageInfoBarChanged(MainWindow* win);
 // implemented by each app: "canvas=x,y,dx,dy bar=x,y,dx,dy" (or bar=none), for tests
 TempStr PageInfoBarGeometryTemp(MainWindow* win);
+// ReadingProgressBarDy
+Color ProgressBarDoneColor();
+Color ProgressBarRestColor();
+bool ProgressBarRects(MainWindow* win, Size canvas, int dpi, int bottomInset, Rect* doneOut, Rect* restOut);
+// implemented by each app: the bar in canvas coordinates; false when there is none
+bool ProgressBarCanvasRects(MainWindow* win, Rect* doneOut, Rect* restOut);
 bool ShouldUseBrowserView(FileType kind);
 struct CustomCommand;
+bool RunDocColorsFollowThemeCmd(CustomCommand* cmd);
 void ToggleCaption(CustomCommand* cmd);
 void ToggleSidebarAutoHide(CustomCommand* cmd);
 bool showTocByDefault(Str path, EngineBase* engine);
@@ -103,7 +110,7 @@ Str HelpThemePref();
 void ManualOnJsNotify(void*, Str method, Str paramsJson);
 TempStr DocURIToLocalManualUrlTemp(Str docURI);
 void TocItemToText(str::Builder& s, TocItem* item, int level);
-bool ShouldToggle(CustomCommand* cmd, bool curState);
+bool ToggleCmdIsNoOp(MainWindow* win, CustomCommand* cmd, int cmdId);
 Str CurrentImageTabPathTemp(MainWindow* win);
 void PrintCurrentFileDeferred(MainWindow* win);
 void PrintSelectionDeferred(MainWindow* win);
@@ -132,6 +139,8 @@ bool SetPointToVisiblePage(DisplayModel* dm, Point& pt, int& pageNo);
 
 // implemented by each app
 void ShowPageInfoIfWanted(MainWindow* win);
+bool AppToggleCmdState(MainWindow* win, int cmdId, bool& on);
+bool IsDocErrorsNotifShown(MainWindow* win);
 void ToggleCursorPositionInDoc(MainWindow* win);
 
 extern Str gNextPrevDir;
@@ -221,5 +230,6 @@ static Kind kNotifDocErrors = "docErrors";
 static Kind kNotifDefaultApp = "defaultApp";
 static Kind kNotifThumbnailProgress = "thumbnailProgress";
 int SidebarNativeDx(MainWindow* win);
+void ToggleLineWeights();
 
 int SidebarExtraDx(MainWindow* win);

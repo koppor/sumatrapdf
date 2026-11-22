@@ -173,6 +173,30 @@ export enum ControlCommand {
   WaitHomePainted = 163,
   // [idx]: select tab idx; idx < 0 only reports the current tab and count
   TestSelectTab = 164,
+  // [definition]: does "CmdToggleX on" parse, and the command's on/off state
+  TestToggleCmd = 165,
+  // page 1 pixels a Clone() of the current document renders differently
+  TestCloneRender = 166,
+  // does the document have load errors, does the Errors notification show
+  TestDocErrors = 167,
+  // [pageNo, idx, value]: pick value in the idx-th combo / list box
+  TestSetFormChoice = 168,
+  // [action, a, b, c]: "drop" from to groupPos, "move" dir, "select" idx, or
+  // "" for the state; answers with the strip groups and tabs
+  TestStripGroups = 169,
+  // ng only (macOS): [path, mode]: a PNG of the first window as drawn
+  TestCaptureWindow = 170,
+  // [ms]: every document open waits this long first, like a sleeping drive
+  TestLoadDelay = 171,
+  // ng: a line per frame and tool window (hwnd= class= pid= visible= rect=
+  // [owner= name=] title=), or with "target", <hwnd> aims the requests that follow at
+  // that frame (0: the first)
+  TestWindows = 172,
+  // [path, value]: sets a setting the way the palette's "= settings" rows do
+  TestSetSetting = 173,
+  // [action, word]: "word <w>" screen center of a word on page 1, "state" the
+  // touch selection handles
+  TestTouchSel = 174,
 }
 
 export type ControlArg = number | string | Uint8Array | ControlArg[];
@@ -491,8 +515,18 @@ function cleanEnv(env: Record<string, string | undefined> | undefined): Record<s
   if (!env) {
     return undefined;
   }
+  // Windows env names are case-insensitive: { ...process.env, PATH } keeps the
+  // original "Path" too, and the child may read the stale one. Last key wins.
+  const isWin = process.platform === "win32";
   const res: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
+    if (isWin) {
+      for (const k of Object.keys(res)) {
+        if (k.toLowerCase() === key.toLowerCase()) {
+          delete res[k];
+        }
+      }
+    }
     if (value !== undefined) {
       res[key] = value;
     }

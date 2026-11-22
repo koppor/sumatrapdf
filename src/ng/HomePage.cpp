@@ -51,6 +51,7 @@
 #include "SvgIcons.h"
 #include "gui/DialogWidgets.h"
 #include "OverlayScrollbar.h"
+#include "ServerFiles.h"
 #include "HomePage.h"
 #include "HomePageCommon.h"
 
@@ -490,7 +491,11 @@ static void OpenHomeEntry(MainWindow* win, int idx, bool ctrl) {
         AppShellInvalidate(win);
         return;
     }
-    LoadDocument(win, path);
+    if (IsServerOnlyFile(path)) {
+        OpenServerFile(win, path);
+        return;
+    }
+    StartLoadDocument(win, path);
 }
 
 void HomeView::OnEntryClick(HomeView* self, gp::Ctx* cx, const gp::ClickEvent* ev, int64_t idx) {
@@ -1210,6 +1215,29 @@ static gp::El* HomeViewModeBtn(MainWindow* win, gp::Ctx* cx, bool listView) {
     return btn;
 }
 
+// the website's Server badge: amber pill, teal on a dark theme
+constexpr Color kServerBadgeBg = MkRgb(0x8a, 0x5a, 0x00);
+constexpr Color kServerBadgeBgDark = MkRgb(0x11, 0x5e, 0x59);
+constexpr Color kServerBadgeFgDark = MkRgb(0xcc, 0xfb, 0xf1);
+constexpr float kServerBadgeFontPx = 11;
+
+// "Server ≠": the server copy has a different size
+static gp::El* ServerBadgeEl(gp::Ctx* cx, ServerFileState st) {
+    Str label = st == ServerFileState::Differs ? Tr("Server ≠") : Tr("Server");
+    bool light = IsLightColor(ThemeMainWindowBackgroundColor());
+    Color bg = light ? kServerBadgeBg : kServerBadgeBgDark;
+    Color fg = light ? MkRgb(0xff, 0xff, 0xff) : kServerBadgeFgDark;
+    return gp::Div(cx->a)
+        ->Shrink0()
+        ->Radius(999)
+        ->PadX(6)
+        ->Bg(ToGpui(bg))
+        ->Child(gp::TextEl(cx->a, ToGpui(label))
+                    ->Font(kServerBadgeFontPx)
+                    ->Weight(gp::FontWeight::Semibold)
+                    ->Fg(ToGpui(fg)));
+}
+
 // one thumbnail: the page image with a hairline and a shadow, the reading
 // progress along its bottom edge, the file name and page count under it and
 // the ✕ that forgets the file (shown on hover, as orig does)
@@ -1281,8 +1309,15 @@ static gp::El* HomeThumbnailEl(MainWindow* win, gp::Ctx* cx, int idx, bool isSel
                         ->IntoEl();
     close->Absolute()->Right(5)->Top(5)->GroupHoverVisible();
     // orig's UpdateCloseBtnVisibility
-    if (CanAccessDisk()) {
+    // a server-only file has no history entry to remove
+    bool serverOnly = IsServerOnlyFile(fs->filePath);
+    if (CanAccessDisk() && !serverOnly) {
         page->Child(close);
+    }
+    // ng: the website puts it top-right, where orig's ✕ is
+    ServerFileState srv = GetServerFileState(fs->filePath, GetHomeFileSize(fs->filePath));
+    if (srv != ServerFileState::None) {
+        page->Child(ServerBadgeEl(cx, srv)->Absolute()->Left(4)->Top(4));
     }
     float progress = 0;
     TempStr meta = HomeThumbnailMetaTemp(fs, &progress);
@@ -1363,8 +1398,14 @@ static gp::El* HomeListRowEl(MainWindow* win, gp::Ctx* cx, int idx, bool isSelec
     row->Child(
         FilterHighlightText(cx, path::GetBaseNameTemp(fs->filePath), filterWords, ToGpui(colText), kHomeTextFontPx)
             ->Shrink0());
-    // the wasm build's directories are the page's own (/uploads)
-    TempStr dir = OS_WASM ? TempStr{} : path::GetDirTemp(fs->filePath);
+    ServerFileState srv = GetServerFileState(fs->filePath, GetHomeFileSize(fs->filePath));
+    if (srv != ServerFileState::None) {
+        row->Child(ServerBadgeEl(cx, srv));
+    }
+    // the wasm build's directories are the page's own (/uploads); a server-only
+    // file isn't in a directory yet
+    bool serverOnly = IsServerOnlyFile(fs->filePath);
+    TempStr dir = (OS_WASM || serverOnly) ? TempStr{} : path::GetDirTemp(fs->filePath);
     row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, dir))
                    ->Font(12)
                    ->Fg(ToGpui(colDim))
@@ -1372,7 +1413,7 @@ static gp::El* HomeListRowEl(MainWindow* win, gp::Ctx* cx, int idx, bool isSelec
                    ->MinW(0)
                    ->Truncate()
                    ->BoundsOut(&Ui(win)->listPathBounds[idx]));
-    i64 size = GetHomeFileSize(fs->filePath);
+    i64 size = serverOnly ? ServerFileSize(fs->filePath) : GetHomeFileSize(fs->filePath);
     if (size >= 0) {
         row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, str::FormatSizeShortTemp(size)))
                        ->Font(12)
@@ -1385,6 +1426,10 @@ static gp::El* HomeListRowEl(MainWindow* win, gp::Ctx* cx, int idx, bool isSelec
         if (len(progress) > 0) {
             row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, progress))->Font(12)->Fg(ToGpui(colText))->Shrink0());
         }
+    }
+    // a server-only file has no history entry to remove or pin
+    if (serverOnly) {
+        return row;
     }
     row->Child(gpc::Button::New(cx, GpuiDup(cx->a, fmt("home-row-forget-%d", idx)))
                    ->Icon(gp::IconName::Close)
@@ -1475,20 +1520,45 @@ static gpc::PopupMenu* HomePopupFromModel(gp::Ctx* cx, MenuModel* model, Str id)
     return menu;
 }
 
+// The cue names the key that focuses the search box as this platform writes
+// it (⌘F on mac) and as the user bound it; the translations carry "Ctrl + F".
+static TempStr HomeSearchCueTemp(int nFiles) {
+    TempStr cue = fmt(Tr("Search %d files (Ctrl + F)").s, nFiles);
+    TempStr key = ShortcutsForCmdTemp(CmdFindFirst, 1);
+    if (len(key) == 0) {
+        return str::ReplaceTemp(cue, StrL(" (Ctrl + F)"), StrL(""));
+    }
+    return str::ReplaceTemp(cue, StrL("Ctrl + F"), key);
+}
+
+// orig's StartPageProvider: what screen readers see when no document is shown
+static gp::El* StartPageA11y(gp::El* page) {
+    return page->Role(gp::AccessibilityRole::Pane)->AriaLabel(GStrL("Start Page"));
+}
+
 gp::El* HomePageBuild(MainWindow* win, gp::Ctx* cx) {
     EnsureHomeView(win, cx);
     bool showStartPage = HasPermission(Perm::SavePreferences | Perm::DiskAccess) && gSettings &&
                          SettingsRememberOpenedFiles() && gSettings->showStartPage;
     if (!showStartPage) {
         Ui(win)->filesLaidOut = true;
-        return AboutPageBuild(win, cx);
+        return StartPageA11y(AboutPageBuild(win, cx));
     }
     EnsureTipsParsed();
 
+    ServerFilesEnsureListed();
     HomePageUI* h = Ui(win);
     VecReset(h->files);
     StrVec filterWords;
     CollectHomePageFiles(HomeSearchQueryTemp(win), h->files, filterWords);
+    // ng: the website's server-only documents, after the local ones
+    Vec<FileState*> serverOnly;
+    ServerOnlyFileStates(serverOnly);
+    for (FileState* fs : serverOnly) {
+        if (len(filterWords) == 0 || FilterMatches(path::GetBaseNameTemp(fs->filePath), filterWords)) {
+            VecAppend(h->files, fs);
+        }
+    }
     h->filesLaidOut = true;
     int nFiles = len(h->files);
     h->entryCount = nFiles;
@@ -1588,7 +1658,7 @@ gp::El* HomePageBuild(MainWindow* win, gp::Ctx* cx) {
         h->focusSearchOnBuild = false;
         HomePageFocusSearch(win);
     }
-    TempStr cue = fmt(Tr("Search %d files (Ctrl + F)").s, CountHomePageFiles());
+    TempStr cue = HomeSearchCueTemp(CountHomePageFiles());
     gp::InputSetPlaceholder(h->search, ToGpui(cue));
     h->search->onChange = gp::ListenTo(Ui(win)->view, &HomeView::OnSearch);
 
@@ -1744,6 +1814,7 @@ gp::El* HomePageBuild(MainWindow* win, gp::Ctx* cx) {
                        ->OnMouseDown(gp::ListenTo(Ui(win)->view, &HomeView::OnPageDown))
                        ->OnMouseUp(gp::ListenTo(Ui(win)->view, &HomeView::OnPageUp))
                        ->Child(root);
+    StartPageA11y(wrap);
     // orig's UpdateHomeOverlayScrollbar: the canvas' overlay bar, only in the
     // smart / overlay modes, along the whole right edge of the canvas
     int totalContentDy = HomeTotalContentDy(h);
@@ -1917,6 +1988,8 @@ TempStr HomeListRowsResultTemp(int* exitCodeOut) {
                        r.dy, progress, fs->filePath));
         Rect pathRc = BoundsRect(h->listPathBounds[i]);
         out.Append(fmt("pathRect=%d,%d,%d,%d\n", pathRc.x, pathRc.y, pathRc.dx, pathRc.dy));
+        // 0: not on the server, 1: same size, 2: different size
+        out.Append(fmt("server=%d\n", (int)GetServerFileState(fs->filePath, size)));
     }
     return finish(0);
 }
@@ -2011,6 +2084,10 @@ bool HomePageOnKeyDown(MainWindow* win, int vk, bool ctrl) {
         case VK_RETURN:
             OpenHomeEntry(win, Ui(win)->selIdx, ctrl);
             return true;
+#if OS_DARWIN
+        // a Mac's Delete key
+        case VK_BACK:
+#endif
         case VK_DELETE: {
             // remove the keyboard-selected entry from file history (not from disk)
             Str path = HomePageSelectedFilePathTemp(win);

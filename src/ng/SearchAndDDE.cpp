@@ -49,7 +49,9 @@
 #include "Favorites.h"
 #include "Translations.h"
 #include "gui/AppShell.h"
+#include "VirtualDesktop.h"
 #include "SearchAndDDE.h"
+#include "gui/DocCanvas.h"
 #include "SearchAndDDECommon.h"
 #include "Toolbar.h"
 
@@ -244,6 +246,21 @@ void ForwardSearchMarkTick(MainWindow* win, int elapsedMs) {
     AppShellInvalidate(win);
 }
 
+// ng: orig's kFindFlashTimerID handler in Canvas.cpp
+void FindFlashTick(MainWindow* win, int elapsedMs) {
+    if (!win || !win->findFlash.next.Tick(elapsedMs)) {
+        return;
+    }
+    if (FindFlashStep(win)) {
+        win->findFlash.next.Arm(kFindFlashIntervalMs);
+    }
+    AppShellInvalidate(win);
+}
+
+void ArmFindFlashTimer(MainWindow* win, int delayMs) {
+    win->findFlash.next.Arm(delayMs);
+}
+
 // starts fading the forward search mark after delayMs
 void HideFwdSearchMarkAfter(MainWindow* win, int delayMs) {
     win->fwdSearchMark.hide.Arm(delayMs);
@@ -348,12 +365,41 @@ MainWindow* LastActiveWindow() {
 }
 
 // the window an Open with newWindow set should land in: an existing empty one,
-// or a brand new one
+// or a brand new one. An empty window must be on the current virtual desktop: a
+// new-window request exists to avoid a desktop switch (#5630), in every
+// OpenOnOtherDesktop mode. Under move, an empty window elsewhere is pulled here.
 static MainWindow* WindowForNewWindowOpen() {
+    MainWindow* elsewhere = nullptr;
     for (MainWindow* w : gWindows) {
-        if (!HasOpenedDocuments(w)) {
+        if (HasOpenedDocuments(w)) {
+            continue;
+        }
+        if (IsWinOnCurrentDesktop(w)) {
             return w;
         }
+        elsewhere = w;
+    }
+    if (elsewhere && BringWinHere(elsewhere)) {
+        return elsewhere;
+    }
+    return CreateAndShowMainWindow(nullptr);
+}
+
+// Window to load a new document into: the last active one, unless focusing it
+// would switch desktops; then another window here, the last active one pulled
+// here (move), or a new window (copy).
+static MainWindow* FindWinToLoadInto() {
+    MainWindow* last = LastActiveWindow();
+    if (!last || CanFocusWinHere(last)) {
+        return last;
+    }
+    for (MainWindow* w : gWindows) {
+        if (CanFocusWinHere(w)) {
+            return w;
+        }
+    }
+    if (BringWinHere(last)) {
+        return last;
     }
     return CreateAndShowMainWindow(nullptr);
 }
@@ -439,7 +485,7 @@ Str HandleOpenCmd(Str cmd, bool* ack) {
     }
     bool doLoad = true;
     if (!win) {
-        win = FindMainWindowByFile(filePath, focusTab);
+        win = focusTab ? FindMainWindowToActivate(filePath) : FindMainWindowByFile(filePath, false);
         if (win) {
             doLoad = false;
             if (!win->IsDocLoaded()) {
@@ -449,7 +495,7 @@ Str HandleOpenCmd(Str cmd, bool* ack) {
         }
     }
     if (!win) {
-        win = (nWindows == 1) ? gWindows[0] : LastActiveWindow();
+        win = (nWindows == 1 && CanFocusWinHere(gWindows[0])) ? gWindows[0] : FindWinToLoadInto();
     }
 
     if (doLoad) {
@@ -546,9 +592,15 @@ bool ExecuteDdeCmds(Str cmd) {
 
 #if OS_WIN
 
-// ng answers no requests of its own
-Str HandleAppRequestCmd(Str, bool*, str::Builder&) {
-    return {};
+// the window the user last worked in and the mouse cursor in its canvas, for
+// the shared [GetMousePos] request
+DisplayModel* DdeMousePosModel(Point* posOut) {
+    MainWindow* win = LastActiveWindow();
+    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    if (dm) {
+        *posOut = DocCanvasCursorPos(win);
+    }
+    return dm;
 }
 
 static void OpenManyCopyDataAsyncRun(OpenManyCopyDataAsync* d) {
@@ -559,7 +611,7 @@ static void OpenManyCopyDataAsyncRun(OpenManyCopyDataAsync* d) {
     if (win) {
         win->Focus();
         for (Str path : d->paths) {
-            LoadDocument(win, path);
+            StartLoadDocument(win, path);
         }
     }
     delete d;
@@ -569,10 +621,12 @@ static void OpenCopyDataAsyncRun(OpenCopyDataAsync* d) {
     // Pick a target window the same way HandleOpenCmd would, then load. We are
     // off the sender's clock: it already returned from SendMessageW.
     MainWindow* win = nullptr;
-    if (d->newWindow) {
-        win = WindowForNewWindowOpen();
-    } else {
-        win = FindMainWindowByFile(d->path, true);
+    // Under OpenOnOtherDesktop = move, pull the window already showing the
+    // document here instead of opening it twice (#5630 forces newWindow when
+    // every window is on another desktop).
+    bool activate = !d->newWindow || GetOtherDesktopOpen() == OtherDesktopOpen::Move;
+    if (activate) {
+        win = FindMainWindowToActivate(d->path);
         if (win) {
             // Already open: just focus (matches activateExisting).
             win->Focus();
@@ -580,14 +634,14 @@ static void OpenCopyDataAsyncRun(OpenCopyDataAsync* d) {
             delete d;
             return;
         }
-        win = LastActiveWindow();
     }
+    win = d->newWindow ? WindowForNewWindowOpen() : FindWinToLoadInto();
     // Match the legacy DDE Open(..., setFocus=1) behavior used by
     // shell/reuseInstance launches: opening into an existing instance should
     // bring that window to the foreground.
     if (win) {
         win->Focus();
-        LoadDocument(win, d->path);
+        StartLoadDocument(win, d->path);
     }
 
     str::Free(d->path);

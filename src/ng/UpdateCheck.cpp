@@ -18,6 +18,7 @@
 #endif
 #if OS_DARWIN
 #include <sys/sysctl.h>
+#include <unistd.h>
 #endif
 
 #include "gui/UIModels.h"
@@ -109,10 +110,17 @@ BuiltOn: 2026-08-21
 Installer64: https://www.sumatrapdfreader.org/dl/prerel/14276/SumatraPDF-prerel-64-install.exe
 ...
 
-ng: macOS and Linux have no installer to run, so their info names what the
-browser should open instead:
+ng: Linux has no installer to run, so its info names what the browser should
+open instead:
 
-DownloadPage: https://www.sumatrapdfreader.org/dlng/mac/14276/SumatraPDF-mac-arm64.zip
+DownloadPage: https://www.sumatrapdfreader.org/dlng/linux/26.10.03/...
+
+A mac build replaces itself with the .zip of its architecture and opens the
+.dmg in the browser when it can't (see ParseUpdateInfo):
+
+ZipArm64: https://www.sumatrapdfreader.org/dlng/mac/26.10.03/SumatraPDF-mac-arm64.zip
+ZipArm64Sha256: <hex>
+DmgArm64: https://www.sumatrapdfreader.org/dlng/mac/26.10.03/SumatraPDF-mac-arm64.dmg
 */
 
 static void OpenWebPage(Str url) {
@@ -144,6 +152,18 @@ bool StartInstallerAutoUpgrade(Str installerPath) {
 static void ExitAfterStartingUpdater() {
     // Exit immediately so the updater can overwrite our exe
     ::ExitProcess(0);
+}
+
+#elif OS_DARWIN
+
+// installerPath is the downloaded .zip of SumatraPDF.app
+bool StartInstallerAutoUpgrade(Str installerPath) {
+    return MacInstallUpdateZip(installerPath);
+}
+
+static void ExitAfterStartingUpdater() {
+    // as ExitProcess() on Windows; the relauncher waits for us to be gone
+    _exit(0);
 }
 
 #else
@@ -296,6 +316,31 @@ static void DownloadUpdateAsync(DownloadUpdateAsyncData* data) {
     } else {
         file::Delete(installerPath);
     }
+#elif OS_DARWIN
+    UpdateInfo* updateInfo = data->updateInfo;
+    TempStr zipPath = MacUpdateZipPathTemp();
+    constexpr int kMaxUpdateDownloadSize = 256 * 1024 * 1024;
+    gp::HttpRsp gr;
+    bool ok = len(zipPath) > 0 && gp::HttpGet(ToGpui(updateInfo->dlURL), &gr) && gr.status == 200 && gr.body.len > 0 &&
+              gr.body.len < kMaxUpdateDownloadSize;
+    Str body = ok ? Str((char*)gr.body.els, gr.body.len) : Str();
+    if (ok && len(updateInfo->dlSha256) > 0) {
+        u8 digest[32];
+        CalcSHA2Digest(body, digest);
+        TempStr got = str::MemToHexTemp(Str((char*)digest, 32));
+        ok = str::EqI(got, updateInfo->dlSha256);
+        if (!ok) {
+            logf("DownloadUpdateAsync: sha256 is %s, expected %s\n", got, updateInfo->dlSha256);
+        }
+    }
+    ok = ok && file::WriteFile(zipPath, body);
+    gp::HttpRspFree(&gr);
+    logf("DownloadUpdateAsync: ok=%d, downloaded '%s' to '%s'\n", (int)ok, updateInfo->dlURL, zipPath);
+    if (ok) {
+        updateInfo->installerPath = str::Dup(zipPath);
+    } else if (len(zipPath) > 0) {
+        file::Delete(zipPath);
+    }
 #endif
 
     // process the rest on ui thread to avoid threading issues
@@ -365,6 +410,12 @@ void DownloadAndInstallPendingUpdate(MainWindow* win) {
 }
 
 static bool ShouldDownloadUpdate(UpdateInfo* updateInfo) {
+#if OS_DARWIN
+    // a version not built for our architecture (yet)
+    if (len(updateInfo->dlURL) == 0) {
+        return false;
+    }
+#endif
     // a store build lets the store install updates
     return ShouldOfferProgramUpdate(updateInfo->latestVer, currentVersion, gIsStoreBuild);
 }
@@ -395,6 +446,10 @@ static void NotifyUpdateCheckFailed(MainWindow* win, DWORD err) {
     MsgBox(win, content, Tr("SumatraPDF Update"), MbYesNo | MbIconWarning, MkFunc1Void(OnVisitWebsiteAnswer));
 }
 
+#if OS_LINUX
+static void PickLinuxPackage(UpdateInfo* updateInfo, Str data);
+#endif
+
 static DWORD MaybeStartUpdateDownload(MainWindow* win, HttpRsp* rsp, UpdateCheck updateCheckType) {
     Str url = rsp->url;
     str::Builder* data = &rsp->data;
@@ -423,6 +478,9 @@ static DWORD MaybeStartUpdateDownload(MainWindow* win, HttpRsp* rsp, UpdateCheck
         return 3;
     }
     updateInfo->win = win;
+#if OS_LINUX
+    PickLinuxPackage(updateInfo, ToStr(*data));
+#endif
 
     if (!ShouldDownloadUpdate(updateInfo)) {
         Str myVer = currentVersion;
@@ -437,6 +495,13 @@ static DWORD MaybeStartUpdateDownload(MainWindow* win, HttpRsp* rsp, UpdateCheck
         delete updateInfo;
         return 0;
     }
+
+#if OS_DARWIN
+    // e.g. run from the disk image: the browser gets the .dmg instead
+    if (!MacCanUpdateSelf()) {
+        str::FreePtr(&updateInfo->dlURL);
+    }
+#endif
 
     if (len(updateInfo->dlURL) == 0) {
         // currently for release builds we don't set this and redirect to a website instead
@@ -485,38 +550,73 @@ static TempStr OsNameTemp() {
     return fmt("mac-%s", Str(ver));
 }
 #elif OS_LINUX
-// The distribution's ID from os-release, e.g. "ubuntu" for ID=ubuntu or ID="ubuntu".
-static TempStr OsNameTemp() {
+// A value from os-release, e.g. "ubuntu" for ID=ubuntu or ID="ubuntu", "" if missing.
+static TempStr OsReleaseValueTemp(Str key) {
     FILE* f = fopen("/etc/os-release", "r");
     if (!f) {
         f = fopen("/usr/lib/os-release", "r");
     }
     if (!f) {
-        return StrL("linux");
+        return {};
     }
-    constexpr Str kKey = StrL("ID=");
-    TempStr res = StrL("linux");
+    TempStr prefix = str::JoinTemp(key, StrL("="));
+    TempStr res{};
     char line[256];
     while (fgets(line, sizeof(line), f)) {
         Str s(line);
-        if (!str::StartsWith(s, kKey)) {
+        if (!str::StartsWith(s, prefix)) {
             continue;
         }
         // keep what is safe in a url; that drops the quotes and the newline
-        str::Builder id;
-        for (int i = len(kKey); i < len(s); i++) {
+        str::Builder v;
+        for (int i = len(prefix); i < len(s); i++) {
             char c = s.s[i];
             if (isalnum((unsigned char)c) || c == '.' || c == '_' || c == '-') {
-                id.AppendChar(c);
+                v.AppendChar(c);
             }
         }
-        if (len(id) > 0) {
-            res = str::DupTemp(ToStr(id));
+        if (len(v) > 0) {
+            res = str::DupTemp(ToStr(v));
         }
         break;
     }
     fclose(f);
     return res;
+}
+
+// The distribution's ID from os-release, e.g. "ubuntu".
+static TempStr OsNameTemp() {
+    TempStr id = OsReleaseValueTemp(StrL("ID"));
+    return len(id) > 0 ? id : StrL("linux");
+}
+
+// Opens this distro's package instead of DownloadPage (the list of all) when
+// the update info has one, e.g. "Package-ubuntu24.04-x86_64: <.deb url>".
+// A rolling release has no VERSION_ID: "Package-arch-x86_64".
+static void PickLinuxPackage(UpdateInfo* updateInfo, Str data) {
+    TempStr id = OsReleaseValueTemp(StrL("ID"));
+    TempStr ver = OsReleaseValueTemp(StrL("VERSION_ID"));
+    if (len(id) == 0) {
+        return;
+    }
+#if defined(__aarch64__)
+    Str arch = StrL("aarch64");
+#else
+    Str arch = StrL("x86_64");
+#endif
+    SquareTreeNode* root = ParseSquareTree(data);
+    if (!root) {
+        return;
+    }
+    AutoDelete delRoot(root);
+    SquareTreeNode* node = root->GetChild(StrL("SumatraPDF"));
+    TempStr key = fmt("Package-%s%s-%s", id, ver, arch);
+    Str url = node ? node->GetValue(key) : Str{};
+    logf("PickLinuxPackage: %s: '%s'\n", key, url);
+    if (len(url) == 0 || !IsTrustedUpdateDlUrl(url)) {
+        return;
+    }
+    str::ReplaceWithCopy(&updateInfo->downloadPage, url);
 }
 #elif !OS_WIN
 static TempStr OsNameTemp() {
@@ -649,6 +749,11 @@ static void UpdateCheckAsync(UpdateCheckAsyncData* data) {
         delete rsp;
         str::Builder url;
         BuildUpdateURL(url, updateInfoURL, updateCheckType);
+#if OS_DARWIN
+        // tells installs apart in the update check stats
+        url.Append(StrL("&id="));
+        url.Append(MacMachineIdHashTemp());
+#endif
         Str uri = ToStr(url);
         rsp = new HttpRsp;
         str::ReplaceWithCopy(&rsp->url, uri);

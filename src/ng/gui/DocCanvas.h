@@ -55,6 +55,9 @@ void DocCanvasFrameWheel(MainWindow* win, int delta, bool isCtrl, bool isShift, 
 void DocCanvasMouseDown(MainWindow* win, int x, int y);
 void DocCanvasMouseUp(MainWindow* win, int x, int y);
 void DocCanvasMouseMove(MainWindow* win, int x, int y);
+#if OS_WIN
+Point DocCanvasCursorPos(MainWindow* win);
+#endif
 void DocCanvasClick(MainWindow* win, int x, int y);
 // gpui lays out in dips, the document model in pixels: dips per document pixel
 float CanvasScale(MainWindow* win);
@@ -62,6 +65,8 @@ float CanvasScale(MainWindow* win);
 // leaves the canvas still arrives (orig captures the mouse for the same reason)
 void DocCanvasHookWindow(MainWindow* win, gpui::Window* gw);
 void DocCanvasDelete(MainWindow* win);
+void DocCanvasA11y(MainWindow* win, gpui::Ctx* cx, gpui::El* canvas);
+void DocCanvasA11yFree(MainWindow* win);
 // the shell's tick: repaint while a page is still rendering
 bool DocCanvasWantsRepaint(MainWindow* win);
 // middle-button auto-scroll moves the document a bit on every tick
@@ -69,6 +74,12 @@ void DocCanvasAutoScrollTick(MainWindow* win, int elapsedMs);
 // orig's SmoothScroll: the exponential chase of the wheel / line-scroll target
 void DocCanvasSmoothScrollTick(MainWindow* win, int elapsedMs);
 void StopSmoothScroll(MainWindow* win);
+enum class PinchPhase {
+    Begin,
+    Change,
+    End,
+};
+bool DocCanvasPinch(MainWindow* win, PinchPhase phase, float magnification, float wx, float wy);
 
 // `nTrackPos` is the thumb position of a ScrollMsg::ThumbTrack
 void CanvasOnVScroll(MainWindow* win, ScrollMsg msg, int nTrackPos = 0);
@@ -103,6 +114,10 @@ void CanvasDrawLine(gpui::PaintCtx* ctx, Point a, Point b, Color col, float widt
 void CanvasDrawRect(gpui::PaintCtx* ctx, Rect r, Color col, float width);
 // width <= 0 fills the ellipse
 void CanvasDrawEllipse(gpui::PaintCtx* ctx, Rect r, Color col, float width);
+void CanvasFillRoundRect(gpui::PaintCtx* ctx, Rect r, int radius, Color fill, Color border);
+void CanvasDrawSvg(gpui::PaintCtx* ctx, Str svg, Rect r, Color col);
+void CanvasClipPush(gpui::PaintCtx* ctx, Rect r);
+void CanvasClipPop(gpui::PaintCtx* ctx);
 Size CanvasMeasureText(gpui::PaintCtx* ctx, Str s, float fontSize);
 void CanvasDrawText(gpui::PaintCtx* ctx, Str s, Point at, Color col, float fontSize);
 
@@ -115,9 +130,8 @@ void CanvasSetKeyModifiers(bool shift, bool ctrl, bool platform);
 bool IsDragDistance(int x1, int x2, int y1, int y2);
 // the cursor the canvas shows, as a gpui CursorKind cast to int
 void CanvasSetCursor(MainWindow* win, int cursorKind);
-// one of orig's cursors that are bitmaps; false where there is none (off
-// Windows), and the caller sets a gpui cursor instead
-bool CanvasSetNativeCursor(MainWindow* win, NativeCursor cursor);
+// one of orig's cursors that are bitmaps
+void CanvasSetNativeCursor(MainWindow* win, NativeCursor cursor);
 // orig's CancelDrag: Escape abandons whatever the mouse was doing
 void CanvasCancelDrag(MainWindow* win);
 bool NudgeSelectedAnnotation(MainWindow*, int vkey, bool shift);
