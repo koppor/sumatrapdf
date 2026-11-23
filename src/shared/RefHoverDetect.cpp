@@ -7,8 +7,8 @@
 #include "RefHover.h"
 
 static constexpr float kAnchorTopMarginPt = 6.f;
-// pt of padding around the detected entry box.
-static constexpr float kEntryPadPt = 6.f;
+// pt of padding around the detected entry box (kRefHoverEntryPadPt in RefHover.h).
+static constexpr float kEntryPadPt = kRefHoverEntryPadPt;
 static constexpr float kLatePageStartRatio = 0.70f;
 
 bool ShouldSearchNextPage(RectF mediabox, float destY) {
@@ -729,16 +729,192 @@ static RectF FindColumnWrapContinuation(WStr text, const Rect* coords, RectF med
     return box;
 }
 
+// Tail of a bibliography entry that wraps onto the top of the next page's
+// reference column, called with that next page's text. colLeftX is the
+// entry-head X of the column on the previous page. Running headers are
+// dropped (they sit more than two line pitches above the body). The tail is
+// the leading run of indented (hanging-indent continuation) lines; it ends at
+// the first flush or bracket-labeled line, which starts the next entry.
+// Empty when the page's column starts with a new entry or no boundary is
+// found within the cap (so unrelated body text is never captured).
+RectF FindPageWrapContinuation(WStr text, const Rect* coords, RectF mediabox, int colLeftX) {
+    if (len(text) == 0 || !coords) {
+        return RectF{};
+    }
+    constexpr int kIndentSlackPt = 4;
+    constexpr int kMaxHangingIndentPt = 60;
+    constexpr int kColWidthMaxPt = 400;
+    constexpr int kLineTolPt = 3;
+
+    // Distinct line tops in the column band, sorted.
+    constexpr int kMaxTops = 64;
+    int tops[kMaxTops];
+    int nTops = 0;
+    for (int i = 0; i < text.len; i++) {
+        if (IsGlyphSpace(text.s[i])) {
+            continue;
+        }
+        Rect r = coords[i];
+        if (r.x < colLeftX - 5 || r.x > colLeftX + kColWidthMaxPt) {
+            continue;
+        }
+        int t = r.y;
+        int lo = 0;
+        bool found = false;
+        for (; lo < nTops; lo++) {
+            if (abs(tops[lo] - t) <= kLineTolPt) {
+                tops[lo] = std::min(tops[lo], t);
+                found = true;
+                break;
+            }
+            if (tops[lo] > t) {
+                break;
+            }
+        }
+        if (!found && nTops < kMaxTops) {
+            for (int m = nTops; m > lo; m--) {
+                tops[m] = tops[m - 1];
+            }
+            tops[lo] = t;
+            nTops++;
+        }
+    }
+    if (nTops < 3) {
+        return RectF{};
+    }
+
+    // The leftmost glyph of the first body line decides: indented =
+    // continuation of the previous page's entry, flush = a new entry.
+    auto lineLeftX = [&](int top, int* leftIdxOut = nullptr, int* rightOut = nullptr) {
+        int left = INT_MAX;
+        int right = INT_MIN;
+        for (int i = 0; i < text.len; i++) {
+            if (IsGlyphSpace(text.s[i])) {
+                continue;
+            }
+            Rect r = coords[i];
+            if (r.x < colLeftX - 5 || r.x > colLeftX + kColWidthMaxPt) {
+                continue;
+            }
+            if (abs(r.y - top) > kLineTolPt) {
+                continue;
+            }
+            if (r.x < left) {
+                left = r.x;
+                if (leftIdxOut) {
+                    *leftIdxOut = i;
+                }
+            }
+            right = std::max(r.x + r.dx, right);
+        }
+        if (rightOut) {
+            *rightOut = right;
+        }
+        return left;
+    };
+
+    // Drop running-header lines (at most two): a header is separated from the
+    // body by more than 1.5x the body's own line pitch, or has a wide internal
+    // gap (page number left, running title right) that no body line has.
+    int first = 0;
+    while (first + 2 < nTops && first < 2) {
+        bool bigGap = 2 * (tops[first + 1] - tops[first]) > 3 * (tops[first + 2] - tops[first + 1]);
+        bool wideHole = false;
+        int leftIdx = -1;
+        int lineRight = INT_MIN;
+        if (lineLeftX(tops[first], &leftIdx, &lineRight) != INT_MAX && leftIdx >= 0) {
+            LineRun run = LineRunExtent(text, coords, leftIdx);
+            wideHole = run.rightX < lineRight - 40;
+        }
+        if (!bigGap && !wideHole) {
+            break;
+        }
+        first++;
+    }
+
+    int firstLeft = lineLeftX(tops[first]);
+    if (firstLeft <= colLeftX + kIndentSlackPt || firstLeft > colLeftX + kMaxHangingIndentPt) {
+        return RectF{};
+    }
+
+    // Boundary: the first flush line below, which starts the next entry.
+    constexpr int kMaxContinuationLines = 8;
+    int boundaryY = -1;
+    int lastTail = first;
+    for (int k = first + 1; k < nTops && k <= first + kMaxContinuationLines; k++) {
+        if (lineLeftX(tops[k]) <= colLeftX + kIndentSlackPt) {
+            boundaryY = tops[k];
+            break;
+        }
+        lastTail = k;
+    }
+    if (boundaryY < 0) {
+        return RectF{};
+    }
+
+    int bMinX = INT_MAX, bMinY = INT_MAX, bMaxX = INT_MIN, bMaxY = INT_MIN;
+    for (int i = 0; i < text.len; i++) {
+        if (IsGlyphSpace(text.s[i])) {
+            continue;
+        }
+        Rect r = coords[i];
+        if (r.x < colLeftX - 5 || r.x > colLeftX + kColWidthMaxPt) {
+            continue;
+        }
+        if (r.y < tops[first] - kLineTolPt || r.y > tops[lastTail] + kLineTolPt) {
+            continue;
+        }
+        bMinX = std::min(r.x, bMinX);
+        bMinY = std::min(r.y, bMinY);
+        bMaxX = std::max(r.x + r.dx, bMaxX);
+        bMaxY = std::max(r.y + r.dy, bMaxY);
+    }
+    if (bMinX == INT_MAX || (bMaxX - bMinX) < 30 || (bMaxY - bMinY) < 8) {
+        return RectF{};
+    }
+    RectF box{(float)bMinX - kEntryPadPt, (float)bMinY - kEntryPadPt, (float)(bMaxX - bMinX) + (2.f * kEntryPadPt),
+              (float)(bMaxY - bMinY) + (2.f * kEntryPadPt)};
+    ClipToMediabox(box, mediabox);
+    return box;
+}
+
+// True when no further text follows `box` in its column on this page: the
+// entry is the column's last and may continue at the top of the next page.
+static bool NoColumnTextBelow(WStr text, const Rect* coords, RectF box) {
+    int x0 = (int)box.x;
+    int x1 = (int)(box.x + box.dx);
+    int yBot = (int)(box.y + box.dy);
+    for (int i = 0; i < text.len; i++) {
+        if (IsGlyphSpace(text.s[i])) {
+            continue;
+        }
+        Rect r = coords[i];
+        int cx = r.x + r.dx / 2;
+        if (cx < x0 || cx > x1) {
+            continue;
+        }
+        if (r.y >= yBot) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Fit a bibliography, glossary, or abbreviation entry; otherwise use LandscapeBox.
 // continuationOut optionally receives the entry's tail in the next column.
 // outIsBibEntry optionally reports whether the box is a fitted bibliography entry.
+// mayWrapPageOut optionally reports that the entry ends its column with no
+// following text, so it may continue on the next page.
 RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX, float destY, RectF* continuationOut,
-                     bool* outIsBibEntry) {
+                     bool* outIsBibEntry, bool* mayWrapPageOut) {
     if (continuationOut) {
         *continuationOut = RectF{};
     }
     if (outIsBibEntry) {
         *outIsBibEntry = false;
+    }
+    if (mayWrapPageOut) {
+        *mayWrapPageOut = false;
     }
     // Show the whole page when sparse text would hide its images.
     constexpr int kSparsePageTextLen = 50;
@@ -786,6 +962,42 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
     // Keep an existing bracket label; walking left could cross a narrow gutter.
     if (text.s[startIdx] != L'[') {
         startIdx = run.leftIdx;
+    }
+
+    // An XYZ link dest often anchors a few points above the entry's first line,
+    // inside the previous entry's last line, which then wins the nearest-line
+    // pick. In a hanging-indent bibliography the entry head is out-dented: a
+    // line just below the pick that starts further left is the head the dest
+    // meant, so the box must not swallow the previous entry's tail.
+    if (text.s[startIdx] != L'[') {
+        constexpr int kMinOutdentPt = 4;
+        constexpr int kMaxOutdentPt = 60;
+        int pickedY = coords[startIdx].y;
+        int headIdx = -1;
+        int headY = INT_MAX;
+        int headX = INT_MAX;
+        for (int i = 0; i < text.len; i++) {
+            if (IsGlyphSpace(text.s[i])) {
+                continue;
+            }
+            Rect r = coords[i];
+            if (r.y <= pickedY + 2 || r.y > dY + 30) {
+                continue;
+            }
+            if (r.x < columnLeft || r.x >= run.leftX - kMinOutdentPt || r.x < run.leftX - kMaxOutdentPt) {
+                continue;
+            }
+            if (r.y < headY || (r.y == headY && r.x < headX)) {
+                headY = r.y;
+                headX = r.x;
+                headIdx = i;
+            }
+        }
+        if (headIdx >= 0) {
+            run = LineRunExtent(text, coords, headIdx);
+            startIdx = run.leftIdx;
+            lineRunRightX = run.rightX;
+        }
     }
 
     // Recover a bracket label whose baseline differs from the body, within one hanging indent.
@@ -1033,6 +1245,9 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
                         *continuationOut = FindColumnWrapContinuation(text, coords, mediabox, columnRightX);
                     }
                 }
+                if (mayWrapPageOut && !foundSibling && NoColumnTextBelow(text, coords, box)) {
+                    *mayWrapPageOut = true;
+                }
                 return box;
             }
         }
@@ -1053,6 +1268,9 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
     int indentX = -1;
     // An aligned sibling with no hanging indent identifies a description list, even for single-line entries.
     bool descListSibling = false;
+    // Whether the scan ended at a following entry (vs. running out of column
+    // text): only a sibling-less entry can continue on the next page.
+    bool sawSibling = false;
 
     for (int i = startIdx + 1; i < text.len; i++) {
         WCHAR c = text.s[i];
@@ -1100,6 +1318,7 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
         // Paragraph gaps end the entry; an aligned next line identifies a sibling.
         if (nextEntry || r.y > prevBottom + (lineHeight * 5 / 4)) {
             descListSibling = atFirstLineLeftX;
+            sawSibling = nextEntry;
             endIdx = i;
             break;
         }
@@ -1178,6 +1397,9 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
         if (outIsBibEntry) {
             *outIsBibEntry = true;
         }
+        if (mayWrapPageOut && !sawSibling && NoColumnTextBelow(text, coords, box)) {
+            *mayWrapPageOut = true;
+        }
         return box;
     }
     // A wide continuation offset is a table column gap, not a hanging indent.
@@ -1224,6 +1446,9 @@ RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX,
     // Keep the fitted author-year entry.
     if (outIsBibEntry) {
         *outIsBibEntry = true;
+    }
+    if (mayWrapPageOut && !sawSibling && NoColumnTextBelow(text, coords, box)) {
+        *mayWrapPageOut = true;
     }
     return box;
 }
@@ -1356,4 +1581,96 @@ int FindBibEntryHeads(WStr text, const Rect* coords, Point* out, int cap) {
         out[n++] = Point(coords[i].x, coords[i].y);
     }
     return n;
+}
+
+// Collect the text of every glyph whose center falls inside `region`, in
+// reading order, joining wrapped lines with a space. Two exceptions keep
+// tokens that a line break merely wrapped intact: inside a URL ("://" in the
+// token so far) no space is inserted ("doi.org/10." + "1007/x" stays one
+// token), and an end-of-line hyphen between lowercase letters is removed
+// ("hyphen-" + "ated" becomes "hyphenated"; "Smith-" + "Jones" keeps the
+// hyphen). Returns UTF-8 in the temp arena, or null when the region is empty.
+TempStr ExtractRegionTextTemp(WStr text, const Rect* coords, RectF region) {
+    if (len(text) == 0 || !coords) {
+        return {};
+    }
+    int x0 = (int)region.x;
+    int y0 = (int)region.y;
+    int x1 = (int)(region.x + region.dx);
+    int y1 = (int)(region.y + region.dy);
+    wstr::Builder out;
+    int prevY = INT_MIN;
+    int prevIdx = -1;
+    for (int i = 0; i < text.len; i++) {
+        Rect r = coords[i];
+        int cx = r.x + r.dx / 2;
+        int cy = r.y + r.dy / 2;
+        if (cx < x0 || cx > x1 || cy < y0 || cy > y1) {
+            continue;
+        }
+        WCHAR c = text.s[i];
+        bool isSpace = (c == L' ' || c == L'\t' || c == L'\n' || c == L'\r');
+        WCHAR last = (out.len > 0) ? out.LastChar() : 0;
+        // A line change inside the region separates words from wrapped lines.
+        // When the engine's own text has no separator between the two glyphs
+        // it already joined the lines (dehyphenation): keep them joined.
+        bool engineJoined = true;
+        for (int t = prevIdx + 1; t < i; t++) {
+            WCHAR tc = text.s[t];
+            if (tc == L' ' || tc == L'\t' || tc == L'\n' || tc == L'\r') {
+                engineJoined = false;
+                break;
+            }
+        }
+        if (!isSpace && prevY != INT_MIN && r.y > prevY + 3 && last != 0 && last != L' ' && !engineJoined) {
+            // The token the line break interrupted: text since the last space.
+            WStr sofar = ToWStr(out);
+            int tokStart = sofar.len;
+            while (tokStart > 0 && sofar.s[tokStart - 1] != L' ') {
+                tokStart--;
+            }
+            bool inUrl = false;
+            for (int t = tokStart; t + 2 < sofar.len; t++) {
+                if (sofar.s[t] == L':' && sofar.s[t + 1] == L'/' && sofar.s[t + 2] == L'/') {
+                    inUrl = true;
+                    break;
+                }
+            }
+            bool nextLower = (c >= L'a' && c <= L'z');
+            bool nextAlnum = nextLower || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9');
+            WCHAR b = (out.len > 1) ? sofar.s[out.len - 2] : 0;
+            bool beforeLower = (b >= L'a' && b <= L'z');
+            bool beforeAlnum = beforeLower || (b >= L'A' && b <= L'Z') || (b >= L'0' && b <= L'9');
+            bool isHyphen = (last == L'-' || last == 0x2010);
+            if (inUrl) {
+                // no separator: the URL continues
+            } else if (last == 0x00AD) {
+                out.RemoveLast(); // a soft hyphen only marks the line break
+            } else if (isHyphen && beforeLower && nextLower) {
+                out.RemoveLast(); // hyphenation artifact
+            } else if (isHyphen && beforeAlnum && nextAlnum) {
+                // keep the hyphen, join without a space ("Smith-" + "Jones",
+                // a page range "1537-" + "1577")
+            } else {
+                out.Append(L" ");
+            }
+        }
+        if (isSpace) {
+            if (last != 0 && last != L' ') {
+                out.Append(L" ");
+            }
+            continue;
+        }
+        prevY = r.y;
+        prevIdx = i;
+        WCHAR buf[2] = {c, 0};
+        out.Append(buf);
+    }
+    while (out.len > 0 && out.LastChar() == L' ') {
+        out.RemoveLast();
+    }
+    if (out.len == 0) {
+        return {};
+    }
+    return ToUtf8Temp(ToWStr(out));
 }

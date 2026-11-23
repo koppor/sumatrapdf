@@ -190,56 +190,30 @@ void RefHoverHandlePopupClick(RefHoverState* s, IPageDestination* dest) {
 // paints it) so the user sees at a glance which references they already have.
 
 // Collect the UTF-8 text of every glyph whose center falls inside `region` on
-// `destPage`, in text-array (reading) order. A separating space is inserted
-// between glyphs that sit on different lines so words from wrapped lines don't
-// run together, and runs of whitespace are collapsed. Returns a heap string
-// (caller frees with str::Free) or null when the region holds no text.
+// `destPage`, in text-array (reading) order (see ExtractRegionTextTemp for the
+// line-join rules). Returns a heap string (caller frees with str::Free) or
+// null when the region holds no text.
 static char* ExtractEntryText(EngineBase* engine, int destPage, RectF region) {
     int textLen = 0;
     Rect* coords = nullptr;
     Str textUtf8 = engine->GetTextForPage(destPage, &textLen, &coords);
     TempWStr wtext = RefHoverPageTextToWStrTemp(textUtf8);
-    const WCHAR* text = wtext.s;
-    if (!text || textLen <= 0 || !coords) {
+    if (!wtext.s || textLen <= 0 || !coords) {
         return nullptr;
     }
-    int x0 = (int)region.x;
-    int y0 = (int)region.y;
-    int x1 = (int)(region.x + region.dx);
-    int y1 = (int)(region.y + region.dy);
-    wstr::Builder out;
-    int prevY = INT_MIN;
-    for (int i = 0; i < textLen; i++) {
-        Rect r = coords[i];
-        int cx = r.x + r.dx / 2;
-        int cy = r.y + r.dy / 2;
-        if (cx < x0 || cx > x1 || cy < y0 || cy > y1) {
-            continue;
-        }
-        WCHAR c = text[i];
-        bool isSpace = (c == L' ' || c == L'\t' || c == L'\n' || c == L'\r');
-        WCHAR last = (out.len > 0) ? out.LastChar() : 0;
-        // A line change inside the region separates words from wrapped lines.
-        if (!isSpace && prevY != INT_MIN && r.y > prevY + 3 && last != 0 && last != L' ') {
-            out.Append(L" ");
-        }
-        if (isSpace) {
-            if (last != 0 && last != L' ') {
-                out.Append(L" ");
-            }
-            continue;
-        }
-        prevY = r.y;
-        WCHAR buf[2] = {c, 0};
-        out.Append(buf);
-    }
-    while (out.len > 0 && out.LastChar() == L' ') {
-        out.RemoveLast();
-    }
-    if (out.len == 0) {
+    // Undo the display padding DetectEntryBox added: engine glyph boxes carry
+    // font ascent/descent slack, so the padded crop reaches the neighbouring
+    // lines and their glyph centers would leak the previous entry's tail into
+    // the captured text.
+    region.x += kRefHoverEntryPadPt;
+    region.y += kRefHoverEntryPadPt;
+    region.dx -= 2.f * kRefHoverEntryPadPt;
+    region.dy -= 2.f * kRefHoverEntryPadPt;
+    TempStr s = ExtractRegionTextTemp(WStr(wtext.s, textLen), coords, region);
+    if (len(s) == 0) {
         return nullptr;
     }
-    return str::Dup(ToUtf8Temp(ToWStr(out))).s;
+    return str::Dup(s).s;
 }
 
 // FNV-1a 64-bit. Fast, zero-dep, more than enough collision resistance for a
@@ -534,7 +508,8 @@ static void KickoffExistenceCheck(RefHoverState* s) {
     RunAsync(fn, StrL("RefHoverExistenceCheck"));
 }
 
-void RefHoverCaptureEntryAndCheck(RefHoverState* s, EngineBase* engine, int destPage, RectF region, bool isBibEntry) {
+void RefHoverCaptureEntryAndCheck(RefHoverState* s, EngineBase* engine, int destPage, RectF region, bool isBibEntry,
+                                  int contPage, RectF contRegion) {
     if (!s) {
         return;
     }
@@ -551,6 +526,17 @@ void RefHoverCaptureEntryAndCheck(RefHoverState* s, EngineBase* engine, int dest
     if (isBibEntry) {
         str::Free(Str(s->entryText));
         s->entryText = ExtractEntryText(engine, destPage, region);
+        // Entry wrapping onto the next page: append its tail so the pushed
+        // text is the complete reference.
+        if (s->entryText && contPage > destPage && contRegion.dx > 0.f && contRegion.dy > 0.f) {
+            char* tail = ExtractEntryText(engine, contPage, contRegion);
+            if (tail) {
+                char* whole = str::Dup(fmt("%s %s", Str(s->entryText), Str(tail))).s;
+                str::Free(Str(s->entryText));
+                str::Free(Str(tail));
+                s->entryText = whole;
+            }
+        }
         // New entryText invalidates the parser-cache token issued for the
         // previous one — wait for the fresh lookup to refill it.
         str::Free(Str(s->parserCacheKey));
