@@ -52,7 +52,15 @@ int FreeTextFontSize(const AnnotCreateArgs& args) {
 }
 
 float FreeTextPadding(const AnnotCreateArgs& args) {
-    return args.borderWidth > 0 ? (float)args.borderWidth * 2.f : 0.f;
+    return FreeTextPadding(args.borderWidth);
+}
+
+float FreeTextPadding(int borderWidth) {
+    return 2.f * (float)std::max(borderWidth, 0);
+}
+
+float FreeTextWrappedHeight(int lines, int fontSize, int borderWidth) {
+    return (float)lines * (float)fontSize * kFreeTextLineHeight + 2.f * FreeTextPadding(borderWidth);
 }
 
 Str FreeTextPlacementContent(const AnnotCreateArgs& args) {
@@ -423,7 +431,10 @@ bool AnnotationPlacementFillCreate(MainWindow* win, AnnotationType type, Point& 
 }
 
 bool CommitShapePlacement(MainWindow* win) {
-    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    if (!win) {
+        return false;
+    }
+    DisplayModel* dm = win->AsFixed();
     AnnotPlacement& p = win->annotPlacement;
     if (!IsPlacingShapeAnnotation(win) || !dm || !dm->ValidPageNo(p.pageNo)) {
         return false;
@@ -615,8 +626,6 @@ static bool HandlePolyLineClick(MainWindow* win, Point pt, bool isShift, bool is
     // double back on itself, so let it keep collecting vertices instead
     bool close = isCtrl && len(p.points) > 2;
     if (close) {
-        // by value: VecAppend takes a reference, and growing the vec frees the
-        // buffer that reference would point into
         // by value: VecAppend takes a reference, and growing the vec frees the
         // buffer that reference would point into
         PointF first = p.points[0];

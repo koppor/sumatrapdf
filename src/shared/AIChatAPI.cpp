@@ -352,12 +352,12 @@ static bool ValidAPIURL(Str url) {
     }
     int schemeLen = tls ? 8 : 7;
     Str rest(url.s + schemeLen, len(url) - schemeLen);
-    Str host;
+    Str host = rest;
     if (!str::Cut(rest, StrL("/"), &host, nullptr)) {
         str::Cut(rest, StrL("?"), &host, nullptr);
     }
     if (len(host) == 0) {
-        host = rest;
+        return false;
     }
     for (int i = 0; i < len(url); i++) {
         char c = url.s[i];
@@ -405,9 +405,9 @@ static bool ResolveAPIEndpoint(Str model, APIEndpoint& ep, Str& error) {
     Str key = gSettings->customAI.apiKey;
     Str env = gSettings->customAI.apiKeyEnv;
     if (len(env) > 0) {
-        const char* value = getenv(CStrTemp(env));
-        if (value && *value) {
-            key = Str(value);
+        TempStr value = GetEnvVariableTemp(env);
+        if (len(value) > 0) {
+            key = value;
         }
     }
     for (int i = 0; i < len(key); i++) {
@@ -520,7 +520,7 @@ struct CustomAIProvider : AIChatProvider {
     CustomAIProvider() {
         backend = AIChatBackend::CustomAPI;
         name = StrL("Custom AI");
-        virtualHost = StrL("custom-ai.local");
+        virtualHost = StrL("https://sumatrapdf.custom-ai/");
         webViewDataDirPrefix = StrL("CustomAIWebView");
         docUri = StrL("AI-chat");
         optionItems = "Chat Completions\0";

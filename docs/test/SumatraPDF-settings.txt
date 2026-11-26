@@ -64,6 +64,7 @@ ShowTocPageNumbers = true
 TocWrapText = false
 AutoGenerateTOC = false
 ShowStartPage = true
+DisableCrashReports = false
 SidebarDx = 0
 Scrollbars = windows
 ScrollbarInSinglePage = false
@@ -74,7 +75,7 @@ PaddingAfterLastPage = false
 ContinuousScrollFollowsRotation = false
 IgnoreDestinationZoom = false
 HighlightLinkDestination = false
-FlashFindMatch = true
+FlashFindMatch = 1
 CitationHoverDelay = -1
 ReadAloudSpeed = 1
 ReadAloudSentenceColor = #3b82f6
@@ -164,11 +165,16 @@ ChmUI [
 ]
 
 MarkdownUI [
+	MaxContentWidth = 0
+	FontSize = 0
+	LineSpacing = 0
 	UseFixedPageUI = false
 	PreserveLineBreaks = false
 ]
 
 HtmlUI [
+	FontSize = 0
+	LineSpacing = 0
 	UseFixedPageUI = false
 ]
 

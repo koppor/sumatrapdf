@@ -18,7 +18,8 @@ First install [bun](https://bun.sh/), then a compiler:
 - **Windows** — Visual Studio 2026; the free Community edition is fine, and
   2022 works too. `build.ts` finds it with vswhere, so no developer prompt.
 - **Linux** — `g++` or `clang++`, plus `pkg-config`, X11, cairo, pangocairo and gdk-pixbuf.
-  Optional: libcurl (remote images) and WebKitGTK 4.1 (the webview).
+  Optional: libcurl (remote images), WebKitGTK 4.1 (the webview), ALSA (the
+  speech microphone), libXcursor (image cursors) and libXi (touch and pen).
 - **macOS** — the Xcode command line tools (`xcode-select --install`).
 
 Then:
@@ -73,7 +74,7 @@ extras/              the ported library crates as standalone amalgams, one
                      Also inside gpui.cpp — this copy is standalone
   html5ever-mini/    a smaller parser implementing the same html5ever.h API;
                      selected with -html=mini
-  wry/               the webview, crate lb-wry 0.53.3 (WebView2 on
+  wry/               the webview, crate lb-wry 0.57.3 (WebView2 on
                      Windows, WKWebView on macOS, stubs elsewhere). Also
                      inside gpui.cpp
   unicode-linebreak/  Unicode 15.0 line breaks, crate unicode-linebreak
@@ -82,7 +83,9 @@ gpui_shell/           command-line JavaScript application host
 examples/            every example, including story/ and showcase/
 assets/              icons, images and documents the examples load at runtime
 web/shell.html       the page a -wasm build is served in
-build.ts, run.ts     the source repo's own build and run scripts
+build.ts, run.ts     the source repo's own build and run scripts, with
+                     winapi.ts and mac-window-place.m, which they use
+ubuntu-install-deps.sh  the Linux packages a build needs
 ```
 
 `out/` is where builds land. Nothing else is generated in place.
@@ -95,13 +98,15 @@ C11. The platform halves are already
 inside `gpui.cpp` behind `GPUI_OS_*`
 guards, so the same source set builds on all four:
 
-- **Windows** — `cl /std:c++20 /EHsc /utf-8 /DUNICODE /D_UNICODE`, static CRT;
+- **Windows** — `cl /std:c++20 /EHs-c- /GR- /D_HAS_EXCEPTIONS=0 /utf-8 /DUNICODE /D_UNICODE`, static CRT;
   link `d2d1.lib d3d11.lib dxgi.lib dcomp.lib dwrite.lib windowscodecs.lib`
   beside the usual user32/gdi32/ole32/shell32 set (see `build.ts`).
 - **Linux** — `g++ -std=c++20` with `pkg-config --cflags --libs x11 cairo pangocairo gdk-pixbuf-2.0`.
   Add `libcurl` and `-DGPUI_HAVE_CURL=1` for remote images,
   `webkit2gtk-4.1` and `-DGPUI_HAVE_WEBKITGTK=1` for the webview, and
-  `alsa` and `-DGPUI_HAVE_ALSA=1` for the speech microphone.
+  `alsa` and `-DGPUI_HAVE_ALSA=1` for the speech microphone, `xcursor` and
+  `-DGPUI_HAVE_XCURSOR=1` for image cursors, and `xi` and `-DGPUI_HAVE_XI=1`
+  for touch and pen input.
 - **macOS** — `clang++ -std=c++20 -x objective-c++` with the Cocoa, CoreText,
   IOKit, AudioToolbox, AVFoundation and Speech frameworks. The file is
   Objective-C++ because the mac half is.
@@ -153,7 +158,7 @@ parsers need no libraries at all.
 
 No other dependencies, no nested build system, no STL containers.
 
-## Unicode grapheme data
+## Unicode data
 
 The grapheme property tables come from unicode-segmentation 1.13.3.
 
@@ -185,9 +190,53 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+The browser's joining property table comes from the Unicode 17.0 Character Database.
+
+```text
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 1991-2026 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+```
+
 ## This copy
 
-Amalgamated from gpui-kit-cpp [`32e2f70d1e0c8baecde36c8d939ae45599638543`](https://github.com/kjk/gpui-kit-cpp/commit/32e2f70d1e0c8baecde36c8d939ae45599638543).
+Amalgamated from gpui-kit-cpp [`c17370884548859a83b4568f61d25e7c15087ad6`](https://github.com/kjk/gpui-kit-cpp/commit/c17370884548859a83b4568f61d25e7c15087ad6).
 
-[What has changed in gpui-kit-cpp since](https://github.com/kjk/gpui-kit-cpp/compare/32e2f70d1e0c8baecde36c8d939ae45599638543...main)
+[What has changed in gpui-kit-cpp since](https://github.com/kjk/gpui-kit-cpp/compare/c17370884548859a83b4568f61d25e7c15087ad6...main)
 shows every commit this copy is behind by; if that page is empty, it is current.

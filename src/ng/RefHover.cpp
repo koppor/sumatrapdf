@@ -22,9 +22,8 @@
 #include "DisplayModel.h"
 #include "MainWindow.h"
 #include "gui/AppShell.h"
+#include "gui/DocCanvas.h"
 #include "RefHover.h"
-
-float CanvasScale(MainWindow* win);
 
 // Tests pass a frame client point. The document hit-test wants canvas pixels.
 static bool FrameClientToDoc(MainWindow* win, int px, int py, Point* out) {
@@ -165,8 +164,16 @@ void RefHoverHandlePopupClick(RefHoverState* s, IPageDestination* dest) {
     if (!s || !dest || !s->ctrl) {
         return;
     }
+    // dest belongs to hitEngine, which hiding releases
+    EngineBase* engine = s->hitEngine;
+    if (engine) {
+        engine->AddRef();
+    }
     RefHoverHide(s);
     s->ctrl->HandleLink(dest, s->linkHandler);
+    if (engine) {
+        engine->Release();
+    }
 }
 
 int RefHoverPopupWidthCap(RefHoverState* s, int minWidth) {

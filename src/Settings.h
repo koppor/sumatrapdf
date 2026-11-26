@@ -307,6 +307,9 @@ struct FileState {
     Str layerStates;
     // unit name for calibrated measurements
     Str measurementUnit;
+    // sha1 of the file's content, then its size and modification time when
+    // hashed, to match SumatraPDF Web files
+    Str contentSha1;
     // calibrated measurement units per document coordinate; 0 uses points
     float measurementScale;
     // how often the document was opened, halved every week so that the
@@ -733,10 +736,10 @@ struct ComicBookUI {
     bool landscapeAsSpread;
 };
 
-// measurement grid overlay (View > Page Grid). Spacing, slant and style
-// are saved; showing the grid is session-only. Drag a grid line while
-// Configure Page Grid is open, or Alt+drag, to resize cells with equal
-// width and height
+// measurement grid overlay (View > Show > Page Grid). Spacing, slant
+// and style are saved; showing the grid is session-only. Drag a grid
+// line while Configure Page Grid is open, or Alt+drag, to resize cells
+// with equal width and height
 struct PageGrid {
     // distance between major vertical grid lines, in PDF points (1/72
     // inch)
@@ -791,10 +794,10 @@ struct FixedPageUI {
     // if given, sets the canvas background color for PDF, DjVu and XPS
     // files
     ParsedColor windowBgCol;
-    // measurement grid overlay (View > Page Grid). Spacing, slant and
-    // style are saved; showing the grid is session-only. Drag a grid line
-    // while Configure Page Grid is open, or Alt+drag, to resize cells with
-    // equal width and height
+    // measurement grid overlay (View > Show > Page Grid). Spacing, slant
+    // and style are saved; showing the grid is session-only. Drag a grid
+    // line while Configure Page Grid is open, or Alt+drag, to resize cells
+    // with equal width and height
     PageGrid pageGrid;
 };
 
@@ -905,17 +908,34 @@ struct ReadingBar {
 // customization options for Markdown UI. If UseFixedPageUI is true,
 // MuPDF is used; otherwise WebView2 browser view is used when available
 struct MarkdownUI {
+    // maximum browser reading width in CSS pixels; 0 uses the default
+    // (980)
+    int maxContentWidth;
+    // font family for Markdown prose
+    Str fontName;
+    // base text size in points; 0 keeps the viewer or document default
+    float fontSize;
+    // prose line-height multiplier from 0.5 to 5; 0 keeps the viewer or
+    // document default
+    float lineSpacing;
     // if true, use MuPDF (cmark-gfm) to render markdown; if false, use
     // WebView2 browser view when available
     bool useFixedPageUI;
-    // if true, preserve source line breaks in the Markdown browser view;
-    // false uses standard Markdown paragraph wrapping
+    // if true, preserve source line breaks in Markdown; false uses
+    // standard Markdown paragraph wrapping
     bool preserveLineBreaks;
 };
 
 // customization options for HTML UI. If UseFixedPageUI is true, MuPDF
 // is used; otherwise WebView2 browser view is used when available
 struct HtmlUI {
+    // font family for HTML prose
+    Str fontName;
+    // base text size in points; 0 keeps the viewer or document default
+    float fontSize;
+    // prose line-height multiplier from 0.5 to 5; 0 keeps the viewer or
+    // document default
+    float lineSpacing;
     // if true, use MuPDF to render HTML; if false, use WebView2 browser
     // view when available
     bool useFixedPageUI;
@@ -1229,8 +1249,8 @@ struct Settings {
     // next to the PDF. Off by default for security (matches Acrobat)
     bool allowExternalImages;
     // if true, show the SyncTeX inverse search command line in Settings ->
-    // Options, so a double-click in the document can jump to the matching
-    // line in a LaTeX editor
+    // Settings..., so a double-click in the document can jump to the
+    // matching line in a LaTeX editor
     bool enableTeXEnhancements;
     // if true, Esc key closes SumatraPDF. In presentation or fullscreen
     // mode, Esc leaves that mode first
@@ -1404,8 +1424,9 @@ struct Settings {
     // if true, show a tip when hovering an annotation (e.g. "Highlight
     // annotation. Ctrl+click to edit.")
     bool showAnnotationNotification;
-    // if true, at the end of a document show a hint to open the next file
-    // in the folder. Closing the hint sets it to false
+    // if true, going on at the end of a document (next page, Page Down,
+    // Space) offers the next file in the folder, and going on again opens
+    // it. Closing the hint sets it to false
     bool showFileNavigateHint;
     // if true, show the author at the bottom of an annotation tooltip as
     // "Author: <author>"
@@ -1419,6 +1440,8 @@ struct Settings {
     // if true, show a list of frequently read documents when no document
     // is loaded
     bool showStartPage;
+    // keep crash reports local and disable automatic diagnostic uploads
+    bool disableCrashReports;
     // if true, show a scrollbar in single page mode as well
     bool scrollbarInSinglePage;
     // if true, smooth mouse-wheel and arrow-key scrolling (exponential
@@ -1443,10 +1466,10 @@ struct Settings {
     // ForwardSearch. Off when the destination is only a page with no
     // position
     bool highlightLinkDestination;
-    // if true, Find Next / Find Previous blinks a ring around the found
-    // text a few times, so it's easy to spot on a busy page. The color
-    // matches ForwardSearch
-    bool flashFindMatch;
+    // how many times Find Next / Find Previous blinks a ring around the
+    // found text, so it's easy to spot on a busy page; 0 turns it off. The
+    // color matches ForwardSearch
+    int flashFindMatch;
     // if true, mouse wheel scrolling is faster when mouse is over a
     // scrollbar
     bool fastScrollOverScrollbar;
@@ -1511,7 +1534,7 @@ struct FieldInfo;
 struct StructInfo;
 extern const StructInfo gFavoriteInfo;
 extern const StructInfo gFileEBookUIInfo;
-extern const FieldInfo gFileStateFields[36];
+extern const FieldInfo gFileStateFields[37];
 extern StructInfo gFileStateInfo;
 extern const StructInfo gTabStateInfo;
 extern const StructInfo gSessionDataInfo;

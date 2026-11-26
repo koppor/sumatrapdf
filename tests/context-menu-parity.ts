@@ -1,11 +1,13 @@
 // The page context menu without a selection has orig's rows in ng too: Selection
 // lists Select All once and Trim Pages To Selection, hides the selection-only
-// commands; the menu has Show Thumbnails and no Annotations > Create From Selection.
+// commands; the menu has Show > Thumbnails and no Annotations > Create From Selection.
+// The Show submenu checks the parts of the window that are shown.
 //
 // Run: bun tests/context-menu-parity.ts [-ng] [--no-build]
 
 import { join } from "node:path";
 import { ControlCommand, type ControlClient } from "./control.ts";
+import { IS_WIN } from "./host.ts";
 import { ROOT, runStandalone, USE_NG } from "./util.ts";
 import { findCanvas, killAndWait, launchControlled, readContextMenuTree } from "./win-automation.ts";
 import type { MenuItem } from "./winapi.ts";
@@ -13,11 +15,11 @@ import type { MenuItem } from "./winapi.ts";
 const PDF = join(ROOT, "docs", "test", "zlib.3.pdf");
 
 // "depth title" rows, depth-first
-type Row = { depth: number; title: string };
+type Row = { depth: number; title: string; checked: boolean };
 
 function rowsFromTree(items: MenuItem[], depth = 0, out: Row[] = []): Row[] {
   for (const it of items) {
-    out.push({ depth, title: it.text.split("\t")[0]!.replace(/&/g, "") });
+    out.push({ depth, title: it.text.split("\t")[0]!.replace(/&/g, ""), checked: it.checked === true });
     if (it.items) {
       rowsFromTree(it.items, depth + 1, out);
     }
@@ -33,7 +35,7 @@ function rowsFromNg(raw: string): Row[] {
     if (c.length < 6 || c[1] === "-") {
       continue;
     }
-    out.push({ depth: c[0]!.split(".").length - 1, title: c[5]! });
+    out.push({ depth: c[0]!.split(".").length - 1, title: c[5]!, checked: c[4] === "1" });
   }
   return out;
 }
@@ -81,19 +83,47 @@ export async function testit(): Promise<void> {
     if (sel.filter((t) => t === "Select All").length !== 1) {
       fail("Selection should list Select All once");
     }
-    if (!sel.includes("Trim Pages To Selection")) {
-      fail("Selection lacks Trim Pages To Selection");
+    if (!sel.includes("Trim Pages to Selection")) {
+      fail("Selection lacks Trim Pages to Selection");
     }
-    for (const t of ["Copy To Clipboard", "Visual Search With Google Lens", "Zoom To Selection"]) {
+    for (const t of ["Copy to Clipboard", "Visual Search with Google Lens", "Zoom to Selection"]) {
       if (sel.includes(t)) {
         fail(`Selection shows '${t}' without a selection`);
       }
     }
-    if (!rows.some((r) => r.depth === 0 && r.title === "Show Thumbnails")) {
-      fail("no Show Thumbnails");
+    if (!submenu(rows, "Show").includes("Thumbnails")) {
+      fail("no Show > Thumbnails");
     }
-    if (submenu(rows, "Annotations").includes("Create From Selection")) {
-      fail("Annotations shows Create From Selection without a selection");
+    if (submenu(rows, "Annotations").includes("Create from Selection")) {
+      fail("Annotations shows Create from Selection without a selection");
+    }
+
+    // the settings toggles show their state: the caption is shown by default
+    // an item of the top-level Show submenu
+    const isChecked = (rs: Row[], title: string) => {
+      const i = rs.findIndex((r) => r.depth === 0 && r.title === "Show");
+      for (let j = i + 1; i >= 0 && j < rs.length && rs[j]!.depth > 0; j++) {
+        if (rs[j]!.depth === 1 && rs[j]!.title === title) {
+          return rs[j]!.checked;
+        }
+      }
+      return undefined;
+    };
+    // no client title bar off Windows, so CmdToggleCaption is not in the menu
+    if (IS_WIN && isChecked(rows, "Caption") !== true) {
+      fail("Show > Caption should be checked");
+    }
+    if (isChecked(rows, "Auto-Hide Sidebar") !== false) {
+      fail("Show > Auto-Hide Sidebar should start unchecked");
+    }
+    await client.request(ControlCommand.TestInvokeCommand, ["CmdToggleSidebarAutoHide"]);
+    try {
+      const rows2 = await contextMenuRows(client, frame);
+      if (isChecked(rows2, "Auto-Hide Sidebar") !== true) {
+        fail("Show > Auto-Hide Sidebar should be checked once it's on");
+      }
+    } finally {
+      await client.request(ControlCommand.TestInvokeCommand, ["CmdToggleSidebarAutoHide"]);
     }
   } finally {
     client.close();

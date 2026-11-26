@@ -71,3 +71,30 @@ void AppShellOpenDocsReady() {
     gOpenDocsReady = true;
     OpenQueuedDocs();
 }
+
+// Tests pass HWND_TOPMOST. Floating level stays above ordinary windows.
+// FullScreenPrimary excludes FullScreenAuxiliary, so clear it or the frame
+// stays off the space a drop is tested against.
+void AppShellRaiseAbove(MainWindow* win) {
+    NSView* view = win && win->gpuiWin ? (__bridge NSView*)gp::PlatWindowHandle(win->gpuiWin) : nil;
+    NSWindow* w = view.window;
+    if (!w) {
+        return;
+    }
+    NSWindowCollectionBehavior behavior = w.collectionBehavior;
+    behavior &= ~NSWindowCollectionBehaviorFullScreenPrimary;
+    behavior &= ~NSWindowCollectionBehaviorFullScreenNone;
+    behavior &= ~NSWindowCollectionBehaviorPrimary;
+    behavior &= ~NSWindowCollectionBehaviorAuxiliary;
+    behavior &= ~NSWindowCollectionBehaviorMoveToActiveSpace;
+    behavior &= ~NSWindowCollectionBehaviorManaged;
+    behavior &= ~NSWindowCollectionBehaviorTransient;
+    behavior |= NSWindowCollectionBehaviorCanJoinAllSpaces;
+    behavior |= NSWindowCollectionBehaviorStationary;
+    behavior |= NSWindowCollectionBehaviorIgnoresCycle;
+    behavior |= NSWindowCollectionBehaviorFullScreenAuxiliary;
+    behavior |= NSWindowCollectionBehaviorCanJoinAllApplications;
+    w.collectionBehavior = behavior;
+    w.level = NSFloatingWindowLevel;
+    [w orderFrontRegardless];
+}

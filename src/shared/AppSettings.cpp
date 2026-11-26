@@ -19,8 +19,6 @@
 
 #include "gui/UIModels.h"
 
-#if defined(SUMATRA_NG)
-#endif
 #include "Settings.h"
 #include "Commands.h"
 #include "DisplayMode.h"
@@ -37,7 +35,6 @@
 #include "WindowTab.h"
 #include "MainWindow.h"
 #include "DisplayModel.h"
-#include "VirtualDesktop.h"
 #endif
 #include "AppTools.h"
 #if !defined(SUMATRA_NG)
@@ -67,11 +64,10 @@
 #include "Notifications.h"
 #include "ExplorerQuickLook.h"
 #include "Tabs.h"
-#include "StripGroups.h"
 #include "GlobalHotkeys.h"
 #include "PagePosition.h"
 #include "CachedObjects.h"
-#include "AppHelpersCommon.h"
+#include "SessionStateCommon.h"
 #endif
 #include "AppSettings.h"
 void ReloadSettingsUpdateWindows(bool showToolbarBefore);
@@ -92,6 +88,10 @@ static bool gSaveSettingsPending = false;
 // last bytes we wrote (or loaded). Watcher reloads and SaveSettings() writes
 // are skipped when the file / serialized prefs still match this.
 static Str gLastSavedPrefs;
+
+// Settings that couldn't be written, for the next LoadSettings() to parse
+// instead of the file (see ForceReloadSettings).
+static Str gInMemoryPrefs;
 
 static bool IsLastSavedPrefs(Str s) {
     return len(gLastSavedPrefs) == len(s) && str::Eq(gLastSavedPrefs, s);
@@ -421,7 +421,7 @@ static void CreateCustomShortcuts() {
 void ApplySettingsToOpenWindows() {
     if (gSettings) {
         setMinMax(gSettings->saveMemory, 0, 100);
-        gSaveMemory = gSettings->saveMemory;
+        AtomicIntSet(&gSaveMemory, gSettings->saveMemory);
     }
 #if !defined(SUMATRA_NG)
     for (MainWindow* win : gWindows) {
@@ -466,21 +466,6 @@ void ApplySettingsToOpenWindows() {
     ReRegisterGlobalHotkeys();
 }
 
-// FileStates are large; the minidump comment only needs the rest.
-static void UpdateCrashHandlerSettings() {
-    if (!gSettings) {
-        return;
-    }
-    Vec<FileState*> empty;
-    Vec<FileState*>* saved = gSettings->fileStates;
-    gSettings->fileStates = &empty;
-    Str d = SerializeSettings(gSettings, {}, SerializeOpt::NoSecrets);
-    gSettings->fileStates = saved;
-    CrashHandlerSetSettings(d);
-    str::Free(d);
-}
-
-#if !defined(SUMATRA_NG)
 TabState* CloneTabState(const TabState* src) {
     TabState* dst = (TabState*)AllocStruct<TabState>();
     str::ReplaceWithCopy(&dst->filePath, src->filePath);
@@ -499,20 +484,6 @@ TabState* CloneTabState(const TabState* src) {
     return dst;
 }
 
-static SessionData* CloneSessionData(const SessionData* src) {
-    SessionData* dst = NewSessionData();
-    dst->tabIndex = src->tabIndex;
-    dst->windowState = src->windowState;
-    dst->windowPos = src->windowPos;
-    dst->sidebarDx = src->sidebarDx;
-    str::ReplaceWithCopy(&dst->virtualDesktopId, src->virtualDesktopId);
-    for (TabState* ts : *src->tabStates) {
-        VecAppend(*dst->tabStates, CloneTabState(ts));
-    }
-    return dst;
-}
-
-#endif
 // session snapshot loaded at startup. Also the source of state for re-saving
 // not-yet-loaded (lazy) tabs, kept mirroring the live session by
 // SyncInitialSessionData() so it never carries closed-window entries.
@@ -521,107 +492,37 @@ Vec<SessionData*>* gInitialSessionData = nullptr;
 int gInitialSessionDataGen = 0;
 
 #if defined(SUMATRA_NG)
-// ng: orig's SaveSettings() calls UpdateTabFileDisplayStateForTab() for every
-// tab, then RememberSessionState() + SyncInitialSessionData(). All three need
-// MainWindow / WindowTab, which live in the SumatraPDF target because `app`
-// also links into the console tools, so the shell installs them here.
-// src/SessionState.cpp has orig's code.
+// The ng shell installs the window session save hook. Console tools also link
+// this settings module and have no windows.
 void (*gRememberSessionStateFn)() = nullptr;
-#else
-// keep gInitialSessionData mirroring the just-saved live session, so re-saving
-// not-yet-loaded tabs never feeds stale state from a closed window back into the
-// saved session (fixes #5668). Call after RememberSessionState().
-static void SyncInitialSessionData() {
-    if (!gInitialSessionData) {
-        return;
-    }
-    FreeSessionDataVec(gInitialSessionData);
-    gInitialSessionDataGen++;
-    for (SessionData* sd : *gSettings->sessionData) {
-        VecAppend(*gInitialSessionData, CloneSessionData(sd));
-    }
-    RefreshLazyTabStatePointers();
-}
-
-static void RememberSessionState() {
-    Vec<SessionData*>* sessionState = gSettings->sessionData;
-    FreeSessionDataVec(sessionState);
-
-    if (!SettingsRememberOpenedFiles()) {
-        return;
-    }
-
-    // which virtual desktop each window is on, so restoring puts it back (#6271)
-    ISumatraVirtualDesktopManager* vdm = CreateVirtualDesktopManager();
-    for (auto* win : gWindows) {
-        if (win->isQuickLook) {
-            continue;
-        }
-        SessionData* windowState = NewSessionData();
-        for (WindowTab* tab : win->Tabs()) {
-            if (len(tab->filePath) == 0 || tab->IsHexTab()) {
-                // home page or hex view tab
-                continue;
-            }
-            Str fp = tab->filePath;
-            if (!tab->ctrl) {
-                // file not loaded into a tab (lazy loading, or a placeholder for
-                // a missing file). Prefer the tab's own remembered state -- it's
-                // authoritative and disambiguates the same file open in multiple
-                // windows -- and only fall back to the (in-sync) startup snapshot.
-                TabState* src = tab->tabState;
-                if (!src) {
-                    src = FindSessionTabState(fp);
-                }
-                if (src) {
-                    TabState* ts = CloneTabState(src);
-                    StripGroupSaveTab(win, tab, ts);
-                    VecAppend(*windowState->tabStates, ts);
-                }
-                continue;
-            }
-            FileState* fs = NewFileState(fp);
-            tab->ctrl->GetDisplayState(fs);
-            fs->showToc = tab->showToc;
-            str::ReplaceWithCopy(&fs->sidebarView, SidebarViewToStr(tab->sidebarView));
-            *fs->tocState = tab->tocState;
-            TabState* ts = NewTabState(fs);
-            StripGroupSaveTab(win, tab, ts);
-            VecAppend(*windowState->tabStates, ts);
-            DeleteFileState(fs);
-        }
-        if (len(*windowState->tabStates) == 0) {
-            FreeSessionData(windowState);
-            continue;
-        }
-        str::ReplaceWithCopy(&windowState->virtualDesktopId, GetWindowDesktopIdTemp(vdm, win->hwndFrame));
-        // 1-based index among document tabs only (home / about tab is omitted
-        // from TabStates above). Using the UI tab index would mis-restore when
-        // the home tab was closed at save time but recreated on the next start.
-        int docOrdinal = 0;
-        int selectedDocOrdinal = 1;
-        WindowTab* cur = win->CurrentTab();
-        for (WindowTab* tab : win->Tabs()) {
-            if (tab->IsAboutTab() || tab->IsHexTab() || len(tab->filePath) == 0) {
-                continue;
-            }
-            docOrdinal++;
-            if (tab == cur) {
-                selectedDocOrdinal = docOrdinal;
-            }
-        }
-        windowState->tabIndex = selectedDocOrdinal;
-        RememberDefaultWindowPosition(win);
-        windowState->windowState = gSettings->windowState;
-        windowState->windowPos = gSettings->windowPos;
-        windowState->sidebarDx = gSettings->sidebarDx;
-        VecAppend(*sessionState, windowState);
-    }
-    if (vdm) {
-        vdm->Release();
-    }
-}
 #endif
+
+// Session state and string forms of parsed values, ready to serialize.
+static void SyncSettingsForSerialize() {
+#if defined(SUMATRA_NG)
+    // update display states for all tabs, then snapshot the session
+    if (gRememberSessionStateFn) {
+        gRememberSessionStateFn();
+    }
+#else
+    SaveWindowSessionState();
+#endif
+
+    // remove entries which should (no longer) be remembered
+    FileHistoryPurge(!gSettings->rememberStatePerDocument);
+    // update display mode and zoom fields from internal values.
+    // "page aspect" is not a DisplayMode enum value — keep the string.
+    if (!IsPageAspectDisplayMode(gSettings->defaultDisplayMode)) {
+        str::ReplaceWithCopy(&gSettings->defaultDisplayMode, DisplayModeToString(gSettings->defaultDisplayModeEnum));
+    }
+    ZoomToString(&gSettings->defaultZoom, gSettings->defaultZoomFloat, nullptr);
+    if (gSettings->imageUI.defaultZoomFloat != 0) {
+        ZoomToString(&gSettings->imageUI.defaultZoom, gSettings->imageUI.defaultZoomFloat, nullptr);
+    }
+    if (gSettings->comicBookUI.defaultZoomFloat != 0) {
+        ZoomToString(&gSettings->comicBookUI.defaultZoom, gSettings->comicBookUI.defaultZoomFloat, nullptr);
+    }
+}
 
 // called whenever global preferences change or a file is
 // added or removed from the file history (in order to keep
@@ -647,41 +548,7 @@ static bool SaveSettings(bool force) {
         return false;
     }
     logf("SaveSettings\n");
-#if defined(SUMATRA_NG)
-    // update display states for all tabs, then snapshot the session
-    if (gRememberSessionStateFn) {
-        gRememberSessionStateFn();
-#else
-    // update display states for all tabs
-    // we snapshot the list because SaveSettings() can be called re-entrantly
-    // (e.g. from LoadDocumentFinish while other documents are still loading/closing)
-    for (MainWindow* win : gWindows) {
-        Vec<WindowTab*> tabs = win->Tabs();
-        for (WindowTab* tab : tabs) {
-            UpdateTabFileDisplayStateForTab(tab);
-        }
-#endif
-    }
-#if !defined(SUMATRA_NG)
-    RememberSessionState();
-    SyncInitialSessionData();
-    SyncTabGroups();
-#endif
-
-    // remove entries which should (no longer) be remembered
-    FileHistoryPurge(!gSettings->rememberStatePerDocument);
-    // update display mode and zoom fields from internal values.
-    // "page aspect" is not a DisplayMode enum value — keep the string.
-    if (!IsPageAspectDisplayMode(gSettings->defaultDisplayMode)) {
-        str::ReplaceWithCopy(&gSettings->defaultDisplayMode, DisplayModeToString(gSettings->defaultDisplayModeEnum));
-    }
-    ZoomToString(&gSettings->defaultZoom, gSettings->defaultZoomFloat, nullptr);
-    if (gSettings->imageUI.defaultZoomFloat != 0) {
-        ZoomToString(&gSettings->imageUI.defaultZoom, gSettings->imageUI.defaultZoomFloat, nullptr);
-    }
-    if (gSettings->comicBookUI.defaultZoomFloat != 0) {
-        ZoomToString(&gSettings->comicBookUI.defaultZoom, gSettings->comicBookUI.defaultZoomFloat, nullptr);
-    }
+    SyncSettingsForSerialize();
 
     TempStr path = GetSettingsPathTemp();
     ReportIf(len(path) == 0);
@@ -698,15 +565,18 @@ static bool SaveSettings(bool force) {
     if (len(prefs) == 0) {
         return false;
     }
-    UpdateCrashHandlerSettings();
+    CrashHandlerSetSettings(gSettings);
 
     if (!missing && (IsLastSavedPrefs(prefs) || (prevPrefs.len == prefs.len && str::Eq(prefs, prevPrefs)))) {
         RememberLastSavedPrefs(prefs);
+#if defined(SUMATRA_NG) && OS_WASM
+        WasmPersistSettings(WasmSaveRequest::Retry);
+#endif
         return true;
     }
 
     WatchedFileSetIgnore(gWatchedSettingsFile, true);
-    bool ok = file::WriteFile(path, prefs);
+    bool ok = file::WriteFileAtomic(path, prefs);
     if (ok) {
         RememberLastSavedPrefs(prefs);
         gSettings->lastPrefUpdate = file::GetModificationTime(path);
@@ -771,7 +641,8 @@ bool LoadSettings() {
     TempStr settingsPath = GetSettingsPathTemp();
     bool settingsMigrated = false;
     {
-        Str prefsData = file::ReadFile(settingsPath);
+        Str prefsData = len(gInMemoryPrefs) > 0 ? gInMemoryPrefs : file::ReadFile(settingsPath);
+        gInMemoryPrefs = {};
 
         gSettings = NewSettings(prefsData);
         ReportIf(!gSettings);
@@ -830,12 +701,16 @@ bool LoadSettings() {
         gprefs->comicBookUI.defaultZoomFloat = ZoomFromString(gprefs->comicBookUI.defaultZoom, 0);
     }
 
-    int weekDiff = GetWeekCount() - gprefs->openCountWeek;
-    gprefs->openCountWeek = GetWeekCount();
-    if (weekDiff > 0) {
-        // "age" openCount statistics (cut in in half after every week)
-        for (FileState* fs : *gprefs->fileStates) {
-            fs->openCount >>= weekDiff;
+    int week = GetWeekCount();
+    i64 weekDiff = (i64)week - gprefs->openCountWeek;
+    gprefs->openCountWeek = week;
+    // Age the count by cutting it in half for each elapsed week.
+    for (FileState* fs : *gprefs->fileStates) {
+        setMin(fs->openCount, 0);
+        if (weekDiff >= 31) {
+            fs->openCount = 0;
+        } else if (weekDiff > 0) {
+            fs->openCount >>= (int)weekDiff;
         }
     }
 
@@ -884,7 +759,7 @@ bool LoadSettings() {
     }
 
     if (len(gprefs->treeFontName) == 0) {
-        gprefs->treeFontName = StrL("automatic");
+        str::ReplaceWithCopy(&gprefs->treeFontName, StrL("automatic"));
     }
 
     // drop file states without a path: they can't be opened, found by path
@@ -912,6 +787,10 @@ bool LoadSettings() {
         }
         SetDefaultEbookFont(fontName, fontSize);
         SetDefaultChmFont(EbookFontNameFromSetting(gprefs->chmUI.fontName));
+        auto& md = gprefs->markdownUI;
+        auto& html = gprefs->htmlUI;
+        SetWebDocStyles({md.fontName, md.fontSize, md.lineSpacing, md.maxContentWidth, md.preserveLineBreaks},
+                        {html.fontName, html.fontSize, html.lineSpacing});
     }
 
 #if !defined(SUMATRA_NG)
@@ -941,7 +820,7 @@ bool LoadSettings() {
         SaveSettings();
     }
 
-    UpdateCrashHandlerSettings();
+    CrashHandlerSetSettings(gSettings);
 
     logf("LoadSettings('%s') took %.2f ms\n", settingsPath, TimeSinceInMs(timeStart));
     return true;
@@ -967,14 +846,14 @@ static void ReloadSettings(bool force = false) {
 
 #endif
     TempStr settingsPath = GetSettingsPathTemp();
-    if (!file::Exists(settingsPath)) {
+    if (len(gInMemoryPrefs) == 0 && !file::Exists(settingsPath)) {
         return;
     }
 
     // make sure that the settings file is readable - else wait
     // a short while to prevent accidental data loss
     // this is triggered when e.g. saving the file with VS Code
-    bool ok = false;
+    bool ok = len(gInMemoryPrefs) > 0;
     Str prefsData{};
     for (int i = 0; !ok && i < 5; i++) {
         str::Free(prefsData);
@@ -1025,7 +904,7 @@ static void ReloadSettings(bool force = false) {
     FileHistorySetStates(nullptr);
     // no cache trim until LoadSettings() restores it: reading the file
     // allocates and the trim's canFree callbacks read gSettings
-    gSaveMemory = 0;
+    AtomicIntSet(&gSaveMemory, 0);
     CleanUpSettings();
 
     ok = LoadSettings();
@@ -1053,8 +932,19 @@ void CleanUpSettings() {
 }
 
 void ForceReloadSettings() {
-    // a pending scheduled save must reach the file before we re-read it
-    FlushScheduledSaveSettings();
+    bool canSave = !gForTesting && !gDontSaveSettings && HasPermission(Perm::SavePreferences);
+    if (canSave) {
+        // a pending scheduled save must reach the file before we re-read it
+        FlushScheduledSaveSettings();
+        ReloadSettings(true);
+        return;
+    }
+
+    // the file won't get the change (-for-testing, restricted): reload it from memory
+    SyncSettingsForSerialize();
+    TempStr prevPrefs = file::ReadFileWithArena(GetSettingsPathTemp(), GetTempArena());
+    str::Free(gInMemoryPrefs);
+    gInMemoryPrefs = SerializeSettings(gSettings, prevPrefs, SerializeOpt::All);
     ReloadSettings(true);
 }
 
@@ -1275,11 +1165,6 @@ bool IsMenuFontSizeDefault() {
     auto fntSize = gSettings->uIFontSize;
     return fntSize < kMinFontSize;
 }
-
-bool IsAppFontSizeDefault() {
-    auto fntSize = gSettings->uIFontSize;
-    return fntSize < kMinFontSize;
-}
 #endif
 
 TempStr ZoomLevelStr(float zoom) {
@@ -1304,7 +1189,7 @@ TempStr ZoomLevelStr(float zoom) {
     if (zoom == kZoomFitByOrientation) {
         return Tr("Fit by Orientation");
     }
-    if (zoom == 0) {
+    if (zoom == 0 || !isfinite(zoom)) {
         return StrL("-");
     }
     return fmt("%.f%%", zoom);
@@ -1322,7 +1207,7 @@ float ParseZoomText(Str text, const Vec<float>& levels, float fallback) {
         return fallback;
     }
     float zoom = (float)atof(CStrTemp(text));
-    if (zoom == 0) {
+    if (zoom == 0 || !isfinite(zoom)) {
         return fallback;
     }
     return limitValue(zoom, kZoomMin, kZoomMax);
@@ -1725,9 +1610,6 @@ static SeqStrings kFileStateKeepNoPerDoc =
 // prevData is used to preserve fields that exists in prevField but not in Settings
 // caller has to free()
 Str SerializeSettings(Settings* prefs, Str prevData, SerializeOpt opt) {
-    Vec<FileState*>* allFileStates = prefs->fileStates;
-    Vec<FileState*> withFavorites;
-
     // The two settings mean different things and must not be conflated (#5907):
     // RememberStatePerDocument = false only drops the per-document state (page,
     // zoom, scroll, window placement) - the list of files stays, because that is
@@ -1736,52 +1618,62 @@ Str SerializeSettings(Settings* prefs, Str prevData, SerializeOpt opt) {
     bool dropPerDocState = !prefs->rememberStatePerDocument || !prefs->rememberOpenedFiles;
     bool dropHistory = !prefs->rememberOpenedFiles;
 
-    if (dropPerDocState) {
-        for (FileState* fs : *prefs->fileStates) {
-            fs->useDefaultState = true;
-            if (FileStateWorthKeepingWithoutHistory(fs)) {
-                VecAppend(withFavorites, fs);
-            }
-        }
-        if (dropHistory) {
-            // serialize the filtered list, then put the real one back below -
-            // the in-memory history is still needed for this session
-            prefs->fileStates = &withFavorites;
-        }
-        FieldInfo keepFields[dimof(gFileStateFields)];
-        char keepNames[512];
-        int nKeep = 0;
-        int namesLen = 0;
-        const char* srcName = gFileStateInfo.fieldNames;
-        for (int i = 0; i < dimofi(gFileStateFields); i++) {
-            Str name = Str(srcName);
-            if (SeqStrIndex(kFileStateKeepNoPerDoc, name) >= 0) {
-                keepFields[nKeep] = gFileStateFields[i];
-                int n = len(name);
-                ReportIf(namesLen + n + 1 > (int)sizeof(keepNames));
-                memcpy(keepNames + namesLen, name.s, (size_t)n + 1);
-                namesLen += n + 1;
-                nKeep++;
-            }
-            srcName += len(name) + 1;
-        }
-        const FieldInfo* savedFields = gFileStateInfo.fields;
-        const char* savedNames = gFileStateInfo.fieldNames;
-        u16 savedCount = gFileStateInfo.fieldCount;
-        gFileStateInfo.fields = keepFields;
-        gFileStateInfo.fieldNames = keepNames;
-        gFileStateInfo.fieldCount = (u16)nKeep;
-
-        Str serialized = SerializeStruct(&gSettingsInfo, prefs, prevData, opt);
-
-        gFileStateInfo.fields = savedFields;
-        gFileStateInfo.fieldNames = savedNames;
-        gFileStateInfo.fieldCount = savedCount;
-        prefs->fileStates = allFileStates;
-        return serialized;
+    if (!dropPerDocState) {
+        return SerializeStruct(&gSettingsInfo, prefs, prevData, opt);
     }
 
-    return SerializeStruct(&gSettingsInfo, prefs, prevData, opt);
+    Vec<FileState> states;
+    for (FileState* fs : *prefs->fileStates) {
+        if (dropHistory && !FileStateWorthKeepingWithoutHistory(fs)) {
+            continue;
+        }
+        if (!VecAppend(states, *fs)) {
+            return {};
+        }
+        VecLast(states).useDefaultState = true;
+    }
+
+    Vec<FileState*> statePtrs;
+    if (len(states) > 0 && !VecReserve(statePtrs, len(states))) {
+        return {};
+    }
+    for (FileState& fs : states) {
+        VecAppend(statePtrs, &fs);
+    }
+    Settings snapshot = *prefs;
+    snapshot.fileStates = &statePtrs;
+
+    FieldInfo keepFields[dimof(gFileStateFields)];
+    str::Builder keepNames;
+    int nKeep = 0;
+    const char* srcName = gFileStateInfo.fieldNames;
+    for (int i = 0; i < dimofi(gFileStateFields); i++) {
+        Str name(srcName);
+        if (SeqStrIndex(kFileStateKeepNoPerDoc, name) >= 0) {
+            keepFields[nKeep++] = gFileStateFields[i];
+            keepNames.Append(Str(srcName, len(name) + 1));
+        }
+        srcName += len(name) + 1;
+    }
+    StructInfo fileInfo = gFileStateInfo;
+    fileInfo.fields = keepFields;
+    fileInfo.fieldNames = ToStr(keepNames).s;
+    fileInfo.fieldCount = (u16)nKeep;
+
+    Vec<FieldInfo> settingsFields;
+    if (!VecAppendN(settingsFields, gSettingsInfo.fields, gSettingsInfo.fieldCount)) {
+        return {};
+    }
+    for (FieldInfo& field : settingsFields) {
+        if (field.type == SettingType::Array && field.offset == offsetof(Settings, fileStates)) {
+            field.value = (intptr_t)&fileInfo;
+            StructInfo settingsInfo = gSettingsInfo;
+            settingsInfo.fields = VecData(settingsFields);
+            return SerializeStruct(&settingsInfo, &snapshot, prevData, opt);
+        }
+    }
+    ReportIf(true);
+    return {};
 }
 
 void DeleteSettings(Settings* gp) {

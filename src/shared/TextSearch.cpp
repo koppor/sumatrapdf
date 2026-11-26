@@ -24,11 +24,16 @@ static Str GetSearchPageText(EngineBase* engine, int pageNo, int& lenOut, const 
     return {};
 }
 
+// (char)c would make e.g. U+4E09 a tab
+static bool IsWsCodepoint(int c) {
+    return c >= 0 && c < 0x80 && str::IsWs((char)c);
+}
+
 static void SkipWhitespace(Str text, int textLen, int& idx, int& byteIdx) {
     while (idx < textLen) {
         int nextByte = byteIdx;
         int c = Utf8CodepointNext(text, nextByte);
-        if (!str::IsWs((char)c)) {
+        if (!IsWsCodepoint(c)) {
             break;
         }
         byteIdx = nextByte;
@@ -74,20 +79,23 @@ int TextSearch::GetCurrentPageNo() const {
 void TextSearch::SetText(Str text) {
     // Single leading/trailing spaces request word boundaries; whole-word mode
     // requests both. Strip one space from each end for matching.
-    this->matchWordStart = matchWholeWord || (text && text.s[0] == ' ' && (text.len < 2 || text.s[1] != ' '));
-    this->matchWordEnd = matchWholeWord || (str::EndsWith(text, StrL(" ")) && !str::EndsWith(text, StrL("  ")));
+    bool newWordStart = matchWholeWord || (text && text.s[0] == ' ' && (text.len < 2 || text.s[1] != ' '));
+    bool newWordEnd = matchWholeWord || (str::EndsWith(text, StrL(" ")) && !str::EndsWith(text, StrL("  ")));
 
     Str searchText = text;
     if (searchText && searchText.s[0] == ' ') {
         searchText = Str(searchText.s + 1, searchText.len - 1);
     }
 
-    // don't reset anything if the search text hasn't changed at all
-    if (str::Eq(this->lastText, searchText)) {
+    // don't reset anything if the search text and boundary flags haven't changed
+    if (str::Eq(this->lastText, searchText) && this->matchWordStart == newWordStart &&
+        this->matchWordEnd == newWordEnd) {
         return;
     }
 
     this->Clear();
+    this->matchWordStart = newWordStart;
+    this->matchWordEnd = newWordEnd;
     // Matching text and anchor borrow the saved query.
     this->lastText = str::Dup(searchText);
     searchText = this->lastText;
@@ -407,7 +415,7 @@ TextSearch::PageAndOffset TextSearch::MatchEnd(int startOff) const {
         int endNextByteIdx = endByteIdx;
         int endCh = atPageEnd ? 0 : Utf8CodepointNext(currentPageText, endNextByteIdx);
         // Page boundaries count as whitespace.
-        bool lookingAtWs = atPageEnd || str::IsWs((char)endCh);
+        bool lookingAtWs = atPageEnd || IsWsCodepoint(endCh);
         bool isMatch = false;
         int matchAdv = 1;
         int endAdv = 1;
@@ -429,7 +437,7 @@ TextSearch::PageAndOffset TextSearch::MatchEnd(int startOff) const {
                 }
             }
         }
-        bool sameWhitespace = str::IsWs((char)matchCh) && lookingAtWs;
+        bool sameWhitespace = IsWsCodepoint(matchCh) && lookingAtWs;
         // ASCII punctuation also matches typographic variants, in this direction only.
         bool samePunctuation = (matchCh == '-' && 0x2010 <= endCh && endCh <= 0x2014) ||
                                (matchCh == '\'' && 0x2018 <= endCh && endCh <= 0x201b) ||
@@ -452,7 +460,7 @@ TextSearch::PageAndOffset TextSearch::MatchEnd(int startOff) const {
         int prevMatchCh = Utf8CodepointPrev(findText, prevMatchByteIdx);
         int curMatchCh = Utf8CodepointAtByte(findText, matchByteIdx);
         if (matchIdx < findTextLen && ((!isnoncjkwordchar(prevMatchCh) && (prevMatchCh != '?' || curMatchCh != '?')) ||
-                                       (lookingAtWs && str::IsWs((char)prevMatchCh)))) {
+                                       (lookingAtWs && IsWsCodepoint(prevMatchCh)))) {
             SkipWhitespace(findText, findTextLen, matchIdx, matchByteIdx);
             SkipWhitespace(currentPageText, currentPageTextLen, endIdx, endByteIdx);
             while (endIdx >= currentPageTextLen && PageAllowed(currentPage + 1)) {

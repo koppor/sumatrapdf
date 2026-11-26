@@ -123,7 +123,7 @@ static fz_buffer* base64(fz_context* ctx, const char* text) {
 static fz_buffer* decrypt_copy(fz_context* ctx, fz_buffer* data, const unsigned char* key, const unsigned char* iv) {
     fz_buffer* out = fz_new_buffer_from_copied_data(ctx, data->data, data->len);
     size_t n = ofd_sm4_cbc_decrypt(key, iv, out->data, out->len);
-    if (!n) {
+    if (n == OFD_SM4_BAD) {
         fz_drop_buffer(ctx, out);
         return NULL;
     }
@@ -135,24 +135,32 @@ static fz_buffer* decrypt_copy(fz_context* ctx, fz_buffer* data, const unsigned 
 static fz_xml* parse_entries_map(fz_context* ctx, fz_buffer* map, const unsigned char* fek, const unsigned char* iv) {
     fz_buffer* plain = decrypt_copy(ctx, map, fek, iv);
     fz_xml* xml = NULL;
-    for (int attempt = 0; attempt < 2 && !xml; ++attempt) {
-        fz_buffer* buf = attempt == 0 ? plain : map;
-        if (!buf) continue;
-        fz_try(ctx) {
-            xml = fz_parse_xml(ctx, buf, 0);
-            fz_xml* root = fz_xml_root(xml);
-            if (!ofd_is(root, "EncryptEntries") && !ofd_is(root, "Entries")) {
-                fz_drop_xml(ctx, xml);
+    fz_var(xml);
+    fz_try(ctx) {
+        for (int attempt = 0; attempt < 2 && !xml; ++attempt) {
+            fz_buffer* buf = attempt == 0 ? plain : map;
+            if (!buf) continue;
+            fz_try(ctx) {
+                xml = fz_parse_xml(ctx, buf, 0);
+                fz_xml* root = fz_xml_root(xml);
+                if (!ofd_is(root, "EncryptEntries") && !ofd_is(root, "Entries")) {
+                    fz_drop_xml(ctx, xml);
+                    xml = NULL;
+                }
+            }
+            fz_catch(ctx) {
+                fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
+                fz_ignore_error(ctx);
                 xml = NULL;
             }
         }
-        fz_catch(ctx) {
-            fz_rethrow_if(ctx, FZ_ERROR_SYSTEM);
-            fz_ignore_error(ctx);
-            xml = NULL;
-        }
     }
-    fz_drop_buffer(ctx, plain);
+    fz_always(ctx) {
+        fz_drop_buffer(ctx, plain);
+    }
+    fz_catch(ctx) {
+        fz_rethrow(ctx);
+    }
     return xml;
 }
 

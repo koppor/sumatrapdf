@@ -19,6 +19,8 @@ enum class Perm : uint {
     FullscreenAccess = 1 << 6,
     // enables AI chat and AI translation (also needs InternetAccess and DiskAccess)
     AIChat = 1 << 7,
+    // enables submitting crash and diagnostic reports (also needs InternetAccess)
+    CrashReports = 1 << 8,
     // enables all of the above
     All = 0x0FFFFFF,
     // set if either sumatrapdfrestrict.ini or the -restrict command line flag is present
@@ -33,11 +35,6 @@ constexpr Perm operator|(Perm lhs, Perm rhs) {
 constexpr Perm operator&(Perm lhs, Perm rhs) {
     using T = std::underlying_type_t<Perm>;
     return static_cast<Perm>(static_cast<T>(lhs) & static_cast<T>(rhs));
-}
-
-constexpr Perm operator<<(Perm lhs, uint rhs) {
-    using T = std::underlying_type_t<Perm>;
-    return static_cast<Perm>(static_cast<T>(lhs) << static_cast<T>(rhs));
 }
 
 constexpr Perm operator~(Perm lhs) {

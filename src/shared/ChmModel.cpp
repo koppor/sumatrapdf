@@ -175,12 +175,10 @@ TempStr ChmModel::ScrollUrlForPageTemp(int pageNo) const {
 }
 
 struct ChmTocBuilder {
-    ChmFile* doc = nullptr;
-
     StrVec* pages = nullptr;
     Vec<BrowserTocTraceItem>* tocTrace = nullptr;
     Arena* a = nullptr;
-    dict::MapStrToInt urlsSet;
+    dict::StrToInt urlsSet;
 
     // We fake page numbers by doing a depth-first traversal of
     // toc tree and considering each unique html page in toc tree
@@ -203,8 +201,7 @@ struct ChmTocBuilder {
     }
 
   public:
-    ChmTocBuilder(ChmFile* doc, StrVec* pages, Vec<BrowserTocTraceItem>* tocTrace, Arena* a) {
-        this->doc = doc;
+    ChmTocBuilder(StrVec* pages, Vec<BrowserTocTraceItem>* tocTrace, Arena* a) {
         this->pages = pages;
         this->tocTrace = tocTrace;
         this->a = a;
@@ -239,7 +236,7 @@ bool ChmModel::Load(Str fileName) {
 
     // parse the ToC here, since page numbering depends on it
     tocTrace = new Vec<BrowserTocTraceItem>();
-    ChmTocBuilder tmpTocBuilder(doc, &pages, tocTrace, poolAlloc);
+    ChmTocBuilder tmpTocBuilder(&pages, tocTrace, poolAlloc);
     EbookToc toc;
     doc->ParseToc(toc);
     for (EbookTocItem& it : toc.items) {
@@ -374,7 +371,11 @@ static Str ChmInjectStyle(Str raw, Str style) {
 // returns a heap copy of `raw` (the CHM resource for a url), with a theme
 // <style> injected when `raw` is an HTML page and the color mode wants
 // non-default page colors
-static Str ChmThemeApplyToData(Str raw) {
+static Str ChmThemeApplyToData(Str url, Str raw) {
+    if (str::EndsWithI(url, StrL(".js")) || str::EndsWithI(url, StrL(".css")) || str::EndsWithI(url, StrL(".json")) ||
+        str::EndsWithI(url, StrL(".svg")) || str::EndsWithI(url, StrL(".xml"))) {
+        return str::Dup(raw);
+    }
     TempStr style = ChmThemeStyleTemp();
     if (len(style) == 0) {
         return str::Dup(raw);
@@ -398,7 +399,7 @@ Str ChmModel::GetDataForUrl(Str url) {
     if (len(raw) == 0) {
         return {};
     }
-    return CacheData(plainUrl, ChmThemeApplyToData(raw));
+    return CacheData(plainUrl, ChmThemeApplyToData(plainUrl, raw));
 }
 
 // named destinations are either in-document URLs or Alias topic IDs.

@@ -142,7 +142,6 @@ bool IsBackendInstalled(AIChatBackend backend);
 bool IsAIChatSupportedForFile(Str filePath, Kind engineKind = nullptr);
 bool IsAIChatSupportedForTab(WindowTab* tab);
 
-TempStr AIChatJsEscapeTemp(Str s);
 TempStr AIChatJsonStrTemp(Str json, Str key);
 inline Str AIChatFindHistoryPrompt(Str data, Str sessionId, Str key) {
     Str line;
@@ -164,7 +163,6 @@ Str AIChatSessionDescription(Str sessionPath);
 void AIChatLoadSessionHistory(MainWindow* win, Str sessionPath);
 
 MainWindow* AIChatFindMainWindowByFrame(HWND hwndFrame);
-TempStr AIChatHomeDirTemp();
 
 void AIChatFreeSessions(Vec<AIChatSessionInfo>& sessions);
 void AIChatCollectJsonlSessions(Str sessionDir, Str project, Vec<AIChatSessionInfo>& sessions);
@@ -172,6 +170,8 @@ void AIChatCollectProjectSessions(Str dir, const Str* roots, int rootCount, Vec<
 TempStr AIChatFindProjectSessionTemp(Str dir, Str sessionId, const Str* roots, int rootCount);
 void AIChatSortSessionsByTimestampDesc(Vec<AIChatSessionInfo>& sessions);
 i64 AIChatFileTimeToMs(const FILETIME& ft);
+bool AIChatFileCacheGet(Str path, i64 size, i64 mtime, TempStr* valueOut);
+void AIChatFileCacheSet(Str path, i64 size, i64 mtime, Str value);
 
 void AIChatLog(AIChatLogger* logger, Str direction, Str text);
 
@@ -187,6 +187,7 @@ TempStr AIChatTestResultTemp(int backend, Str filePath, Str message, int* exitCo
 // Inject a canned (user, assistant) turn into the chat webview (opening the grok
 // panel if needed) to debug webview rendering without a live provider call.
 TempStr AIChatTestReplayResultTemp(Str userMsg, Str response, int* exitCode);
+TempStr AIChatSessionsTestTemp(int* exitCode);
 
 void AIChatShowNotInstalledDialog(const AIChatNotInstalledDialogArgs& args);
 void AIChatShowNotInstalledDialog(MainWindow* win, const AIChatNotInstalledDialogArgs& args);
@@ -218,6 +219,7 @@ int AIChatReadPipeChunk(void* hReadPipe, char* buf, int size);
 void AIChatCloseReadPipe(void* hReadPipe);
 // reads the whole pipe into `out` and closes it
 void AIChatReadPipeToEnd(void* hReadPipe, str::Builder& out);
+bool AIChatReadUntilExit(void* hReadPipe, void* hProcess, int timeoutMs, str::Builder& out);
 // waits up to timeoutMs for the process to exit; true if it did
 bool AIChatWaitForProcess(void* hProcess, int timeoutMs);
 void AIChatTerminateProcess(void* hProcess);

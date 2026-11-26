@@ -43,26 +43,10 @@
 #include "HomePage.h"
 #include "MainWindow.h"
 #include "Selection.h"
+#include "SelectTextKeyboard.h"
 #include "MainWindowCommon.h"
 
 Vec<MainWindow*> gWindows;
-
-bool MainWindow::HasDocsLoaded() const {
-    int nTabs = TabCount();
-    if (nTabs == 0) {
-        // logf("HasDocsLoaded: false because nTabs == 0\n");
-        return true;
-    }
-    for (int i = 0; i < nTabs; i++) {
-        auto* tab = GetTab(i);
-        if (!tab->IsAboutTab()) {
-            // logf("HasDocsLoaded: true because GetTab(i) !IsAboutTab()\n");
-            return true;
-        }
-    }
-    // logf("HasDocsLoaded: false because all %d tabs are IsAboutTab()\n", nTabs);
-    return false;
-}
 
 bool MainWindow::IsCurrentTabAbout() const {
     return nullptr == CurrentTab() || CurrentTab()->IsAboutTab();
@@ -95,15 +79,19 @@ bool PathFromFileUriTemp(Str uri, TempStr* pathOut, Str* fragmentOut) {
     if (!str::TrimPrefixI(rest, StrL("file:"))) {
         return false;
     }
-    // file://host/path or file:///path → drop authority (// or ///)
+    // file:///path and file://localhost/path are local; file://host/share is UNC
+    bool isUnc = false;
     if (str::TrimPrefix(rest, StrL("//"))) {
-        // empty host: next char is / of absolute path
-        if (rest && rest.s[0] == '/') {
-            // Windows drive path: /C:/foo → C:/foo
-            if (rest.len >= 3 && rest.s[1] && rest.s[2] == ':') {
-                rest = Str(rest.s + 1, rest.len - 1);
-            }
+        Str localhost = StrL("localhost/");
+        if (str::StartsWithI(rest, localhost)) {
+            rest = Str(rest.s + len(localhost) - 1, rest.len - len(localhost) + 1);
+        } else if (len(rest) > 0 && rest.s[0] != '/') {
+            isUnc = true;
         }
+    }
+    // Windows drive path: /C:/foo → C:/foo
+    if (!isUnc && len(rest) >= 3 && rest.s[0] == '/' && rest.s[2] == ':') {
+        rest = Str(rest.s + 1, rest.len - 1);
     }
     TempStr path = str::DupTemp(rest);
     Str pathStr = path;
@@ -113,7 +101,12 @@ bool PathFromFileUriTemp(Str uri, TempStr* pathOut, Str* fragmentOut) {
         frag = Str(frag.s + 1, frag.len - 1);
     }
     path = url::DecodeTemp(pathStr);
-    str::TransCharsInPlace(path, StrL("/"), StrL("\\"));
+    if (OS_WIN) {
+        str::TransCharsInPlace(path, StrL("/"), StrL("\\"));
+    }
+    if (isUnc) {
+        path = str::JoinTemp(OS_WIN ? StrL("\\\\") : StrL("//"), path);
+    }
     *pathOut = path;
     if (fragmentOut) {
         *fragmentOut = frag ? str::DupTemp(frag) : Str{};
@@ -217,35 +210,49 @@ bool IsWindowTabValid(WindowTab* tab) {
 }
 
 // A posted task runs after the window or tab may have been closed and freed.
-// These post fn(ptr) and drop it if ptr is gone by then, so the task never
-// sees a dangling pointer.
-struct PostedForPtr {
-    void* ptr = nullptr;
-    void (*fn)(void*) = nullptr;
+// The same address may have been reused before the callback runs.
+template <typename T>
+struct PostedForObject {
+    T* ptr;
+    u64 lifetimeId;
+    void (*fn)(T*);
 };
 
-static void RunPostedForWindow(PostedForPtr* d) {
-    if (IsMainWindowValid((MainWindow*)d->ptr)) {
+static void RunPostedForWindow(PostedForObject<MainWindow>* d) {
+    if (IsMainWindowValid(d->ptr) && d->ptr->lifetimeId == d->lifetimeId) {
         d->fn(d->ptr);
     }
     delete d;
 }
 
-static void RunPostedForTab(PostedForPtr* d) {
-    if (IsWindowTabValid((WindowTab*)d->ptr)) {
+static void RunPostedForTab(PostedForObject<WindowTab>* d) {
+    if (IsWindowTabValid(d->ptr) && d->ptr->lifetimeId == d->lifetimeId) {
         d->fn(d->ptr);
     }
     delete d;
 }
 
 void PostForWindow(MainWindow* win, void (*fn)(MainWindow*), Kind kind) {
-    auto d = new PostedForPtr{win, (void (*)(void*))fn};
-    uitask::Post(MkFunc0(RunPostedForWindow, d), kind);
+    if (uitask::IsMainUIThread() && IsMainWindowValid(win)) {
+        PostForWindow(win, win->lifetimeId, fn, kind);
+    }
+}
+
+void PostForWindow(MainWindow* win, u64 lifetimeId, void (*fn)(MainWindow*), Kind kind) {
+    auto* d = new PostedForObject<MainWindow>{win, lifetimeId, fn};
+    if (!uitask::Post(MkFunc0(RunPostedForWindow, d), kind)) {
+        delete d;
+    }
 }
 
 void PostForTab(WindowTab* tab, void (*fn)(WindowTab*), Kind kind) {
-    auto d = new PostedForPtr{tab, (void (*)(void*))fn};
-    uitask::Post(MkFunc0(RunPostedForTab, d), kind);
+    if (!uitask::IsMainUIThread() || !IsWindowTabValid(tab)) {
+        return;
+    }
+    auto* d = new PostedForObject<WindowTab>{tab, tab->lifetimeId, fn};
+    if (!uitask::Post(MkFunc0(RunPostedForTab, d), kind)) {
+        delete d;
+    }
 }
 
 void LinkHandler::GoToPage(int pageNo, bool addNavPoint) {
@@ -520,6 +527,10 @@ AppCommandCtx NewAppCommandCtx(MainWindow* win, Point cursorPos) {
         ctx.canRedo = EngineCanUndoRedo(engine, UndoDir::Redo, EngineWait::NoWait);
         ctx.isCursorOnPage = dm->GetPageNoByPoint(cursorPos) > 0;
         ctx.annotationUnderCursor = AnnotationUnderCursor(win, dm, cursorPos);
+        // keyboard selection mode: the annotation under the caret (#6579)
+        if (!ctx.annotationUnderCursor) {
+            ctx.annotationUnderCursor = AnnotationAtCaret(win);
+        }
         IPageElement* pageEl = dm->GetElementAtPos(cursorPos, nullptr);
         if (pageEl) {
             Str value = pageEl->GetValue();

@@ -100,6 +100,7 @@ struct NotificationCreateArgs {
 
 void SetNotifWindow(NotificationCreateArgs&, MainWindow*);
 NotificationWnd* ShowNotification(const NotificationCreateArgs& args);
+int NotificationCountForWindow(MainWindow* win);
 NotificationWnd* ShowTemporaryNotification(MainWindow* win, Str msg, int timeoutMs = kNotifDefaultTimeOut);
 NotificationWnd* ShowWarningNotification(MainWindow* win, Str msg, int timeoutMs);
 // same, for a message that isn't fully app-authored: shown verbatim, no markup
@@ -116,6 +117,7 @@ bool RemoveNotificationsForGroup(MainWindow*, Kind);
 void RemoveNotificationsForWindow(MainWindow*);
 void RemoveNotificationsForTab(WindowTab*);
 NotificationWnd* GetNotificationForGroup(MainWindow*, Kind);
+WindowTab* NotificationTab(NotificationWnd*);
 NotificationWnd* GetNotificationByKey(u32 key);
 // closes this window's notifications whose timeout elapsed; the shell's tick
 // calls it with the ms since the last one

@@ -4,7 +4,6 @@
 #include "base/Base.h"
 #include "base/WinDynCalls.h"
 #include "base/Win.h"
-#include "uia/Constants.h"
 #include "uia/Common.h"
 #include "uia/DocumentProvider.h"
 #include "uia/StartPageProvider.h"
@@ -74,6 +73,9 @@ ULONG STDMETHODCALLTYPE SumatraUIAutomationProvider::Release() {
 
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationProvider::GetPatternProvider(__unused PATTERNID patternId,
                                                                           IUnknown** pRetVal) {
+    if (pRetVal == nullptr) {
+        return E_POINTER;
+    }
     *pRetVal = nullptr;
     return S_OK;
 }
@@ -84,9 +86,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationProvider::GetPropertyValue(PROPERTY
     }
 
     if (propertyId == UIA_NamePropertyId) {
-        pRetVal->vt = VT_BSTR;
-        pRetVal->bstrVal = SysAllocString(L"Canvas");
-        return S_OK;
+        return UiaSetBstr(pRetVal, L"Canvas");
     } else if (propertyId == UIA_IsKeyboardFocusablePropertyId) {
         // VARIANT_TRUE (-1), not TRUE (1) - see DocumentProvider::GetPropertyValue
         pRetVal->vt = VT_BOOL;
@@ -214,15 +214,15 @@ IRawElementProviderFragment* SumatraUIAutomationProvider::GetElementFromPoint(do
     }
 
     // check the children
-    IRawElementProviderFragment* it;
+    IRawElementProviderFragment* it = nullptr;
     HRESULT hr = root->Navigate(NavigateDirection_FirstChild, &it);
 
     while (SUCCEEDED(hr) && it) {
         UiaRect rect;
-        hr = it->get_BoundingRectangle(&rect);
+        HRESULT rectHr = it->get_BoundingRectangle(&rect);
 
         // step into
-        if (SUCCEEDED(hr) && rect.left <= x && x <= rect.left + rect.width && rect.top <= y &&
+        if (SUCCEEDED(rectHr) && rect.left <= x && x <= rect.left + rect.width && rect.top <= y &&
             y <= rect.top + rect.height) {
             IRawElementProviderFragment* leaf = GetElementFromPoint(x, y, it);
             it->Release();
@@ -231,6 +231,7 @@ IRawElementProviderFragment* SumatraUIAutomationProvider::GetElementFromPoint(do
 
         // go to next element, release old one
         IRawElementProviderFragment* old_it = it;
+        it = nullptr;
         hr = old_it->Navigate(NavigateDirection_NextSibling, &it);
         old_it->Release();
     }

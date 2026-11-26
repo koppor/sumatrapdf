@@ -275,7 +275,7 @@ end
 function links_base_win()
   links {
     "advapi32", "kernel32", "user32", "gdi32", "comdlg32", "shell32", "windowscodecs", "comctl32", "msimg32",
-    "winspool", "wininet", "urlmon", "gdiplus", "ole32", "oleAut32", "shlwapi", "version", "crypt32",
+    "winspool", "urlmon", "gdiplus", "ole32", "oleAut32", "shlwapi", "version", "crypt32",
   }
 end
 
@@ -1096,7 +1096,7 @@ workspace "SumatraPDF"
     links {
       "advapi32", "kernel32", "user32", "gdi32", "comdlg32",
       "shell32", "windowscodecs", "comctl32", "msimg32",
-      "winspool", "wininet", "urlmon", "gdiplus", "ole32",
+      "winspool", "urlmon", "gdiplus", "ole32",
       "oleAut32", "shlwapi", "version", "crypt32"
     }
 
@@ -1161,8 +1161,7 @@ workspace "SumatraPDF"
     -- LitDoc.cpp: DES decryption of DRM-free .lit sections, LZX section decompression
     links { "msdes", "chmdec" }
     links {
-      "gdiplus", "gdi32", "user32", "comctl32", "shlwapi", "Version", "wininet",
-      "shcore", "wintrust", "crypt32", "shell32", "ole32", "oleAut32", "urlmon",
+      "gdiplus", "gdi32", "user32", "comctl32", "shlwapi", "Version", "shcore", "wintrust", "crypt32", "shell32", "ole32", "oleAut32", "urlmon",
       "windowscodecs"
     }
 
@@ -1188,8 +1187,7 @@ workspace "SumatraPDF"
     }
     links {
       "gdiplus", "gdi32", "user32", "comctl32", "shlwapi", "Version",
-      "ole32", "oleAut32", "windowscodecs", "shcore", "wininet",
-    }
+      "ole32", "oleAut32", "windowscodecs", "shcore", }
 
   -- small console app that loads PdfPreview.dll and saves a thumbnail as PNG
   project "preview_test"
@@ -1223,7 +1221,7 @@ workspace "SumatraPDF"
     links { "base" }
     links {
       "gdiplus", "gdi32", "user32", "comctl32", "shell32", "shlwapi", "Version",
-      "wininet", "ole32", "oleAut32",
+      "ole32", "oleAut32",
     }
 
   -- native log viewer: the pipe server side of src/SumatraLog.cpp. GUI app,
@@ -1241,8 +1239,7 @@ workspace "SumatraPDF"
     setup_base_pch()
     links { "base" }
     links {
-      "gdiplus", "gdi32", "user32", "comctl32", "shlwapi", "Version", "wininet",
-      "shcore", "wintrust", "crypt32", "shell32", "ole32", "oleAut32", "uxtheme",
+      "gdiplus", "gdi32", "user32", "comctl32", "shlwapi", "Version", "shcore", "wintrust", "crypt32", "shell32", "ole32", "oleAut32", "uxtheme",
     }
 
   -- LzSA archive tool (packs installer payloads / PDBs, see LzmaSimpleArchive.cpp).
@@ -1262,12 +1259,13 @@ workspace "SumatraPDF"
     makelzsa_files()
     zlib_files()
     uses_zlib()
-    links { "shlwapi", "version", "comctl32", "wininet", "crypt32", "wintrust" }
+    links { "shlwapi", "version", "comctl32", "crypt32", "wintrust" }
 
-  -- small console app that runs the mupdf command-line tools (draw, convert,
-  -- info, ...). Console subsystem (so it works with cmd.exe / PowerShell) and
-  -- links libsumatrapdf.dll for everything, so the exe itself is tiny. It's embedded
-  -- in SumatraPDF.exe's IDR_EMBEDDED_PAK (see the embedded.lzsa prebuild).
+  -- small console app that runs SumatraPDF.exe's command line (the mupdf tools,
+  -- cli, ...) from cmd.exe / PowerShell: it sends the args to SumatraPDF.exe
+  -- over a named pipe and relays its stdout / stderr (src/ToolPipe.h). Plain
+  -- Win32, no libsumatrapdf.dll. It's embedded in SumatraPDF.exe's
+  -- IDR_EMBEDDED_PAK (see the embedded.lzsa prebuild).
   project "sumatrapdf-tool"
     build_defines()
     dll_app_objdir()
@@ -1278,10 +1276,7 @@ workspace "SumatraPDF"
     mixed_dbg_rel_conf()
     includedirs { "src" }
     sumatrapdf_tool_files()
-    -- base: EmbeddedResources.cpp (mupdf's built-in fonts from SumatraPDF.exe's archive)
-    links { "base", "libsumatrapdf" }
-    links_base_win()
-    links { "shell32", "wintrust" }
+    links { "shell32" }
 
   project "PdfFilter"
     build_defines()
@@ -1292,37 +1287,14 @@ workspace "SumatraPDF"
     mixed_dbg_rel_conf()
     disablewarnings { "4100", "4838" }
     defines { "HAVE_LIBARCHIVE", "LIBARCHIVE_STATIC" }
-    filter { "configurations:Debug" }
-    defines { "BUILD_TEX_IFILTER", "BUILD_EPUB_IFILTER" }
-    filter {}
     includedirs { "src", "src/gui", "ext/mupdf/include", "ext/a-libarchive" }
     search_filter_files()
     -- libarchive + unrar live in libsumatrapdf.dll (re-exported); do not link second copies
     links { "base", "libsumatrapdf" }
     links_base_win()
-    links { "comctl32", "gdiplus", "shlwapi", "version", "wininet", "wintrust", "crypt32" }
-
-  -- project "PdfFilter2"
-  --   kind "SharedLib"
-  --   language "C++"
-  --   cppdialect "C++latest"
-  --   mixed_dbg_rel_conf()
-  --   disablewarnings { "4100", "4838" }
-  --   includedirs { "src", "src/gui" }
-  --   search_filter2_files()
-  --   links { "comctl32", "gdiplus", "shlwapi", "version", "wininet", "wintrust", "crypt32" }
-
-  -- project "PdfPreview2"
-  --   kind "SharedLib"
-  --   language "C++"
-  --   cppdialect "C++latest"
-  --   mixed_dbg_rel_conf()
-  --   disablewarnings { "4100", "4838" }
-  --   includedirs {
-  --     "src", "src/gui"
-  --   }
-  --   pdf_preview2_files()
-  --   links { "comctl32", "gdiplus", "msimg32", "shlwapi", "version", "wininet", "wintrust", "crypt32" }
+    links { "comctl32", "gdiplus", "shlwapi", "version", "wintrust", "crypt32", "delayimp" }
+    -- base's Http.cpp comes along with the engines; a filter never fetches anything
+    linkoptions { "/DELAYLOAD:winhttp.dll" }
 
   project "PdfPreview"
     build_defines()
@@ -1346,7 +1318,10 @@ workspace "SumatraPDF"
     -- do not link second copies
     links { "base", "libsumatrapdf" }
     links_base_win()
-    links { "comctl32", "gdiplus", "msimg32", "shlwapi", "version", "wininet", "wintrust", "crypt32" }
+    links { "delayimp" }
+    -- base's Http.cpp comes along with the engines; a preview never fetches anything
+    linkoptions { "/DELAYLOAD:winhttp.dll" }
+    links { "comctl32", "gdiplus", "msimg32", "shlwapi", "version", "wintrust", "crypt32" }
 
   -- a single static executable
   project "SumatraPDF-static"
@@ -1428,12 +1403,12 @@ workspace "SumatraPDF"
     }
     links {
       "comctl32", "delayimp", "gdiplus", "msimg32", "shlwapi", "urlmon",
-      "version", "windowscodecs", "wininet", "uiautomationcore.lib", "uxtheme", "wintrust", "crypt32"
+      "version", "windowscodecs", "uiautomationcore.lib", "uxtheme", "wintrust", "crypt32"
     }
     links_base_win()
     -- this is to prevent dll hijacking
     linkoptions { "/DELAYLOAD:gdiplus.dll /DELAYLOAD:msimg32.dll /DELAYLOAD:shlwapi.dll" }
-    linkoptions { "/DELAYLOAD:urlmon.dll /DELAYLOAD:wininet.dll" }
+    linkoptions { "/DELAYLOAD:urlmon.dll" }
     linkoptions { "/DELAYLOAD:uiautomationcore.dll" }
     -- resolve static imports (uxtheme.dll etc.) from System32 only, so that
     -- a DLL planted next to the exe can't be side-loaded (seen in crash reports
@@ -1540,13 +1515,13 @@ workspace "SumatraPDF"
     }
     links {
       "comctl32", "delayimp", "gdiplus", "msimg32", "shlwapi", "urlmon",
-      "version", "wininet", "d2d1.lib", "uiautomationcore.lib", "uxtheme", "wintrust", "crypt32"
+      "version", "d2d1.lib", "uiautomationcore.lib", "uxtheme", "wintrust", "crypt32"
     }
     links_base_win()
     -- this is to prevent dll hijacking
     linkoptions { "/DELAYLOAD:libsumatrapdf.dll" }
     linkoptions { "/DELAYLOAD:gdiplus.dll /DELAYLOAD:msimg32.dll /DELAYLOAD:shlwapi.dll" }
-    linkoptions { "/DELAYLOAD:urlmon.dll /DELAYLOAD:wininet.dll" }
+    linkoptions { "/DELAYLOAD:urlmon.dll" }
     linkoptions { "/DELAYLOAD:uiautomationcore.dll" }
     -- resolve static imports (uxtheme.dll etc.) from System32 only, so that
     -- a DLL planted next to the exe can't be side-loaded. doesn't affect

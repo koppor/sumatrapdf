@@ -411,6 +411,10 @@ const commandsRaw = [
     "CmdCloseWindow", "Close Window",
     "CmdUploadToServer", "Upload to Server",
     "CmdDeleteFromServer", "Delete from Server",
+    "CmdExportMarkdown", "Export as Markdown...",
+    "CmdImagesToPdf", "Make PDF From Images...",
+    "CmdExportAnnotations", "Export Annotations...",
+    "CmdLocateFile", "Locate File...",
     "CmdRefHoverPushToJabRef", "Push Reference to JabRef",
 ];
 

@@ -9,6 +9,7 @@
 #include "base/Base.h"
 #include "base/File.h"
 #include "base/Pixmap.h"
+#include "base/UITask.h"
 #include "gui/WasmBridge.h"
 
 #if !OS_WASM
@@ -127,18 +128,59 @@ static RectF SelectionBounds(const Vec<SelectionOnPage>& selection, int pageNo) 
     return bounds;
 }
 
+// the document's resolution, which sets the printed size. dpi= / PrintDpi
+// overrides it for scans, image folders and comic books; formats with real
+// page sizes (PDF, ...) keep theirs, as on Windows (PrintFileDPI)
+static float PrintFileDpi(EngineBase* engine, float dpiOverride) {
+    float fileDpi = IsEngineImages(engine) ? dpiOverride : 0;
+    if (!(fileDpi > 0) || !isfinite(fileDpi)) {
+        fileDpi = engine->fileDPI;
+    }
+    if (!(fileDpi > 0) || !isfinite(fileDpi)) {
+        fileDpi = 96.f;
+    }
+    return fileDpi;
+}
+
+static Kind kNotifPrintToPdf = "notifPrintToPdf";
+
+struct PrintProgressData {
+    MainWindow* win;
+    int current;
+    int total;
+};
+
+static void UpdatePrintProgress(PrintProgressData* d) {
+    NotificationWnd* wnd = IsMainWindowValid(d->win) ? GetNotificationForGroup(d->win, kNotifPrintToPdf) : nullptr;
+    if (wnd) {
+        TempStr msg = fmt(Tr("Printing page %d of %d...").s, d->current, d->total);
+        UpdateNotificationProgress(wnd, msg, CalcPerc(d->current, d->total));
+    }
+    delete d;
+}
+
 // renders every page, or the selected part of its pages, into a new PDF.
 // docName is -print-settings docname=; the file records it as the title.
+// mirror flips the pages left to right (CmdToggleMirror: print as shown).
+// threadWin: runs on that window's print thread, which reports progress and
+// stops on printCanceled. Callers lay the engine out first (EnsureFullLayout).
 static bool PrintEngineToPdf(EngineBase* engine, Str destPath, const Vec<SelectionOnPage>* selection = nullptr,
-                             int rotation = 0, const Vec<int>* pages = nullptr, float dpi = kPrintToPdfDpi,
-                             int orientation = 0, Str docName = {}) {
-    EnsureFullLayout(engine);
+                             int rotation = 0, const Vec<int>* pages = nullptr, float dpiOverride = 0,
+                             int orientation = 0, Str docName = {}, bool mirror = false,
+                             MainWindow* threadWin = nullptr) {
     PdfCreator c;
-    float zoom = dpi / engine->fileDPI;
+    float zoom = (float)kPrintToPdfDpi / PrintFileDpi(engine, dpiOverride);
     int nPages = engine->PageCount();
     int nAdded = 0;
     int nToPrint = pages ? len(*pages) : nPages;
     for (int i = 0; i < nToPrint; i++) {
+        if (threadWin) {
+            if (AtomicBoolGet(&threadWin->printCanceled)) {
+                return false;
+            }
+            auto* progress = new PrintProgressData{threadWin, i + 1, nToPrint};
+            uitask::Post(MkFunc0(UpdatePrintProgress, progress), nullptr);
+        }
         int pageNo = pages ? (*pages)[i] : i + 1;
         RectF bounds;
         RectF* boundsPtr = nullptr;
@@ -167,7 +209,10 @@ static bool PrintEngineToPdf(EngineBase* engine, Str destPath, const Vec<Selecti
             logf("PrintEngineToPdf: failed to render page %d\n", pageNo);
             return false;
         }
-        bool ok = c.AddPageFromPixmap(bmp, dpi);
+        if (mirror) {
+            FlipPixmapHorizontally(bmp);
+        }
+        bool ok = c.AddPageFromPixmap(bmp, kPrintToPdfDpi);
         FreePixmap(bmp);
         if (!ok) {
             logf("PrintEngineToPdf: failed to add page %d\n", pageNo);
@@ -185,7 +230,7 @@ static bool PrintEngineToPdf(EngineBase* engine, Str destPath, const Vec<Selecti
     return c.SaveToFile(destPath);
 }
 
-// `output=<path>` of -print-settings, the only token this path understands
+// `docname=<name>` of -print-settings
 static TempStr DocNameFromSettingsTemp(Str settings) {
     StrVec list;
     Split(&list, settings, StrL(","), true);
@@ -197,6 +242,7 @@ static TempStr DocNameFromSettingsTemp(Str settings) {
     return {};
 }
 
+// `output=<path>` of -print-settings
 static TempStr OutputPathFromSettingsTemp(Str settings) {
     if (len(settings) == 0) {
         return {};
@@ -212,7 +258,8 @@ static TempStr OutputPathFromSettingsTemp(Str settings) {
 }
 
 // parses the page-selection subset of the original -print-settings syntax
-static void ApplyRenderSettings(Str settings, int pageCount, Vec<int>& pages, float& dpi, int& rotation,
+// dpiOverride: dpi=, the document's resolution (see PrintFileDpi)
+static void ApplyRenderSettings(Str settings, int pageCount, Vec<int>& pages, float& dpiOverride, int& rotation,
                                 int& orientation) {
     Vec<PosixPageRange> ranges;
     int parity = 0;
@@ -256,7 +303,7 @@ static void ApplyRenderSettings(Str settings, int pageCount, Vec<int>& pages, fl
         } else if (str::TrimPrefixI(s, StrL("dpi="))) {
             float value = 0;
             if (!str::IsNull(str::Parse(s, "%f%$", &value)) && value > 0) {
-                dpi = value;
+                dpiOverride = value;
             }
         }
     }
@@ -391,12 +438,13 @@ PrintResult PrintFile2(EngineBase* engine, Str printerName, bool displayErrors, 
     }
     logf("PrintFile2: printing '%s' to '%s'\n", engine->FilePath(), destPath);
     Vec<int> pages;
-    float dpi = kPrintToPdfDpi;
+    float dpiOverride = gSettings->printerDefaults.printDpi;
     int rotation = 0;
     int orientation = 0;
-    ApplyRenderSettings(settings, engine->PageCount(), pages, dpi, rotation, orientation);
+    ApplyRenderSettings(settings, engine->PageCount(), pages, dpiOverride, rotation, orientation);
     TempStr docName = DocNameFromSettingsTemp(settings);
-    if (!PrintEngineToPdf(engine, destPath, nullptr, rotation, &pages, dpi, orientation, docName)) {
+    EnsureFullLayout(engine);
+    if (!PrintEngineToPdf(engine, destPath, nullptr, rotation, &pages, dpiOverride, orientation, docName)) {
         if (sendToPrinter) {
             file::Delete(destPath);
         }
@@ -427,8 +475,8 @@ PrintResult PrintFile(Str fileName, Str printerName, bool displayErrors, Str set
 // the browser prints a PDF itself, so a PDF goes there as it is (with unsaved
 // annotations, as a copy that has them); rendering pages is only for the rest
 // and for a selection or a rotated view, which the original can't show
-static bool WasmPrintEngine(EngineBase* engine, Vec<SelectionOnPage>* selection, int rotation) {
-    bool wholeDoc = !selection && rotation == 0;
+static bool WasmPrintEngine(EngineBase* engine, Vec<SelectionOnPage>* selection, int rotation, bool mirror) {
+    bool wholeDoc = !selection && rotation == 0 && !mirror;
     TempStr tmpPath = GetTempFilePathTemp(StrL("sumatra-print-"));
     if (wholeDoc && EngineMupdfIsPdf(engine) && !engine->isPasswordProtected) {
         if (!EngineHasUnsavedAnnotations(engine) && file::Exists(engine->FilePath())) {
@@ -444,7 +492,9 @@ static bool WasmPrintEngine(EngineBase* engine, Vec<SelectionOnPage>* selection,
     // No fallback converter: it would zopfli each WebP/JXL/... page
     bool ok = wholeDoc && engine->isImageCollection && PdfCreator::SaveImageCollectionAsPdf(tmpPath, engine);
     if (!ok) {
-        ok = PrintEngineToPdf(engine, tmpPath, selection, rotation);
+        float dpiOverride = gSettings->printerDefaults.printDpi;
+        EnsureFullLayout(engine);
+        ok = PrintEngineToPdf(engine, tmpPath, selection, rotation, nullptr, dpiOverride, 0, {}, mirror);
     }
     ok = ok && WasmPrintPdf(tmpPath);
     file::Delete(tmpPath);
@@ -452,30 +502,96 @@ static bool WasmPrintEngine(EngineBase* engine, Vec<SelectionOnPage>* selection,
 }
 #endif
 
+// the print dialog's job: the view's rotation and mirroring, PrinterDefaults' PrintDpi
 struct PrintToPdfCtx {
     MainWindow* win;
     EngineBase* engine;
     Vec<SelectionOnPage>* selection;
     int rotation;
+    bool mirror;
+    float dpiOverride = 0;
+    Str path;
+    ThreadHandle thread = nullptr;
+    bool ok = false;
+    bool canceled = false;
 };
+
+static void FreePrintToPdfCtx(PrintToPdfCtx* ctx) {
+    SafeEngineRelease(&ctx->engine);
+    delete ctx->selection;
+    str::Free(ctx->path);
+    delete ctx;
+}
+
+static bool PrintViewToPdf(PrintToPdfCtx* ctx, Str destPath, MainWindow* threadWin = nullptr) {
+    return PrintEngineToPdf(ctx->engine, destPath, ctx->selection, ctx->rotation, nullptr, ctx->dpiOverride, 0, {},
+                            ctx->mirror, threadWin);
+}
+
+// UI thread, after PrintToPdfThread. AbortPrinting() in CloseWindow() waits
+// for the thread, so the window may be gone by now
+static void FinishPrintToPdf(PrintToPdfCtx* ctx) {
+    MainWindow* win = ctx->win;
+    logf("PrintCurrentFile: wrote '%s', ok=%d\n", ctx->path, (int)ctx->ok);
+    bool isCurrent = IsMainWindowValid(win) && win->printThread == ctx->thread;
+    if (isCurrent) {
+        RemoveNotificationsForGroup(win, kNotifPrintToPdf);
+        win->printThread = nullptr;
+        AtomicBoolSet(&win->printCanceled, false);
+    }
+    SafeCloseThreadHandle(&ctx->thread);
+    bool showError = !ctx->ok && !ctx->canceled && isCurrent && IsMainWindowValidAndNotClosing(win);
+    FreePrintToPdfCtx(ctx);
+    if (showError) {
+        MessageBoxWarning(win, Tr("Couldn't initialize printer"), Tr("Printing problem."));
+    }
+}
+
+static void PrintToPdfThread(PrintToPdfCtx* ctx) {
+    ctx->ok = PrintViewToPdf(ctx, ctx->path, ctx->win);
+    ctx->canceled = AtomicBoolGet(&ctx->win->printCanceled);
+    uitask::Post(MkFunc0(FinishPrintToPdf, ctx), "PrintToPdfDone");
+}
+
+// closing the progress notification cancels the job
+static void OnPrintNotifClosed(MainWindow* win, NotificationClosedEvent* ev) {
+    if (ev->reason == NotifCloseReason::User && IsMainWindowValid(win)) {
+        AtomicBoolSet(&win->printCanceled, true);
+    }
+    RemoveNotification(ev->wnd);
+}
 
 static void OnPrintPathPicked(PrintToPdfCtx* ctx, SavePathArgs* args) {
     MainWindow* win = ctx->win;
-    EngineBase* engine = ctx->engine;
-    Vec<SelectionOnPage>* selection = ctx->selection;
-    int rotation = ctx->rotation;
-    delete ctx;
-    bool canceled = len(args->path) == 0;
-    bool ok = !canceled && PrintEngineToPdf(engine, args->path, selection, rotation);
-    logf("PrintCurrentFile: wrote '%s', ok=%d\n", args->path, (int)ok);
-    SafeEngineRelease(&engine);
-    delete selection;
-    if (canceled || !IsMainWindowValidAndNotClosing(win)) {
+    if (len(args->path) == 0 || !IsMainWindowValidAndNotClosing(win)) {
+        FreePrintToPdfCtx(ctx);
         return;
     }
-    if (!ok) {
-        MessageBoxWarning(win, Tr("Couldn't initialize printer"), Tr("Printing problem."));
+
+    // one job per window, as on Windows
+    AbortPrinting(win);
+    ctx->path = str::Dup(args->path);
+
+    NotificationCreateArgs nargs;
+    SetNotifWindow(nargs, win);
+    nargs.groupId = kNotifPrintToPdf;
+    nargs.timeoutMs = kNotifNoTimeout;
+    nargs.msg = fmt(Tr("Printing page %d of %d...").s, 1, ctx->engine->PageCount());
+    nargs.onClosed = MkFunc1(OnPrintNotifClosed, win);
+    ShowNotification(nargs);
+
+    // rendering every page takes long on big documents: keep the UI responsive.
+    // Layout stays on the UI thread, which also uses the engine
+    EnsureFullLayout(ctx->engine);
+    win->printThread = StartThread(MkFunc0(PrintToPdfThread, ctx), StrL("PrintToPdfThread"));
+    if (!win->printThread) {
+        logf("OnPrintPathPicked: couldn't start the print thread\n");
+        RemoveNotificationsForGroup(win, kNotifPrintToPdf);
+        FreePrintToPdfCtx(ctx);
+        return;
     }
+    // read by FinishPrintToPdf, which runs on this (UI) thread after this
+    ctx->thread = win->printThread;
 }
 
 void PrintCurrentFile(MainWindow* win, bool waitForCompletion, bool selectionByDefault, PrintUI) {
@@ -505,22 +621,25 @@ void PrintCurrentFile(MainWindow* win, bool waitForCompletion, bool selectionByD
         }
     }
     int rotation = dm->GetRotation();
+    bool mirror = dm->GetMirror();
+    engine->AddRef();
+    auto* ctx = new PrintToPdfCtx{win, engine, selection, rotation, mirror};
+    ctx->dpiOverride = gSettings->printerDefaults.printDpi;
     if (waitForCompletion) {
         // -print-dialog -exit-when-done has nobody to answer the dialog
-        PrintEngineToPdf(engine, destPath, selection, rotation);
-        delete selection;
+        EnsureFullLayout(engine);
+        PrintViewToPdf(ctx, destPath);
+        FreePrintToPdfCtx(ctx);
         return;
     }
 #if OS_WASM
-    bool ok = WasmPrintEngine(engine, selection, rotation);
-    delete selection;
+    bool ok = WasmPrintEngine(engine, selection, rotation, mirror);
+    FreePrintToPdfCtx(ctx);
     if (!ok) {
         MessageBoxWarning(win, Tr("Couldn't initialize printer"), Tr("Printing problem."));
     }
     return;
 #endif
-    engine->AddRef();
-    auto* ctx = new PrintToPdfCtx{win, engine, selection, rotation};
     auto* args = new SavePathArgs();
     args->win = win;
     args->title = str::Dup(Tr("Print"));
@@ -530,6 +649,11 @@ void PrintCurrentFile(MainWindow* win, bool waitForCompletion, bool selectionByD
     ShowSavePathDialog(args);
 }
 
-void AbortPrinting(MainWindow*) {
-    // nothing runs on a thread here: the PDF is written inline
+// stops the print-to-PDF thread at its next page and waits for it
+void AbortPrinting(MainWindow* win) {
+    if (win->printThread) {
+        AtomicBoolSet(&win->printCanceled, true);
+        WaitThread(win->printThread, -1);
+    }
+    AtomicBoolSet(&win->printCanceled, false);
 }

@@ -2,9 +2,7 @@
    License: GPLv3 */
 
 // ng: what the engines and the application model expect from the layers above
-// them. Everything here is replaced by the real file as the port gets to it:
-// the document model in step 5b, the gpui shell in step 6, the theme and the
-// toolbar in step 12. Delete this file when it is empty.
+// them, for test_util and test_engines, which link them without the app.
 
 #include "base/Base.h"
 #include "base/SettingsUtil.h"
@@ -126,7 +124,7 @@ bool ShowTransparencyGrid() {
 void GetPrintersInfo(str::Builder&) {}
 
 void ShowTextInWindowDialog(Str, Str) {}
-void ShowTextInWindow(MainWindow*, Str, Str) {}
+void ShowTextInWindow(MainWindow*, Str, Str, const TextWindowOption*) {}
 void SetTextViewWindowText(Str) {}
 bool IsTextViewWindowTitle(Str) {
     return false;

@@ -38,8 +38,8 @@
 #include "gui/DocCanvas.h"
 #include "gui/TabSwitcher.h"
 #include "gui/DialogWidgets.h"
+#include "gui/TabColors.h"
 #include "gui/TabsUI.h"
-#include "AppHelpersCommon.h"
 #include "SvgIcons.h"
 
 #include "SumatraLog.h"
@@ -161,15 +161,58 @@ static Color TabBgColor(WindowTab* tab, bool isSelected, bool isUnderMouse) {
 // the tab label's size; Home's margins are 1rem of it
 constexpr float kTabFontSize = 12;
 
+struct TabTextDx {
+    Str text;
+    Str family;
+    int fontPx;
+    int dx;
+};
+
+static Vec<TabTextDx> gTabTextDx;
+// titles, page suffixes and chip labels; cleared when full
+constexpr int kTabTextDxMax = 128;
+int gTabTextMeasureCount = 0;
+
+static void FreeTabTextDx() {
+    for (TabTextDx& e : gTabTextDx) {
+        str::Free(e.text);
+        str::Free(e.family);
+    }
+    VecReset(gTabTextDx);
+}
+
+// the tab bar is laid out every frame, so widths are remembered by text, font
+// and size. gpui's MeasureText is what the labels are painted with.
+static int MeasureTabTextDx(gp::PaintCtx* paint, Str family, float fontPx, Str s) {
+    int key = (int)fontPx;
+    for (const TabTextDx& e : gTabTextDx) {
+        if (e.fontPx == key && str::Eq(e.text, s) && str::Eq(e.family, family)) {
+            return e.dx;
+        }
+    }
+    if (len(gTabTextDx) >= kTabTextDxMax) {
+        FreeTabTextDx();
+    }
+    int dx = 0;
+    if (paint && paint->pa && len(s) > 0) {
+        dx = (int)(gp::MeasureText(paint, ToGpui(s), fontPx, 0).w + 0.5f);
+    }
+    if (dx <= 0 && len(s) > 0) {
+        float dpi = paint && paint->dpi > 0 ? paint->dpi : 96.f;
+        PlatformFont* font = GetUserGuiFont(family, (int)(fontPx * dpi / 96.f + 0.5f));
+        dx = (int)((float)PlatformFontMeasureText(font, s).dx * 96.f / dpi + 0.5f);
+    }
+    VecAppend(gTabTextDx, TabTextDx{str::Dup(s), str::Dup(family), key, dx});
+    gTabTextMeasureCount++;
+    return dx;
+}
+
 // TabsEqualWidth = false: what a tab sized to its name needs, in dips, as
 // BuildTab lays it out: margins, page suffix, dirty dot and room for the ✕
 static int FitToNameDx(MainWindow* win, WindowTab* tab) {
-    int dpi = std::max(AppShellWindowDpi(win), 96);
+    gp::PaintCtx* paint = win->gpuiWin ? &win->gpuiWin->paint : nullptr;
     Str family = FromGpui(gp::PaintSystemUIFontMappedFamily());
-    auto measure = [&](Str s, float fontSize) {
-        PlatformFont* font = GetUserGuiFont(family, MulDiv((int)fontSize, dpi, 96));
-        return MulDiv(PlatformFontMeasureText(font, s).dx, 96, dpi);
-    };
+    auto measure = [&](Str s, float fontSize) { return MeasureTabTextDx(paint, family, fontSize, s); };
     int dx = 8 + measure(tab->GetTabTitle(), kTabFontSize);
     TempStr pageText = TabPageSuffixTemp(tab);
     if (len(pageText) > 0) {
@@ -189,10 +232,9 @@ static int ChipDx(MainWindow* win, StripGroup* g) {
     if (len(label) == 0) {
         return kMinDx;
     }
-    int dpi = std::max(AppShellWindowDpi(win), 96);
+    gp::PaintCtx* paint = win->gpuiWin ? &win->gpuiWin->paint : nullptr;
     Str family = FromGpui(gp::PaintSystemUIFontMappedFamily());
-    PlatformFont* font = GetUserGuiFont(family, MulDiv((int)kTabFontSize, dpi, 96));
-    int dx = MulDiv(PlatformFontMeasureText(font, label).dx, 96, dpi) + 18;
+    int dx = MeasureTabTextDx(paint, family, kTabFontSize, label) + 18;
     return limitValue(dx, kMinDx, kMaxDx);
 }
 
@@ -303,6 +345,8 @@ void TabsView::OnTabUp(TabsView* self, gp::Ctx* cx, const gp::MouseUpEvent* ev, 
 
 // ng: keeps a right press from gpui's ContextMenu, which would open from it
 void TabsView::OnBarDown(TabsView*, gp::Ctx* cx, const gp::MouseDownEvent* ev) {
+    // a press hides a tab's tooltip, as a Win32 tooltip does
+    HoverTooltipHide(cx);
     if (IsContextClick(ev->button, ev->modifiers)) {
         gp::WindowStopPropagation(cx);
     }
@@ -336,7 +380,7 @@ void TabsView::OnTabHover(TabsView* self, gp::Ctx* cx, const gp::HoverEvent* ev,
     ui->highlighted = want;
     WindowTab* tab = win->GetTab((int)idx);
     if (ev->hovered && tab && idx < ui->tabBounds.len) {
-        TempStr tip = MakeTabTooltipTemp(tab->filePath, TabIsDirty(tab));
+        TempStr tip = MakeTabTooltipTemp(tab, TabIsDirty(tab));
         if (len(tip) > 0) {
             HoverTooltipShow(cx, tip, ui->tabBounds[(int)idx]);
         }
@@ -647,7 +691,6 @@ static gp::El* BuildChip(MainWindow* win, gp::Ctx* cx, StripGroup* g) {
 
 static gp::El* BuildTab(MainWindow* win, gp::Ctx* cx, int idx, int tabDx) {
     TabsUI* ui = Ui(win);
-    const gp::Theme& th = gp::ThemeNow(cx->app);
     WindowTab* tab = win->GetTab(idx);
     // while the Ctrl+Tab list is open it previews the tab it points at, as
     // orig's TabsCtrl::SetHighlighted does
@@ -730,60 +773,6 @@ static gp::El* BuildTab(MainWindow* win, gp::Ctx* cx, int idx, int tabDx) {
     return el;
 }
 
-// the same action the menu bar rows use, so a pick runs through the shell
-static uint32_t ActMenuCmd() {
-    static uint32_t id = gp::ActionOf(GStrL("sumatra::Cmd"));
-    return id;
-}
-
-static void SetMenuCue(gp::Ctx* cx, gpc::PopupMenu* menu, gp::Str label, const MenuAccelText& at, bool disabled) {
-    if (at.underlineOff < 0 || menu->items.len == 0) {
-        return;
-    }
-    const gp::Theme& th = gp::ThemeNow(cx->app);
-    gp::Rgba fg = disabled ? th.mutedFg : th.foreground;
-    auto* span = gp::ArenaNew<gp::TextSpan>(cx->a);
-    span->lo = at.underlineOff;
-    span->hi = at.underlineOff + at.underlineLen;
-    span->color = fg;
-    menu->items[menu->items.len - 1].element = gp::TextEl(cx->a, label)->Font(14)->Fg(fg)->Underlines(span, 1);
-}
-
-// one MenuModel level as a popup. A menu-bar entry is itself a submenu, so the
-// button's menu is File, View, ... each opening the menu it names.
-static gpc::PopupMenu* MenuPopupFromModel(gp::Ctx* cx, MenuModel* model, Str id, bool cues) {
-    gpc::PopupMenu* menu = gpc::PopupMenu::New(cx, GpuiDup(cx->a, id))->MinW(220);
-    if (!model) {
-        return menu;
-    }
-    int i = -1;
-    for (const MenuItemModel& it : model->items) {
-        i++;
-        if (it.separator) {
-            menu->Separator();
-            continue;
-        }
-        MenuAccelText at = ParseMenuAccelTextTemp(it.title);
-        gp::Str label = GpuiDup(cx->a, at.display);
-        if (it.submenu) {
-            TempStr subId = fmt("%s-%d", id, i);
-            menu->Submenu(label, MenuPopupFromModel(cx, it.submenu, subId, cues));
-            menu->Disabled(it.disabled);
-        } else {
-            menu->MenuWithAction(label, ActMenuCmd(), (intptr_t)it.cmdId);
-            // a row without a hint asks the keymap, which answers with some
-            // other command's shortcut (every command is one action)
-            menu->Kbd(len(it.accel) > 0 ? GpuiDup(cx->a, it.accel) : GStrL(""));
-            menu->Disabled(it.disabled);
-            menu->Checked(it.checked);
-        }
-        if (cues) {
-            SetMenuCue(cx, menu, label, at, it.disabled);
-        }
-    }
-    return menu;
-}
-
 // orig's CB_MENU caption button. The strip puts it before its tabs; a window
 // without tabs has no strip, so the caption asks for it alone. Null while the
 // menu bar is showing. A click opens the bar's menus as one drop-down.
@@ -791,7 +780,13 @@ gp::El* TabsUIMenuButton(MainWindow* win, gp::Ctx* cx) {
     if (win->isMenuBarVisible || AppShellNativeMenu() || !win->menu) {
         return nullptr;
     }
-    gpc::PopupMenu* popup = MenuPopupFromModel(cx, win->menu, StrL("sumatra-menu-btn"), MenuCuesAlways());
+    gpc::PopupMenu* popup = AppShellMenuPopup(cx, win->menu, StrL("sumatra-menu-btn"), MenuCuesAlways());
+    // an open menu shows what the last command changed, even mid-burst
+    gp::PopupMenuState* popupState = popup->state.Get(cx);
+    if (win->menuDirty && popupState && popupState->open) {
+        RebuildMenuBar(win);
+        popup = AppShellMenuPopup(cx, win->menu, StrL("sumatra-menu-btn"), MenuCuesAlways());
+    }
     popup->MinW(160);
     TrackPopup(cx, popup);
 

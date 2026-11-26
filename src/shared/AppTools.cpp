@@ -324,13 +324,6 @@ static TextEditor editorRules[] = {
         // TODO: find a way to detect where emacs is installed
         // "emacsclientw.exe","+%l \"%f\"", BinaryPath, "???", "???",
     },
-    {
-        StrL("notepad.exe"),
-        StrL("\"%f\""),
-        RegType::BinaryDir,
-        StrL(R"(Software\Microsoft\Windows NT\CurrentVersion)"),
-        StrL("SystemRoot"),
-    }
 };
 
 // clang-format on
@@ -341,8 +334,7 @@ static void FindTextEditors() {
         return;
     }
     StrVec found;
-    // all but last entry, which is notepad.exe
-    int n = dimofi(editorRules) - 1;
+    int n = dimofi(editorRules);
     for (int i = 0; i < n; i++) {
         auto& rule = editorRules[i];
         Str regKey = rule.regKey;
@@ -442,7 +434,7 @@ Rect GetDefaultWindowPos() {
 
     Rect r = work;
     r.dx = std::min((int)((double)r.dy * kDefPageRatio), work.dx);
-    r.x = (work.dx - r.dx) / 2;
+    r.x = work.x + ((work.dx - r.dx) / 2);
 
     return r;
 }
@@ -473,7 +465,7 @@ TempStr GetWebViewDataDirTemp() {
         str::BufSet(Str(id, dimof(id)), buildId);
     }
     dir = path::JoinTemp(dir, Str(id));
-    return path::JoinTemp(dir, fmt("webview-%d", (int)GetCurrentProcessId()));
+    return path::JoinTemp(dir, fmt("webview-%llu", GetCurrProcessId()));
 }
 
 // seconds since ft, from a FILETIME's 100-ns ticks
@@ -481,6 +473,9 @@ static i64 FileTimeAgeSecs(FILETIME ft, const ULARGE_INTEGER& now) {
     ULARGE_INTEGER t;
     t.LowPart = ft.dwLowDateTime;
     t.HighPart = ft.dwHighDateTime;
+    if (t.QuadPart >= now.QuadPart) {
+        return 0;
+    }
     return (i64)((now.QuadPart - t.QuadPart) / 10000000ULL);
 }
 
@@ -698,6 +693,7 @@ bool IsUntrustedFile(Str filePath, Str fileURL) {
     while (len(path) > 2 && str::ContainsChar(Str(path.s + 2, path.len - 2), ':')) {
         Str lastColon = str::SliceFromCharLast(path, ':');
         *lastColon.s = '\0';
+        path.len = (int)(lastColon.s - path.s);
         if (file::GetZoneIdentifier(path) >= URLZONE_INTERNET) {
             return true;
         }
@@ -708,10 +704,6 @@ bool IsUntrustedFile(Str filePath, Str fileURL) {
 
 TempStr GetTempDirPathTemp() {
     return GetTempDirTemp();
-}
-
-int CurrentProcessId() {
-    return (int)GetCurrentProcessId();
 }
 
 #endif // OS_WIN

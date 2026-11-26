@@ -143,7 +143,6 @@ void OnFindBarTextChanged(MainWindow* win) {
     int delay = FindDebounceDelayMs(nChars);
     // re-arming replaces the previous countdown, so each keystroke restarts it
     win->findDebounce.Arm(delay);
-    win->findDebouncePending = true;
 }
 
 // the shell's tick: runs the deferred search once the countdown expires
@@ -151,7 +150,6 @@ void FindDebounceTick(MainWindow* win, int elapsedMs) {
     if (!win->findDebounce.Tick(elapsedMs)) {
         return;
     }
-    win->findDebouncePending = false;
     if (!win->IsDocLoaded() || !NeedsFindUI(win)) {
         return;
     }
@@ -160,10 +158,8 @@ void FindDebounceTick(MainWindow* win, int elapsedMs) {
     }
 }
 
-// if a debounced search is pending, cancel the timer and start it now (so Enter
-// forces the search to start immediately). Returns true if one was pending.
-void FindDebounceStop(MainWindow* win) {
-    win->findDebounce.Cancel();
+bool FindDebouncePending(MainWindow* win) {
+    return win->findDebounce.IsArmed();
 }
 
 // ng's find buttons read the find state on every frame
@@ -214,7 +210,6 @@ void UpdateFindStatus(UpdateFindStatusData* d) {
 
 // cancel a pending debounced find-as-you-type search
 void CancelPendingFind(MainWindow* win) {
-    win->findDebouncePending = false;
     win->findDebounce.Cancel();
 }
 
@@ -333,7 +328,7 @@ TempStr FindStateResultTemp(MainWindow* win) {
     // page of the active hit (0: none), whether a search is still running
     // and the page in view (orig's TestFindUiState fields)
     int hitPage = (ts && len(ts->result) > 0) ? ts->result[0].pageNo : 0;
-    bool busy = win->findThread || win->findCountThread || win->findDebouncePending;
+    bool busy = win->findThread || win->findCountThread || FindDebouncePending(win);
     int page = win->ctrl ? win->ctrl->CurrentPageNo() : 0;
     out.Append(fmt("hitPage=%d busy=%d page=%d\n", hitPage, busy ? 1 : 0, page));
     return ToStrTemp(out);
@@ -573,9 +568,6 @@ Handle all commands as defined in Commands.h
 eg: [CmdClose] or [CmdCreateAnnotHighlight #00ff00 openEdit]
 */
 
-// returns true if did handle a message
-// ng: orig also has [ForwardSearch(...)], which needs the forward-search mark
-// this port doesn't draw yet
 void DdeExecuteBegin() {}
 
 // [Open] / [GotoPageWord] / the rest of the DDE execute grammar.

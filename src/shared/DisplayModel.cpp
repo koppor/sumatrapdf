@@ -152,8 +152,8 @@ bool DisplayModel::HasPageLabels() const {
     return engine->hasPageLabels;
 }
 
-TempStr DisplayModel::GetPageLabeTemp(int pageNo) const {
-    return engine->GetPageLabeTemp(pageNo);
+TempStr DisplayModel::GetPageLabelTemp(int pageNo) const {
+    return engine->GetPageLabelTemp(pageNo);
 }
 
 int DisplayModel::GetPageByLabel(Str label) const {
@@ -1082,45 +1082,51 @@ bool DisplayModel::ShouldTreatLandscapeAsSpread() const {
     return gSettings->imageUI.landscapeAsSpread;
 }
 
-void DisplayModel::EnsureSpreadFlags() const {
+// UI thread only (Relayout). Render threads read the cache under pagesInfoLock
+// (FreeIfFull, PageVisibleNearbyLocked), so it is built aside and swapped in.
+void DisplayModel::BuildSpreadFlags() {
     int n = PageCount();
-    if (spreadCacheValid && spreadFlags.len == n && rowFirst.len == n && rowLast.len == n) {
-        return;
-    }
-    spreadCacheValid = true;
-    if (n <= 0) {
-        VecReset(spreadFlags);
-        VecReset(rowFirst);
-        VecReset(rowLast);
-        return;
-    }
-    VecResize(spreadFlags, n);
-    VecResize(rowFirst, n);
-    VecResize(rowLast, n);
-    bool useSpreads = ShouldTreatLandscapeAsSpread();
-    for (int i = 0; i < n; i++) {
-        spreadFlags[i] = 0;
-        if (!useSpreads) {
-            continue;
+    bool useSpreads = n > 0 && ShouldTreatLandscapeAsSpread();
+    Vec<u8> flags;
+    Vec<int> first;
+    Vec<int> last;
+    if (useSpreads) {
+        VecResize(flags, n);
+        VecResize(first, n);
+        VecResize(last, n);
+        for (int i = 0; i < n; i++) {
+            flags[i] = 0;
+            PageInfo* pi = GetPageInfo(i + 1);
+            if (!pi || !IsMediaBoxKnown(pi->mediaBox)) {
+                continue;
+            }
+            SizeF sz = PageSizeAfterRotation(i + 1);
+            if (sz.dx > sz.dy) {
+                flags[i] = 1;
+            }
         }
-        PageInfo* pi = GetPageInfo(i + 1);
-        if (!pi || !IsMediaBoxKnown(pi->mediaBox)) {
-            continue;
-        }
-        SizeF sz = PageSizeAfterRotation(i + 1);
-        if (sz.dx > sz.dy) {
-            spreadFlags[i] = 1;
-        }
-    }
-    Vec<FacingRow> rows;
-    CollectFacingRows(rows, n, IsBookView(GetDisplayMode()), spreadFlags);
-    for (int i = 0; i < len(rows); i++) {
-        const FacingRow& row = rows[i];
-        for (int p = row.firstPage; p <= row.lastPage; p++) {
-            rowFirst[p - 1] = row.firstPage;
-            rowLast[p - 1] = row.lastPage;
+        Vec<FacingRow> rows;
+        CollectFacingRows(rows, n, IsBookView(GetDisplayMode()), flags);
+        for (int i = 0; i < len(rows); i++) {
+            const FacingRow& row = rows[i];
+            for (int p = row.firstPage; p <= row.lastPage; p++) {
+                first[p - 1] = row.firstPage;
+                last[p - 1] = row.lastPage;
+            }
         }
     }
+
+    ScopedMutex scope(&pagesInfoLock);
+    spreadFlags = flags;
+    rowFirst = first;
+    rowLast = last;
+    spreadCacheValid = useSpreads;
+}
+
+// readers never build the cache: callers fall back to rows without spreads
+bool DisplayModel::HasSpreadFlags() const {
+    int n = PageCount();
+    return spreadCacheValid && len(spreadFlags) == n && len(rowFirst) == n && len(rowLast) == n;
 }
 
 // rows of a non-continuous facing / book view stepping one page start at any
@@ -1144,8 +1150,7 @@ int DisplayModel::FirstPageInRow(int pageNo) const {
     if (columns < 2 || !ShouldTreatLandscapeAsSpread()) {
         return FirstPageInARowNo(pageNo, columns, book);
     }
-    EnsureSpreadFlags();
-    if (rowFirst.len != n) {
+    if (!HasSpreadFlags()) {
         return FirstPageInARowNo(pageNo, columns, book);
     }
     return rowFirst[pageNo - 1];
@@ -1159,10 +1164,7 @@ int DisplayModel::LastPageInRow(int pageNo) const {
     pageNo = limitValue(pageNo, 1, n);
     if (StepsOnePage()) {
         Vec<u8> noSpreads;
-        bool spreads = ShouldTreatLandscapeAsSpread();
-        if (spreads) {
-            EnsureSpreadFlags();
-        }
+        bool spreads = ShouldTreatLandscapeAsSpread() && HasSpreadFlags();
         return FacingRowAt(pageNo, n, IsBookView(GetDisplayMode()), spreads ? spreadFlags : noSpreads).lastPage;
     }
     int columns = ColumnsFromDisplayMode(GetDisplayMode());
@@ -1170,8 +1172,7 @@ int DisplayModel::LastPageInRow(int pageNo) const {
     if (columns < 2 || !ShouldTreatLandscapeAsSpread()) {
         return LastPageInARowNo(pageNo, columns, book, n);
     }
-    EnsureSpreadFlags();
-    if (rowLast.len != n) {
+    if (!HasSpreadFlags()) {
         return LastPageInARowNo(pageNo, columns, book, n);
     }
     return rowLast[pageNo - 1];
@@ -1280,10 +1281,18 @@ static void RememberStableNavPointCandidateAfterViewChange(DisplayModel* dm, con
     nav.hasPending = true;
 }
 
+// Takes ownership of engine, including when it cannot be displayed.
+DisplayModel* DisplayModel::Create(EngineBase* engine, DocControllerCallback* cb) {
+    if (!engine || engine->PageCount() <= 0 || !cb) {
+        SafeEngineRelease(&engine);
+        return nullptr;
+    }
+    return new DisplayModel(engine, cb);
+}
+
 // must call SetInitialViewSettings() after creation
 DisplayModel::DisplayModel(EngineBase* engine, DocControllerCallback* cb) : DocController(cb) {
     this->engine = engine;
-    ReportIf(!engine || engine->PageCount() <= 0);
     engineType = engine->kind;
     VecAppend(gLiveDisplayModels, this);
 
@@ -1484,10 +1493,9 @@ void DisplayModel::UpdateEstimatedMediaBox() {
 }
 
 PageInfo* DisplayModel::GetPageInfo(int pageNo) const {
-    if (!ValidPageNo(pageNo)) {
+    if (!pagesInfo || !ValidPageNo(pageNo)) {
         return nullptr;
     }
-    ReportIf(!pagesInfo);
     return &pagesInfo[pageNo - 1];
 }
 
@@ -1518,7 +1526,11 @@ void DisplayModel::SetInitialViewSettings(DisplayMode newDisplayMode, int newSta
         // would make dpiFactor and therefore zoomReal negative
         screenDPI = 96;
     }
-    dpiFactor = 1.0f * (float)screenDPI / engine->fileDPI;
+    float fileDPI = engine->fileDPI;
+    if (!(fileDPI > 0) || !isfinite(fileDPI)) {
+        fileDPI = 96.f;
+    }
+    dpiFactor = (float)screenDPI / fileDPI;
     // pagesInfo isn't built yet, so ValidPageNo() (which reads pageCount from
     // the snapshot) would always say no; ask the engine directly
     if (newStartPage >= 1 && newStartPage <= engine->PageCount()) {
@@ -1885,7 +1897,7 @@ float DisplayModel::ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) co
         row = PageSizeAfterRotation(pageNo, fitToContent, ContentFitPadding(zoomVirtual));
         int nCols = columns;
         if (columns > 1 && ShouldTreatLandscapeAsSpread() && FirstPageInRow(pageNo) == LastPageInRow(pageNo) &&
-            spreadFlags.len >= pageNo && spreadFlags[pageNo - 1] != 0) {
+            len(spreadFlags) >= pageNo && spreadFlags[pageNo - 1] != 0) {
             nCols = 1;
         }
         row.dx *= (float)nCols;
@@ -2215,7 +2227,7 @@ void DisplayModel::Relayout(float newZoomVirtual, int newRotation) {
 
     rotation = NormalizeRotation(newRotation);
     zoomVirtual = newZoomVirtual;
-    spreadCacheValid = false;
+    BuildSpreadFlags();
 
     bool needHScroll = false;
     bool needVScroll = false;
@@ -2241,6 +2253,7 @@ void DisplayModel::Relayout(float newZoomVirtual, int newRotation) {
                 PageMediaBox(pageNo);
             }
         }
+        BuildSpreadFlags();
     }
     bool hideScrollbars = ScrollbarsAreHidden();
     bool useOverlayScrollbar = ScrollbarsUseOverlay();
@@ -2305,8 +2318,7 @@ void DisplayModel::Relayout(float newZoomVirtual, int newRotation) {
         params.freePan = freePan && !inPresentation;
         params.landscapeAsSpread = ShouldTreatLandscapeAsSpread();
         params.stepOnePage = StepsOnePage();
-        if (params.landscapeAsSpread) {
-            EnsureSpreadFlags();
+        if (params.landscapeAsSpread && HasSpreadFlags()) {
             params.spreadFlags = spreadFlags;
         }
         layout.Relayout(params);
@@ -2326,18 +2338,10 @@ void DisplayModel::Relayout(float newZoomVirtual, int newRotation) {
         break;
     }
 
-    bool firstLayout = zoomReal < 0.01f;
     viewPort = layout.viewPort;
     canvasSize = layout.canvasSize;
     zoomReal = layout.zoomReal;
     CopyDocumentLayoutToPageInfo(this, layout);
-
-    Size slack = PanSlack();
-    if (firstLayout && (slack.dx > 0 || slack.dy > 0)) {
-        viewPort.x = slack.dx;
-        viewPort.y = slack.dy;
-        RecalcVisibleParts();
-    }
 
     // Page 1 of a rotated stack does not start at the canvas origin.
     if (openingLayout && ScrollFollowsRotation()) {
@@ -2346,6 +2350,7 @@ void DisplayModel::Relayout(float newZoomVirtual, int newRotation) {
         if (pi && pi->pos.dx > 0 && pi->pos.dy > 0) {
             PlaceContentScroll(this, pi, 0);
             SnapCrossAxis(this, pi);
+            Size slack = PanSlack();
             viewPort.x = limitValue(viewPort.x, slack.dx, canvasSize.dx - viewPort.dx - slack.dx);
             viewPort.y = limitValue(viewPort.y, slack.dy, canvasSize.dy - viewPort.dy - slack.dy);
             RecalcVisibleParts();
@@ -2557,21 +2562,22 @@ void DisplayModel::RecalcVisibleParts() const {
         return;
     }
 
-    DocumentLayout layout;
-    layout.Reset(PageCount());
-    layout.viewPort = viewPort;
-    for (int pageNo = 1; pageNo <= PageCount(); ++pageNo) {
-        DocumentLayoutPage* layoutPage = layout.GetPage(pageNo);
+    int count = PageCount();
+    for (int pageNo = 1; pageNo <= count; ++pageNo) {
         PageInfo* pageInfo = GetPageInfo(pageNo);
-        if (!layoutPage || !pageInfo) {
+        if (!pageInfo) {
             continue;
         }
-        layoutPage->pos = pageInfo->pos;
-        layoutPage->isShown = pageInfo->isShown;
-        layoutPage->zoomReal = pageInfo->zoomReal;
+        Rect pageRect = pageInfo->pos;
+        Rect visiblePart = pageRect.Intersect(viewPort);
+        pageInfo->visibleRatio = 0;
+        if (!visiblePart.IsEmpty() && !pageRect.IsEmpty()) {
+            pageInfo->visibleRatio =
+                1.0f * (float)visiblePart.dx * (float)visiblePart.dy / ((float)pageRect.dx * (float)pageRect.dy);
+        }
+        pageInfo->pageOnScreen = pageRect;
+        pageInfo->pageOnScreen.Offset(-viewPort.x, -viewPort.y);
     }
-    layout.RecalcVisibleParts();
-    CopyDocumentLayoutToPageInfo(this, layout);
 }
 
 int DisplayModel::GetPageNoByPoint(Point pt) {
@@ -2639,8 +2645,9 @@ static float getZoomSafe(DisplayModel* dm, int pageNo, const PageInfo* pageInfo)
         return dm->zoomReal;
     }
 
+    // zoomVirtual is a percent
     if (dm->zoomVirtual > 0) {
-        return dm->zoomVirtual;
+        return dm->zoomVirtual * 0.01f * dm->dpiFactor;
     }
     // hail mary, return 100%
     return 1.f;
@@ -3070,9 +3077,21 @@ void DisplayModel::SetDisplayMode(DisplayMode newDisplayMode, bool keepContinuou
     GoToPage(currPageNo, 0);
 }
 
+// Fullscreen.DisplayMode, when it names a layout. "automatic" names none: a
+// model's display mode is always a resolved one
+static bool FullscreenDisplayModePref(DisplayMode* modeOut) {
+    DisplayMode mode{};
+    if (!TryParseDisplayMode(gSettings->fullscreen.displayMode, &mode) || mode == DisplayMode::Automatic) {
+        return false;
+    }
+    *modeOut = mode;
+    return true;
+}
+
 void DisplayModel::SetInPresentation(bool enable) {
-    // entering twice would save the presentation layout as the one to restore
-    if (enable && inPresentation) {
+    // entering twice would save the presentation layout as the one to restore;
+    // exiting when not in presentation would restore uninitialized state
+    if (enable == inPresentation) {
         return;
     }
     inPresentation = enable;
@@ -3083,7 +3102,7 @@ void DisplayModel::SetInPresentation(bool enable) {
         windowMargin.top = windowMargin.right = windowMargin.bottom = windowMargin.left = 0;
         // Fullscreen.DisplayMode overrides the built-in single-page layout
         DisplayMode mode = DisplayMode::SinglePage;
-        TryParseDisplayMode(gSettings->fullscreen.displayMode, &mode);
+        FullscreenDisplayModePref(&mode);
         SetDisplayMode(mode);
         SetZoomVirtual(kZoomFitPage, nullptr);
         return;
@@ -3101,7 +3120,7 @@ void DisplayModel::SetInPresentation(bool enable) {
 // Presentation uses SetInPresentation instead.
 void DisplayModel::ApplyFullscreenDisplayMode(bool enable) {
     DisplayMode wanted{};
-    bool havePref = TryParseDisplayMode(gSettings->fullscreen.displayMode, &wanted);
+    bool havePref = FullscreenDisplayModePref(&wanted);
     if (enable) {
         if (!havePref) {
             return;
@@ -3339,7 +3358,8 @@ bool DisplayModel::GoToFirstPage() {
             if (AtContentEdge(-1)) {
                 return false;
             }
-        } else if (0 == viewPort.y) {
+        } else if (viewPort.y <= PanSlack().dy) {
+            // free pan lands the first page below its slack, not at 0
             return false;
         }
     } else {

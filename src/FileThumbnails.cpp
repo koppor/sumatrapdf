@@ -73,8 +73,13 @@ void SaveThumbnail(FileState* fs) {
     WCHAR* pathW = CWStrTemp(tmpPath);
     Gdiplus::Status st = bmp->Save(pathW, &tmpClsid, nullptr);
     delete bmp;
-    if (st != Gdiplus::Ok || !file::RenameReplace(thumbnailPath, tmpPath)) {
-        logf("SaveThumbnail: Save('%s') failed with %d\n", thumbnailPath, (int)st);
+    if (st != Gdiplus::Ok) {
+        logf("SaveThumbnail: Save('%s') failed with %d\n", tmpPath, (int)st);
+        file::Delete(tmpPath);
+        return;
+    }
+    if (!file::RenameReplace(thumbnailPath, tmpPath)) {
+        logf("SaveThumbnail: RenameReplace('%s', '%s') failed\n", thumbnailPath, tmpPath);
         file::Delete(tmpPath);
     }
 }
@@ -196,6 +201,7 @@ void CreateChmThumbnail(Str path, const Size& size, const OnBitmapRendered* save
         CreateWindowExW(0, WC_STATICW, L"BrowserCapture", WS_POPUP, 0, 0, dx, dy, nullptr, nullptr, nullptr, nullptr);
     if (!hwnd) {
         delete doc;
+        delete saveThumbnail;
         return;
     }
 #if 0 // when debugging set to 1 to see the window

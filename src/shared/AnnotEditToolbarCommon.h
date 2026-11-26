@@ -19,9 +19,11 @@ enum class AnnotEditKind {
     Bold,
     Italic,
     Underline,
+    Strikeout,
     TextColor,
     TextSize,
     Alignment,
+    VAlign,
     Icon,
     Contents,
     LineStart,
@@ -52,12 +54,22 @@ bool AnnotationBorderInColorChip(AnnotationType tp);
 Str ResolvedAnnotIconName(Annotation* annot);
 extern SeqStrings gBase14ReadableNames;
 int StyleBitForKind(AnnotEditKind kind);
+int VAlignOfStyle(int style);
+int NextVAlignStyle(int style);
 Str FontFamilyLabel(Str family);
 void AppendStyleToggle(Vec<AnnotEditItem>& out, AnnotEditKind kind, int style, Str tooltip);
 const char* MupdfIconStream(Str name);
-bool IsPdfPathOpChar(char c);
-void SkipPdfPathWs(const char*& p);
-float PdfPathPop(float* stk, int& top);
+// receives an icon glyph's path; points are already transformed
+struct MupdfIconPathSink {
+    virtual void MoveTo(PointF p) = 0;
+    virtual void LineTo(PointF p) = 0;
+    virtual void CurveTo(PointF p1, PointF p2, PointF p3) = 0;
+    // corners in order: (x,y), (x+w,y), (x+w,y+h), (x,y+h)
+    virtual void AddRect(PointF a, PointF b, PointF c, PointF d) = 0;
+    virtual void Close() = 0;
+    virtual ~MupdfIconPathSink() = default;
+};
+void ParseMupdfIconPath(MupdfIconPathSink& sink, const char* s);
 Color BarActiveBg();
 void AnnotChanged(WindowTab* tab);
 extern SeqStrings gLineEndingStyles;
@@ -123,9 +135,4 @@ constexpr int kFreeTextSizeMax = 72;
 
 constexpr int kOpacityPercentMin = 10;
 
-// GDI's Arial is not quite MuPDF's Helvetica; leave room rather than let the
-// annotation wrap a line the box showed whole
-constexpr float kInPlaceWidthSlack = 1.03f;
-
 void PostedStartContentsEdit(MainWindow* win);
-Size FreeTextGrowth(Size box, Size fitOld, Size fitNew);

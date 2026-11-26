@@ -8,7 +8,7 @@
 #include "FilterUtil.h"
 
 // non-default themes: a light yellow still readable on a dark row
-constexpr u8 kFilterMatchAlpha = 72;
+constexpr Color kFilterMatchBg = MkRgb(0xff, 0xee, 0x70);
 
 // approximate "is this UTF-8 byte part of a word character?": any byte >= 0x80
 // is part of a multi-byte rune (CJK / Cyrillic / accented Latin -> treat as a
@@ -17,12 +17,7 @@ static bool IsWordByte(u8 b) {
     if (b >= 0x80) {
         return true;
     }
-#if OS_WIN
-    return IsCharAlphaNumericW((WCHAR)b) || b == '_';
-#else
-    // ng: no IsCharAlphaNumericW off Windows (as in EngineMupdf.cpp)
-    return iswalnum((wint_t)b) != 0 || b == '_';
-#endif
+    return IsAlNumW(b) || b == '_';
 }
 
 void MarkFilterHighlights(Str text, const StrVec& filterWords, Vec<u8>& out, bool matchWholeWord) {
@@ -99,14 +94,9 @@ gp::El* FilterHighlightText(gp::Ctx* cx, Str text, const StrVec& filterWords, gp
             span->Bold();
         }
         if (hl) {
-            // orig's FillFilterMatchRect: a tint of the accent on the default
-            // theme, a shade of the row on the others
-            if (IsCurrentThemeDefault()) {
-                Color a = ThemeAccentColor();
-                span->Bg(gp::Rgba8(GetRed(a), GetGreen(a), GetBlue(a), kFilterMatchAlpha));
-            } else {
-                span->Bg(ToGpui(AccentColor(ThemeWindowControlBackgroundColor(), 40)));
-            }
+            // default theme uses the same yellow as orig's filter underlay
+            Color bg = IsCurrentThemeDefault() ? kColYellow : kFilterMatchBg;
+            span->Bg(ToGpui(bg))->Fg(ToGpui(kColBlack));
         }
         row->Child(span);
         i = j;

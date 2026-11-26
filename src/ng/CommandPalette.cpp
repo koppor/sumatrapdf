@@ -167,28 +167,6 @@ static void ExecuteCurrentSelection();
 static void StartThumbnailRendering();
 static void ThumbSelectPage(int pageNo);
 
-// clang-format off
-static i32 gCommandsNoActivate[] = {
-    CmdOptions,
-    CmdSetInverseSearch,
-    CmdChangeLanguage,
-    CmdHelpAbout,
-    CmdHelpOpenManual,
-    CmdHelpOpenManualOnWebsite,
-    CmdHelpOpenKeyboardShortcuts,
-    CmdHelpVisitWebsite,
-    CmdOpenFile,
-    CmdOpenFileNoHistory,
-    CmdProperties,
-    CmdNewWindow,
-    CmdDuplicateInNewWindow,
-    CmdListPrinters,
-    CmdTabGroupSave,
-    CmdTabGroupRestore,
-    0,
-};
-// clang-format on
-
 static TempStr QueryTemp() {
     CommandPaletteWnd* wnd = gCommandPaletteWnd;
     if (!wnd || !wnd->editQuery) {
@@ -745,9 +723,8 @@ static void ExecuteCurrentSelection() {
         return;
     }
     if (cmdId != 0) {
-        // ng: orig also decides which window to re-activate; the palette is
-        // inside the window here, so gCommandsNoActivate only documents that
-        IsCmdInList(cmdId, gCommandsNoActivate);
+        // ng: orig also re-activates a window (gCommandsNoActivate); the
+        // palette is inside the window here
         ScheduleDeleteAndExecCommand(cmdId);
         return;
     }
@@ -871,6 +848,9 @@ static bool RemoveSelectedItem() {
 }
 
 // orig's list-box dump. exit 2 when the palette is not open.
+// the list rows BuildList made, for tests
+static int gPaletteRowsBuilt = 0;
+
 TempStr CommandPaletteStateTemp(int* exitCodeOut) {
     str::Builder out;
     auto finish = [&](int code) -> TempStr {
@@ -936,6 +916,7 @@ TempStr CommandPaletteStateTemp(int* exitCodeOut) {
             rendered, nAnnots, annotPage, annotsDone));
     int editFocus = wnd->editQuery && wnd->editQuery->focused ? 1 : 0;
     int helpShown = (!wnd->thumbnailMode && ShowsSettingHelp(wnd)) ? 1 : 0;
+    out.Append(fmt("rowsBuilt=%d ", gPaletteRowsBuilt));
     out.Append(fmt("settingHelp=%d editFocus=%d selValue=%s selText=%s\n", helpShown, editFocus, selValue, selText));
     return finish(0);
 }
@@ -1144,15 +1125,8 @@ static void CollectFavorites(MainWindow* mainWin) {
     WindowTab* currTab = mainWin->CurrentTab();
     Str currFilePath = currTab ? currTab->filePath : Str();
 
-    FileState* currFs = nullptr;
-    if (currFilePath) {
-        for (FileState* fs : *gSettings->fileStates) {
-            if (str::Eq(fs->filePath, currFilePath)) {
-                currFs = fs;
-                break;
-            }
-        }
-    }
+    // the history matches paths ignoring case
+    FileState* currFs = currFilePath ? FileHistoryFindByPath(currFilePath) : nullptr;
     if (currFs) {
         AppendFavoritesForFile(wnd->favorites, currFs, true);
     }
@@ -1323,6 +1297,22 @@ void CommandPaletteOnSettingsReloaded() {
     int n = len(wnd->items);
     SetCurrentSelection(n == 0 ? -1 : std::min(currSel, n - 1));
     AppShellInvalidate(wnd->win);
+}
+
+// a reload replaced the document: the TOC and annotation rows point into the
+// freed controller
+void CommandPaletteOnDocumentReloaded(MainWindow* win) {
+    CommandPaletteWnd* wnd = gCommandPaletteWnd;
+    if (!wnd || !wnd->visible || wnd->win != win) {
+        return;
+    }
+    int currSel = wnd->sel;
+    CollectToc(win);
+    CollectAnnotations(win);
+    FilterPaletteStrings(*wnd, CommandPaletteSkipWS(QueryTemp()), wnd->items);
+    int n = len(wnd->items);
+    SetCurrentSelection(n == 0 ? -1 : std::min(currSel, n - 1));
+    AppShellInvalidate(win);
 }
 
 // orig's CommandPaletteWnd::OnCommand: Ctrl+A and Ctrl+C are accelerators
@@ -1532,96 +1522,97 @@ void PaletteView::OnThumbScroll(PaletteView*, gp::Ctx* cx, const gp::ScrollEvent
     gp::Notify(cx);
 }
 
-static gp::El* BuildList(CommandPaletteWnd* wnd, gp::Ctx* cx, float listDy) {
+static gp::El* PaletteRow(void* user, gp::Ctx* cx, int i) {
+    auto* wnd = (CommandPaletteWnd*)user;
+    if (!wnd || i < 0 || i >= len(wnd->items)) {
+        return nullptr;
+    }
     Color colBg = ThemeWindowControlBackgroundColor();
     Color colText = ThemeWindowTextColor();
     Color colMuted = ThemeWindowTextDisabledColor();
-    // keep the selected row visible; gpui has no EnsureVisible for a plain box
-    int visibleRows = std::max((int)(listDy / kPaletteRowDy), 1);
-    if (wnd->sel >= 0) {
-        float selTop = (float)wnd->sel * kPaletteRowDy;
-        float selBottom = selTop + kPaletteRowDy;
-        if (selTop < wnd->scrollOff) {
-            wnd->scrollOff = selTop;
-        } else if (selBottom > wnd->scrollOff + listDy) {
-            wnd->scrollOff = selBottom - listDy;
+    ItemDataCP* data = wnd->items.AtData(i);
+    Str itemText = wnd->items[i];
+    // the list's own inset, then the row's; the selection stays inside the inset
+    gp::El* row = gp::Div(cx->a)
+                      ->FlexRow()
+                      ->W(gp::kFill)
+                      ->H(kPaletteRowDy)
+                      ->Shrink0()
+                      ->ItemsCenter()
+                      ->PadX(kPaletteInsetDx)
+                      ->Radius(kPaletteSelectionRadius)
+                      ->PathClick(GpuiDup(cx->a, fmt("palette-row-%d", i)))
+                      ->OnClick(gp::ListenTo(gPaletteView, &PaletteView::OnRowClick, (intptr_t)i));
+    if (i == wnd->sel) {
+        row->Bg(ToGpui(AccentColor(colBg, 28)));
+    }
+    if (data->indent > 0) {
+        row->Child(gp::Div(cx->a)->W((float)(data->indent * 16))->Shrink0());
+    }
+    // a long directory must not push the filename off the left (#6104)
+    bool fileRow = len(data->filePath) > 0;
+    gp::El* left = gp::Div(cx->a)->FlexRow()->ItemsCenter()->ClipX();
+    if (fileRow) {
+        left->Shrink0();
+    } else {
+        left->Flex1()->MinW(0);
+    }
+    left->Child(FilterHighlightText(cx, itemText, wnd->filterWords, ToGpui(colText), kPaletteTextFontPx));
+    if (data->annot) {
+        Str contents = Contents(data->annot);
+        if (len(contents) > 0) {
+            left->Child(gp::TextEl(cx->a, GpuiDup(cx->a, str::JoinTemp(StrL("  "), contents)))
+                            ->Font(kPaletteTextFontPx)
+                            ->Fg(ToGpui(colMuted))
+                            ->Truncate());
         }
     }
-    float maxOff = std::max(0.f, (float)len(wnd->items) * kPaletteRowDy - listDy);
-    wnd->scrollOff = limitValue(wnd->scrollOff, 0.f, maxOff);
-    (void)visibleRows;
-
-    gp::El* list = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->H(listDy)->PadX(kPaletteInsetDx)->ScrollY(wnd->scrollOff);
-    int n = len(wnd->items);
-    for (int i = 0; i < n; i++) {
-        ItemDataCP* data = wnd->items.AtData(i);
-        Str itemText = wnd->items[i];
-        gp::El* row = gp::Div(cx->a)
-                          ->FlexRow()
-                          ->W(gp::kFill)
-                          ->H(kPaletteRowDy)
-                          ->Shrink0()
-                          ->ItemsCenter()
-                          ->PadX(kPaletteInsetDx)
-                          ->Radius(kPaletteSelectionRadius)
-                          ->PathClick(GpuiDup(cx->a, fmt("palette-row-%d", i)))
-                          ->OnClick(gp::ListenTo(gPaletteView, &PaletteView::OnRowClick, (intptr_t)i));
-        if (i == wnd->sel) {
-            row->Bg(ToGpui(AccentColor(colBg, 28)));
-        }
-        if (data->indent > 0) {
-            row->Child(gp::Div(cx->a)->W((float)(data->indent * 16))->Shrink0());
-        }
-        // a long directory must not push the filename off the left (#6104)
-        bool fileRow = len(data->filePath) > 0;
-        gp::El* left = gp::Div(cx->a)->FlexRow()->ItemsCenter()->ClipX();
+    row->Child(left);
+    // a color setting shows its color before the value, as in advanced settings
+    Color swatch;
+    if (PaletteRowColor(data, itemText, &swatch)) {
+        row->Child(gp::Div(cx->a)->W(kPaletteSwatchGap)->Shrink0());
+        row->Child(gp::Div(cx->a)
+                       ->W(kPaletteSwatchDx)
+                       ->H(kPaletteSwatchDx)
+                       ->Shrink0()
+                       ->Bg(ToGpui(swatch))
+                       ->Border(1, ToGpui(ThemeEdgeColor())));
+    }
+    TempStr right = PaletteRightColumnTemp(data);
+    if (len(right) > 0) {
+        // a setting's value reads as part of the row; one off its default is bold
+        bool settingValue = IsSettingRow(data) && len(data->settingPath) == 0;
+        bool emphasized = settingValue && SettingDiffersFromDefault(data);
+        gp::Rgba rightFg = ToGpui(settingValue ? colText : colMuted);
+        int boldLen = emphasized ? len(right) : 0;
+        gp::El* rightEl = FilterHighlightText(cx, right, wnd->filterWords, rightFg, kPaletteMetaFontPx, 0, boldLen);
         if (fileRow) {
-            left->Shrink0();
+            rightEl->Flex1()->MinW(0)->ClipX();
         } else {
-            left->Flex1()->MinW(0);
+            rightEl->Shrink0();
         }
-        left->Child(FilterHighlightText(cx, itemText, wnd->filterWords, ToGpui(colText), kPaletteTextFontPx));
-        if (data->annot) {
-            Str contents = Contents(data->annot);
-            if (len(contents) > 0) {
-                left->Child(gp::TextEl(cx->a, GpuiDup(cx->a, str::JoinTemp(StrL("  "), contents)))
-                                ->Font(kPaletteTextFontPx)
-                                ->Fg(ToGpui(colMuted))
-                                ->Truncate());
-            }
-        }
-        row->Child(left);
-        // a color setting shows its color before the value, as in advanced settings
-        Color swatch;
-        if (PaletteRowColor(data, itemText, &swatch)) {
-            row->Child(gp::Div(cx->a)->W(kPaletteSwatchGap)->Shrink0());
-            row->Child(gp::Div(cx->a)
-                           ->W(kPaletteSwatchDx)
-                           ->H(kPaletteSwatchDx)
-                           ->Shrink0()
-                           ->Bg(ToGpui(swatch))
-                           ->Border(1, ToGpui(ThemeEdgeColor())));
-        }
-        TempStr right = PaletteRightColumnTemp(data);
-        if (len(right) > 0) {
-            // a setting's value reads as part of the row; one off its default is bold
-            bool settingValue = IsSettingRow(data) && len(data->settingPath) == 0;
-            bool emphasized = settingValue && SettingDiffersFromDefault(data);
-            gp::Rgba rightFg = ToGpui(settingValue ? colText : colMuted);
-            int boldLen = emphasized ? len(right) : 0;
-            gp::El* rightEl = FilterHighlightText(cx, right, wnd->filterWords, rightFg, kPaletteMetaFontPx, 0, boldLen);
-            if (fileRow) {
-                rightEl->Flex1()->MinW(0)->ClipX();
-            } else {
-                rightEl->Shrink0();
-            }
-            row->Child(gp::Div(cx->a)->W(kPalettePadDx)->Shrink0());
-            row->Child(rightEl);
-        }
-        list->Child(row);
+        row->Child(gp::Div(cx->a)->W(kPalettePadDx)->Shrink0());
+        row->Child(rightEl);
     }
+    gPaletteRowsBuilt++;
+    return gp::Div(cx->a)->W(gp::kFill)->H(kPaletteRowDy)->Shrink0()->PadX(kPaletteInsetDx)->Child(row);
+}
+
+static gp::El* BuildList(CommandPaletteWnd* wnd, gp::Ctx* cx, float listDy) {
+    int n = len(wnd->items);
+    if (wnd->sel >= 0) {
+        wnd->scrollOff =
+            gp::VirtualListScrollToRow(n, kPaletteRowDy, wnd->sel, wnd->scrollOff, listDy, gp::ScrollStrategy::Top);
+    } else {
+        float maxOff = std::max(0.f, (float)n * kPaletteRowDy - listDy);
+        wnd->scrollOff = limitValue(wnd->scrollOff, 0.f, maxOff);
+    }
+
+    gp::El* frame = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->H(listDy);
     if (n == 0) {
-        list->Child(
+        Color colMuted = ThemeWindowTextDisabledColor();
+        frame->Child(
             gp::Div(cx->a)
                 ->W(gp::kFill)
                 ->H(kPaletteRowDy)
@@ -1630,8 +1621,11 @@ static gp::El* BuildList(CommandPaletteWnd* wnd, gp::Ctx* cx, float listDy) {
                 ->ItemsCenter()
                 ->Child(
                     gp::TextEl(cx->a, ToGpui(Tr("No result found")))->Font(kPaletteTextFontPx)->Fg(ToGpui(colMuted))));
+        return frame;
     }
-    return list;
+    frame->Child(VirtualRows(cx, GStrL("palette-list"), n, kPaletteRowDy, listDy, wnd->scrollOff, PaletteRow, wnd)
+                     ->W(gp::kFill));
+    return frame;
 }
 
 // orig's PageThumbnailsCtrl::SetBounds + DrawRow for ThumbnailsHost::Palette
@@ -1827,13 +1821,11 @@ static bool ShowsSettingHelp(CommandPaletteWnd* wnd) {
 
 // the doc comment of the selected setting, like the advanced settings dialog
 static gp::El* BuildSettingHelp(CommandPaletteWnd* wnd, gp::Ctx* cx) {
-    const gp::Theme& th = gp::ThemeNow(cx->app);
     Str comment;
     int idx = wnd->sel;
     if (idx >= 0 && idx < len(wnd->items)) {
         comment = wnd->items.AtData(idx)->settingComment;
     }
-    (void)th;
     return gp::Div(cx->a)
         ->W(gp::kFill)
         ->H(kSettingHelpDy)
@@ -1849,8 +1841,8 @@ static gp::El* BuildSettingHelp(CommandPaletteWnd* wnd, gp::Ctx* cx) {
 }
 
 static RectF PaletteBounds(MainWindow* win, CommandPaletteWnd* wnd) {
-    // orig sizes the palette to the frame: 640..1024 wide, at least 480 tall,
-    // and puts it 42 px below the frame's top edge
+    // orig sizes the palette to the frame: 640..1024 wide, at least 480 tall
+    // (160 here, inside the frame), and puts it 42 px below the frame's top edge
     float dx = (float)limitValue(win->frameRc.dx - 256, kPaletteMinDx, kPaletteMaxDx);
     dx = std::min(dx, (float)win->frameRc.dx - 32);
     float dy = std::max((float)win->frameRc.dy - kPaletteTopMargin - 24, 160.f);
@@ -1993,10 +1985,8 @@ static gp::El* PaletteCard(CommandPaletteWnd* wnd, gp::Ctx* cx, RectF bounds) {
     if (!gPaletteView.IsValid()) {
         gPaletteView = gp::EntityNewState<PaletteView>(cx->app);
     }
-    const gp::Theme& th = gp::ThemeNow(cx->app);
     wnd->editQuery->onChange = gp::ListenTo(gPaletteView, &PaletteView::OnInput);
 
-    (void)th;
     gp::El* card = gp::Div(cx->a)
                        ->FlexCol()
                        ->W(bounds.dx)

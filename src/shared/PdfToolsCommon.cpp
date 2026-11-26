@@ -14,6 +14,7 @@
 #include "EngineAll.h"
 #include "Annotation.h"
 #include "PdfCreator.h"
+#include "AnnotationsExport.h"
 #include "ImageReader.h"
 #include "PngOptimizer.h"
 #include "base/Pixmap.h"
@@ -32,16 +33,29 @@
 #include "PdfTools.h"
 #include "PdfToolsCommon.h"
 
-extern "C" int pdfbake_main(int argc, char** argv);
-extern "C" int pdfclean_main(int argc, char** argv);
-extern "C" int muconvert_main(int argc, char** argv);
-extern "C" void fz_set_optind(int val);
+Kind kNotifSaveSelectionAsImage = "notifSaveSelectionAsImage";
 
 // a usable page range: Delete Pages cannot take every page
 // the value of -p for a tool re-opening srcPath, the current tab's file
 char* PdfToolPasswordTemp(MainWindow* win, Str srcPath) {
     WindowTab* tab = win ? win->CurrentTab() : nullptr;
     return CStrTemp(EngineMupdfToolPasswordTemp(tab ? tab->GetEngine() : nullptr, srcPath));
+}
+
+// The file a tool that re-opens the PDF from disk reads: srcPath, or a temp copy
+// with the unsaved annotations (*tmpPath, deleted by the caller). Empty if saving failed.
+TempStr PdfToolInputTemp(EngineBase* engine, Str srcPath, TempStr* tmpPath) {
+    *tmpPath = {};
+    if (!engine || !EngineHasUnsavedAnnotations(engine)) {
+        return str::DupTemp(srcPath);
+    }
+    TempStr path = GetTempFilePathTemp(StrL("pdftool"));
+    if (len(path) == 0 || !EngineMupdfSaveCopy(engine, path)) {
+        file::Delete(path);
+        return {};
+    }
+    *tmpPath = path;
+    return path;
 }
 
 bool PageRangeOk(Str s, int pageCount, bool isExtract, Vec<int>& pages) {
@@ -216,16 +230,15 @@ bool KeepOnlyPagesWithAnnotations(EngineBase* engine, Vec<int>& pages) {
     }
 
     Vec<int> annotationPages;
+    VecReserve(annotationPages, len(annotations));
     for (Annotation* annotation : annotations) {
-        int pageNo = PageNo(annotation);
-        if (!VecContains(annotationPages, pageNo)) {
-            VecAppend(annotationPages, pageNo);
-        }
+        VecAppend(annotationPages, PageNo(annotation));
     }
+    std::sort(annotationPages.begin(), annotationPages.end());
 
     Vec<int> filteredPages;
     for (int pageNo : pages) {
-        if (VecContains(annotationPages, pageNo)) {
+        if (std::binary_search(annotationPages.begin(), annotationPages.end(), pageNo)) {
             VecAppend(filteredPages, pageNo);
         }
     }
@@ -295,6 +308,54 @@ void PageNumberPositionLabels(StrVec& out) {
     }
 }
 
+void PdfCompressQualityLabels(StrVec& out) {
+    for (Str label : {Tr("Same quality"), Tr("Balanced (150 dpi pictures)"), Tr("Smallest (96 dpi pictures)")}) {
+        out.Append(label);
+    }
+}
+
+bool PdfCompressQualityFromName(Str name, PdfCompressQuality& out) {
+    if (str::EqI(name, StrL("same"))) {
+        out = PdfCompressQuality::Same;
+    } else if (str::EqI(name, StrL("balanced"))) {
+        out = PdfCompressQuality::Balanced;
+    } else if (str::EqI(name, StrL("smallest"))) {
+        out = PdfCompressQuality::Smallest;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// mutool clean's options for Compress PDF. Color and gray pictures above 1.5x
+// the target dpi are scaled down to it and saved as JPEG, kept as they were
+// when that isn't smaller. Black and white scans are left alone.
+void AppendPdfCompressArgs(Vec<char*>& argv, PdfCompressQuality quality) {
+    static const char* lossless[] = {"-gggg", "-e", "100", "-f", "-i", "-t", "-Z"};
+    for (const char* a : lossless) {
+        VecAppend(argv, (char*)a);
+    }
+    // the subsample options take threshold,target dpi
+    static const char* balanced[] = {"--color-image-subsample-dpi=225,150", "--gray-image-subsample-dpi=225,150",
+                                     "--color-image-recompress-method=jpeg:75",
+                                     "--gray-image-recompress-method=jpeg:75"};
+    static const char* smallest[] = {"--color-image-subsample-dpi=144,96", "--gray-image-subsample-dpi=144,96",
+                                     "--color-image-recompress-method=jpeg:60",
+                                     "--gray-image-recompress-method=jpeg:60"};
+    if (quality == PdfCompressQuality::Same) {
+        return;
+    }
+    // average only halves, so 300 dpi stays 300 for a 150 target
+    static const char* bicubic[] = {"--color-image-subsample-method=bicubic", "--gray-image-subsample-method=bicubic"};
+    for (const char* a : bicubic) {
+        VecAppend(argv, (char*)a);
+    }
+    const char** extra = quality == PdfCompressQuality::Balanced ? balanced : smallest;
+    for (int i = 0; i < dimofi(balanced); i++) {
+        VecAppend(argv, (char*)extra[i]);
+    }
+}
+
 // what Add Watermark (gray, see-through, across the middle) and Add Page
 // Numbers (at positionIdx, numbered from 1) put on the pages
 void DialogStamps(bool watermark, Str text, const Vec<int>& pages, int positionIdx, Vec<PdfStamp>& out) {
@@ -339,6 +400,65 @@ bool ConvertImageCollectionToPdf(EngineBase* engine, Str destPath) {
     TempStr producer = fmt("SumatraPDF %s", currentVersion);
     PdfCreator::SetProducerName(producer);
     return PdfCreator::SaveImageCollectionAsPdf(destPath, engine);
+}
+
+// OFD keeps its text and vector paths; image collections become one image per page
+static bool ConvertDocToPdf(EngineBase* engine, Str destPath) {
+    if (EngineMupdfIsOfd(engine)) {
+        return EngineMupdfSaveAsPdf(engine, destPath);
+    }
+    return ConvertImageCollectionToPdf(engine, destPath);
+}
+
+// Make PDF From Images: the Open dialog's filter, "\1" separated as ng's
+Str ImagesToPdfFilter() {
+    return StrL(
+        "Images\1*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.tif;*.tiff;*.webp;*.heic;*.heif;*.avif;*.jp2;*.jxl\1"
+        "All files\1*.*\1");
+}
+
+// next to the first image, named after it: scan1.jpg -> scan1.pdf
+TempStr ImagesToPdfDestTemp(Str firstImage) {
+    return MakeUniqueFilePathTemp(str::JoinTemp(path::GetPathNoExtTemp(firstImage), StrL(".pdf")));
+}
+
+// Writes a PDF with a page per image to dest. Empty when it worked, else what
+// to tell the user.
+TempStr MakePdfFromImagesTemp(const StrVec& paths, Str dest) {
+    TempStr producer = fmt("SumatraPDF %s", currentVersion);
+    PdfCreator::SetProducerName(producer);
+    int bad = 0;
+    ImagesPdfResult res = PdfCreator::SaveImagesAsPdf(paths, dest, &bad);
+    if (res == ImagesPdfResult::BadImage) {
+        return fmt(Tr("Couldn't load image '%s'").s, path::GetBaseNameTemp(paths[bad]));
+    }
+    if (res == ImagesPdfResult::WriteFailed) {
+        return fmt(Tr("Couldn't save '%s'").s, dest);
+    }
+    return {};
+}
+
+// Export Annotations: next to the document, foo.pdf -> foo-annotations.md
+TempStr AnnotationsExportDestTemp(Str docPath) {
+    TempStr base = str::JoinTemp(path::GetPathNoExtTemp(docPath), StrL("-annotations.md"));
+    return MakeUniqueFilePathTemp(base);
+}
+
+// Writes the document's annotations (unsaved ones too) to dest: CSV for a .csv
+// file, else Markdown. Empty when it worked, else what to tell the user.
+TempStr ExportAnnotationsTemp(EngineBase* engine, Str docPath, Str dest) {
+    Vec<int> pages;
+    for (int i = 1; i <= engine->PageCount(); i++) {
+        VecAppend(pages, i);
+    }
+    Vec<AnnotRow> rows;
+    CollectAnnotRows(engine, pages, rows);
+    bool csv = str::EndsWithI(dest, StrL(".csv"));
+    TempStr data = csv ? AnnotationsCsvTemp(rows) : AnnotationsMarkdownTemp(rows, path::GetBaseNameTemp(docPath));
+    if (!file::WriteFile(dest, data)) {
+        return fmt(Tr("Couldn't save '%s'").s, dest);
+    }
+    return {};
 }
 
 // 0 if not a usable font size
@@ -410,9 +530,8 @@ TempStr ConvertImageCollectionToPdfResultTemp(Str srcPath, Str destPath, int* ex
     if (!engine) {
         return finish(1, str::DupTemp(StrL("ERROR engine-create-failed")));
     }
-    // as the Convert to PDF dialog: OFD as vector pages
-    bool ok = EngineMupdfIsOfd(engine) ? EngineMupdfSaveAsPdf(engine, destPath)
-                                       : ConvertImageCollectionToPdf(engine, destPath);
+    // as the Convert to PDF dialog
+    bool ok = ConvertDocToPdf(engine, destPath);
     SafeEngineRelease(&engine);
     if (!ok) {
         return finish(1, str::DupTemp(StrL("ERROR convert-failed")));
@@ -475,8 +594,7 @@ TempStr ExtractPdfPagesResultTemp(Str destPath, Str pagesSpec, int annotsOnly, i
         (char*)"-f",        (char*)"-i",         (char*)"-t",
         (char*)"-Z",        CStrTemp(inputPath), CStrTemp(destPath),
         CStrTemp(pageRange)};
-    fz_set_optind(0);
-    int res = pdfclean_main(dimofi(argv), argv);
+    int res = RunPdfToolMain(pdfclean_main, dimofi(argv), argv);
     if (tmpPath) {
         file::Delete(tmpPath);
     }
@@ -658,7 +776,7 @@ bool PagesFitDpi(EngineBase* engine, const Vec<int>& pages, int dpi) {
 // render each page at dpi and write it to templatePath with <N> replaced by
 // the 1-based page number. Returns how many files were written.
 int ConvertPagesToImages(EngineBase* engine, int rotation, Str templatePath, const Vec<int>& pages, int dpi,
-                         Str* firstPathOwnedOut) {
+                         Str* firstPathOwnedOut, const Func1<int>& onProgress) {
     if (firstPathOwnedOut) {
         *firstPathOwnedOut = {};
     }
@@ -673,7 +791,9 @@ int ConvertPagesToImages(EngineBase* engine, int rotation, Str templatePath, con
     float zoom = SaveSelectionZoom(engine, (float)dpi);
     int nOk = 0;
     StrVec pngs;
+    int nDone = 0;
     for (int pageNo : pages) {
+        onProgress.Call(nDone++);
         if (!PageFitsDpi(engine, pageNo, dpi)) {
             logf("ConvertPagesToImages: page %d at %d DPI is too large\n", pageNo, dpi);
             continue;
@@ -864,11 +984,8 @@ TempStr SaveSelectionAsImageResultTemp(Str destPath, int dpi, int pageNo, int x,
     return finish(0, fmt("OK w=%d h=%d path=%s", w, h, withExt));
 }
 
-bool ExtractTextViaEngine(MainWindow* win, Str destPath, Str pages) {
-    if (!win || !win->ctrl) {
-        return false;
-    }
-    DisplayModel* dm = win->ctrl->AsFixed();
+bool ExtractTextViaEngine(WindowTab* tab, Str destPath, Str pages) {
+    DisplayModel* dm = tab ? tab->AsFixed() : nullptr;
     if (!dm) {
         return false;
     }
@@ -902,4 +1019,283 @@ void SaveSelImgThread(SaveSelImgWork* d) {
     FreePixmap(d->px);
     d->px = nullptr;
     uitask::Post(MkFunc0(FinishSaveSelImg, d), "FinishSaveSelImg");
+}
+
+// the tools keep getopt state in globals: one runs at a time
+static Mutex gPdfToolMutex;
+
+int RunPdfToolMain(PdfToolMain toolMain, int argc, char** argv) {
+    ScopedMutex lock(&gPdfToolMutex);
+    fz_set_optind(0);
+    return toolMain(argc, argv);
+}
+
+PdfToolJob* NewPdfToolJob(PdfToolMain toolMain, Str logName, Str destPath, Str failMsg, Str failTitle) {
+    auto* job = new PdfToolJob();
+    job->toolMain = toolMain;
+    job->logName = str::Dup(logName);
+    job->destPath = str::Dup(destPath);
+    job->failMsg = str::Dup(failMsg);
+    job->failTitle = str::Dup(failTitle);
+    return job;
+}
+
+// tmpPath: the input's temp copy, if any, which the job deletes
+void SetPdfToolJobArgs(PdfToolJob* job, char** argv, int argc, Str tmpPath) {
+    for (int i = 0; i < argc; i++) {
+        job->args.Append(Str(argv[i]));
+    }
+    if (len(tmpPath) > 0) {
+        job->tmpPath = str::Dup(tmpPath);
+    }
+}
+
+void FreePdfToolJob(PdfToolJob* job) {
+    str::Free(job->tmpPath);
+    str::Free(job->destPath);
+    str::Free(job->logName);
+    str::Free(job->failMsg);
+    str::Free(job->failTitle);
+    delete job;
+}
+
+static void PdfToolJobDone(PdfToolJob* job) {
+    if (job->res == 0) {
+        logf("%s: succeeded\n", job->logName);
+    } else {
+        logf("%s: failed with %d\n", job->logName, job->res);
+    }
+    if (job->onFinish.IsValid()) {
+        job->onFinish.Call(job);
+    } else {
+        FinishPdfToolJob(job);
+    }
+    FreePdfToolJob(job);
+}
+
+int PdfToolJob::Run() {
+    Vec<char*> argv;
+    for (Str s : args) {
+        VecAppend(argv, CStrTemp(s));
+    }
+    return RunPdfToolMain(toolMain, len(argv), argv.els);
+}
+
+static void PdfToolJobThread(PdfToolJob* job) {
+    job->res = job->Run();
+    if (len(job->tmpPath) > 0) {
+        file::Delete(job->tmpPath);
+    }
+    uitask::Post(MkFunc0(PdfToolJobDone, job), "PdfToolJobDone");
+}
+
+// a headless caller (tests) needs the result now
+int RunPdfToolJobNow(PdfToolJob* job) {
+    int res = job->Run();
+    if (len(job->tmpPath) > 0) {
+        file::Delete(job->tmpPath);
+    }
+    FreePdfToolJob(job);
+    return res;
+}
+
+// the job outlives its progress tasks: PdfToolJobDone is posted after them
+static void PostPdfToolJobProgress(PdfToolJob* job, int nDone) {
+    AtomicIntSet(&job->nDone, nDone);
+    uitask::Post(MkFunc0(PdfToolJobProgress, job), "PdfToolJobProgress");
+}
+
+static void InitJob(PdfToolJob* job, Str logName, Str destPath, Str failMsg, Str failTitle) {
+    job->logName = str::Dup(logName);
+    job->destPath = str::Dup(destPath);
+    job->failMsg = str::Dup(failMsg);
+    job->failTitle = str::Dup(failTitle);
+}
+
+// stamps a clone of the document: cloning off the UI thread is safe
+// (thumbnails do it) and the reference keeps the engine alive
+struct StampJob : PdfToolJob {
+    EngineBase* engine = nullptr;
+    bool watermark = true;
+    Str text; // owned
+    Vec<int> pages;
+    int posIdx = 0;
+
+    ~StampJob() override {
+        SafeEngineRelease(&engine);
+        str::Free(text);
+    }
+    int Run() override {
+        Vec<PdfStamp> stamps;
+        DialogStamps(watermark, text, pages, posIdx, stamps);
+        Str err;
+        if (StampPdfToFile(engine, stamps, destPath, &err)) {
+            return 0;
+        }
+        logf("StampJob: failed: %s\n", err);
+        str::ReplaceWithCopy(&failMsg, err);
+        return 1;
+    }
+};
+
+PdfToolJob* NewStampJob(EngineBase* engine, bool watermark, Str text, const Vec<int>& pages, int posIdx, Str destPath) {
+    auto* job = new StampJob();
+    Str title = watermark ? Tr("Add Watermark") : Tr("Add Page Numbers");
+    InitJob(job, StrL("PdfStampDoIt"), destPath, {}, title);
+    engine->AddRef();
+    job->engine = engine;
+    job->watermark = watermark;
+    job->text = str::Dup(text);
+    job->pages = pages;
+    job->posIdx = posIdx;
+    return job;
+}
+
+// render threads already render the document's pages concurrently, so one
+// more thread may too; the reference keeps the engine alive
+struct ImagesJob : PdfToolJob {
+    EngineBase* engine = nullptr;
+    int rotation = 0;
+    Vec<int> pages;
+    int dpi = 0;
+
+    ~ImagesJob() override { SafeEngineRelease(&engine); }
+    int Run() override {
+        Str firstPath;
+        auto onProgress = MkFunc1(PostPdfToolJobProgress, (PdfToolJob*)this);
+        int nOk = ConvertPagesToImages(engine, rotation, destPath, pages, dpi, &firstPath, onProgress);
+        logf("ImagesJob: wrote %d of %d file(s)\n", nOk, len(pages));
+        if (nOk == 0) {
+            str::Free(firstPath);
+            return 1;
+        }
+        // the file the dialog shows
+        str::Free(destPath);
+        destPath = firstPath;
+        return 0;
+    }
+};
+
+PdfToolJob* NewImagesJob(EngineBase* engine, int rotation, Str templatePath, const Vec<int>& pages, int dpi) {
+    auto* job = new ImagesJob();
+    InitJob(job, StrL("ConvertPdfToImages"), templatePath, Tr("Failed to convert to images."), Tr("Convert to Images"));
+    engine->AddRef();
+    job->engine = engine;
+    job->rotation = rotation;
+    job->pages = pages;
+    job->dpi = dpi;
+    job->nTotal = len(pages);
+    job->done = PdfToolDone::ShowDest;
+    return job;
+}
+
+// lays the book out anew from its file: no engine of the UI's is touched
+struct EpubToPdfJob : PdfToolJob {
+    Str srcPath; // owned
+    float pageDx = 0;
+    float pageDy = 0;
+    int fontSize = 0;
+
+    ~EpubToPdfJob() override { str::Free(srcPath); }
+    int Run() override {
+        int nPages = EngineMupdfEbookToPdf(srcPath, destPath, pageDx, pageDy, (float)fontSize);
+        logf("ConvertEpubToPdf: wrote %d pages\n", nPages);
+        return nPages > 0 ? 0 : 1;
+    }
+};
+
+PdfToolJob* NewEpubToPdfJob(Str srcPath, Str destPath, const EbookPdfPageSize& ps, int fontSize) {
+    auto* job = new EpubToPdfJob();
+    InitJob(job, StrL("ConvertEpubToPdf"), destPath, Tr("Failed to save a file"), Tr("Convert EPUB to PDF"));
+    job->srcPath = str::Dup(srcPath);
+    job->pageDx = ps.dx;
+    job->pageDy = ps.dy;
+    job->fontSize = fontSize;
+    return job;
+}
+
+struct CajToPdfJob : PdfToolJob {
+    Str srcPath; // owned
+
+    ~CajToPdfJob() override { str::Free(srcPath); }
+    int Run() override {
+        if (ConvertCajToPdf(srcPath, destPath)) {
+            return 0;
+        }
+        str::ReplaceWithCopy(&failMsg, CajErrorReasonTemp(srcPath));
+        return 1;
+    }
+};
+
+PdfToolJob* NewCajToPdfJob(Str srcPath, Str destPath) {
+    auto* job = new CajToPdfJob();
+    InitJob(job, StrL("ConvertCajToPdf"), destPath, {}, Tr("Convert CAJ to PDF"));
+    job->srcPath = str::Dup(srcPath);
+    return job;
+}
+
+// converts the open document: its engine already serves concurrent render
+// threads (OFD conversion holds docLock); the reference keeps it alive
+struct ConvertToPdfJob : PdfToolJob {
+    EngineBase* engine = nullptr;
+
+    ~ConvertToPdfJob() override { SafeEngineRelease(&engine); }
+    int Run() override { return ConvertDocToPdf(engine, destPath) ? 0 : 1; }
+};
+
+PdfToolJob* NewConvertToPdfJob(EngineBase* engine, Str destPath) {
+    auto* job = new ConvertToPdfJob();
+    InitJob(job, StrL("ConvertToPdf"), destPath, Tr("Failed to save a file"), Tr("Convert to PDF"));
+    engine->AddRef();
+    job->engine = engine;
+    return job;
+}
+
+// merges into a temp file, then copies it over destPath, which may be one of
+// the sources
+struct MergeJob : PdfToolJob {
+    StrVec paths;
+    StrVec passwords;
+    Vec<PdfMergePage> pages;
+
+    int Run() override {
+        Vec<PdfMergeSource> srcs;
+        for (int i = 0; i < len(paths); i++) {
+            VecAppend(srcs, PdfMergeSource{paths[i], passwords[i]});
+        }
+        TempStr mergedPath = GetTempFilePathTemp(StrL("merge"));
+        bool ok = len(mergedPath) > 0 && EngineMupdfMergePdfs(srcs, pages, mergedPath);
+        if (ok) {
+            Str data = file::ReadFile(mergedPath);
+            ok = len(data) > 0 && file::WriteFile(destPath, data);
+            str::Free(data);
+        }
+        if (len(mergedPath) > 0) {
+            file::Delete(mergedPath);
+        }
+        logf("MergeJob: %d pages from %d files to '%s', ok: %d\n", len(pages), len(srcs), destPath, (int)ok);
+        return ok ? 0 : 1;
+    }
+};
+
+// srcCopy: a copy of the first source with its unsaved changes, deleted after
+PdfToolJob* NewMergeJob(const Vec<PdfMergeSource>& srcs, const Vec<PdfMergePage>& pages, Str srcCopy, Str destPath) {
+    auto* job = new MergeJob();
+    InitJob(job, StrL("MergePdf"), destPath, fmt(Tr("Couldn't save '%s'").s, destPath), Tr("Merge PDF"));
+    for (const PdfMergeSource& src : srcs) {
+        job->paths.Append(src.path);
+        job->passwords.Append(src.password);
+    }
+    if (len(srcCopy) > 0) {
+        job->paths.SetAt(0, srcCopy);
+        job->tmpPath = str::Dup(srcCopy);
+    }
+    job->pages = pages;
+    job->done = PdfToolDone::ReloadDest;
+    return job;
+}
+
+// a big PDF takes seconds to rewrite: off the UI thread
+void StartPdfToolJob(PdfToolJob* job) {
+    RunAsync(MkFunc0(PdfToolJobThread, job), StrL("PdfToolJob"));
 }

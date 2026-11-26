@@ -46,6 +46,7 @@
 #include "gui/DialogWidgets.h"
 #include "shared/PdfToolsCommon.h"
 #include "gui/ToolWindow.h"
+#include "gui/WasmBridge.h"
 #include "SumatraDialogs.h"
 #include "ImageSaveCropResize.h"
 #include "ImageSaveCropResizeCommon.h"
@@ -721,6 +722,10 @@ static void FinishSave(Str dest) {
     MainWindow* win = gImgEdit.win;
     TempStr saved = str::DupTemp(dest);
     logf("ImageEdit: saved '%s'\n", saved);
+#if OS_WASM
+    // a file in MEMFS is not a file the user has; hand it to the browser
+    WasmDownloadFile(saved);
+#endif
     CloseImageEditWindow();
     if (gImageEditHost.OpenSavedFile) {
         gImageEditHost.OpenSavedFile(win, saved);
@@ -883,6 +888,9 @@ void ShowImageEditWindow(HWND parent, ImageEditMode mode, Str filePath, Rendered
 }
 #endif
 
+static void OpenImageEdit(MainWindow* win, ImageEditMode mode, Str filePath, Pixmap* px, bool fromRendered,
+                          bool selectPdf, Str originalData, bool closeOnEsc);
+
 void ShowImageEditWindow(MainWindow* win, ImageEditMode mode, Str filePath, RenderedBitmap* rbmp, bool selectPdf,
                          Str originalData, bool closeOnEsc) {
     if (!IsMainWindowValidAndNotClosing(win)) {
@@ -897,12 +905,7 @@ void ShowImageEditWindow(MainWindow* win, ImageEditMode mode, Str filePath, Rend
         // ng: orig keeps the bitmap and the caller deletes it; here the
         // Pixmap takes its pixels over, so the editor owns it from now on
 #if OS_WIN
-        px = PixmapFromRenderedBitmap(rbmp);
-        if (px && px->format == PixmapFormat::Native) {
-            Pixmap* copy = PixmapCopyAs32bppDIB(px);
-            FreePixmap(px);
-            px = copy;
-        }
+        px = PixmapToBgra(PixmapFromRenderedBitmap(rbmp));
 #else
         // ng: a RenderedBitmap is win32-only, so rbmp is always null here
 #endif
@@ -914,11 +917,28 @@ void ShowImageEditWindow(MainWindow* win, ImageEditMode mode, Str filePath, Rend
         logf("ShowImageEditWindow: no image ('%s')\n", filePath);
         return;
     }
+    OpenImageEdit(win, mode, filePath, px, fromRendered, selectPdf, originalData, closeOnEsc);
+}
 
+// px is an image taken from a document; the editor owns it
+void ShowImageEditWindowPixmap(MainWindow* win, ImageEditMode mode, Str filePath, Pixmap* px, bool selectPdf,
+                               Str originalData) {
+    if (!IsMainWindowValidAndNotClosing(win) || !px) {
+        FreePixmap(px);
+        return;
+    }
+    InitImageEditHost();
+    CloseImageEditWindow();
+    OpenImageEdit(win, mode, filePath, px, true, selectPdf, originalData, false);
+}
+
+static void OpenImageEdit(MainWindow* win, ImageEditMode mode, Str filePath, Pixmap* px, bool fromRendered,
+                          bool selectPdf, Str originalData, bool closeOnEsc) {
     gImgEdit.win = win;
     gImgEdit.mode = mode;
     gImgEdit.fromRenderedBitmap = fromRendered;
-    gImgEdit.closeWithEsc = closeOnEsc || (gImageEditHost.escToExit && mode == ImageEditMode::Save);
+    bool escToExit = gImageEditHost.EscToExit && gImageEditHost.EscToExit();
+    gImgEdit.closeWithEsc = closeOnEsc || (escToExit && mode == ImageEditMode::Save);
     gImgEdit.srcPixmap = px;
     gImgEdit.imgW = px->width;
     gImgEdit.imgH = px->height;
@@ -950,6 +970,7 @@ void ShowImageEditWindow(MainWindow* win, ImageEditMode mode, Str filePath, Rend
     SetDestPath(dest);
 
     gImgEdit.visible = true;
+    DialogsTrackFrameDialog(IsImageEditWindowVisible, [] { return gImgEdit.win; }, CloseImageEditWindow);
     ImageEditOpenToolWindow(win);
     logf("%s\n", ImageEditStateTemp());
     AppShellInvalidate(win);
@@ -1011,6 +1032,9 @@ static void OnDestPathPicked(SavePathArgs* args) {
         return;
     }
     SetDestPath(args->path);
+    if (gImgEdit.tw) {
+        ToolWindowActivate(gImgEdit.tw);
+    }
     int idx = FormatIdxFromExt(path::GetExtTemp(args->path));
     for (int i = 0; i < len(gImgEdit.formatIndices); i++) {
         if (gImgEdit.formatIndices[i] == idx) {
@@ -1035,8 +1059,13 @@ void ImageEditView::OnBrowse(ImageEditView*, gp::Ctx* cx, const gp::ClickEvent*)
                       "BMP Files\1*.bmp\1"
                       "All Files\1*.*\1"));
     args->noDefExt = true;
+    args->pickOnly = true;
     args->onDone = MkFunc1Void<SavePathArgs*>(OnDestPathPicked);
     ShowSavePathDialog(args);
+    // the port's dialog is drawn in the main window, which can be behind the editor
+    if (gImgEdit.tw && IsSavePathDialogVisible()) {
+        AppShellActivateWindow(gImgEdit.win);
+    }
     gp::Notify(cx);
 }
 
@@ -1740,10 +1769,13 @@ gp::El* ImageEditWindowBuild(MainWindow* win, gp::Ctx* cx) {
     body->Child(gp::TextEl(cx->a, GpuiDup(cx->a, InfoTextTemp()))->Font(12)->Fg(th.mutedFg));
 
     gp::El* destRow = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->ItemsCenter()->Gap(8);
-    destRow->Child(gp::Div(cx->a)->Flex1()->Child(gpc::Input::New(cx, GStrL("imgedit-dest"), gImgEdit.destEdit)
-                                                      ->WithSize(gp::UiSize::Small)
-                                                      ->W(gp::kFill)
-                                                      ->IntoEl()));
+    destRow->Child(
+        gp::Div(cx->a)->Flex1()->Child(EditStyle(cx,
+                                                 gpc::Input::New(cx, GStrL("imgedit-dest"), gImgEdit.destEdit)
+                                                     ->WithSize(gp::UiSize::Small)
+                                                     ->W(gp::kFill)
+                                                     ->IntoEl(),
+                                                 gImgEdit.destEdit, EditLook::Frame)));
     destRow->Child(gpc::Button::New(cx, GStrL("imgedit-browse"))
                        ->Label(ToGpui(HostTr(StrL("Browse..."))))
                        ->WithSize(gp::UiSize::Small)

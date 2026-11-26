@@ -389,7 +389,12 @@ function sumatrapdf_files()
     "HomePageCommon.*",
     "OpenFromUrlCommon.*",
     "SumatraPDFWebCommon.*",
+    "ServerFiles.*",
+    "ContentHash.*",
+    "Cli.*",
+    "AnnotationsExport.*",
     "AppHelpersCommon.*",
+    "SessionStateCommon.*",
     "BrowserViewCommon.*",
     "Installer.*",
     "InstallerCommon.cpp",
@@ -468,6 +473,7 @@ function sumatrapdf_files()
     "VirtualDesktop.h",
     "SumatraPDF.h",
     "SumatraPDF.rc",
+    "ToolPipe.h",
     "DocumentProperties.*",
     "DocumentPropertiesCommon.*",
     "EutlTrust.*",
@@ -552,7 +558,6 @@ end
 
 function base_files()
   files_in_dir("src/base", {
-    "ApiHook.*",
     "Archive.*",
     "Base.h",
     "Base.cpp",
@@ -580,16 +585,13 @@ function base_files()
     "Http.h",
     "Http.cpp",
     "JsonParser.*",
-    "Log.h",
     "LzmaSimpleArchive.*",
     "Pixmap.*",
-    "RegistryPaths.*",
     "AutoWin.h",
     "SettingsUtil.*",
     "SquareTreeParser.*",
     "StrQueue.*",
     "TgaReader.*",
-    "TxtParser.*",
     "UITask.*",
     "WinDynCalls.h",
     "WinDynCalls.cpp",
@@ -614,7 +616,7 @@ function gui_files()
     "GfxDirect2D.cpp",
     "GuiColors.*",
     "Layout.*",
-    "PasswordDialog.*",
+    "PasswordDialog.h",
     "PlatformFont.*",
     "PlatformText.*",
     "PlatformWindow.h",
@@ -628,6 +630,7 @@ function gui_files()
     "*.h",
     "*.cpp",
   })
+  files { "src/shared/gui/TabColors.h" }
 end
 
 function engines_files()
@@ -1681,10 +1684,11 @@ end
 
 function search_filter_files()
   files_in_dir("src/ifilter", {
-    "CPdfFilter.*",
+    "EpubFilter.*",
     "FilterBase.h",
     "PdfFilter.*",
     "SearchFilterDll.cpp",
+    "TeXFilter.*",
   })
   files_in_dir("src/base", {
     "Archive.*",
@@ -1710,65 +1714,6 @@ function search_filter_files()
     "RegistrySearchFilter.*",
     "SumatraLog.*",
   })
-
-  filter { "configurations:Debug or DebugFull" }
-  files_in_dir("src/ifilter", {
-    "TeXFilter.*",
-    "EpubFilter.*",
-  })
-  files {
-    "src/shared/EbookDoc.*",
-    "src/shared/MobiDoc.*",
-    "src/PalmDbReader.*",
-  }
-  filter {}
-end
-
-function pdf_preview2_files()
-  files_in_dir("src/previewer2", {
-    "PdfPreview.*",
-    "PdfPreviewDll.cpp",
-  })
-
-  files_in_dir("src", {
-    "CrashHandlerNoOp.cpp",
-    "RegistryPreview.*",
-    "SumatraConfig.*",
-    "base/Base.*",
-    "gui/Dpi.h",
-    "gui/Dpi.cpp",
-    "base/File.h",
-    "base/File.cpp",
-    "base/Log.h",
-    "base/LogNoOp.cpp",
-    "base/WinDynCalls.h",
-    "base/WinDynCalls.cpp",
-    "base/Win.*",
-  })
-end
-
-function search_filter2_files()
-  files_in_dir("src/ifilter2", {
-    "CPdfFilter.*",
-    "FilterBase.h",
-    "PdfFilter.*",
-    "SearchFilterDll.cpp",
-  })
-  files_in_dir("src", {
-    "CrashHandlerNoOp.cpp",
-    "RegistrySearchFilter.*",
-    "SumatraConfig.*",
-    "base/Base.*",
-    "gui/Dpi.h",
-    "gui/Dpi.cpp",
-    "base/File.h",
-    "base/File.cpp",
-    "base/Log.h",
-    "base/LogNoOp.cpp",
-    "base/WinDynCalls.h",
-    "base/WinDynCalls.cpp",
-    "base/Win.*",
-  })
 end
 
 function a_gumbo_files()
@@ -1781,9 +1726,7 @@ end
 
 function sumatrapdf_tool_files()
   files_in_dir("src", {
-    "CrashHandlerNoOp.cpp",
-    "EmbeddedResources.*",
-    "SumatraLog.*",
     "sumatrapdf-tool.cpp",
+    "ToolPipe.h",
   })
 end

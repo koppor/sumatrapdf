@@ -29,28 +29,31 @@ static void LogAppendNum(str::Builder& s, int n, Str suffix) {
 }
 
 void LogConstraints(Constraints c, Str suffix) {
+    if (!gEnableDebugLayout) {
+        return;
+    }
     // Debug-only; "dx: Inf - Inf dy: Inf - Inf <suffix>" is tiny.
     char sScratch[128]{};
     str::Builder s;
     s.UseExternalBuffer(Str(sScratch, sizeofi(sScratch)));
     if (c.min.dx == c.max.dx) {
-        dbglayout(StrL("dx: "));
+        s.Append(StrL("dx: "));
         LogAppendNum(s, c.min.dx, StrL(" "));
     } else {
-        dbglayout(StrL("dx: "));
+        s.Append(StrL("dx: "));
         LogAppendNum(s, c.min.dx, StrL(" - "));
         LogAppendNum(s, c.max.dx, StrL(" "));
     }
     if (c.min.dy == c.max.dy) {
-        dbglayout(StrL("dy: "));
+        s.Append(StrL("dy: "));
         LogAppendNum(s, c.min.dy, StrL(" "));
     } else {
-        dbglayout(StrL("dy: "));
+        s.Append(StrL("dy: "));
         LogAppendNum(s, c.min.dy, StrL(" - "));
         LogAppendNum(s, c.max.dy, StrL(" "));
     }
     s.Append(suffix);
-    dbglayout(fmt("%s", ToStr(s)));
+    dbglayout(ToStr(s));
 }
 
 bool IsCollapsed(ILayout* l) {
@@ -166,10 +169,6 @@ bool Constraints::IsTight() const {
     return HasTightWidth() && HasTightHeight();
 }
 
-bool Constraints::IsZero() const {
-    return min.dx == 0 && min.dy == 0 && max.dx == 0 && max.dy == 0;
-}
-
 Constraints Constraints::Loosen() const {
     return Constraints{Size{}, max};
 }
@@ -232,37 +231,58 @@ Padding::~Padding() {
 
 // ILayout
 Size Padding::Layout(const Constraints bc) {
-    dbglayout(StrL("Padding::Layout() "));
-    LogConstraints(bc, StrL("\n"));
+    if (gEnableDebugLayout) {
+        dbglayout(StrL("Padding::Layout() "));
+        LogConstraints(bc, StrL("\n"));
+    }
 
     auto hinset = insets.left + insets.right;
     auto vinset = insets.top + insets.bottom;
+    if (!child) {
+        childSize = {0, 0};
+        return bc.Constrain({hinset, vinset});
+    }
 
     auto innerConstraints = bc.Inset(hinset, vinset);
     childSize = child->Layout(innerConstraints);
-    return Size{
+    return bc.Constrain(Size{
         childSize.dx + hinset,
         childSize.dy + vinset,
-    };
+    });
 }
 
 int Padding::MinIntrinsicHeight(int width) {
+    auto hinset = insets.left + insets.right;
     auto vinset = insets.top + insets.bottom;
-    return child->MinIntrinsicHeight(width) + vinset;
+    if (!child) {
+        return vinset;
+    }
+    int innerW = GuardInf(width, std::max(0, width - hinset));
+    return child->MinIntrinsicHeight(innerW) + vinset;
 }
 
 int Padding::MinIntrinsicWidth(int height) {
     auto hinset = insets.left + insets.right;
-    return child->MinIntrinsicWidth(height) + hinset;
+    auto vinset = insets.top + insets.bottom;
+    if (!child) {
+        return hinset;
+    }
+    int innerH = GuardInf(height, std::max(0, height - vinset));
+    return child->MinIntrinsicWidth(innerH) + hinset;
 }
 
 void Padding::SetBounds(Rect bounds) {
-    dbglayout(fmt("Padding:SetBounds() %d,%d - %d, %d\n", bounds.x, bounds.y, bounds.dx, bounds.dy));
+    if (gEnableDebugLayout) {
+        dbglayout(fmt("Padding:SetBounds() %d,%d - %d, %d\n", bounds.x, bounds.y, bounds.dx, bounds.dy));
+    }
     lastBounds = bounds;
+    if (!child) {
+        return;
+    }
     bounds.x += insets.left;
     bounds.y += insets.top;
-    bounds.dx -= (insets.right + insets.left);
-    bounds.dy -= (insets.bottom + insets.top);
+    bounds.dx = std::max(0, bounds.dx - (insets.right + insets.left));
+    bounds.dy = std::max(0, bounds.dy - (insets.bottom + insets.top));
     child->SetBounds(bounds);
 }
 
@@ -385,8 +405,13 @@ Size VBox::Layout(const Constraints bc) {
     auto cbc = bc;
 
     if (alignMain == MainAxisAlign::Homogeneous) {
-        int childDy = Scale(cbc.max.dy, 1, count) - Scale(gap, count - 1, count);
-        cbc = cbc.TightenHeight(std::max(childDy, 0));
+        if (cbc.HasBoundedHeight()) {
+            int childDy = Scale(cbc.max.dy, 1, count) - Scale(gap, count - 1, count);
+            cbc = cbc.TightenHeight(std::max(childDy, 0));
+        } else {
+            cbc.min.dy = 0;
+            cbc.max.dy = Inf;
+        }
     } else {
         cbc.min.dy = 0;
         cbc.max.dy = Inf;
@@ -443,6 +468,7 @@ Size VBox::Layout(const Constraints bc) {
                     auto size = v.layout->Layout(fbc);
                     v.size = size;
                     totalHeight += size.dy - oldHeight;
+                    height += size.dy - oldHeight;
                 }
             }
         }
@@ -470,6 +496,15 @@ Size VBox::Layout(const Constraints bc) {
 
     if (alignCross == CrossAxisAlign::Stretch) {
         return bc.Constrain(Size{cbc.min.dx, height});
+    }
+
+    if (totalFlex > 0) {
+        width = 0;
+        for (const auto& v : children) {
+            if (!IsCollapsed(v.layout)) {
+                width = std::max(width, v.size.dx);
+            }
+        }
     }
 
     return bc.Constrain(Size{width, height});
@@ -507,6 +542,7 @@ int VBox::MinIntrinsicHeight(int width) {
                 size = std::max(size, v.layout->MinIntrinsicHeight(width));
             }
         }
+        size *= count;
     } else {
         for (auto& v : children) {
             if (!IsCollapsed(v.layout)) {
@@ -557,13 +593,6 @@ void VBox::SetBounds(Rect bounds) {
             case MainAxisAlign::MainEnd:
                 bounds.y = bounds.Bottom() - totalHeight;
                 break;
-            case MainAxisAlign::SpaceAround: {
-                int l = (bounds.dy - totalHeight);
-                int extra = Scale(l, 1, i64(count) + 1);
-                bounds.y += extra;
-                between += extra;
-                break;
-            }
             case MainAxisAlign::SpaceBetween:
                 if (count > 1) {
                     int l = (bounds.dy - totalHeight);
@@ -677,9 +706,14 @@ Size HBox::Layout(const Constraints bc) {
     // Determine the constraints for layout of child elements.
     auto cbc = bc;
     if (alignMain == MainAxisAlign::Homogeneous) {
-        auto maxw = cbc.max.dx;
-        int childDx = Scale(maxw, 1, count) - Scale(gap, count - 1, count);
-        cbc = cbc.TightenWidth(std::max(childDx, 0));
+        if (cbc.HasBoundedWidth()) {
+            auto maxw = cbc.max.dx;
+            int childDx = Scale(maxw, 1, count) - Scale(gap, count - 1, count);
+            cbc = cbc.TightenWidth(std::max(childDx, 0));
+        } else {
+            cbc.min.dx = 0;
+            cbc.max.dx = Inf;
+        }
     } else {
         cbc.min.dx = 0;
         cbc.max.dx = Inf;
@@ -740,6 +774,7 @@ Size HBox::Layout(const Constraints bc) {
             auto size = v.layout->Layout(fbc);
             v.size = size;
             totalWidth += size.dx - oldWidth;
+            width += size.dx - oldWidth;
         }
     }
 
@@ -766,6 +801,14 @@ Size HBox::Layout(const Constraints bc) {
 
     if (alignCross == CrossAxisAlign::Stretch) {
         return bc.Constrain(Size{width, std::max(cbc.min.dy, minDy)});
+    }
+    if (totalFlex > 0) {
+        height = 0;
+        for (const auto& v : children) {
+            if (!IsCollapsed(v.layout)) {
+                height = std::max(height, v.size.dy);
+            }
+        }
     }
     return bc.Constrain(Size{width, std::max(height, minDy)});
 }
@@ -866,12 +909,6 @@ void HBox::SetBounds(Rect bounds) {
             case MainAxisAlign::MainEnd:
                 bounds.x = bounds.Right() - totalWidth;
                 break;
-            case MainAxisAlign::SpaceAround: {
-                auto eg = (bounds.dx - totalWidth);
-                int extra = Scale(eg, 1, i64(count) + 1);
-                bounds.x += extra;
-                between += extra;
-            } break;
             case MainAxisAlign::SpaceBetween:
                 if (count > 1) {
                     auto eg = (bounds.dx - totalWidth);
@@ -978,49 +1015,31 @@ Size Align::Layout(const Constraints bc) {
 
     Size size = Child->Layout(bc.Loosen());
     childSize = size;
-    auto f = WidthFactor;
-    if (f > 0) {
-        size.dx = i32(float(size.dx) * f);
-    }
-    f = HeightFactor;
-    if (f > 0) {
-        size.dy = i32(float(size.dy) * f);
-    }
     return bc.Constrain(size);
 }
 
 int Align::MinIntrinsicHeight(int width) {
-    int height = Child->MinIntrinsicHeight(width);
-    auto f = HeightFactor;
-    if (f > 0) {
-        return int(float(height) * f);
-    }
-    return height;
+    return Child->MinIntrinsicHeight(width);
 }
 
 int Align::MinIntrinsicWidth(int height) {
-    int width = Child->MinIntrinsicWidth(height);
-    auto f = WidthFactor;
-    if (f > 0) {
-        return int(float(width) * f);
-    }
-    return width;
+    return Child->MinIntrinsicWidth(height);
 }
 
 void Align::SetBounds(Rect bounds) {
-    dbglayout(fmt("Align:SetBounds() %d,%d - %d, %d\n", bounds.x, bounds.y, bounds.dx, bounds.dy));
+    if (gEnableDebugLayout) {
+        dbglayout(fmt("Align:SetBounds() %d,%d - %d, %d\n", bounds.x, bounds.y, bounds.dx, bounds.dy));
+    }
 
     lastBounds = bounds;
-    int bminx = bounds.x;
-    int bmaxx = bounds.Right();
+    if (!Child) {
+        return;
+    }
     int cw = childSize.dx;
-    i64 twm = AlignStart - AlignEnd;
-    i64 tw = AlignEnd - AlignStart;
-    int x = Scale(bminx, HAlign - AlignEnd, twm) + Scale(bmaxx - cw, HAlign - AlignStart, tw);
     int ch = childSize.dy;
-    int bminy = bounds.y;
-    int bmaxy = bounds.Bottom();
-    int y = Scale(bminy, VAlign - AlignEnd, twm) + Scale(bmaxy - ch, VAlign - AlignStart, tw);
+    i64 tw = AlignEnd - AlignStart;
+    int x = bounds.x + Scale(bounds.dx - cw, HAlign - AlignStart, tw);
+    int y = bounds.y + Scale(bounds.dy - ch, VAlign - AlignStart, tw);
     Rect b{Point{x, y}, Point{x + cw, y + ch}};
     Child->SetBounds(b);
 }
@@ -1039,14 +1058,21 @@ Table::~Table() {
 }
 
 int Table::CellIdx(int row, int col) const {
-    ReportIf(row < 0 || row >= rows);
-    ReportIf(col < 0 || col >= cols);
+    if (ReportIf(row < 0 || row >= rows || col < 0 || col >= cols)) {
+        CrashMe();
+    }
     return (row * cols) + col;
 }
 
 void Table::SetSize(int nRows, int nCols) {
-    ReportIf(nRows < 0 || nCols < 0);
+    if (ReportIf(nRows < 0 || nCols < 0 || (nCols > 0 && nRows > INT_MAX / nCols))) {
+        return;
+    }
     if (nRows == rows && nCols == cols) {
+        return;
+    }
+    int nCells = nRows * nCols;
+    if (nCells > 0 && !VecReserve(cells, nCells)) {
         return;
     }
     RemoveAllCells();
@@ -1054,7 +1080,7 @@ void Table::SetSize(int nRows, int nCols) {
     cols = nCols;
     VecClear(cells);
     TableCell empty;
-    for (int i = 0; i < rows * cols; i++) {
+    for (int i = 0; i < nCells; i++) {
         VecAppend(cells, empty);
     }
     VecClear(colWidths);
@@ -1068,8 +1094,6 @@ void Table::MarkCovered(int row, int col, int rowSpan, int colSpan, bool covered
                 continue;
             }
             TableCell& cell = cells[CellIdx(r, c)];
-            // a spanned-over cell can't hold a child of its own
-            ReportIf(covered && cell.child);
             cell.covered = covered;
         }
     }
@@ -1078,10 +1102,22 @@ void Table::MarkCovered(int row, int col, int rowSpan, int colSpan, bool covered
 // (row, col) is the cell's top-left; a spanning cell covers the ones to its
 // right / below, which must stay empty
 TableCell& Table::SetCell(int row, int col, ILayout* child, int rowSpan, int colSpan) {
-    ReportIf(rowSpan < 1 || colSpan < 1);
-    ReportIf(row + rowSpan > rows || col + colSpan > cols);
     TableCell& cell = cells[CellIdx(row, col)];
-    ReportIf(cell.covered);
+    if (ReportIf(cell.covered || rowSpan < 1 || colSpan < 1 || rowSpan > rows - row || colSpan > cols - col)) {
+        CrashMe();
+    }
+    for (int r = row; r < row + rowSpan; r++) {
+        for (int c = col; c < col + colSpan; c++) {
+            if (r == row && c == col) {
+                continue;
+            }
+            const TableCell& target = cells[CellIdx(r, c)];
+            bool wasCovered = r < row + cell.rowSpan && c < col + cell.colSpan;
+            if (ReportIf(target.child || (target.covered && !wasCovered))) {
+                CrashMe();
+            }
+        }
+    }
     MarkCovered(row, col, cell.rowSpan, cell.colSpan, false);
     if (cell.child && cell.child != child) {
         delete cell.child;
@@ -1136,25 +1172,6 @@ ILayout* Table::LayoutChildAt(int idx) {
     return nullptr;
 }
 
-// a cell spanning several tracks needs those tracks (plus the gaps between
-// them) to be at least as big as the cell; grow them evenly if they aren't
-static void GrowTracks(Vec<int>& tracks, int start, int span, int gap, int needed) {
-    int have = gap * (span - 1);
-    for (int i = start; i < start + span; i++) {
-        have += tracks[i];
-    }
-    int missing = needed - have;
-    if (missing <= 0) {
-        return;
-    }
-    for (int i = 0; i < span; i++) {
-        // the last track gets what rounding left over
-        int add = missing / (span - i);
-        tracks[start + i] += add;
-        missing -= add;
-    }
-}
-
 static int TracksSize(Vec<int>& tracks, int start, int span, int gap) {
     if (span < 1) {
         return 0;
@@ -1172,6 +1189,22 @@ static int TracksSize(Vec<int>& tracks, int start, int span, int gap) {
         n++;
     }
     return size;
+}
+
+// a cell spanning several tracks needs those tracks (plus the gaps between
+// them) to be at least as big as the cell; grow them evenly if they aren't
+static void GrowTracks(Vec<int>& tracks, int start, int span, int gap, int needed) {
+    int have = TracksSize(tracks, start, span, gap);
+    int missing = needed - have;
+    if (missing <= 0) {
+        return;
+    }
+    for (int i = 0; i < span; i++) {
+        // the last track gets what rounding left over
+        int add = missing / (span - i);
+        tracks[start + i] += add;
+        missing -= add;
+    }
 }
 
 // where track idx starts, relative to the first track
@@ -1293,25 +1326,58 @@ Rect Table::CellRect(int row, int col) {
     return {x, y, dx, dy};
 }
 
+static void ComputeTrackStarts(const Vec<int>& tracks, int gap, Vec<int>& out) {
+    int nTracks = len(tracks);
+    VecClear(out);
+    VecAppendBlanks(out, nTracks);
+    int pos = 0;
+    int nonEmpty = 0;
+    for (int i = 0; i < nTracks; i++) {
+        if (tracks[i] > 0) {
+            if (nonEmpty > 0) {
+                pos += gap;
+            }
+            out[i] = pos;
+            pos += tracks[i];
+            nonEmpty++;
+        } else {
+            out[i] = pos;
+        }
+    }
+}
+
 void Table::SetBounds(Rect r) {
     lastBounds = r;
     if (len(colWidths) != cols || len(rowHeights) != rows) {
         // SetBounds() without a preceding Layout()
         Measure();
     }
-    int extraDx = ContentRect().dx - TracksSize(colWidths, 0, cols, colGap);
+    int savedLastCol = cols > 0 ? colWidths[cols - 1] : 0;
+    Rect content = ContentRect();
+    int extraDx = content.dx - TracksSize(colWidths, 0, cols, colGap);
     if (extraDx > 0 && cols > 0) {
         colWidths[cols - 1] += extraDx;
     }
+    Vec<int> colX;
+    Vec<int> rowY;
+    ComputeTrackStarts(colWidths, colGap, colX);
+    ComputeTrackStarts(rowHeights, rowGap, rowY);
     for (int row = 0; row < rows; row++) {
         for (int col = 0; col < cols; col++) {
             TableCell& cell = cells[CellIdx(row, col)];
             if (!cell.child || IsCollapsed(cell.child)) {
                 continue;
             }
-            Rect cellRc = CellRect(row, col);
+            int x = content.x + colX[col];
+            int y = content.y + rowY[row];
+            int dx = cell.colSpan == 1 ? colWidths[col] : TracksSize(colWidths, col, cell.colSpan, colGap);
+            int dy = cell.rowSpan == 1 ? rowHeights[row] : TracksSize(rowHeights, row, cell.rowSpan, rowGap);
+            Rect cellRc{x, y, dx, dy};
             cell.child->SetBounds(AlignInCell(cellRc, cell.childSize, cell.alignH, cell.alignV));
         }
+    }
+    if (cols > 0) {
+        colWidths[cols - 1] = savedLastCol;
     }
 }
 
@@ -1401,10 +1467,6 @@ int Overlay::LayoutChildCount() {
 
 ILayout* Overlay::LayoutChildAt(int idx) {
     return children[idx].child;
-}
-
-int Overlay::ChildrenCount() const {
-    return len(children);
 }
 
 static OverlayChild gRefusedOverlayChild;
@@ -1653,6 +1715,7 @@ int Wrap::MinIntrinsicHeight(int width) {
     int x = 0;
     int rowH = 0;
     int total = 0;
+    int rowCount = 0;
     bool have = false;
     for (int i = 0; i < n; i++) {
         auto& v = children[i];
@@ -1663,10 +1726,11 @@ int Wrap::MinIntrinsicHeight(int width) {
         int ch = v.layout->MinIntrinsicHeight(width);
         int next = have ? (x + colGap + cw) : cw;
         if (have && next > width) {
-            if (total > 0) {
+            if (rowCount > 0) {
                 total += rowGap;
             }
             total += rowH;
+            rowCount++;
             x = 0;
             rowH = 0;
             have = false;
@@ -1677,7 +1741,7 @@ int Wrap::MinIntrinsicHeight(int width) {
         have = true;
     }
     if (have) {
-        if (total > 0) {
+        if (rowCount > 0) {
             total += rowGap;
         }
         total += rowH;
@@ -1715,8 +1779,10 @@ void Wrap::SetBounds(Rect bounds) {
 }
 
 void LayoutAndSizeToContent(ILayout* layout, int minDx, int minDy, HWND hwnd) {
-    DpiSetFromHwnd(hwnd);
-    dbglayout(fmt("\nLayoutAndSizeToContent() %d,%d\n", minDx, minDy));
+    DpiScope dpiScope(hwnd);
+    if (gEnableDebugLayout) {
+        dbglayout(fmt("\nLayoutAndSizeToContent() %d,%d\n", minDx, minDy));
+    }
 
     Constraints c = ExpandInf();
     c.min = {minDx, minDy};
@@ -1795,8 +1861,9 @@ ILayout* MinDxBox::LayoutChildAt(int) {
     return child;
 }
 
-int MinDxBox::MinIntrinsicWidth(int) {
-    return dx;
+int MinDxBox::MinIntrinsicWidth(int height) {
+    int cw = child ? child->MinIntrinsicWidth(height) : 0;
+    return std::max(dx, cw);
 }
 
 int MinDxBox::MinIntrinsicHeight(int width) {
@@ -1804,15 +1871,17 @@ int MinDxBox::MinIntrinsicHeight(int width) {
 }
 
 Size MinDxBox::Layout(const Constraints bc) {
-    int w = MinIntrinsicWidth(0);
-    if (bc.min.dx > w) {
-        w = bc.min.dx;
+    int minW = dx;
+    if (bc.min.dx > minW) {
+        minW = bc.min.dx;
     }
-    if (bc.HasBoundedWidth() && bc.max.dx < w) {
-        w = bc.max.dx;
+    if (bc.HasBoundedWidth() && bc.max.dx < minW) {
+        minW = bc.max.dx;
     }
-    Size s = child ? child->Layout(bc.TightenWidth(w)) : Size{};
-    return {w, s.dy};
+    Constraints cc = bc;
+    cc.min.dx = minW;
+    Size s = child ? child->Layout(cc) : Size{minW, 0};
+    return bc.Constrain({std::max(minW, s.dx), s.dy});
 }
 
 void MinDxBox::SetBounds(Rect r) {

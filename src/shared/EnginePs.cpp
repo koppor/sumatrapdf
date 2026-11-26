@@ -85,7 +85,12 @@ TryAgain64Bit:
     if (size == 0) {
         return {};
     }
-    GetEnvironmentVariableW(L"PATH", envpathW.s, size);
+    // the returned length excludes the NUL; with it the last entry never matched
+    DWORD n = GetEnvironmentVariableW(L"PATH", envpathW.s, size);
+    if (n == 0 || n >= size) {
+        return {};
+    }
+    envpathW.len = (int)n;
     TempStr envPath = ToUtf8Temp(envpathW);
     StrVec paths;
     Split(&paths, envPath, StrL(";"), true);
@@ -280,7 +285,7 @@ class EnginePs : public EnginePdfProxy {
             return false;
         }
         if (str::EndsWithI(FilePath(), StrL(".eps"))) {
-            defaultExt = str::Dup(StrL(".eps"));
+            str::ReplaceWithCopy(&defaultExt, StrL(".eps"));
         }
         CopyStateFromPdfEngine();
         return true;
@@ -303,10 +308,8 @@ bool IsEnginePsAvailable() {
 }
 
 bool IsEnginePsSupportedFileType(FileType kind) {
-    if (!IsEnginePsAvailable()) {
-        return false;
-    }
-    return kind == FileType::PS;
+    // check kind first: finding Ghostscript scans the registry and PATH
+    return kind == FileType::PS && IsEnginePsAvailable();
 }
 
 #else

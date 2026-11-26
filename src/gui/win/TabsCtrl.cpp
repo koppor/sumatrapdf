@@ -12,13 +12,9 @@
 #include "gui/PlatformFont.h"
 #include "gui/Gfx.h"
 #include "gui/GuiColors.h"
+#include "gui/TabColors.h"
 #include "gui/VirtCtrl.h"
 #include "gui/win/TabsCtrl.h"
-#include "AppHelpersCommon.h"
-
-// Forward declaration - defined in MainWindow.cpp
-struct MainWindow;
-MainWindow* FindMainWindowByHwnd(HWND hwnd);
 
 //--- Tabs
 //
@@ -450,6 +446,9 @@ void TabGroupHeader::OnInvalidate() {
 
 void TabGroupHeader::OnClick(VirtMouseEvent* ev) {
     ev->didHandle = true;
+    if (!tabsCtrl->onGroupClick.IsValid()) {
+        return;
+    }
     TabsCtrl::GroupClickEvent gev;
     gev.tabs = tabsCtrl;
     gev.groupId = groupId;
@@ -835,7 +834,7 @@ TabsCtrl::MouseState TabsCtrl::TabStateFromMousePosition(const Point& p) {
     Rect rightHalf = r;
     int halfDx = r.dx / 2;
     rightHalf.x = r.x + halfDx;
-    rightHalf.dx = halfDx;
+    rightHalf.dx = r.dx - halfDx;
     res.inRightHalf = rightHalf.Contains(p);
     return res;
 }
@@ -865,8 +864,14 @@ HBITMAP TabsCtrl::RenderForDragging(int idx) {
         return nullptr;
     }
     Rect r = tw->BoundsInWindow();
+    if (r.IsEmpty()) {
+        return nullptr;
+    }
     Bitmap bitmap(r.dx, r.dy);
     Graphics* gfx = Graphics::FromImage(&bitmap);
+    if (!gfx) {
+        return nullptr;
+    }
     // DrawString() on a bitmap does not work with CompositingModeSourceCopy - obscure bug.
     gfx->SetCompositingMode(Gdiplus::CompositingModeSourceOver);
     gfx->SetCompositingQuality(CompositingQualityHighQuality);
@@ -919,19 +924,21 @@ HBITMAP TabsCtrl::RenderForDragging(int idx) {
         rPage.Width = (float)pageDx;
     }
 
-    br.SetColor(GdiRgbFromColor(textCol));
-    WCHAR* ws = CWStrTemp(ti->text);
-    gfx->DrawString(ws, -1, f, rFile, &sfFile, &br);
-    if (pageDx > 0) {
-        br.SetColor(GdiRgbFromColor(AccentColor(textCol, 40)));
-        WCHAR* wsPage = CWStrTemp(ti->pageText);
-        gfx->DrawString(wsPage, -1, f, rPage, &sfPage, &br);
+    if (f) {
+        br.SetColor(GdiRgbFromColor(textCol));
+        WCHAR* ws = CWStrTemp(ti->text);
+        gfx->DrawString(ws, -1, f, rFile, &sfFile, &br);
+        if (pageDx > 0) {
+            br.SetColor(GdiRgbFromColor(AccentColor(textCol, 40)));
+            WCHAR* wsPage = CWStrTemp(ti->pageText);
+            gfx->DrawString(wsPage, -1, f, rPage, &sfPage, &br);
+        }
     }
     if (ownedFont) {
         delete f;
     }
 
-    HBITMAP ret;
+    HBITMAP ret = nullptr;
     bitmap.GetHBITMAP(Gdiplus::Color(255, 255, 255), &ret);
     delete gfx;
     return ret;
@@ -967,13 +974,15 @@ static void TriggerSelectionChanged(TabsCtrl* tabs) {
     tabs->onSelectionChanged.Call(&ev);
 }
 
-static bool TriggerSelectionChanging(TabsCtrl* tabs) {
+static bool TriggerSelectionChanging(TabsCtrl* tabs, int idx) {
     if (!tabs->onSelectionChanging.IsValid()) {
         // allow changing
         return false;
     }
 
     TabsCtrl::SelectionChangingEvent ev;
+    ev.tabs = tabs;
+    ev.tabIdx = idx;
     tabs->onSelectionChanging.Call(&ev);
     return ev.preventChanging;
 }
@@ -1043,7 +1052,7 @@ void TabsCtrl::OnTabMouseDown(TabCtrl* tab, VirtMouseEvent& ev) {
     int idx = tab->Idx();
     UpdateHover(idx);
     if (idx != selectedIdx) {
-        if (TriggerSelectionChanging(this)) {
+        if (TriggerSelectionChanging(this, idx)) {
             return;
         }
         SetSelected(idx);
@@ -1052,12 +1061,13 @@ void TabsCtrl::OnTabMouseDown(TabCtrl* tab, VirtMouseEvent& ev) {
         HwndRepaintNow(hwnd);
     }
     // SetSelected/TriggerSelectionChanged above can pump messages
-    // (LoadModelIntoTab), which may remove tabs and leave idx stale
+    // (LoadModelIntoTab), which may remove or rebuild tabs and free `tab`
     TabInfo* ti = GetTab(idx);
-    if (!ti || ti->isPinned) {
+    TabCtrl* curTab = TabCtrlAt(idx);
+    if (!ti || !curTab || curTab->ti != ti || ti->isPinned) {
         return;
     }
-    Rect r = tab->BoundsInWindow();
+    Rect r = curTab->BoundsInWindow();
     grabLocation.x = ev.ptWindow.x - r.x;
     grabLocation.y = ev.ptWindow.y - r.y;
     SetCapture(hwnd);
@@ -1071,9 +1081,11 @@ void TabsCtrl::CloseTab(int idx) {
     // unfreezes when mouse leaves the tab control
     frozenTabDx = tabSize.dx;
     tabWidthFrozen = true;
+    HWND h = hwnd;
+    LONG_PTR owner = (LONG_PTR)this;
     TriggerTabClosed(this, idx);
     // TriggerTabClosed() might have destroyed the window and this TabsCtrl
-    if (!FindMainWindowByHwnd(hwnd)) {
+    if (GetWindowLongPtrW(h, GWLP_USERDATA) != owner) {
         return;
     }
     ScheduleRepaint();
@@ -1171,19 +1183,20 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     return 0;
                 }
                 // move the tab out: draw it as a image and drag around the screen
-                draggingTab = true;
                 TabCtrl* hlCtrl = TabCtrlAt(hl);
                 HBITMAP hbmp = RenderForDragging(hl);
                 if (!hbmp || !hlCtrl) {
                     logf("TabsCtrl::WndProc: RenderForDragging failed for tab %d\n", hl);
                     return 0;
                 }
+                // only now: WM_LBUTTONUP drops the tab while it's set
+                draggingTab = true;
                 Rect r = hlCtrl->BoundsInWindow();
                 HIMAGELIST himl = ImageList_Create(r.dx, r.dy, 0, 1, 0);
                 ImageList_Add(himl, hbmp, nullptr);
                 ImageList_BeginDrag(himl, 0, grabLocation.x, grabLocation.y);
                 DeleteObject(hbmp);
-                DeleteObject(himl);
+                ImageList_Destroy(himl);
                 Point p = HwndMapWindowPoint(hwnd, nullptr, mousePos);
                 ImageList_DragEnter(nullptr, p.x, p.y);
                 return 0;
@@ -1332,7 +1345,7 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // forever (fullscreen hides the tab bar), starving the low-priority
             // WM_TIMER that drives smooth wheel scrolling (issue #5865).
             PAINTSTRUCT ps;
-            BeginPaint(hwnd, &ps);
+            HDC hdc = BeginPaint(hwnd, &ps);
             defer {
                 EndPaint(hwnd, &ps);
             };
@@ -1343,7 +1356,6 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (clientRc.IsEmpty()) {
                 return 0;
             }
-            HDC hdc = GetDC(hwnd);
             Color bgCol = GetColor(kColTabBg);
             if (vroot) {
                 PaintVirtTree(vroot, hdc, clientRc, bgCol);
@@ -1351,7 +1363,6 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 // no tabs: nothing but the background
                 HdcFillRect(hdc, clientRc, bgCol);
             }
-            ReleaseDC(hwnd, hdc);
             return 0;
         }
 
@@ -1497,13 +1508,6 @@ UINT_PTR TabsCtrl::RemoveTab(int idx) {
     return userData;
 }
 
-void TabsCtrl::SwapTabs(int idx1, int idx2) {
-    TabInfo* tmp = tabs[idx1];
-    tabs[idx1] = tabs[idx2];
-    tabs[idx2] = tmp;
-    RebuildTabCtrls();
-}
-
 // Note: the caller should take care of deleting userData
 void TabsCtrl::RemoveAllTabs() {
     DeleteVecMembers(tabs);
@@ -1545,8 +1549,9 @@ int TabsCtrl::SetSelected(int idx) {
     int nTabs = TabCount();
     if (idx < 0 || idx >= nTabs) {
         logf("TabsCtrl::SetSelected(): idx: %d, TabsCount(): %d\n", idx, nTabs);
+        ReportIf(true);
+        return selectedIdx;
     }
-    ReportIf(idx < 0 || idx >= nTabs);
     int prevSelectedIdx = selectedIdx;
     selectedIdx = idx;
     UpdateHover(tabHighlighted);

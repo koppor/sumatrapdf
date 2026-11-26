@@ -106,6 +106,8 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
         case WM_MOUSELEAVE:
         case WM_LBUTTONDOWN:
         case WM_LBUTTONUP:
+        case WM_CAPTURECHANGED:
+        case WM_CANCELMODE:
         case WM_LBUTTONDBLCLK: {
             LRESULT res = 0;
             if (HomePageOnCanvasMessage(win, msg, wp, lp, res)) {
@@ -122,6 +124,11 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
             // keyboard navigation of the file list (issue #1136). These keys are
             // routed here by MaybeTranslateAccelerator instead of scrolling
             switch (wp) {
+                case VK_ESCAPE:
+                    if (HomePageClearSelection(win)) {
+                        return 0;
+                    }
+                    break;
                 case VK_LEFT:
                     HomePageMoveSelection(win, -1, 0);
                     return 0;
@@ -139,17 +146,13 @@ LRESULT WndProcCanvasAbout(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, LPAR
                     if (len(path) == 0) {
                         return 0;
                     }
-                    LoadArgs args(path, win);
-                    // ctrl forces always opening, as for a click
-                    args.activateExisting = !IsCtrlPressed();
-                    args.activateExistingInWindow = true;
-                    StartLoadDocument(&args);
+                    HomePageOpenFile(win, path);
                     return 0;
                 }
                 case VK_DELETE: {
-                    // remove the keyboard-selected entry from file history (not from disk)
-                    Str path = HomePageSelectedFilePathTemp(win);
-                    if (path) {
+                    StrVec paths;
+                    HomePageMenuPaths(win, {}, paths);
+                    for (Str path : paths) {
                         ForgetFileFromFrequentlyRead(win, path);
                     }
                     return 0;

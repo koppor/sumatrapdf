@@ -6,7 +6,6 @@ enum class RegType {
     BinaryPath,  // full path to the editor's binary file
     BinaryDir,   // directory containing the editor's binary file
     SiblingPath, // full path to a sibling file of the editor's binary file
-    None,
 };
 
 struct TextEditor {
@@ -38,7 +37,6 @@ TempStr GetAppDataDirTemp();
 TempStr PathForDisplayTemp(Str path);
 TempStr GetPathInAppDataDirTemp(Str fileName);
 TempStr GetTempDirPathTemp();
-int CurrentProcessId();
 
 void DetectTextEditors(Vec<TextEditor*>&);
 void CollectInverseSearchCommands(StrVec& out, Str cmdLine);

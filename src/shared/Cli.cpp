@@ -18,6 +18,8 @@ struct WindowTab;
 #include "ImageReader.h"
 #include "SumatraConfig.h"
 #include "Annotation.h"
+#include "AnnotationsExport.h"
+#include "FileHistory.h"
 #include "base/Pixmap.h"
 #include "Cli.h"
 
@@ -123,7 +125,7 @@ static bool OptTakesValue(Str name) {
                                   "--color",  "--size",     "--format",       "--position",     "--start",
                                   "--margin", "--every",    "--ranges",       "--text",         "--contents",
                                   "--at",     "--rect",     "--key",          "--key-password", "--key-password-env",
-                                  "--field",  "--reason",   "--location"};
+                                  "--field",  "--reason",   "--location",     "--quality"};
     for (const char* n : names) {
         if (str::Eq(name, Str(n))) {
             return true;
@@ -215,7 +217,7 @@ static bool PagesArg(CliCtx& cx, EngineBase* engine, Vec<int>& pages, int* code)
 
 // the page's own label (i, ii, A-1) when it has one other than its number
 static TempStr PageLabelTemp(EngineBase* engine, int pageNo) {
-    TempStr label = engine->GetPageLabeTemp(pageNo);
+    TempStr label = engine->GetPageLabelTemp(pageNo);
     if (len(label) == 0 || str::Eq(label, fmt("%d", pageNo))) {
         return {};
     }
@@ -542,59 +544,6 @@ static int CmdToc(CliCtx& cx) {
 
 //--- annotations
 
-static TempStr HexColorTemp(PdfColor c) {
-    if (c == 0 || c == (PdfColor)kColorUnset) {
-        return {};
-    }
-    u8 r, g, b, a;
-    UnpackPdfColor(c, r, g, b, a);
-    return fmt("#%02x%02x%02x", r, g, b);
-}
-
-static TempStr IsoTimeTemp(time_t t) {
-    if (t <= 0) {
-        return {};
-    }
-    struct tm tmv;
-#if OS_WIN
-    gmtime_s(&tmv, &t);
-#else
-    gmtime_r(&t, &tmv);
-#endif
-    return fmt("%04d-%02d-%02dT%02d:%02d:%02dZ", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour,
-               tmv.tm_min, tmv.tm_sec);
-}
-
-static bool IsTextMarkup(AnnotationType tp) {
-    return tp == AnnotationType::Highlight || tp == AnnotationType::Underline || tp == AnnotationType::Squiggly ||
-           tp == AnnotationType::StrikeOut;
-}
-
-// the page text a highlight (underline, ...) is over: the characters whose
-// box's center is in one of its quads
-static TempStr MarkedTextTemp(const PageText& pt, const Vec<RectF>& quads) {
-    str::Builder out;
-    const u8* p = (const u8*)pt.text.s;
-    const u8* end = p + len(pt.text);
-    for (int i = 0; i < pt.nCodepoints && p < end; i++) {
-        int n = utf8RuneLen(p);
-        if (n < 1 || p + n > end) {
-            n = 1;
-        }
-        Rect c = pt.coords ? pt.coords[i] : Rect();
-        PointF center((float)c.x + (float)c.dx / 2, (float)c.y + (float)c.dy / 2);
-        for (const RectF& q : quads) {
-            if (q.Contains(center)) {
-                out.Append(Str((const char*)p, n));
-                break;
-            }
-        }
-        p += n;
-    }
-    TempStr res = ToStrTemp(out);
-    return str::ReplaceTemp(res, StrL("\n"), StrL(" "));
-}
-
 static int CmdAnnotations(CliCtx& cx) {
     int code = kCliOk;
     EngineBase* engine = OpenDoc(cx, cx.positional[0], &code);
@@ -610,75 +559,45 @@ static int CmdAnnotations(CliCtx& cx) {
         SafeEngineRelease(&engine);
         return code;
     }
-    for (int pageNo : pages) {
-        EngineMupdfLoadAnnotsForPage(engine, pageNo);
-    }
-    Vec<Annotation*> annots;
-    EngineMupdfGetLoadedAnnotations(engine, annots);
+    Vec<AnnotRow> rows;
+    CollectAnnotRows(engine, pages, rows);
     str::Builder out;
     int n = 0;
-    for (int pageNo : pages) {
-        PageText pt{};
-        bool haveText = false;
-        for (Annotation* a : annots) {
-            if (PageNo(a) != pageNo) {
-                continue;
+    for (const AnnotRow& r : rows) {
+        Str typeName = AnnotationTypeName(r.type);
+        if (cx.json) {
+            out.Append(fmt("%s{%s,\"type\":%s,\"rect\":[%.1f,%.1f,%.1f,%.1f]", n > 0 ? StrL(",") : StrL(""),
+                           JPage(engine, r.pageNo), JStr(typeName), r.rect.x, r.rect.y, r.rect.dx, r.rect.dy));
+            if (len(r.marked) > 0) {
+                out.Append(fmt(",\"text\":%s", JStr(r.marked)));
             }
-            AnnotationType tp = Type(a);
-            // a popup is the note window of another annotation, a widget a form field
-            if (tp == AnnotationType::Popup || tp == AnnotationType::Widget) {
-                continue;
+            if (len(r.contents) > 0) {
+                out.Append(fmt(",\"contents\":%s", JStr(r.contents)));
             }
-            RectF r = GetRect(a);
-            TempStr marked;
-            if (IsTextMarkup(tp)) {
-                if (!haveText) {
-                    pt = engine->ExtractPageText(pageNo);
-                    haveText = true;
-                }
-                marked = MarkedTextTemp(pt, GetQuadPointsAsRect(a));
+            if (len(r.author) > 0) {
+                out.Append(fmt(",\"author\":%s", JStr(r.author)));
             }
-            Str contents = Contents(a);
-            Str author = Author(a);
-            TempStr color = HexColorTemp(GetColor(a));
-            TempStr modified = IsoTimeTemp(ModificationDate(a));
-            if (cx.json) {
-                out.Append(fmt("%s{%s,\"type\":%s,\"rect\":[%.1f,%.1f,%.1f,%.1f]", n > 0 ? StrL(",") : StrL(""),
-                               JPage(engine, pageNo), JStr(AnnotationTypeName(tp)), r.x, r.y, r.dx, r.dy));
-                if (len(marked) > 0) {
-                    out.Append(fmt(",\"text\":%s", JStr(marked)));
-                }
-                if (len(contents) > 0) {
-                    out.Append(fmt(",\"contents\":%s", JStr(contents)));
-                }
-                if (len(author) > 0) {
-                    out.Append(fmt(",\"author\":%s", JStr(author)));
-                }
-                if (len(color) > 0) {
-                    out.Append(fmt(",\"color\":%s", JStr(color)));
-                }
-                if (len(modified) > 0) {
-                    out.Append(fmt(",\"modified\":%s", JStr(modified)));
-                }
-                out.Append(StrL("}"));
-            } else {
-                out.Append(fmt("page %d: %s", pageNo, AnnotationTypeName(tp)));
-                if (len(marked) > 0) {
-                    out.Append(fmt(" \"%s\"", marked));
-                }
-                if (len(contents) > 0) {
-                    out.Append(fmt(": %s", str::ReplaceTemp(contents, StrL("\n"), StrL(" "))));
-                }
-                if (len(author) > 0) {
-                    out.Append(fmt(" (%s)", author));
-                }
-                out.Append(StrL("\n"));
+            if (len(r.color) > 0) {
+                out.Append(fmt(",\"color\":%s", JStr(r.color)));
             }
-            n++;
+            if (len(r.modified) > 0) {
+                out.Append(fmt(",\"modified\":%s", JStr(r.modified)));
+            }
+            out.Append(StrL("}"));
+        } else {
+            out.Append(fmt("page %d: %s", r.pageNo, typeName));
+            if (len(r.marked) > 0) {
+                out.Append(fmt(" \"%s\"", r.marked));
+            }
+            if (len(r.contents) > 0) {
+                out.Append(fmt(": %s", str::ReplaceTemp(r.contents, StrL("\n"), StrL(" "))));
+            }
+            if (len(r.author) > 0) {
+                out.Append(fmt(" (%s)", r.author));
+            }
+            out.Append(StrL("\n"));
         }
-        if (haveText) {
-            FreePageText(&pt);
-        }
+        n++;
     }
     if (cx.json) {
         Out(fmt("{\"count\":%d,\"annotations\":[%s]}\n", n, ToStr(out)));
@@ -1098,26 +1017,16 @@ static int CmdImagesToPdf(CliCtx& cx) {
     }
     TempStr producer = fmt("SumatraPDF %s", currentVersion);
     PdfCreator::SetProducerName(producer);
-    PdfCreator c;
-    for (Str path : cx.positional) {
-        Str data = file::ReadFile(path);
-        if (len(data) == 0) {
-            str::Free(data);
+    int bad = 0;
+    ImagesPdfResult res = PdfCreator::SaveImagesAsPdf(cx.positional, dest, &bad);
+    if (res == ImagesPdfResult::BadImage) {
+        Str path = cx.positional[bad];
+        if (file::GetSize(path) <= 0) {
             return Fail(cx, kCliCantOpen, fmt("can't read '%s'", path));
         }
-        bool ok = c.AddPageFromImageData(data);
-        if (!ok && !ImageDecodedPixmapWouldBeHuge(data)) {
-            Pixmap* px = PixmapFromData(data);
-            ok = px && c.AddPageFromPixmap(px);
-            FreePixmap(px);
-        }
-        str::Free(data);
-        if (!ok) {
-            return Fail(cx, kCliCantOpen, fmt("'%s' isn't an image SumatraPDF can read", path));
-        }
+        return Fail(cx, kCliCantOpen, fmt("'%s' isn't an image SumatraPDF can read", path));
     }
-    dir::CreateForFile(dest);
-    if (!c.SaveToFile(dest)) {
+    if (res == ImagesPdfResult::WriteFailed) {
         return Fail(cx, kCliFailed, fmt("couldn't write '%s'", dest));
     }
     return ReportPdfWritten(cx, dest, len(cx.positional));
@@ -1188,8 +1097,14 @@ static int RunClean(CliCtx& cx, const char* const* extra, int nExtra, Str newPas
 }
 
 static int CmdCompress(CliCtx& cx) {
-    static const char* args[] = {"-gggg", "-e", "100", "-f", "-i", "-t", "-Z"};
-    return RunClean(cx, args, dimofi(args));
+    auto quality = PdfCompressQuality::Same;
+    Str name = OptValue(cx, StrL("--quality"));
+    if (len(name) > 0 && !PdfCompressQualityFromName(name, quality)) {
+        return Fail(cx, kCliUsage, fmt("--quality: '%s' isn't same, balanced or smallest", name));
+    }
+    Vec<char*> args;
+    AppendPdfCompressArgs(args, quality);
+    return RunClean(cx, args.els, len(args));
 }
 
 static int CmdDecompress(CliCtx& cx) {
@@ -2443,26 +2358,13 @@ static TempStr TableMarkdownTemp(const StyledPage& p, const MdTable& t) {
     return ToStrTemp(out);
 }
 
-static int CmdMarkdown(CliCtx& cx) {
-    Str dest = OutputArg(cx);
-    Str src = cx.positional[0];
-    if (len(dest) > 0 && SamePath(src, dest)) {
-        return Fail(cx, kCliUsage, StrL("won't write over the input: give another -o"));
-    }
-    int code = kCliOk;
-    EngineBase* engine = OpenDoc(cx, src, &code);
-    if (!engine) {
-        return code;
-    }
-    Vec<int> pages;
-    if (!PagesArg(cx, engine, pages, &code)) {
-        SafeEngineRelease(&engine);
-        return code;
-    }
-    bool pageMarkers = !HasOpt(cx, StrL("--no-page-markers"));
+// The pages of a document as Markdown: headings from the fonts, lists, tables,
+// running headers and page numbers left out. With `dest`, its pictures are
+// written next to it in <name>_images and *imagesOut lists them.
+TempStr DocumentToMarkdownTemp(EngineBase* engine, const Vec<int>& pages, Str dest, MarkdownOpts opts,
+                               StrVec* imagesOut) {
     MdImages imgs;
-    // pictures go next to the markdown file, in <name>_images
-    if (len(dest) > 0 && !HasOpt(cx, StrL("--no-images"))) {
+    if (len(dest) > 0 && opts.images) {
         TempStr base = path::GetPathNoExtTemp(path::GetBaseNameTemp(dest));
         imgs.dirRel = fmt("%s_images", base);
         imgs.dir = path::JoinTemp(path::GetDirTemp(dest), imgs.dirRel);
@@ -2489,9 +2391,8 @@ static int CmdMarkdown(CliCtx& cx) {
         }
     }
     MdChunks out;
-    TempStr title = engine->GetPropertyTemp(DocProp::Title);
     for (int k = 0; k < len(pages); k++) {
-        if (pageMarkers) {
+        if (opts.pageMarkers) {
             out.Add(MdKind::Marker, fmt("<!-- page %d -->", pages[k]));
         }
         if (haveStyles) {
@@ -2503,7 +2404,36 @@ static int CmdMarkdown(CliCtx& cx) {
     for (StyledPage* p : styled) {
         delete p;
     }
-    Str md = JoinChunksTemp(out);
+    if (imagesOut) {
+        for (Str s : imgs.written) {
+            imagesOut->Append(s);
+        }
+    }
+    return JoinChunksTemp(out);
+}
+
+static int CmdMarkdown(CliCtx& cx) {
+    Str dest = OutputArg(cx);
+    Str src = cx.positional[0];
+    if (len(dest) > 0 && SamePath(src, dest)) {
+        return Fail(cx, kCliUsage, StrL("won't write over the input: give another -o"));
+    }
+    int code = kCliOk;
+    EngineBase* engine = OpenDoc(cx, src, &code);
+    if (!engine) {
+        return code;
+    }
+    Vec<int> pages;
+    if (!PagesArg(cx, engine, pages, &code)) {
+        SafeEngineRelease(&engine);
+        return code;
+    }
+    MarkdownOpts opts;
+    opts.pageMarkers = !HasOpt(cx, StrL("--no-page-markers"));
+    opts.images = !HasOpt(cx, StrL("--no-images"));
+    StrVec written;
+    TempStr title = engine->GetPropertyTemp(DocProp::Title);
+    Str md = DocumentToMarkdownTemp(engine, pages, dest, opts, &written);
     if (len(dest) > 0) {
         dir::CreateForFile(dest);
         if (!file::WriteFile(dest, md)) {
@@ -2519,8 +2449,8 @@ static int CmdMarkdown(CliCtx& cx) {
         }
         if (len(dest) > 0) {
             j.Append(fmt(",\"file\":%s,\"images\":[", JStr(dest)));
-            for (int k = 0; k < len(imgs.written); k++) {
-                j.Append(fmt("%s%s", k > 0 ? StrL(",") : StrL(""), JStr(imgs.written[k])));
+            for (int k = 0; k < len(written); k++) {
+                j.Append(fmt("%s%s", k > 0 ? StrL(",") : StrL(""), JStr(written[k])));
             }
             j.Append(StrL("]}\n"));
         } else {
@@ -2528,7 +2458,7 @@ static int CmdMarkdown(CliCtx& cx) {
         }
         Out(ToStr(j));
     } else if (len(dest) > 0) {
-        Out(fmt("%s: %d pages, %d images\n", dest, len(pages), len(imgs.written)));
+        Out(fmt("%s: %d pages, %d images\n", dest, len(pages), len(written)));
     } else {
         Out(md);
     }
@@ -2788,7 +2718,7 @@ static int CmdAnnotate(CliCtx& cx) {
         return Fail(cx, kCliUsage,
                     fmt("'%s': use highlight, underline, strikeout, squiggly, note, freetext, square or circle", type));
     }
-    bool markup = IsTextMarkup(at);
+    bool markup = IsTextMarkupAnnot(at);
     bool shape = at == AnnotationType::Square || at == AnnotationType::Circle;
     Str text = OptValue(cx, StrL("--text"));
     Str contents = OptValue(cx, StrL("--contents"));
@@ -3079,7 +3009,7 @@ Page ranges: `1-3,7,10-N` (N is the last page). Page numbers are 1-based.
 - `merge a.pdf b.pdf -o both.pdf`
 - `images-to-pdf scan1.jpg scan2.png -o scans.pdf`
 - `split <file.pdf> -o folder/ [--every 10 | --ranges "1-3;4-N"]`
-- `compress <file.pdf> -o small.pdf`
+- `compress <file.pdf> -o small.pdf [--quality balanced|smallest]`
 - `encrypt <file.pdf> -o locked.pdf --new-password-env NAME`
 - `sign <file.pdf> --key me.pfx --key-password-env NAME [--pages 2 --rect x,y,w,h] -o signed.pdf`
 - `verify <file.pdf>`: each signature valid, untrusted (intact, signer not
@@ -3103,15 +3033,6 @@ so the password isn't on the command line.
 - 5: the command doesn't apply to this kind of document (a PDF tool on an EPUB)
 )";
 
-static TempStr HomeDirTemp() {
-#if OS_WIN
-    const char* home = getenv("USERPROFILE");
-#else
-    const char* home = getenv("HOME");
-#endif
-    return home ? str::DupTemp(Str(home)) : TempStr{};
-}
-
 static int CmdAgentSkill(CliCtx& cx) {
     TempStr md = str::ReplaceTemp(Str(kSkillMd), StrL("<EXE>"), GetSelfExePathTemp());
     Str where = OptValue(cx, StrL("--install"));
@@ -3126,11 +3047,11 @@ static int CmdAgentSkill(CliCtx& cx) {
     // where each agent looks for skills
     TempStr dir;
     if (str::Eq(where, StrL("claude"))) {
-        dir = path::JoinTemp(HomeDirTemp(), StrL(".claude/skills"));
+        dir = path::JoinTemp(GetHomeDirTemp(), StrL(".claude/skills"));
     } else if (str::Eq(where, StrL("codex"))) {
-        dir = path::JoinTemp(HomeDirTemp(), StrL(".codex/skills"));
+        dir = path::JoinTemp(GetHomeDirTemp(), StrL(".codex/skills"));
     } else if (str::Eq(where, StrL("agents"))) {
-        dir = path::JoinTemp(HomeDirTemp(), StrL(".agents/skills"));
+        dir = path::JoinTemp(GetHomeDirTemp(), StrL(".agents/skills"));
     } else {
         dir = str::DupTemp(where);
     }
@@ -3196,8 +3117,11 @@ static const CliCmd gCmds[] = {
      "-o <folder>      where the PDFs go\n--every <n>      n pages to a PDF (default 1)\n--ranges <r;r>   a PDF per "
      "range, e.g. \"1-3;4-9;10-N\"",
      "split book.pdf -o chapters/ --ranges \"1-12;13-40;41-N\"\nsplit scan.pdf -o pages/", CmdSplit},
-    {"compress", "<file.pdf> -o <out.pdf>", "a smaller copy of a PDF (same quality: unused objects and streams go)",
-     "-o <file>        the new PDF", "compress big.pdf -o small.pdf --json", CmdCompress},
+    {"compress", "<file.pdf> -o <out.pdf> [--quality same|balanced|smallest]",
+     "a smaller copy of a PDF: unused objects and streams go, and balanced / smallest scale pictures down to 150 / "
+     "96 dpi as JPEG",
+     "-o <file>        the new PDF\n--quality <q>    same (the default), balanced or smallest",
+     "compress scan.pdf -o small.pdf --quality balanced --json", CmdCompress},
     {"decompress", "<file.pdf> -o <out.pdf>", "a copy of a PDF with its streams uncompressed, for reading its insides",
      "-o <file>        the new PDF", "decompress a.pdf -o readable.pdf", CmdDecompress},
     {"encrypt", "<file.pdf> -o <out.pdf> --new-password <pw>", "a copy of a PDF that needs a password (AES-256)",
@@ -3205,12 +3129,12 @@ static const CliCmd gCmds[] = {
      "encrypt a.pdf -o locked.pdf --new-password-env PDF_PW", CmdEncrypt},
     {"decrypt", "<file.pdf> -o <out.pdf> --password <pw>", "a copy of an encrypted PDF without the password",
      "-o <file>        the new PDF", "decrypt locked.pdf -o open.pdf --password-env PDF_PW", CmdDecrypt},
-    {"watermark", "<file.pdf> <text> -o <out.pdf>", "a copy of a PDF with text across its pages (Latin text)",
+    {"watermark", "<file.pdf> <text> -o <out.pdf>", "a copy of a PDF with text across its pages (any script)",
      "-o <file>        the new PDF\n--pages <range>  only these pages\n--opacity <0-1>  default 0.25\n"
      "--color <#rgb>   default #808080\n--size <pt>      default: across 60% of the page's diagonal",
      "watermark report.pdf DRAFT -o draft.pdf\nwatermark a.pdf \"Do not copy\" --color #cc0000 --opacity 0.15 -o b.pdf",
      CmdWatermark},
-    {"number", "<file.pdf> -o <out.pdf>", "a copy of a PDF with page numbers on its pages (Latin text)",
+    {"number", "<file.pdf> -o <out.pdf>", "a copy of a PDF with page numbers on its pages (any script)",
      "-o <file>          the new PDF\n--format <text>    {n} is the number, {total} the last one; default {n}\n"
      "--position <where> top-left, top-center, top-right, bottom-left, bottom-center (default), bottom-right\n"
      "--start <n>        the first page's number, default 1\n--pages <range>    only these pages, numbered from "
@@ -3325,7 +3249,7 @@ int CliMain(int argc, char** argv) {
         if (str::Eq(a, StrL("--json"))) {
             continue;
         }
-        if (len(a) > 1 && a.s[0] == '-') {
+        if (len(a) > 1 && a.s[0] == '-' && !str::IsDigit(a.s[1])) {
             if (OptTakesValue(a)) {
                 if (i + 1 >= argc) {
                     return Fail(cx, kCliUsage, fmt("%s needs a value", a));
@@ -3357,6 +3281,11 @@ int CliMain(int argc, char** argv) {
     // reading or writing the user's settings file
     if (!gSettings) {
         gSettings = NewSettings(Str{});
+    }
+    // engines look a document up in the history (orig runs this before its
+    // settings, and so the history, are loaded)
+    if (!FileHistoryStates()) {
+        FileHistorySetStates(gSettings->fileStates);
     }
     int res = cx.cmd->fn(cx);
     WaitForCbxPrefetches();

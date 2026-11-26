@@ -56,6 +56,7 @@
 #include "SumatraDialogs.h"
 #include "PdfTools.h"
 #include "PdfToolsCommon.h"
+#include "Cli.h"
 
 #include "SumatraLog.h"
 
@@ -112,7 +113,7 @@ void FinishSaveSelImg(SaveSelImgWork* d) {
             LoadDocument(d->win, d->destPath);
         }
     } else {
-        MessageBoxWarning(winOk ? d->win : nullptr, StrL("Failed to save the selection as an image."),
+        MessageBoxWarning(winOk ? d->win : nullptr, Tr("Failed to save the selection as an image."),
                           Tr("Save Selection As Image"));
     }
     str::Free(d->destPath);
@@ -131,6 +132,7 @@ void FinishSaveSelImg(SaveSelImgWork* d) {
 enum class PdfToolKind {
     Bake,
     ExtractText,
+    ExportMarkdown,
     Compress,
     Decompress,
     DeletePages,
@@ -264,6 +266,8 @@ struct PdfToolDlg {
     gpui::InputState* textEdit = nullptr;
     // Add Page Numbers: where on the page
     DialogSelect ddPosition;
+    // Compress PDF: what happens to the pictures (PdfCompressQuality)
+    DialogSelect ddQuality;
     // Merge PDF as orig's window, where the platform can have one
     // (gui/ToolWindow.h); null: a dialog in the frame
     ToolWindow* tw = nullptr;
@@ -327,6 +331,8 @@ struct PdfToolDlg {
     // has the text copying them put there (orig: its sequence number)
     Vec<MergePageDlg> mergeClip;
     Str mergeClipText; // owned
+    // the tool running on a thread, if any
+    PdfToolJob* job = nullptr;
 };
 
 // Merge PDF (orig has one such window), and the single-purpose tool that is
@@ -419,6 +425,8 @@ static Str ToolTitleFor(PdfToolKind kind) {
             return Tr("Bake PDF");
         case PdfToolKind::ExtractText:
             return Tr("Extract Text From PDF");
+        case PdfToolKind::ExportMarkdown:
+            return Tr("Export as Markdown");
         case PdfToolKind::Compress:
             return Tr("Compress PDF");
         case PdfToolKind::Decompress:
@@ -468,6 +476,8 @@ static Str (*ToolTitleFn(PdfToolKind kind))() {
             return ToolTitleOf<PdfToolKind::Bake>;
         case PdfToolKind::ExtractText:
             return ToolTitleOf<PdfToolKind::ExtractText>;
+        case PdfToolKind::ExportMarkdown:
+            return ToolTitleOf<PdfToolKind::ExportMarkdown>;
         case PdfToolKind::Compress:
             return ToolTitleOf<PdfToolKind::Compress>;
         case PdfToolKind::Decompress:
@@ -506,6 +516,8 @@ static Str ToolActionText() {
     switch (gTool.kind) {
         case PdfToolKind::ExtractText:
             return Tr("Extract Text");
+        case PdfToolKind::ExportMarkdown:
+            return Tr("Export");
         case PdfToolKind::DeletePages:
             return Tr("Delete Pages");
         case PdfToolKind::ExtractPages:
@@ -601,6 +613,11 @@ static void DetachMergeThumbs() {
 // `toolWin`: the tool's own window, which is closed a moment later
 static void FreeToolState(gp::Window* toolWin) {
     MainWindow* win = gTool.win;
+    // closed before its tool finished: the output isn't opened
+    if (gTool.job) {
+        gTool.job->owner = nullptr;
+        gTool.job = nullptr;
+    }
     // whichever of them has the focus: the window would keep a pointer to a
     // freed field (the page range of Delete Pages was left focused)
     gp::InputState* edits[] = {gTool.destEdit,     gTool.pagesEdit, gTool.passwordEdit,
@@ -628,6 +645,7 @@ static void FreeToolState(gp::Window* toolWin) {
     gTool.textEdit = nullptr;
     gTool.ddFormat.Free();
     gTool.ddPosition.Free();
+    gTool.ddQuality.Free();
     gTool.ddDpi.Free();
     DetachMergeThumbs();
     for (MergeSourceDlg& source : gTool.mergeSources) {
@@ -693,6 +711,88 @@ static void CloseAndLoad(Str destPath) {
     }
 }
 
+// the action button stays disabled (ActionEnabled) until FinishPdfToolJob
+static void RunToolJob(PdfToolJob* job) {
+    gTool.job = job;
+    job->owner = gCurTool;
+    AppShellInvalidate(gTool.win);
+    ToolWindowInvalidate(gTool.dlgTw);
+    StartPdfToolJob(job);
+}
+
+// the write failed: the next change of the file is a real one
+static void UnignoreReload(Str path) {
+    WindowTab* tab = FindTabByFilePath(path);
+    if (tab) {
+        tab->ignoreNextAutoReload = false;
+    }
+}
+
+static void MergeAfterSave(Str path);
+
+void FinishPdfToolJob(PdfToolJob* job) {
+    if (job->res != 0 && job->done == PdfToolDone::ReloadDest) {
+        UnignoreReload(job->destPath);
+    }
+    auto* tool = (PdfToolDlg*)job->owner;
+    if (!tool) {
+        return;
+    }
+    ToolScope scope(tool);
+    gTool.job = nullptr;
+    MainWindow* win = gTool.win;
+    AppShellInvalidate(win);
+    ToolWindowInvalidate(gTool.dlgTw);
+    if (job->res != 0 && job->fail == PdfToolFail::Notification) {
+        ShowWarningNotification(win, job->failMsg, kNotif5SecsTimeOut);
+        return;
+    }
+    if (job->res != 0) {
+        MessageBoxWarning(win, job->failMsg, job->failTitle);
+        return;
+    }
+    if (job->done == PdfToolDone::ShowDest) {
+        TempStr path = str::DupTemp(job->destPath);
+        ClosePdfToolDialog();
+        ShowFileInFolder(win, path);
+        return;
+    }
+    if (job->done == PdfToolDone::ReloadDest) {
+        MergeAfterSave(job->destPath);
+        return;
+    }
+    CloseAndLoad(job->destPath);
+}
+
+// the footer's hint says which page is being converted
+void PdfToolJobProgress(PdfToolJob* job) {
+    auto* tool = (PdfToolDlg*)job->owner;
+    if (!tool) {
+        return;
+    }
+    ToolScope scope(tool);
+    AppShellInvalidate(gTool.win);
+    ToolWindowInvalidate(gTool.dlgTw);
+}
+
+static TempStr JobProgressTemp() {
+    PdfToolJob* job = gTool.job;
+    if (!job || job->nTotal == 0) {
+        return {};
+    }
+    return fmt(Tr("Page %d of %d").s, AtomicIntGet(&job->nDone) + 1, job->nTotal);
+}
+
+// the tab the dialog was opened for; the user may have switched tabs since
+static WindowTab* ToolSrcTab() {
+    return gTool.win ? FindTabByFilePath(gTool.srcPath, gTool.win) : nullptr;
+}
+
+static DisplayModel* ToolSrcDm() {
+    WindowTab* tab = ToolSrcTab();
+    return tab ? tab->AsFixed() : nullptr;
+}
+
 static void PdfBakeDoIt() {
     TempStr destPath = DestPathTemp();
     if (len(destPath) == 0) {
@@ -701,14 +801,14 @@ static void PdfBakeDoIt() {
     MainWindow* win = gTool.win;
     Str inputPath = gTool.srcPath;
     TempStr tmpPath;
-    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    WindowTab* tab = ToolSrcTab();
     EngineBase* engine = tab ? tab->GetEngine() : nullptr;
     // pdfbake_main re-opens the file from disk, so unsaved session
     // annotations would be missing unless we write them out first (issue #5977).
     if (engine && EngineHasUnsavedAnnotations(engine)) {
         tmpPath = GetTempFilePathTemp(StrL("bake"));
         if (len(tmpPath) == 0 || !EngineMupdfSaveCopy(engine, tmpPath)) {
-            MessageBoxWarning(win, StrL("Failed to bake PDF file."), Tr("Bake PDF"));
+            MessageBoxWarning(win, Tr("Failed to bake PDF file."), Tr("Bake PDF"));
             return;
         }
         inputPath = tmpPath;
@@ -720,20 +820,10 @@ static void PdfBakeDoIt() {
     // build argv for pdfbake_main: "bake" input output
     char* argv[] = {(char*)"bake", (char*)"-p", PdfToolPasswordTemp(win, gTool.srcPath), CStrTemp(inputPath),
                     CStrTemp(destPath)};
-    int argc = dimofi(argv);
-
-    fz_set_optind(0);
-    int res = pdfbake_main(argc, argv);
-    if (tmpPath) {
-        file::Delete(tmpPath);
-    }
-    if (res == 0) {
-        logf("PdfBakeDoIt: baked successfully\n");
-        CloseAndLoad(destPath);
-        return;
-    }
-    logf("PdfBakeDoIt: pdfbake_main failed with %d\n", res);
-    MessageBoxWarning(win, StrL("Failed to bake PDF file."), Tr("Bake PDF"));
+    auto* job =
+        NewPdfToolJob(pdfbake_main, StrL("PdfBakeDoIt"), destPath, Tr("Failed to bake PDF file."), Tr("Bake PDF"));
+    SetPdfToolJobArgs(job, argv, dimofi(argv), tmpPath);
+    RunToolJob(job);
 }
 
 static void PdfExtractTextDoIt() {
@@ -749,21 +839,22 @@ static void PdfExtractTextDoIt() {
 
     logf("PdfExtractTextDoIt: extracting text from '%s' to '%s', pages: %s\n", gTool.srcPath, destPath, pages);
 
-    bool ok = false;
-    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    WindowTab* tab = ToolSrcTab();
     bool isPdf = tab && IsPdfDoc(tab);
     if (isPdf) {
         // use muconvert for PDF
         char* argv[] = {(char*)"convert", (char*)"-p",        PdfToolPasswordTemp(win, gTool.srcPath),
                         (char*)"-o",      CStrTemp(destPath), CStrTemp(gTool.srcPath),
                         CStrTemp(pages)};
-        int argc = dimofi(argv);
-        fz_set_optind(0);
-        ok = muconvert_main(argc, argv) == 0;
-    } else {
-        // use engine text extraction for other formats (DjVu, etc.)
-        ok = ExtractTextViaEngine(gTool.win, destPath, pages);
+        auto* job = NewPdfToolJob(muconvert_main, StrL("PdfExtractTextDoIt"), destPath, Tr("Failed to extract text."),
+                                  Tr("Extract Text"));
+        SetPdfToolJobArgs(job, argv, dimofi(argv), {});
+        job->done = PdfToolDone::ShowDest;
+        RunToolJob(job);
+        return;
     }
+    // use engine text extraction for other formats (DjVu, etc.)
+    bool ok = ExtractTextViaEngine(tab, destPath, pages);
 
     if (ok) {
         logf("PdfExtractTextDoIt: extracted successfully\n");
@@ -773,7 +864,31 @@ static void PdfExtractTextDoIt() {
         return;
     }
     logf("PdfExtractTextDoIt: failed to extract text, isPdf: %d\n", (int)isPdf);
-    MessageBoxWarning(win, StrL("Failed to extract text."), Tr("Extract Text"));
+    MessageBoxWarning(win, Tr("Failed to extract text."), Tr("Extract Text"));
+}
+
+// the pages picked as Markdown next to the document, as `cli markdown` writes
+static void ExportMarkdownDoIt() {
+    TempStr destPath = DestPathTemp();
+    Vec<int> pages;
+    if (len(destPath) == 0 || !PageRangeOk(InputTextTemp(gTool.pagesEdit), gTool.pageCount, true, pages)) {
+        return;
+    }
+    MainWindow* win = gTool.win;
+    WindowTab* tab = FindTabByFilePath(gTool.srcPath);
+    EngineBase* engine = tab ? tab->GetEngine() : nullptr;
+    if (!engine) {
+        return;
+    }
+    logf("ExportMarkdownDoIt: %d pages of '%s' to '%s'\n", len(pages), gTool.srcPath, destPath);
+    TempStr md = DocumentToMarkdownTemp(engine, pages, destPath, MarkdownOpts{}, nullptr);
+    if (!file::WriteFile(destPath, md)) {
+        MessageBoxWarning(win, Tr("Failed to save a file"), Tr("Export as Markdown"));
+        return;
+    }
+    TempStr path = str::DupTemp(destPath);
+    ClosePdfToolDialog();
+    ShowFileInFolder(win, path);
 }
 
 static void PdfCleanDoIt(bool decompress) {
@@ -783,29 +898,34 @@ static void PdfCleanDoIt(bool decompress) {
     }
     MainWindow* win = gTool.win;
     Str what = decompress ? StrL("decompress") : StrL("compress");
-    logf("PdfCleanDoIt: %s '%s' to '%s'\n", what, gTool.srcPath, destPath);
-
-    // compress is: clean -gggg -e 100 -f -i -t -Z input output
-    // decompress is: clean -d input output
-    char* pwd = PdfToolPasswordTemp(gTool.win, gTool.srcPath);
-    char* compressArgv[] = {
-        (char*)"clean", (char*)"-p", pwd,         (char*)"-gggg",          (char*)"-e",       (char*)"100", (char*)"-f",
-        (char*)"-i",    (char*)"-t", (char*)"-Z", CStrTemp(gTool.srcPath), CStrTemp(destPath)};
-    char* decompressArgv[] = {(char*)"clean",          (char*)"-p",       pwd, (char*)"-d",
-                              CStrTemp(gTool.srcPath), CStrTemp(destPath)};
-    char** argv = decompress ? decompressArgv : compressArgv;
-    int argc = decompress ? dimofi(decompressArgv) : dimofi(compressArgv);
-
-    fz_set_optind(0);
-    int res = pdfclean_main(argc, argv);
-    if (res == 0) {
-        logf("PdfCleanDoIt: %sed successfully\n", what);
-        CloseAndLoad(destPath);
+    Str msg = decompress ? Tr("Failed to decompress PDF file.") : Tr("Failed to compress PDF file.");
+    Str title = decompress ? Tr("Decompress PDF") : Tr("Compress PDF");
+    WindowTab* tab = ToolSrcTab();
+    TempStr tmpPath;
+    TempStr inputPath = PdfToolInputTemp(tab ? tab->GetEngine() : nullptr, gTool.srcPath, &tmpPath);
+    if (len(inputPath) == 0) {
+        MessageBoxWarning(win, msg, title);
         return;
     }
-    logf("PdfCleanDoIt: pdfclean_main failed with %d\n", res);
-    Str msg = decompress ? StrL("Failed to decompress PDF file.") : StrL("Failed to compress PDF file.");
-    MessageBoxWarning(win, msg, decompress ? Tr("Decompress PDF") : Tr("Compress PDF"));
+    logf("PdfCleanDoIt: %s '%s' to '%s'\n", what, inputPath, destPath);
+
+    // compress is: clean -gggg -e 100 -f -i -t -Z [picture options] input output
+    // decompress is: clean -d input output
+    Vec<char*> argv;
+    VecAppend(argv, (char*)"clean");
+    VecAppend(argv, (char*)"-p");
+    VecAppend(argv, PdfToolPasswordTemp(gTool.win, gTool.srcPath));
+    if (decompress) {
+        VecAppend(argv, (char*)"-d");
+    } else {
+        AppendPdfCompressArgs(argv, (PdfCompressQuality)gTool.ddQuality.sel);
+    }
+    VecAppend(argv, CStrTemp(inputPath));
+    VecAppend(argv, CStrTemp(destPath));
+
+    auto* job = NewPdfToolJob(pdfclean_main, StrL("PdfCleanDoIt"), destPath, msg, title);
+    SetPdfToolJobArgs(job, argv.els, len(argv), tmpPath);
+    RunToolJob(job);
 }
 
 static void PdfDeletePageDoIt() {
@@ -836,7 +956,7 @@ static void PdfDeletePageDoIt() {
         return;
     }
 
-    WindowTab* sourceTab = isExtract ? FindTabByFilePath(gTool.srcPath) : nullptr;
+    WindowTab* sourceTab = FindTabByFilePath(gTool.srcPath);
     EngineBase* sourceEngine = sourceTab ? sourceTab->GetEngine() : nullptr;
 
     TempStr pageRange;
@@ -854,10 +974,12 @@ static void PdfDeletePageDoIt() {
 
     Str inputPath = gTool.srcPath;
     TempStr tmpPath;
-    if (isExtract && sourceEngine && EngineHasUnsavedAnnotations(sourceEngine)) {
+    if (sourceEngine && EngineHasUnsavedAnnotations(sourceEngine)) {
         tmpPath = GetTempFilePathTemp(StrL("extract-pages"));
         if (len(tmpPath) == 0 || !EngineMupdfSaveCopy(sourceEngine, tmpPath)) {
-            MessageBoxWarning(win, StrL("Failed to extract pages from PDF file."), Tr("Extract Pages From PDF"));
+            Str msg =
+                isExtract ? Tr("Failed to extract pages from PDF file.") : Tr("Failed to delete pages from PDF file.");
+            MessageBoxWarning(win, msg, isExtract ? Tr("Extract Pages From PDF") : Tr("Delete Pages From PDF"));
             return;
         }
         inputPath = tmpPath;
@@ -875,23 +997,11 @@ static void PdfDeletePageDoIt() {
                     (char*)"-f",        (char*)"-i",         (char*)"-t",
                     (char*)"-Z",        CStrTemp(inputPath), CStrTemp(destPath),
                     CStrTemp(pageRange)};
-    int argc = dimofi(argv);
-
-    fz_set_optind(0);
-    int res = pdfclean_main(argc, argv);
-    if (tmpPath) {
-        file::Delete(tmpPath);
-    }
-    if (res == 0) {
-        logf("PdfDeletePageDoIt: %s pages successfully\n", op);
-        CloseAndLoad(destPath);
-        return;
-    }
-    logf("PdfDeletePageDoIt: pdfclean_main failed with %d for %s\n", res, op);
-    Str msg =
-        isExtract ? StrL("Failed to extract pages from PDF file.") : StrL("Failed to delete pages from PDF file.");
+    Str msg = isExtract ? Tr("Failed to extract pages from PDF file.") : Tr("Failed to delete pages from PDF file.");
     Str title = isExtract ? Tr("Extract Pages From PDF") : Tr("Delete Pages From PDF");
-    MessageBoxWarning(win, msg, title);
+    auto* job = NewPdfToolJob(pdfclean_main, StrL("PdfDeletePageDoIt"), destPath, msg, title);
+    SetPdfToolJobArgs(job, argv, dimofi(argv), tmpPath);
+    RunToolJob(job);
 }
 
 static void PdfEncryptDoIt() {
@@ -904,46 +1014,38 @@ static void PdfEncryptDoIt() {
         return;
     }
     MainWindow* win = gTool.win;
+    WindowTab* tab = ToolSrcTab();
+    TempStr tmpPath;
+    TempStr inputPath = PdfToolInputTemp(tab ? tab->GetEngine() : nullptr, gTool.srcPath, &tmpPath);
+    if (len(inputPath) == 0) {
+        MessageBoxWarning(win, Tr("Failed to encrypt PDF file."), Tr("Encrypt PDF"));
+        return;
+    }
 
-    logf("PdfEncryptDoIt: encrypting '%s' to '%s' with AES-256\n", gTool.srcPath, destPath);
+    logf("PdfEncryptDoIt: encrypting '%s' to '%s' with AES-256\n", inputPath, destPath);
 
     // equivalent of: clean -E aes-256 -U <pwd> -O <pwd> input output
     char* pwdZ = CStrTemp(pwd);
-    char* argv[] = {(char*)"clean", (char*)"-E", (char*)"aes-256",        (char*)"-U",       pwdZ,
-                    (char*)"-O",    pwdZ,        CStrTemp(gTool.srcPath), CStrTemp(destPath)};
-    int argc = 9;
+    char* argv[] = {(char*)"clean", (char*)"-E", (char*)"aes-256",    (char*)"-U",       pwdZ,
+                    (char*)"-O",    pwdZ,        CStrTemp(inputPath), CStrTemp(destPath)};
 
-    fz_set_optind(0);
-    int res = pdfclean_main(argc, argv);
-    if (res == 0) {
-        logf("PdfEncryptDoIt: encrypted successfully\n");
-        CloseAndLoad(destPath);
-        return;
-    }
-    logf("PdfEncryptDoIt: pdfclean_main failed with %d\n", res);
-    MessageBoxWarning(win, StrL("Failed to encrypt PDF file."), Tr("Encrypt PDF"));
+    auto* job = NewPdfToolJob(pdfclean_main, StrL("PdfEncryptDoIt"), destPath, Tr("Failed to encrypt PDF file."),
+                              Tr("Encrypt PDF"));
+    SetPdfToolJobArgs(job, argv, dimofi(argv), tmpPath);
+    RunToolJob(job);
 }
 
 static void PdfStampDoIt() {
     TempStr destPath = DestPathTemp();
-    MainWindow* win = gTool.win;
-    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    WindowTab* tab = ToolSrcTab();
     EngineBase* engine = tab ? tab->GetEngine() : nullptr;
     Vec<int> pages;
     if (len(destPath) == 0 || !engine || !ParseDeletePages(InputTextTemp(gTool.pagesEdit), gTool.pageCount, pages)) {
         return;
     }
-    Vec<PdfStamp> stamps;
-    DialogStamps(gTool.kind == PdfToolKind::Watermark, InputTextTemp(gTool.textEdit), pages, gTool.ddPosition.sel,
-                 stamps);
-    logf("PdfStampDoIt: %d pages of '%s' to '%s'\n", len(stamps), gTool.srcPath, destPath);
-    Str err;
-    if (StampPdfToFile(engine, stamps, destPath, &err)) {
-        CloseAndLoad(destPath);
-        return;
-    }
-    logf("PdfStampDoIt: failed: %s\n", err);
-    MessageBoxWarning(win, err, ToolTitle());
+    bool watermark = gTool.kind == PdfToolKind::Watermark;
+    logf("PdfStampDoIt: %d pages of '%s' to '%s'\n", len(pages), gTool.srcPath, destPath);
+    RunToolJob(NewStampJob(engine, watermark, InputTextTemp(gTool.textEdit), pages, gTool.ddPosition.sel, destPath));
 }
 
 static void PdfDecryptDoIt() {
@@ -952,22 +1054,25 @@ static void PdfDecryptDoIt() {
         return;
     }
     MainWindow* win = gTool.win;
-
-    logf("PdfDecryptDoIt: decrypting '%s' to '%s'\n", gTool.srcPath, destPath);
-
-    // equivalent of: clean -p <key> -D input output
-    char* argv[] = {(char*)"clean",          (char*)"-p",       PdfToolPasswordTemp(win, gTool.srcPath), (char*)"-D",
-                    CStrTemp(gTool.srcPath), CStrTemp(destPath)};
-
-    fz_set_optind(0);
-    int res = pdfclean_main(dimofi(argv), argv);
-    if (res == 0) {
-        logf("PdfDecryptDoIt: decrypted successfully\n");
-        CloseAndLoad(destPath);
+    WindowTab* tab = ToolSrcTab();
+    TempStr tmpPath;
+    TempStr inputPath = PdfToolInputTemp(tab ? tab->GetEngine() : nullptr, gTool.srcPath, &tmpPath);
+    if (len(inputPath) == 0) {
+        ShowWarningNotification(win, Tr("Failed to decrypt PDF file."), kNotif5SecsTimeOut);
         return;
     }
-    logf("PdfDecryptDoIt: failed, src: '%s'\n", gTool.srcPath);
-    ShowWarningNotification(win, Tr("Failed to decrypt PDF file."), kNotif5SecsTimeOut);
+
+    logf("PdfDecryptDoIt: decrypting '%s' to '%s'\n", inputPath, destPath);
+
+    // equivalent of: clean -p <key> -D input output
+    char* argv[] = {(char*)"clean", (char*)"-p",         PdfToolPasswordTemp(win, gTool.srcPath),
+                    (char*)"-D",    CStrTemp(inputPath), CStrTemp(destPath)};
+
+    auto* job = NewPdfToolJob(pdfclean_main, StrL("PdfDecryptDoIt"), destPath, Tr("Failed to decrypt PDF file."),
+                              Tr("Decrypt PDF"));
+    SetPdfToolJobArgs(job, argv, dimofi(argv), tmpPath);
+    job->fail = PdfToolFail::Notification;
+    RunToolJob(job);
 }
 
 // orig's ConvertEpubToPdfDialog::DoIt: ddFormat holds the page size and the
@@ -989,13 +1094,7 @@ static void ConvertEpubToPdfDoIt() {
     }
     const EbookPdfPageSize& ps = kEbookPdfPageSizes[idx];
     logf("ConvertEpubToPdf: '%s' -> '%s', %s, %d pt\n", gTool.srcPath, destPath, ps.label, fontSize);
-    int nPages = EngineMupdfEbookToPdf(gTool.srcPath, destPath, ps.dx, ps.dy, (float)fontSize);
-    if (nPages == 0) {
-        MessageBoxWarning(win, Tr("Failed to save a file"), Tr("Convert EPUB to PDF"));
-        return;
-    }
-    logf("ConvertEpubToPdf: wrote %d pages\n", nPages);
-    CloseAndLoad(destPath);
+    RunToolJob(NewEpubToPdfJob(gTool.srcPath, destPath, ps, fontSize));
 }
 
 // orig's ConvertCajToPdfDialog::DoIt
@@ -1005,11 +1104,7 @@ static void ConvertCajToPdfDoIt() {
         return;
     }
     logf("ConvertCajToPdf: '%s' -> '%s'\n", gTool.srcPath, destPath);
-    if (!ConvertCajToPdf(gTool.srcPath, destPath)) {
-        MessageBoxWarning(gTool.win, CajErrorReasonTemp(gTool.srcPath), Tr("Convert CAJ to PDF"));
-        return;
-    }
-    CloseAndLoad(destPath);
+    RunToolJob(NewCajToPdfJob(gTool.srcPath, destPath));
 }
 
 static void ConvertToPdfDoIt() {
@@ -1018,11 +1113,11 @@ static void ConvertToPdfDoIt() {
         return;
     }
     MainWindow* win = gTool.win;
-    if (!win || !win->IsDocLoaded()) {
+    DisplayModel* dm = ToolSrcDm();
+    if (!dm) {
         return;
     }
-    DisplayModel* dm = win->AsFixed();
-    EngineBase* engine = dm ? dm->GetEngine() : nullptr;
+    EngineBase* engine = dm->GetEngine();
     bool isOfd = engine && EngineMupdfIsOfd(engine);
     if (!engine || !(engine->isImageCollection || isOfd)) {
         MessageBoxWarning(win, Tr("Failed to save a file"), Tr("Convert to PDF"));
@@ -1030,22 +1125,14 @@ static void ConvertToPdfDoIt() {
     }
 
     logf("ConvertToPdf: converting '%s' to '%s'\n", gTool.srcPath, destPath);
-    // OFD keeps its text and vector paths; image collections become one image per page
-    bool ok = isOfd ? EngineMupdfSaveAsPdf(engine, destPath) : ConvertImageCollectionToPdf(engine, destPath);
-    if (ok) {
-        logf("ConvertToPdf: converted successfully\n");
-        CloseAndLoad(destPath);
-        return;
-    }
-    logf("ConvertToPdf: SaveImageCollectionAsPdf failed\n");
-    MessageBoxWarning(win, Tr("Failed to save a file"), Tr("Convert to PDF"));
+    RunToolJob(NewConvertToPdfJob(engine, destPath));
 }
 
 // the pages the mode picks; false for a custom range that doesn't parse
 static bool SelectedImagePages(Vec<int>& pages) {
     VecReset(pages);
     if (gTool.pagesMode == PagesMode::Current) {
-        DisplayModel* dm = gTool.win ? gTool.win->AsFixed() : nullptr;
+        DisplayModel* dm = ToolSrcDm();
         int cur = dm ? dm->CurrentPageNo() : 0;
         if (cur < 1 || cur > gTool.pageCount) {
             return false;
@@ -1065,7 +1152,7 @@ static int ExistingImageCount() {
     if (gTool.kind != PdfToolKind::ConvertToImages) {
         return 0;
     }
-    DisplayModel* dm = gTool.win ? gTool.win->AsFixed() : nullptr;
+    DisplayModel* dm = ToolSrcDm();
     int cur = dm ? dm->CurrentPageNo() : 0;
     TempStr key = fmt("%d %d %s|%s", (int)gTool.pagesMode, cur, InputTextTemp(gTool.pagesEdit), DestPathTemp());
     if (str::Eq(key, gTool.existKey)) {
@@ -1083,10 +1170,10 @@ static void ConvertPdfToImagesDoIt() {
         return;
     }
     MainWindow* win = gTool.win;
-    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    DisplayModel* dm = ToolSrcDm();
     EngineBase* engine = dm ? dm->GetEngine() : nullptr;
     if (!engine) {
-        MessageBoxWarning(win, StrL("Failed to convert to images."), Tr("Convert to Images"));
+        MessageBoxWarning(win, Tr("Failed to convert to images."), Tr("Convert to Images"));
         return;
     }
 
@@ -1105,20 +1192,7 @@ static void ConvertPdfToImagesDoIt() {
     }
 
     logf("ConvertPdfToImages: '%s' -> '%s', %d page(s), %d DPI\n", gTool.srcPath, destPath, len(pages), dpi);
-
-    Str firstPath;
-    int nOk = ConvertPagesToImages(engine, dm->GetRotation(), destPath, pages, dpi, &firstPath);
-
-    if (nOk == 0) {
-        str::Free(firstPath);
-        MessageBoxWarning(win, StrL("Failed to convert to images."), Tr("Convert to Images"));
-        return;
-    }
-    logf("ConvertPdfToImages: wrote %d of %d file(s)\n", nOk, len(pages));
-    TempStr openPath = str::DupTemp(firstPath);
-    str::Free(firstPath);
-    ClosePdfToolDialog();
-    ShowFileInFolder(win, openPath);
+    RunToolJob(NewImagesJob(engine, dm->GetRotation(), destPath, pages, dpi));
 }
 
 static void SaveSelectionAsImageDoIt() {
@@ -1127,14 +1201,14 @@ static void SaveSelectionAsImageDoIt() {
         return;
     }
     MainWindow* win = gTool.win;
-    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    DisplayModel* dm = ToolSrcDm();
     EngineBase* engine = dm ? dm->GetEngine() : nullptr;
     if (!engine) {
         return;
     }
     TempStr withExt = WithDefaultImageExtTemp(destPath);
     if (len(withExt) == 0) {
-        MessageBoxWarning(win, StrL("Unsupported image format."), Tr("Save Selection As Image"));
+        MessageBoxWarning(win, Tr("Unsupported image format."), Tr("Save Selection As Image"));
         return;
     }
     int dpi = SelectedDpi();
@@ -1143,7 +1217,7 @@ static void SaveSelectionAsImageDoIt() {
     }
     Pixmap* px = RenderSelectionPixmap(engine, dm->GetRotation(), gTool.pageNo, gTool.selRect, (float)dpi);
     if (!px) {
-        MessageBoxWarning(win, StrL("Failed to save the selection as an image."), Tr("Save Selection As Image"));
+        MessageBoxWarning(win, Tr("Failed to save the selection as an image."), Tr("Save Selection As Image"));
         return;
     }
 
@@ -1851,9 +1925,9 @@ bool PdfToolDialogOnDropFiles(MainWindow* win, const Str* paths, int n, const Po
     return true;
 }
 
-// Writes the pages not removed to destPath, which may be one of the sources:
-// the result goes to a temp file first
-static bool MergeSaveTo(Str destPath) {
+// The merge of the pages not removed into destPath, which may be one of the
+// sources; nullptr if there's nothing to save
+static PdfToolJob* NewMergeSaveJob(Str destPath) {
     Vec<PdfMergeSource> sources;
     Vec<PdfMergePage> pages;
     for (const MergePageDlg& page : gTool.mergePages) {
@@ -1862,7 +1936,7 @@ static bool MergeSaveTo(Str destPath) {
         }
     }
     if (len(destPath) == 0 || len(pages) == 0) {
-        return false;
+        return nullptr;
     }
     for (const MergeSourceDlg& source : gTool.mergeSources) {
         VecAppend(sources, PdfMergeSource{source.path, source.password});
@@ -1874,30 +1948,24 @@ static bool MergeSaveTo(Str destPath) {
     if (docEngine && EngineHasUnsavedAnnotations(docEngine)) {
         sourceCopy = GetTempFilePathTemp(StrL("merge-source"));
         if (len(sourceCopy) == 0 || !EngineMupdfSaveCopy(docEngine, sourceCopy)) {
-            return false;
+            return nullptr;
         }
-        sources[0].path = sourceCopy;
     }
+    WindowTab* tab = FindTabByFilePath(destPath);
+    if (tab) {
+        // it's reloaded after; the file watcher needn't
+        tab->ignoreNextAutoReload = true;
+    }
+    return NewMergeJob(sources, pages, sourceCopy, destPath);
+}
 
-    TempStr tmpPath = GetTempFilePathTemp(StrL("merge"));
-    bool ok = len(tmpPath) > 0 && EngineMupdfMergePdfs(sources, pages, tmpPath);
-    if (ok) {
-        WindowTab* tab = FindTabByFilePath(destPath);
-        if (tab) {
-            // it's reloaded below; the file watcher needn't
-            tab->ignoreNextAutoReload = true;
-        }
-        Str data = file::ReadFile(tmpPath);
-        ok = len(data) > 0 && file::WriteFile(destPath, data);
-        str::Free(data);
+// saves now, for tests
+static bool MergeSaveTo(Str destPath) {
+    PdfToolJob* job = NewMergeSaveJob(destPath);
+    bool ok = job && RunPdfToolJobNow(job) == 0;
+    if (!ok) {
+        UnignoreReload(destPath);
     }
-    if (len(tmpPath) > 0) {
-        file::Delete(tmpPath);
-    }
-    if (len(sourceCopy) > 0) {
-        file::Delete(sourceCopy);
-    }
-    logf("MergeSaveTo: %d pages from %d files to '%s', ok: %d\n", len(pages), len(sources), destPath, (int)ok);
     return ok;
 }
 
@@ -1917,13 +1985,18 @@ static void MergeAfterSave(Str path) {
     }
 }
 
+// closes the dialog once saved (FinishPdfToolJob)
 static void MergeSaveAndClose(Str destPath) {
+    if (gTool.job) {
+        return;
+    }
     TempStr path = str::DupTemp(destPath);
-    if (!MergeSaveTo(path)) {
+    PdfToolJob* job = NewMergeSaveJob(path);
+    if (!job) {
         MessageBoxWarning(gTool.win, fmt(Tr("Couldn't save '%s'").s, path), Tr("Merge PDF"));
         return;
     }
-    MergeAfterSave(path);
+    RunToolJob(job);
 }
 
 // Save: over the document itself
@@ -2071,6 +2144,26 @@ TempStr MergePdfResultTemp(Str action, Str arg, int n, int* exitCodeOut) {
     } else if (str::Eq(action, StrL("close"))) {
         ClosePdfToolDialog();
         return finish(0, str::DupTemp(StrL("OK closed")));
+    } else if (str::Eq(action, StrL("closepaint"))) {
+        // free the files, paint while the window is still up, then close it
+        gp::Window* gw = ToolWindowGpui(gTool.tw);
+#if OS_WIN
+        HWND hwnd = ToolWindowHwnd(gTool.tw);
+        FreeToolState(gw);
+        if (hwnd) {
+            RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            RECT rc{};
+            if (GetWindowRect(hwnd, &rc)) {
+                SetWindowPos(hwnd, nullptr, 0, 0, (rc.right - rc.left) + 40, rc.bottom - rc.top,
+                             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        }
+#else
+        FreeToolState(gw);
+#endif
+        ClosePdfToolDialog();
+        return finish(0, str::DupTemp(StrL("OK closed")));
     } else if (str::Eq(action, StrL("key"))) {
         // a key in the grid: n is the virtual key, arg "shift" / "ctrl"
         PdfToolDialogOnKeyDown(gTool.win, n, str::Eq(arg, StrL("ctrl")), str::Eq(arg, StrL("shift")));
@@ -2141,10 +2234,10 @@ TempStr MergePdfResultTemp(Str action, Str arg, int n, int* exitCodeOut) {
 
 // orig's UpdateButton(): what makes the action button clickable
 static bool ActionEnabled() {
-    if (len(DestPathTemp()) == 0) {
+    if (gTool.job || len(DestPathTemp()) == 0) {
         return false;
     }
-    if (IsPageRangeTool() || gTool.kind == PdfToolKind::ExtractText) {
+    if (IsPageRangeTool() || gTool.kind == PdfToolKind::ExtractText || gTool.kind == PdfToolKind::ExportMarkdown) {
         Vec<int> parsed;
         bool isExtract = gTool.kind != PdfToolKind::DeletePages;
         return PageRangeOk(InputTextTemp(gTool.pagesEdit), gTool.pageCount, isExtract, parsed);
@@ -2172,7 +2265,7 @@ static bool ActionEnabled() {
         return ParseDeletePages(InputTextTemp(gTool.pagesEdit), gTool.pageCount, parsed);
     }
     if (gTool.kind == PdfToolKind::SaveSelectionAsImage) {
-        DisplayModel* dm = gTool.win ? gTool.win->AsFixed() : nullptr;
+        DisplayModel* dm = ToolSrcDm();
         EngineBase* engine = dm ? dm->GetEngine() : nullptr;
         if (!engine) {
             return false;
@@ -2207,6 +2300,9 @@ static void PdfToolDoIt() {
             break;
         case PdfToolKind::ExtractText:
             PdfExtractTextDoIt();
+            break;
+        case PdfToolKind::ExportMarkdown:
+            ExportMarkdownDoIt();
             break;
         case PdfToolKind::Compress:
             PdfCleanDoIt(false);
@@ -2773,6 +2869,8 @@ void PdfToolView::OnBrowse(PdfToolView*, gp::Ctx* cx, const gp::ClickEvent*) {
         args->nativeFile = str::Dup(shown);
     } else if (gTool.kind == PdfToolKind::ExtractText) {
         args->filter = str::Dup(StrL("Text Files\1*.txt\1All Files\1*.*\1"));
+    } else if (gTool.kind == PdfToolKind::ExportMarkdown) {
+        args->filter = str::Dup(StrL("Markdown Files\1*.md\1All Files\1*.*\1"));
     } else {
         args->filter = str::Dup(StrL("PDF Files\1*.pdf\1All Files\1*.*\1"));
     }
@@ -2858,6 +2956,8 @@ static const char* ToolWindowName(PdfToolKind kind) {
             return "pdfbake";
         case PdfToolKind::ExtractText:
             return "pdfextracttext";
+        case PdfToolKind::ExportMarkdown:
+            return "pdfexportmarkdown";
         case PdfToolKind::Compress:
             return "pdfcompress";
         case PdfToolKind::Decompress:
@@ -2922,6 +3022,7 @@ static bool StartToolDialog(MainWindow* win, PdfToolKind kind, Str destPath, Str
     gTool.pagesEdit = nullptr;
     gTool.passwordEdit = nullptr;
     gTool.visible = true;
+    DialogsTrackFrameDialog(IsPdfToolDialogVisible, [] { return gTool.win; }, ClosePdfToolDialog);
     gTool.wantFocus = true;
     gTool.focusPages = false;
     if (!ownWindow) {
@@ -2991,6 +3092,23 @@ void ShowPdfExtractTextDialog(MainWindow* win) {
     AppShellInvalidate(win);
 }
 
+void ShowExportMarkdownDialog(MainWindow* win) {
+    ToolScope scope;
+    if (!CanShowToolDialog(win, false)) {
+        return;
+    }
+    Str srcPath = win->CurrentTab()->filePath;
+    logf("ShowExportMarkdownDialog: opening for '%s'\n", srcPath);
+    TempStr mdPath = str::JoinTemp(path::GetPathNoExtTemp(srcPath), StrL(".md"));
+    if (!StartToolDialog(win, PdfToolKind::ExportMarkdown, MakeUniqueFilePathTemp(mdPath), StrL(".md"))) {
+        return;
+    }
+    int pageCount = win->ctrl ? win->ctrl->PageCount() : 1;
+    gTool.pagesEdit = NewInput(win, fmt("1-%d", pageCount));
+    gTool.focusPages = true;
+    AppShellInvalidate(win);
+}
+
 void ShowPdfCompressDialog(MainWindow* win) {
     ToolScope scope;
     if (!CanShowToolDialog(win, true)) {
@@ -3001,6 +3119,10 @@ void ShowPdfCompressDialog(MainWindow* win) {
                          StrL(".pdf"))) {
         return;
     }
+    gTool.ddQuality.Init(win->gpuiWin ? win->gpuiWin->app : nullptr);
+    StrVec items;
+    PdfCompressQualityLabels(items);
+    gTool.ddQuality.SetItems(items, (int)PdfCompressQuality::Same);
     AppShellInvalidate(win);
 }
 
@@ -4123,7 +4245,10 @@ static gp::El* ToolDlgFooter(gp::Ctx* cx, Str hint) {
                       ->Gap(kToolDlgGapDx);
     // files Convert would overwrite replace the hint (#6439)
     int nExisting = ExistingImageCount();
-    if (nExisting > 0) {
+    TempStr progress = JobProgressTemp();
+    if (len(progress) > 0) {
+        row->Child(ToolText(cx, progress, kToolDlgMetaFontPx, ThemeWindowTextDisabledColor()));
+    } else if (nExisting > 0) {
         row->Child(ToolText(cx, ExistingImagesTextTemp(nExisting), kToolDlgMetaFontPx, ThemeWindowTextColor()));
         row->Child(DlgGhostButton(cx, GStrL("pdftool-newnames"), Tr("Use New Names"),
                                   gp::ListenTo(gToolView, &PdfToolView::OnUseNewNames)));
@@ -4148,11 +4273,21 @@ static gp::El* PdfToolColumn(MainWindow* win, gp::Ctx* cx) {
     int nLines = 0;
     switch (gTool.kind) {
         case PdfToolKind::ExtractText:
+        case PdfToolKind::ExportMarkdown:
         case PdfToolKind::DeletePages:
         case PdfToolKind::ExtractPages:
             col->Child(ToolPagesLine(cx, gTool.kind != PdfToolKind::DeletePages));
             nLines++;
             hint = PageRangeHint();
+            break;
+        case PdfToolKind::Compress:
+            col->Child(
+                ToolLine(cx, Tr("Pictures"))
+                    ->Child(gp::Div(cx->a)
+                                ->W(kCompressQualityDx)
+                                ->Shrink0()
+                                ->Child(gTool.ddQuality.Build(cx, StrL("pdftool-quality"), kCompressQualityDx))));
+            nLines++;
             break;
         case PdfToolKind::Encrypt:
             col->Child(
@@ -4257,6 +4392,9 @@ static gp::El* PdfToolBuildCurrent(MainWindow* win, gp::Ctx* cx) {
     if (gTool.kind == PdfToolKind::PageNumbers) {
         gTool.ddPosition.PollChanged(cx->app);
     }
+    if (gTool.kind == PdfToolKind::Compress) {
+        gTool.ddQuality.PollChanged(cx->app);
+    }
     if (HasDpiCombo()) {
         gTool.dpiEdit->onChange = gp::ListenTo(gToolView, &PdfToolView::OnInput);
         gTool.ddDpi.TakeComboPicked();
@@ -4308,4 +4446,93 @@ gp::El* PdfToolDialogBuild(MainWindow* win, gp::Ctx* cx) {
     }
     ToolScope scope(tool);
     return PdfToolBuildCurrent(win, cx);
+}
+
+// --- Make PDF From Images (CmdImagesToPdf) -----------------------------------
+
+// the images picked, while the Save As question is up
+static StrVec gImagesToPdfPaths;
+
+static void OnImagesToPdfDest(SavePathArgs* args) {
+    MainWindow* win = args->win;
+    TempStr dest = str::DupTemp(args->path);
+    if (len(dest) == 0 || len(gImagesToPdfPaths) == 0 || !IsMainWindowValidAndNotClosing(win)) {
+        gImagesToPdfPaths.Reset();
+        return;
+    }
+    TempStr err = MakePdfFromImagesTemp(gImagesToPdfPaths, dest);
+    gImagesToPdfPaths.Reset();
+    if (len(err) > 0) {
+        ShowWarningNotification(win, err, kNotif5SecsTimeOut);
+        return;
+    }
+    LoadDocument(win, dest);
+}
+
+// the prompt runs a message loop, so it is shown from the ui task queue,
+// after gpui has unwound from the command
+static void ImagesToPdfPromptNow(MainWindow* win) {
+    if (!IsMainWindowValidAndNotClosing(win)) {
+        return;
+    }
+    StrVec paths;
+    if (!AppShellPromptForFiles(win, ImagesToPdfFilter(), &paths)) {
+        return;
+    }
+    // in name order: scan1, scan2, ...
+    SortNatural(&paths);
+    gImagesToPdfPaths = paths;
+
+    auto* args = new SavePathArgs();
+    args->win = win;
+    args->title = str::Dup(Tr("Save As"));
+    args->initialPath = str::Dup(ImagesToPdfDestTemp(paths[0]));
+    args->defExt = str::Dup(StrL(".pdf"));
+    args->filter = str::Dup(StrL("PDF documents\1*.pdf\1"));
+    args->onDone = MkFunc1Void<SavePathArgs*>(OnImagesToPdfDest);
+    ShowSavePathDialog(args);
+}
+
+// orig's MakePdfFromImages: picks images, then where the PDF goes, makes it
+// with a page per image and opens it
+void MakePdfFromImages(MainWindow* win) {
+    PostForWindow(win, ImagesToPdfPromptNow, "ImagesToPdf");
+}
+
+// --- Export Annotations (CmdExportAnnotations) -------------------------------
+
+static void OnAnnotationsExportDest(SavePathArgs* args) {
+    MainWindow* win = args->win;
+    TempStr dest = str::DupTemp(args->path);
+    if (len(dest) == 0 || !IsMainWindowValidAndNotClosing(win)) {
+        return;
+    }
+    WindowTab* tab = win->CurrentTab();
+    EngineBase* engine = tab ? tab->GetEngine() : nullptr;
+    if (!engine) {
+        return;
+    }
+    TempStr err = ExportAnnotationsTemp(engine, tab->filePath, dest);
+    if (len(err) > 0) {
+        ShowWarningNotification(win, err, kNotif5SecsTimeOut);
+        return;
+    }
+    ShowTemporaryNotification(win, fmt(Tr("Saved annotations to '%s'").s, dest));
+}
+
+// orig's ExportAnnotations: the PDF's annotations, unsaved ones too, as
+// Markdown or CSV, to a file the Save As dialog picks
+void ExportAnnotations(MainWindow* win) {
+    WindowTab* tab = win ? win->CurrentTab() : nullptr;
+    if (!tab || !tab->GetEngine() || len(tab->filePath) == 0) {
+        return;
+    }
+    auto* args = new SavePathArgs();
+    args->win = win;
+    args->title = str::Dup(Tr("Save As"));
+    args->initialPath = str::Dup(AnnotationsExportDestTemp(tab->filePath));
+    args->defExt = str::Dup(StrL(".md"));
+    args->filter = str::Dup(StrL("Markdown\1*.md\1CSV\1*.csv\1"));
+    args->onDone = MkFunc1Void<SavePathArgs*>(OnAnnotationsExportDest);
+    ShowSavePathDialog(args);
 }

@@ -76,6 +76,7 @@
 #include "gui/NavFilesUI.h"
 #include "gui/ToolWindow.h"
 #include "HomePage.h"
+#include "ServerFiles.h"
 #include "DocumentProperties.h"
 #include "TabGroupsManage.h"
 #include "Annotation.h"
@@ -144,6 +145,7 @@ struct ShellView {
     // Rearming happens off the timer callback: cancelling the timer that is
     // firing shifts the window's other timers under the dispatch loop.
     int tickTimer = 0;
+    int menuRebuildTimer = 0;
     int tickMs = 0;
     int tickWanted = 0;
     bool tickRearmPosted = false;
@@ -158,6 +160,7 @@ struct ShellView {
     static void OnTick(ShellView* self, gp::Ctx* cx, const gp::TickEvent* ev);
     static void OnRearmTick(ShellView* self, gp::Ctx* cx, const gp::TickEvent*);
     static void OnRevealCheck(ShellView* self, gp::Ctx* cx, const gp::TickEvent*);
+    static void OnMenuRebuildDue(ShellView* self, gp::Ctx* cx, const gp::TickEvent*);
     static void OnMouseDown(ShellView* self, gp::Ctx* cx, const gp::MouseDownEvent* ev);
     static void OnKeyDown(ShellView* self, gp::Ctx* cx, const gp::KeyEvent* ev);
     static void OnKeyUp(ShellView* self, gp::Ctx* cx, const gp::KeyEvent* ev);
@@ -279,8 +282,6 @@ void AppShellOnDpiChanged(MainWindow* win, int dpi) {
     AppShellInvalidate(win);
 }
 
-// gpui keeps the last kFrameTraceCap frames per window; the cursor makes each
-// call report only what was drawn since the previous one
 // --- the caption (orig's tabsInTitlebar) -------------------------------------
 
 static gp::El* BuildMenuBar(ShellView* self, gp::Ctx* cx);
@@ -553,6 +554,8 @@ static void BuildCaption(ShellView* self, gp::Ctx* cx, gp::El* root, bool twoRow
     }
 }
 
+// gpui keeps the last kFrameTraceCap frames per window; the cursor makes each
+// call report only what was drawn since the previous one
 TempStr AppShellFrameStatsTemp(MainWindow* win, bool reset) {
     static u64 cursor = 0;
     if (reset) {
@@ -977,6 +980,10 @@ void AppShellActivateWindow(MainWindow* win) {
     }
 }
 
+#if !OS_DARWIN
+void AppShellRaiseAbove(MainWindow*) {}
+#endif
+
 void AppShellMinimizeWindow(MainWindow* win) {
     if (win && win->gpuiWin) {
         // a window that isn't on screen yet can't be minimized
@@ -1161,6 +1168,40 @@ gp::App* AppShellGetApp() {
     return gApp;
 }
 
+// where the window's content (client area) starts on screen
+Point AppShellContentOrigin(MainWindow* win) {
+#if OS_WIN
+    POINT o{0, 0};
+    if (HWND hwnd = AppShellNativeHwnd(win)) {
+        ClientToScreen(hwnd, &o);
+    }
+    return Point(o.x, o.y);
+#else
+    Rect content = win && win->gpuiWin ? FromGpui(gp::WindowContentBounds(win->gpuiWin)) : Rect{};
+    if (content.IsEmpty()) {
+        content = AppShellWindowScreenRect(win);
+    }
+    return Point(content.x, content.y);
+#endif
+}
+
+// A rect in window dips as screen pixels, for tests. Off Windows tests use
+// gpui's window coordinates, so it comes back as is.
+Rect AppShellDipsToScreen(gp::Window* gw, float x, float y, float dx, float dy) {
+#if OS_WIN
+    HWND hwnd = gw ? (HWND)gp::PlatWindowHandle(gw) : nullptr;
+    float scale = hwnd ? (float)DpiGetForHwnd(hwnd) / 96.f : 1.f;
+    POINT p{(int)(x * scale), (int)(y * scale)};
+    if (hwnd) {
+        ClientToScreen(hwnd, &p);
+    }
+    return Rect{p.x, p.y, (int)(dx * scale), (int)(dy * scale)};
+#else
+    (void)gw;
+    return Rect{(int)x, (int)y, (int)dx, (int)dy};
+#endif
+}
+
 #if !OS_WIN
 static bool SystemUsesDarkMode() {
     return gApp && gp::AppWindowAppearance(gApp) == gp::WindowAppearance::Dark;
@@ -1170,6 +1211,10 @@ static void OnWindowAppearanceChanged(gp::App*, gp::WindowAppearance) {
     UpdateThemeAfterSystemColorChange();
 }
 #endif
+
+void AppShellSettingChanged() {
+    MenuCuesRefresh();
+}
 
 void AppShellSetApp(gp::App* app) {
     gApp = app;
@@ -1215,7 +1260,7 @@ void AppShellReapClosedWindows() {
         }
         logf("AppShellReapClosedWindows: window 0x%p was closed\n", win);
         win->gpuiWin = nullptr;
-        CloseWindow(win, false, false);
+        CloseWindow(win, false);
     }
 }
 
@@ -1406,7 +1451,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void sumatra_wasm_fullscreen_left() {
 extern "C" EMSCRIPTEN_KEEPALIVE const char* sumatra_wasm_build_info() {
     static char* info = nullptr;
     if (!info) {
-        info = str::Dup(fmt("%s %s", currentVersion, gitCommidId)).s;
+        info = str::Dup(fmt("%s %s", currentVersion, gitCommitId)).s;
     }
     return info;
 }
@@ -1721,8 +1766,12 @@ static void SetMenuRowCue(gp::Ctx* cx, gpc::PopupMenu* menu, gp::Str label, cons
     menu->items[menu->items.len - 1].element = MenuCueLabel(cx, label, at, fg);
 }
 
-static gpc::PopupMenu* BuildPopup(gp::Ctx* cx, MenuModel* model, Str id, bool cues) {
+// one MenuModel level as a popup, for the menu bar and the caption's menu button
+gpc::PopupMenu* AppShellMenuPopup(gp::Ctx* cx, MenuModel* model, Str id, bool cues) {
     gpc::PopupMenu* menu = gpc::PopupMenu::New(cx, GpuiDup(cx->a, id))->MinW(220);
+    if (!model) {
+        return menu;
+    }
     int i = -1;
     for (const MenuItemModel& it : model->items) {
         i++;
@@ -1734,7 +1783,7 @@ static gpc::PopupMenu* BuildPopup(gp::Ctx* cx, MenuModel* model, Str id, bool cu
         gp::Str label = GpuiDup(cx->a, at.display);
         if (it.submenu) {
             TempStr subId = fmt("%s-%d", id, i);
-            menu->Submenu(label, BuildPopup(cx, it.submenu, subId, cues));
+            menu->Submenu(label, AppShellMenuPopup(cx, it.submenu, subId, cues));
             menu->Disabled(it.disabled);
         } else {
             menu->MenuWithAction(label, ActSumatraCmd(), (intptr_t)it.cmdId);
@@ -1780,6 +1829,7 @@ static void UnderlineMenuBarTitle(gp::Ctx* cx, gp::El* bar, int barIdx, gp::Str 
 // matched here (orig lets win32 open the menu and underline the letter)
 static bool MenuBarOnAltKey(ShellView* self, gp::Ctx* cx, u16 vk) {
     MainWindow* win = self->win;
+    RebuildMenuIfDirty(win);
     // the macOS menu bar is the system's; it has no Alt access keys
     if (gp::AppHasMenuBar() || !win->menu) {
         return false;
@@ -1827,6 +1877,7 @@ static int MenuBarTitleCount(MainWindow* win) {
 // its first title, with no menu open
 static void MenuBarArm(ShellView* self, gp::Ctx* cx) {
     MainWindow* win = self->win;
+    RebuildMenuIfDirty(win);
     if (gp::AppHasMenuBar() || !win->menu || MenuBarTitleCount(win) == 0) {
         return;
     }
@@ -1978,6 +2029,10 @@ static gp::El* BuildMenuBar(ShellView* self, gp::Ctx* cx) {
         self->menuCues = false;
     }
     bool cues = self->menuCues || MenuCuesAlways();
+    // an open menu shows what the last command changed, even mid-burst
+    if (menuOpen) {
+        RebuildMenuIfDirty(win);
+    }
 
     struct BarTitle {
         gp::Str label;
@@ -2004,7 +2059,7 @@ static gp::El* BuildMenuBar(ShellView* self, gp::Ctx* cx) {
         if (isOpen && MenuContainsCmd(it.submenu, CmdTtsMenuReadCurrentPage) && ReadAloudLoadVoices()) {
             RebuildReadAloudMenu(win, it.submenu);
         }
-        gpc::PopupMenu* popup = BuildPopup(cx, it.submenu, id, cues);
+        gpc::PopupMenu* popup = AppShellMenuPopup(cx, it.submenu, id, cues);
         if (state && state->selected == barIdx && self->menuPopupIdx < 0) {
             gp::PopupMenuState* popupState = popup->state.Get(cx);
             if (popupState) {
@@ -2056,8 +2111,43 @@ static BrowserView* UpdateBrowserViews(MainWindow* win, bool overlayUp) {
     return curr;
 }
 
+// the error page is built every frame; check the disk once per failed tab
+static bool FailedTabFileExists(WindowTab* tab) {
+    static WindowTab* lastTab = nullptr;
+    static const char* lastPath = nullptr;
+    static bool lastExists = false;
+    if (tab != lastTab || tab->filePath.s != lastPath) {
+        lastTab = tab;
+        lastPath = tab->filePath.s;
+        lastExists = file::Exists(tab->filePath);
+    }
+    return lastExists;
+}
+
 // a fixed-page document draws through DocCanvas, the Home tab through
 // HomePage, a CHM or markdown document through the browser view
+// the popup menus open in the frame (tab, toolbar and context menus, a menu
+// bar drop-down), in frame client pixels. A popup not laid out yet asks for
+// another frame.
+static void PopupMenuRects(ShellView* self, gp::Ctx* cx, Vec<Rect>& out) {
+    Vec<gp::Bounds> bounds;
+    TrackedPopupBounds(cx, bounds);
+    auto* mb = (gpc::AppMenuBarState*)gp::EntityGet(cx->app, self->menuBarState.id);
+    if (mb && mb->selected >= 0 && self->menuPopupIdx >= 0) {
+        AppendPopupMenuBounds(cx, self->menuPopupState.Get(cx), bounds);
+    }
+    float k = gp::WindowScaleFactor(cx->win);
+    for (const gp::Bounds& b : bounds) {
+        if (b.w <= 0 || b.h <= 0) {
+            AppShellInvalidate(self->win);
+            continue;
+        }
+        int x = (int)floorf(b.x * k);
+        int y = (int)floorf(b.y * k);
+        VecAppend(out, Rect(x, y, (int)ceilf((b.x + b.w) * k) - x, (int)ceilf((b.y + b.h) * k) - y));
+    }
+}
+
 static gp::El* BuildCanvas(ShellView* self, gp::Ctx* cx, bool overlayUp) {
     MainWindow* win = self->win;
     const gp::Theme& th = gp::ThemeNow(cx->app);
@@ -2081,6 +2171,9 @@ static gp::El* BuildCanvas(ShellView* self, gp::Ctx* cx, bool overlayUp) {
         if (win->captionOverlayShown && ShowCaption(win) && !gSettings->showCaption) {
             clipTop = std::max(0, CaptionDy(win, win->isMenuBarVisible, TabsAreVisible(win)) - win->canvasRc.y);
         }
+        Vec<Rect> holes;
+        PopupMenuRects(self, cx, holes);
+        BrowserViewSetHoles(browser, holes);
         box->Child(BrowserViewBuild(browser, cx, clipTop));
         return box;
     }
@@ -2097,7 +2190,7 @@ static gp::El* BuildCanvas(ShellView* self, gp::Ctx* cx, bool overlayUp) {
                 canvas->Child(gp::TextEl(cx->a, GpuiDup(cx->a, reason))->Font(16)->Fg(th.foreground));
             }
             // looking at the bytes can tell why; not when the file is gone
-            if (file::Exists(tab->filePath) && CanAccessDisk()) {
+            if (FailedTabFileExists(tab) && CanAccessDisk()) {
                 canvas->Child(gp::TextEl(cx->a, GpuiDup(cx->a, Tr("Open in hex view")))
                                   ->Font(16)
                                   ->Fg(ToGpui(ThemeWindowLinkColor()))
@@ -2282,11 +2375,18 @@ static gp::El* BuildBody(ShellView* self, gp::Ctx* cx, bool overlayUp) {
 // canvas it belongs to, with orig's five NotifCorner anchors, its close box
 // and the tip markup ([text](CmdFoo), **bold**, (Kbd/..)) as real spans.
 
-constexpr int kNotifPadX = 10;
-constexpr int kNotifPadY = 6;
+// orig's NotificationWnd::BuildTree padding and kCloseLeftMargin - padding
+constexpr int kNotifPadX = 12;
+constexpr int kNotifPadY = 8;
 // orig's kTopLeftMargin
 constexpr int kNotifTopLeftMargin = 8;
-constexpr int kNotifCloseGap = 8;
+constexpr int kNotifCloseGap = 4;
+// orig's kProgressDy
+constexpr int kNotifProgressDy = 5;
+// orig's kPadding between stacked notifications
+constexpr int kNotifStackGap = 6;
+// orig's VirtCloseButton x (kColCloseXDef)
+constexpr Color kNotifCloseCol = MkRgb(0xa0, 0xa0, 0xa0);
 constexpr int kNotifCloseDx = 16;
 
 static bool NotifShownNow(MainWindow* win, NotificationWnd* n);
@@ -2311,8 +2411,8 @@ static bool NotifShownNow(MainWindow* win, NotificationWnd* n) {
 // close box stays reachable even for a very long message (issue #2916)
 static float NotifMaxTextDx(MainWindow* win) {
     int dx = win->canvasRc.dx - 2 * DpiScale(kNotifTopLeftMargin);
-    // the card's border, its padding and the close box after the text
-    dx -= 2 + 2 * kNotifPadX + kNotifCloseGap + kNotifCloseDx;
+    // the card's padding and the close box after the text
+    dx -= 2 * kNotifPadX + kNotifCloseGap + kNotifCloseDx;
     return dx > 0 ? (float)dx : (float)(1 << 20);
 }
 
@@ -2359,12 +2459,7 @@ static gp::El* BuildNotifCard(gp::Ctx* cx, NotificationWnd* n) {
     Color colText = n->warning ? ThemeNotificationsHighlightTextColor() : ThemeNotificationsTextColor();
     Color colLink = n->warning ? ThemeNotificationsHighlightLinkColor() : ThemeWindowLinkColor();
     bool isBar = n->corner == NotifCorner::BottomBar;
-    gp::El* card = gp::Div(cx->a)
-                       ->FlexCol()
-                       ->PadX((float)kNotifPadX)
-                       ->PadY((float)kNotifPadY)
-                       ->Bg(ToGpui(colBg))
-                       ->Border(1, ToGpui(ThemeWindowTextColor()));
+    gp::El* card = gp::Div(cx->a)->FlexCol()->PadX((float)kNotifPadX)->PadY((float)kNotifPadY)->Bg(ToGpui(colBg));
     gp::El* row = gp::Div(cx->a)->FlexRow()->ItemsCenter()->Gap((float)kNotifCloseGap);
     if (isBar) {
         card->W(gp::kFill);
@@ -2372,16 +2467,18 @@ static gp::El* BuildNotifCard(gp::Ctx* cx, NotificationWnd* n) {
     }
     row->Child(BuildNotifSpans(cx, n, colText, colLink));
     row->Child(gp::TextEl(cx->a, GStrL("\xc3\x97"))
-                   ->Font(14)
-                   ->Fg(ToGpui(colText))
+                   ->Font(18)
+                   ->Fg(ToGpui(kNotifCloseCol))
                    ->Cursor(gp::CursorKind::Pointer)
                    ->PathClick(GpuiDup(cx->a, fmt("notif-%d-close", (int)n->key)))
                    ->OnClick(gp::ListenTo(ShellViewOf(n->win), &ShellView::OnNotifClose, (intptr_t)n->key)));
     card->Child(row);
+    // flat: a light track with the done part in the progress color over it
     if (n->progressPerc >= 0) {
-        gp::Rgba col = ToGpui(ThemeNotificationsProgressColor());
-        gp::El* progress = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->H(5)->Border(1, col);
-        progress->Child(gp::Div(cx->a)->WFrac((float)n->progressPerc / 100.f)->H(gp::kFill)->Bg(col));
+        float frac = (float)std::clamp(n->progressPerc, 0, 100) / 100.f;
+        gp::El* progress = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->H((float)kNotifProgressDy);
+        progress->Bg(ToGpui(ThemeNotificationsProgressTrackColor(colBg)));
+        progress->Child(gp::Div(cx->a)->WFrac(frac)->H(gp::kFill)->Bg(ToGpui(ThemeNotificationsProgressColor())));
         card->Gap((float)kNotifPadY)->Child(progress);
     }
     return card;
@@ -2401,16 +2498,17 @@ static void BuildNotifications(MainWindow* win, gp::Ctx* cx, gp::El* parent) {
         if (!stacks[ci]) {
             bool atRight = n->corner == NotifCorner::TopRight || n->corner == NotifCorner::BottomRight;
             bool atBottom = n->corner != NotifCorner::TopLeft && n->corner != NotifCorner::TopRight;
-            gp::El* st = gp::Div(cx->a)->FlexCol()->Gap(4)->Absolute();
+            gp::El* st = gp::Div(cx->a)->FlexCol()->Gap((float)kNotifStackGap)->Absolute();
             if (n->corner == NotifCorner::BottomBar) {
                 st->Left(0)->Right(0)->Bottom(0);
             } else {
                 float mx = (float)DpiScale(n->xMargin);
                 float my = (float)DpiScale(n->yMargin);
+                // each card as wide as its own message, as orig sizes each window
                 if (atRight) {
                     st->Right(mx)->ItemsEnd();
                 } else {
-                    st->Left(mx);
+                    st->Left(mx)->ItemsStart();
                 }
                 if (atBottom) {
                     st->Bottom(my);
@@ -3063,6 +3161,8 @@ void ShellView::OnKeyDown(ShellView* self, gp::Ctx* cx, const gp::KeyEvent* ev) 
             // the page box gave the focus back
         } else if (DialogsOnEscape(win)) {
             // the topmost dialog is gone now
+        } else if (win->IsCurrentTabAbout() && HomePageClearSelection(win)) {
+            // Home's selected file group is cleared
         } else if (ReadingAutoScrollIsOn(win)) {
             // orig's PreTranslate: these two take Esc before the frame does
             ReadingAutoScrollStop(win);
@@ -3310,8 +3410,6 @@ void ShellView::OnKeyUp(ShellView* self, gp::Ctx* cx, const gp::KeyEvent* ev) {
     }
 }
 
-// drains the ui task queue, runs middle-button auto-scroll and repaints while
-// a page is still rendering
 #if OS_DARWIN || OS_WASM
 // The framebuffer is a scaled copy of the logical canvas. Tiles have to be
 // rendered at that scale or the page is stretched.
@@ -3362,6 +3460,36 @@ static void ShellApplyTickPace(ShellView* self, gp::Window* gw, int ms) {
     self->tickTimer = gp::WindowSetInterval(gw, ms, gp::ListenTo(ShellViewOf(self->win), &ShellView::OnTick));
 }
 
+// how long commands must pause before the menu is rebuilt
+constexpr int kMenuRebuildDelayMs = 150;
+
+// (re)starts the countdown: a burst of commands rebuilds once, after it ends
+void AppShellScheduleMenuRebuild(MainWindow* win) {
+    ShellView* self = nullptr;
+    if (win && win->gpuiWin && win->shell) {
+        self = (ShellView*)gp::EntityGet(win->gpuiWin->app, win->shell->view.id);
+    }
+    if (!self) {
+        RebuildMenuIfDirty(win);
+        return;
+    }
+    if (self->menuRebuildTimer) {
+        gp::WindowCancelTimer(win->gpuiWin, self->menuRebuildTimer);
+    }
+    gp::Listener l = gp::ListenTo(ShellViewOf(win), &ShellView::OnMenuRebuildDue);
+    self->menuRebuildTimer = gp::WindowSetTimeout(win->gpuiWin, kMenuRebuildDelayMs, l);
+}
+
+void ShellView::OnMenuRebuildDue(ShellView* self, gp::Ctx*, const gp::TickEvent*) {
+    self->menuRebuildTimer = 0;
+    MainWindow* win = self->win;
+    if (!IsMainWindowValidAndNotClosing(win) || !win->menuDirty) {
+        return;
+    }
+    RebuildMenuBar(win);
+    AppShellInvalidate(win);
+}
+
 void ShellView::OnRevealCheck(ShellView* self, gp::Ctx*, const gp::TickEvent*) {
     if (IsMainWindowValidAndNotClosing(self->win)) {
         MaybeRevealStartupWindow(self->win);
@@ -3404,6 +3532,37 @@ static void LoadingMessageTick(ShellView* self) {
     AppShellInvalidate(self->win);
 }
 
+// orig pauses auto-scroll from WM_SIZE. The tick watches for a minimize where
+// gpui reports none; macOS reports it (OnWindowBounds), as a minimized
+// window's timers run a second or more late
+static void CheckMinimized(MainWindow* win) {
+    bool minimized = gp::AppIsMinimized(win->gpuiWin);
+    if (minimized != win->wasMinimized) {
+        win->wasMinimized = minimized;
+        ReadingAutoScrollOnMinimize(win, minimized);
+    }
+}
+
+// orig's HomePageOnWindowActivate: a stale SumatraPDF Web list is fetched again
+void AppShellNoteActivation(MainWindow* win, bool active) {
+    if (active && IsMainWindowValidAndNotClosing(win) && win->IsCurrentTabAbout()) {
+        ServerFilesEnsureListed();
+    }
+}
+
+static void OnWindowActivation(void* data, gp::Window*, bool active) {
+    AppShellNoteActivation((MainWindow*)data, active);
+}
+
+static void OnWindowBounds(void* data, gp::Window*, gp::WindowBoundsEvent ev) {
+    auto* win = (MainWindow*)data;
+    if (ev == gp::WindowBoundsEvent::MinimizedChanged && IsMainWindowValidAndNotClosing(win)) {
+        CheckMinimized(win);
+    }
+}
+
+// drains the ui task queue, runs middle-button auto-scroll and repaints while
+// a page is still rendering
 void ShellView::OnTick(ShellView* self, gp::Ctx* cx, const gp::TickEvent* ev) {
     uitask::DrainQueue();
     AppShellReapClosedWindows();
@@ -3455,12 +3614,7 @@ void ShellView::OnTick(ShellView* self, gp::Ctx* cx, const gp::TickEvent* ev) {
             gp::Notify(cx);
         }
     }
-    // orig pauses auto-scroll from WM_SIZE; ng has no minimize event, so watch for one
-    bool minimized = gp::AppIsMinimized(win->gpuiWin);
-    if (minimized != win->wasMinimized) {
-        win->wasMinimized = minimized;
-        ReadingAutoScrollOnMinimize(win, minimized);
-    }
+    CheckMinimized(win);
     ToolbarTick(win, ms);
     LoadingMessageTick(self);
     AutoReloadTick(win, ms);
@@ -3496,7 +3650,6 @@ void ShellView::OnTick(ShellView* self, gp::Ctx* cx, const gp::TickEvent* ev) {
     }
 }
 
-// Document area under the caption, menu, tabs and toolbar.
 // At most one drain queued: every uitask::Post wakes, and a second drain in
 // the same batch runs what the first one posted. A job that runs in slices
 // (see kUiSliceMs) then runs slice after slice without the browser getting a
@@ -3920,6 +4073,7 @@ MainWindow* AppShellCreateWindow(gp::App* app, int dipW, int dipH, bool hiddenUn
     // wasm has one window: a browser tab has one canvas
     if (!gw) {
         logf("AppShellCreateWindow: gpui didn't open a window\n");
+        gp::EntityDrop(app, ui->view.id);
         delete ui;
         return nullptr;
     }
@@ -3933,6 +4087,8 @@ MainWindow* AppShellCreateWindow(gp::App* app, int dipW, int dipH, bool hiddenUn
     win->isMenuBarVisible = SettingsUseTabs() ? gSettings->showMenubarWithTabs : gSettings->showMenubar;
     VecAppend(gWindows, win);
     gp::WindowOnShouldClose(gw, OnWindowShouldClose, win);
+    gp::WindowOnBoundsChanged(gw, OnWindowBounds, win);
+    gp::WindowOnActivationChanged(gw, OnWindowActivation, win);
     view->win = win;
     view->menuBarState = gp::EntityNewState<gpc::AppMenuBarState>(app);
 

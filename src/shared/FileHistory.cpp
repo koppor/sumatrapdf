@@ -94,7 +94,9 @@ FileState* FileHistoryMarkFileLoaded(Str filePath) {
         fs->isMissing = false;
     }
     VecInsertAt(*gStates, 0, fs);
-    fs->openCount++;
+    if (fs->openCount < INT_MAX) {
+        fs->openCount++;
+    }
     return fs;
 }
 
@@ -135,14 +137,14 @@ static int cmpRecentlyOpened(FileState* const* a, FileState* const* b) {
     if (dsA->isPinned) {
         return str::CmpNatural(path::GetBaseNameTemp(dsA->filePath), path::GetBaseNameTemp(dsB->filePath));
     }
-    return dsA->index < dsB->index ? -1 : 1;
+    return (dsA->index > dsB->index) - (dsA->index < dsB->index);
 }
 
 static int cmpOpenCount(FileState* const* a, FileState* const* b) {
     FileState* dsA = *a;
     FileState* dsB = *b;
     if (!dsA->isPinned && !dsB->isPinned && dsA->openCount != dsB->openCount) {
-        return dsB->openCount - dsA->openCount;
+        return dsB->openCount < dsA->openCount ? -1 : 1;
     }
     return cmpRecentlyOpened(a, b);
 }
@@ -209,7 +211,7 @@ void FileHistoryPurge(bool alwaysUseDefaultState) {
 // recently closed tabs and windows, most recent at the end
 static Vec<ClosedDocuments*> gClosedDocuments;
 
-int RecentlyCloseDocumentsCount() {
+int RecentlyClosedDocumentsCount() {
     return len(gClosedDocuments);
 }
 
@@ -288,6 +290,9 @@ bool DocumentPathExists(Str path) {
     if (file::Exists(path) || dir::Exists(path)) {
         return true;
     }
+    if (len(path) <= 2) {
+        return false;
+    }
     Str pos = str::SliceFromCharLast(Str(path.s + 2, path.len - 2), ':');
     if (len(pos) == 0) {
         return false;
@@ -346,13 +351,21 @@ static void GetFilePathsToCheck(StrVec& toCheck) {
             toCheck.Append(fs->filePath);
         }
     }
-    // add missing paths from the list of most frequently opened documents
+    // then the most frequently opened documents not listed yet. History
+    // paths are unique, so only the recent ones above can repeat
+    int nRecent = len(toCheck);
     Vec<FileState*> frequencyList;
     FileHistoryGetFrequencyOrder(frequencyList);
     int iMax = std::min(2 * kFileHistoryMaxFrequent, len(frequencyList));
     for (int i = 0; i < iMax; i++) {
         fs = frequencyList[i];
-        AppendIfNotExists(&toCheck, fs->filePath);
+        bool listed = false;
+        for (int j = 0; j < nRecent && !listed; j++) {
+            listed = str::Eq(toCheck[j], fs->filePath);
+        }
+        if (!listed) {
+            toCheck.Append(fs->filePath);
+        }
     }
 }
 

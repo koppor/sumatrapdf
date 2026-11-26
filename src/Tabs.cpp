@@ -65,7 +65,7 @@ static void UpdateTabTitle(WindowTab* tab) {
     if (tab->AsFixed()) {
         dirty = EngineHasUnsavedAnnotations(tab->AsFixed()->GetEngine());
     }
-    TempStr tooltip = MakeTabTooltipTemp(tab->filePath, dirty);
+    TempStr tooltip = MakeTabTooltipTemp(tab, dirty);
     // a "+" Home tab a document was opened in is sized like the other documents
     TabInfo* ti = win->tabsCtrl->GetTab(idx);
     if (ti) {
@@ -109,7 +109,6 @@ void UpdateTabWidth(MainWindow* win) {
     // settings; convert to physical pixels so HiDPI monitors honor the value
     // (issue #3850). Height already uses DpiScale via GetTabbarHeight.
     if (win->tabsCtrl) {
-        HWND hwnd = win->tabsCtrl->hwnd ? win->tabsCtrl->hwnd : win->hwndFrame;
         win->tabsCtrl->tabDefaultDx = DpiScale(gSettings->tabWidth);
         win->tabsCtrl->equalWidth = gSettings->tabsEqualWidth;
     }
@@ -454,6 +453,11 @@ static void TabsContextMenu(TabsCtrl* tabsCtrl, VirtMouseEvent* ev) {
     if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
+    // the menu loop pumps messages: the tab may have closed or moved meanwhile
+    tabIdx = win->GetTabIdx(tabUnderMouse);
+    if (tabIdx < 0) {
+        return;
+    }
     if (StripGroupCmd(win, tabUnderMouse, cmdId)) {
         return;
     }
@@ -758,7 +762,7 @@ WindowTab* AddTabToWindow(MainWindow* win, WindowTab* tab, bool deferUpdate) {
     // TabsOnChangedDoc for the active tab)
     // a lazy tab (a session's, not loaded yet) leaves its file alone: no size
     bool lazy = !tab->ctrl && tab->tabState;
-    newTab->tooltip = str::Dup(lazy ? PathForDisplayTemp(tab->filePath) : MakeTabTooltipTemp(tab->filePath, false));
+    newTab->tooltip = str::Dup(lazy ? PathForDisplayTemp(tab->filePath) : MakeTabTooltipTemp(tab, false));
     newTab->userData = (UINT_PTR)tab;
     newTab->tabColor = tab->tabColor;
     newTab->groupId = tab->stripGroupId;

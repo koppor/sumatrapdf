@@ -115,6 +115,9 @@ static NO_INLINE bool CanSymbolizeAddress(DWORD64 addr) {
     symInfo->SizeOfStruct = sizeof(SYMBOL_INFO);
     symInfo->MaxNameLen = kMaxSymLen;
 
+    if (!DynSymFromAddr) {
+        return false;
+    }
     DWORD64 symDisp = 0;
     BOOL ok = DynSymFromAddr(GetCurrentProcess(), addr, &symDisp, symInfo);
     if (!ok) {
@@ -158,17 +161,19 @@ bool Initialize(WStr symPathW, bool force) {
         return false;
     }
 
-    if (needsCleanup) {
+    if (needsCleanup && DynSymCleanup) {
         DynSymCleanup(GetCurrentProcess());
     }
 
     // before SymInitialize: it reads every loaded module's symbols unless loads are deferred
-    DWORD symOptions = DynSymGetOptions();
-    symOptions |= (SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
-    symOptions |= SYMOPT_FAIL_CRITICAL_ERRORS; // don't show system msg box on errors
-    DynSymSetOptions(symOptions);
+    if (DynSymGetOptions && DynSymSetOptions) {
+        DWORD symOptions = DynSymGetOptions();
+        symOptions |= (SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
+        symOptions |= SYMOPT_FAIL_CRITICAL_ERRORS; // don't show system msg box on errors
+        DynSymSetOptions(symOptions);
+    }
 
-    gSymInitializeOk = DynSymInitializeW(GetCurrentProcess(), symPathW.s, TRUE);
+    gSymInitializeOk = DynSymInitializeW(GetCurrentProcess(), CWStrTemp(symPathW), TRUE);
 
     if (!gSymInitializeOk) {
         log(StrL("dbghelp::Initialize(): DynSymInitializeW() failed"));
@@ -206,7 +211,7 @@ void WriteMiniDump(WStr crashDumpFilePath, MINIDUMP_EXCEPTION_INFORMATION* mei, 
         return;
     }
 
-    HANDLE hFile = CreateFileW(crashDumpFilePath.s, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+    HANDLE hFile = CreateFileW(CWStrTemp(crashDumpFilePath), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
     if (INVALID_HANDLE_VALUE == hFile) {
         logf("WriteMiniDump: CreateFileW failed, err=%u\n", GetLastError());
@@ -232,7 +237,7 @@ void WriteMiniDump(WStr crashDumpFilePath, MINIDUMP_EXCEPTION_INFORMATION* mei, 
     if (len(comment) > 0) {
         userStream.Type = CommentStreamA;
         userStream.BufferSize = (ULONG)comment.len + 1;
-        userStream.Buffer = (PVOID)comment.s;
+        userStream.Buffer = (PVOID)CStrTemp(comment);
         userInfo.UserStreamCount = 1;
         userInfo.UserStreamArray = &userStream;
         userParam = &userInfo;
@@ -304,7 +309,7 @@ void GetAddressInfo(str::Builder& s, DWORD64 addr, bool compact) {
 
     DWORD64 symDisp = 0;
     char* symName = nullptr;
-    BOOL ok = DynSymFromAddr(GetCurrentProcess(), addr, &symDisp, symInfo);
+    BOOL ok = DynSymFromAddr && DynSymFromAddr(GetCurrentProcess(), addr, &symDisp, symInfo);
     if (ok) {
         symName = &(symInfo->Name[0]);
     }
@@ -333,7 +338,7 @@ void GetAddressInfo(str::Builder& s, DWORD64 addr, bool compact) {
         IMAGEHLP_LINE64 line;
         line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
         DWORD disp;
-        if (DynSymGetLineFromAddr64(GetCurrentProcess(), addr, &disp, &line)) {
+        if (DynSymGetLineFromAddr64 && DynSymGetLineFromAddr64(GetCurrentProcess(), addr, &disp, &line)) {
             s.Append(fmt(" %s+%d", Str(line.FileName), line.LineNumber));
         }
     } else {
@@ -342,10 +347,14 @@ void GetAddressInfo(str::Builder& s, DWORD64 addr, bool compact) {
     s.Append(StrL("\n"));
 }
 
-#ifdef _WIN64
+#if IS_INTEL_64 == 1
 constexpr int kMachineType = IMAGE_FILE_MACHINE_AMD64;
-#else
+#elif IS_INTEL_32 == 1
 constexpr int kMachineType = IMAGE_FILE_MACHINE_I386;
+#elif IS_ARM_64 == 1
+constexpr int kMachineType = IMAGE_FILE_MACHINE_ARM64;
+#else
+#error "Unsupported CPU architecture"
 #endif
 
 static STACKFRAME64 InitStackFrame(const CONTEXT& ctx) {
@@ -383,10 +392,10 @@ static bool GetStackFrameInfo(str::Builder& s, STACKFRAME64* stackFrame, CONTEXT
 
     DWORD64 addr = stackFrame->AddrPC.Offset;
     if (0 == addr) {
-        return true;
+        return false;
     }
     if (addr == stackFrame->AddrReturn.Offset) {
-        s.Append(StrL("GetStackFrameInfo(): addr == stackFrame->AddrReturn.Offset"));
+        s.Append(StrL("GetStackFrameInfo(): addr == stackFrame->AddrReturn.Offset\n"));
         return false;
     }
 
@@ -447,38 +456,6 @@ int GetSuspendedThreadCallstackAddrs(ThreadHandle hThread, u64* addrs, int maxAd
     return n;
 }
 
-void GetThreadCallstack(str::Builder& s, ThreadId threadId) {
-    if (threadId == GetCurrentThreadId()) {
-        return;
-    }
-
-    s.Append(fmt("\nThread: %x\n", threadId));
-
-    DWORD access = THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME;
-    ThreadHandle hThread = OpenThread(access, false, threadId);
-    if (!hThread) {
-        s.Append(StrL("Failed to OpenThread()\n"));
-        return;
-    }
-
-    DWORD res = SuspendThread(hThread);
-    if ((DWORD)(-1) == res) {
-        s.Append(StrL("Failed to SuspendThread()\n"));
-    } else {
-        CONTEXT ctx{};
-        ctx.ContextFlags = CONTEXT_FULL;
-        BOOL ok = GetThreadContext(hThread, &ctx);
-        if (ok) {
-            GetCallstack(s, ctx, hThread);
-        } else {
-            s.Append(StrL("Failed to GetThreadContext()\n"));
-        }
-
-        ResumeThread(hThread);
-    }
-    SafeCloseThreadHandle(&hThread);
-}
-
 // we disable optimizations for this function as it calls RtlCaptureContext()
 // which cannot deal with Omit Frame Pointers optimization (/Oy explicitly, turned
 // implicitly by e.g. /O2)
@@ -521,7 +498,8 @@ void GetExceptionInfo(str::Builder& s, EXCEPTION_POINTERS* excPointers) {
 
     s.Append(fmt("Faulting IP: "));
     GetAddressInfo(s, (DWORD64)excRecord->ExceptionAddress, false);
-    if ((EXCEPTION_ACCESS_VIOLATION == excCode) || (EXCEPTION_IN_PAGE_ERROR == excCode)) {
+    if (((EXCEPTION_ACCESS_VIOLATION == excCode) || (EXCEPTION_IN_PAGE_ERROR == excCode)) &&
+        excRecord->NumberParameters >= 2) {
         int readWriteFlag = (int)excRecord->ExceptionInformation[0];
         DWORD64 dataVirtAddr = (DWORD64)excRecord->ExceptionInformation[1];
         // 0 = read, 1 = write, 8 = DEP
@@ -569,8 +547,6 @@ void GetExceptionInfo(str::Builder& s, EXCEPTION_POINTERS* excPointers) {
     // it's not really for current thread, but it seems to work
     GetCallstack(s, *ctx, GetCurrentThread());
 }
-
-static str::Builder* gCallstackLogs = nullptr;
 
 } // namespace dbghelp
 

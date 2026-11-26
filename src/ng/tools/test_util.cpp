@@ -10,6 +10,11 @@
 #include "base/tests/UtAssert.h"
 
 extern void ArchiveTest();
+extern void ZipDirTest();
+extern void ArchiveWarnTest();
+extern void ArchiveTarLazyTest();
+extern void ArchiveRarHugeEntryTest();
+extern void ArchiveTarHugeEntryTest();
 extern void BaseUtilTest();
 extern void ByteOrderTests();
 extern void CryptoUtilTest();
@@ -17,7 +22,10 @@ extern void CssParser_UnitTests();
 extern void DictTest();
 extern void DirRemoveAllTest();
 extern void UncExistsTest();
+extern void NonVirtualPathTest();
+extern void FileWatcherOverflowTest();
 extern void FileUtilTest();
+extern void ExifTest();
 extern void GuessFileTypeTest();
 extern void JsonTest();
 extern void SettingsUtilTest();
@@ -29,6 +37,7 @@ extern void VecTest();
 extern bool AnnotSearch_UnitTests();
 extern void ChapterTable_UnitTests();
 extern void MobiDoc_UnitTests();
+extern void Ofd_UnitTests();
 extern void LitDoc_UnitTests();
 extern void RtfDoc_UnitTests();
 extern void PdfSync_UnitTests();
@@ -42,6 +51,8 @@ extern void MergePdf_UnitTests();
 extern void Annotation_UnitTests();
 extern void EngineDjvuDec_UnitTests();
 extern void TipMarkup_UnitTests();
+extern void ContentHash_UnitTests();
+extern void BerSize_UnitTests();
 extern void ReadAloudHighlight_UnitTests();
 extern void RefHoverTest();
 extern void AppSettingsTest();
@@ -62,6 +73,8 @@ bool GumboHtmlParser_UnitTest();
 bool DisplayMode_UnitTestZoom();
 bool Translations_UnitTestUnescape();
 bool Translations_UnitTestLocale();
+bool Translations_UnitTestLookup();
+bool Eutl_UnitTestListedCache();
 extern bool Accelerators_UnitTestFolderNavIsSafe();
 extern bool NavFiles_UnitTestHidden();
 #if !OS_WIN
@@ -69,6 +82,7 @@ extern bool MeasurementSystem_UnitTests();
 extern bool DpiPosix_UnitTests();
 #if !OS_WASM
 extern bool AppToolsPosix_UnitTests();
+extern bool Launch_UnitTests();
 #endif
 #endif
 extern bool Accelerators_UnitTestTreeTakesLetters();
@@ -87,14 +101,22 @@ extern bool PlatformFontPosix_UnitTests();
 #endif
 
 // ng: test data lives in docs/test/. Works when run from the repo root and
-// when run from out/<cfg>/, where the exe lives
+// from anywhere else: the exe is in out/<platform>/<cfg>/, so look up from it
 TempStr TestDocPathTemp(Str relPath) {
     TempStr path = str::DupTemp(relPath);
     if (file::Exists(path)) {
         return path;
     }
-    TempStr dir = path::JoinTemp(GetSelfExeDirTemp(), StrL("../.."));
-    return path::JoinTemp(dir, relPath);
+    constexpr int kMaxLevelsUp = 5;
+    TempStr dir = GetSelfExeDirTemp();
+    for (int i = 0; i < kMaxLevelsUp && len(dir) > 0; i++) {
+        TempStr candidate = path::JoinTemp(dir, relPath);
+        if (file::Exists(candidate)) {
+            return candidate;
+        }
+        dir = path::GetDirTemp(dir);
+    }
+    return path;
 }
 
 #if OS_WIN
@@ -140,6 +162,11 @@ int main(int argc, char** argv) {
 #endif
 
     ArchiveTest();
+    ZipDirTest();
+    ArchiveWarnTest();
+    ArchiveTarLazyTest();
+    ArchiveRarHugeEntryTest();
+    ArchiveTarHugeEntryTest();
     BaseUtilTest();
     ByteOrderTests();
     CryptoUtilTest();
@@ -147,7 +174,10 @@ int main(int argc, char** argv) {
     DictTest();
     DirRemoveAllTest();
     UncExistsTest();
+    NonVirtualPathTest();
+    FileWatcherOverflowTest();
     FileUtilTest();
+    ExifTest();
     GuessFileTypeTest();
     JsonTest();
     SettingsUtilTest();
@@ -159,6 +189,7 @@ int main(int argc, char** argv) {
     utassert(AnnotSearch_UnitTests());
     ChapterTable_UnitTests();
     MobiDoc_UnitTests();
+    Ofd_UnitTests();
     LitDoc_UnitTests();
     RtfDoc_UnitTests();
     PdfSync_UnitTests();
@@ -172,6 +203,8 @@ int main(int argc, char** argv) {
     Annotation_UnitTests();
     EngineDjvuDec_UnitTests();
     TipMarkup_UnitTests();
+    ContentHash_UnitTests();
+    BerSize_UnitTests();
     ReadAloudHighlight_UnitTests();
     RefHoverTest();
     AppSettingsTest();
@@ -193,12 +226,15 @@ int main(int argc, char** argv) {
     utassert(DisplayMode_UnitTestZoom());
     utassert(Translations_UnitTestUnescape());
     utassert(Translations_UnitTestLocale());
+    utassert(Translations_UnitTestLookup());
+    utassert(Eutl_UnitTestListedCache());
     utassert(NavFiles_UnitTestHidden());
 #if !OS_WIN
     utassert(MeasurementSystem_UnitTests());
     utassert(DpiPosix_UnitTests());
 #if !OS_WASM
     utassert(AppToolsPosix_UnitTests());
+    utassert(Launch_UnitTests());
 #endif
 #endif
     utassert(Accelerators_UnitTestTreeTakesLetters());

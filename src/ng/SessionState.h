@@ -3,7 +3,6 @@
 
 struct MainWindow;
 struct WindowTab;
-struct TabState;
 class EngineBase;
 
 // makes SaveSettings() snapshot the open windows (orig does it inline)
@@ -14,9 +13,6 @@ void InstallSessionStateHook();
 void TakeInitialSessionData();
 bool SettingsRestoreSession();
 // restores the tabs of the last session into `win`; false if there was nothing
-bool RestoreSession(MainWindow* win);
+bool RestoreSession(MainWindow* win, MainWindow** startWinOut);
 void LoadLazyTabIfNeeded(WindowTab* tab);
 void FinishLazyTabLoad(WindowTab* tab, EngineBase* engine);
-
-TabState* NewTabStateFromTab(WindowTab*);
-void SetTabState(WindowTab*, TabState*);

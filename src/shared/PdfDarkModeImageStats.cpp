@@ -32,14 +32,24 @@ static PixelColor SampleImageRgb(fz_context* ctx, fz_pixmap* pix, int x, int y) 
     if (!pix || !pix->samples || x < 0 || y < 0 || x >= pix->w || y >= pix->h) {
         return {};
     }
-    fz_colorspace* cs = pix->colorspace ? pix->colorspace : fz_device_rgb(ctx);
-    fz_colorspace* rgb = fz_device_rgb(ctx);
     int n = pix->n;
     int stride = (int)pix->stride;
     unsigned char* px = pix->samples + ((size_t)y * stride) + ((size_t)x * n);
+    fz_colorspace* cs = pix->colorspace;
+    if (!cs) {
+        if (n == 1) {
+            float v = (float)px[0] / 255.f;
+            return {v, v, v};
+        }
+        if (n >= 3) {
+            return {(float)px[0] / 255.f, (float)px[1] / 255.f, (float)px[2] / 255.f};
+        }
+        return {};
+    }
+    fz_colorspace* rgb = fz_device_rgb(ctx);
     float conv[FZ_MAX_COLORS] = {};
     float srcRgb[FZ_MAX_COLORS] = {};
-    int components = fz_colorspace_n(ctx, cs);
+    int components = std::min(fz_colorspace_n(ctx, cs), n);
     for (int c = 0; c < components && c < FZ_MAX_COLORS; c++) {
         conv[c] = (float)px[c] / 255.f;
     }
@@ -68,12 +78,14 @@ static void SampleImageBorder(fz_context* ctx, fz_pixmap* pix, ImageStats* stats
         n++;
     };
 
-    int stepX = pix->w >= kBorderSamplesPerEdge ? pix->w / kBorderSamplesPerEdge : 1;
+    // rounded up: at most kBorderSamplesPerEdge per edge, so left and right
+    // edges still fit in samples
+    int stepX = std::max(1, (pix->w + kBorderSamplesPerEdge - 1) / kBorderSamplesPerEdge);
     for (int x = 0; x < pix->w; x += stepX) {
         sampleAt(x, 0);
         sampleAt(x, pix->h - 1);
     }
-    int stepY = pix->h >= kBorderSamplesPerEdge ? pix->h / kBorderSamplesPerEdge : 1;
+    int stepY = std::max(1, (pix->h + kBorderSamplesPerEdge - 1) / kBorderSamplesPerEdge);
     for (int y = 0; y < pix->h; y += stepY) {
         sampleAt(0, y);
         sampleAt(pix->w - 1, y);
@@ -138,9 +150,9 @@ static ImageStats SampleImageStats(fz_context* ctx, fz_image* image) {
         for (int y = 0; y < pix->h; y += stepY) {
             for (int x = 0; x < pix->w; x += stepX) {
                 PixelColor c = SampleImageRgb(ctx, pix, x, y);
-                int ri = (int)lroundf(c.r * 255.f);
-                int gi = (int)lroundf(c.g * 255.f);
-                int bi = (int)lroundf(c.b * 255.f);
+                int ri = ClampI((int)lroundf(limitValue(c.r, 0.f, 1.f) * 255.f), 0, 255);
+                int gi = ClampI((int)lroundf(limitValue(c.g, 0.f, 1.f) * 255.f), 0, 255);
+                int bi = ClampI((int)lroundf(limitValue(c.b, 0.f, 1.f) * 255.f), 0, 255);
                 int bucket = ((ri >> 4) << 8) | ((gi >> 4) << 4) | (bi >> 4);
                 buckets[bucket]++;
 
@@ -303,7 +315,8 @@ bool PdfDarkModeImageStats_UnitTest() {
 
     ImageStats stats;
     SampleImageBorder(ctx, pix, &stats);
-    bool ok = stats.borderLightRatio == 88.f / 128.f && stats.borderUniformity == 0.f;
+    // 20 samples per edge; only the bottom edge is dark
+    bool ok = stats.borderLightRatio == 60.f / 80.f && stats.borderUniformity == 0.f;
 
     fz_clear_pixmap_with_value(ctx, pix, 255);
     SampleImageBorder(ctx, pix, &stats);

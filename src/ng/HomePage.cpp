@@ -51,6 +51,7 @@
 #include "SvgIcons.h"
 #include "gui/DialogWidgets.h"
 #include "OverlayScrollbar.h"
+#include "SumatraDialogs.h"
 #include "ServerFiles.h"
 #include "HomePage.h"
 #include "HomePageCommon.h"
@@ -121,8 +122,8 @@ constexpr Color kCol5 = MkRgb(112, 115, 207);
 static void AppendBugReportInfo(str::Builder& s) {
     s.Append(fmt("SumatraPDF %s\n", GetAppVersionTemp()));
     s.Append(fmt("Built on: %s %s\n", StrL(__DATE__), StrL(__TIME__)));
-    if (gitCommidId) {
-        s.Append(fmt("Git: %s\n", gitCommidId));
+    if (gitCommitId) {
+        s.Append(fmt("Git: %s\n", gitCommitId));
     }
     Str exeType = IsDllBuild() ? StrL("dll") : StrL("static");
     Str instType = IsRunningInPortableMode() ? StrL("portable") : StrL("installed");
@@ -200,6 +201,8 @@ constexpr int kHomeSearchFontPx = 14;
 constexpr int kSearchThumbnailsGapY = 28;
 constexpr int kHomeHeaderTopY = 24;
 constexpr int kHomeSearchMaxDx = 340;
+// orig's HomeSearchBorderCtrl::Paint
+constexpr int kHomeSearchRadius = 6;
 constexpr int kHomeTextFontPx = 13;
 constexpr int kHomeMetaFontPx = 12;
 // the home page brand: five stripes in the logo colors and the name
@@ -263,6 +266,7 @@ struct HomePageUI {
     int searchReturnCol = 0;
     int gridCols = 1;
     int entryCount = 0;
+    HomeSelection selection;
     gpui::Bounds entriesView{};
     // the entries' height is only known once they were painted: the first
     // frame asks for a second one so the scrollbar can be there
@@ -275,7 +279,7 @@ struct HomePageUI {
     Vec<TipSpan> tipSpans;
     // orig's OnAboutContextMenu: the file the menu is for and the menu built
     // for it
-    Str menuPath;
+    StrVec menuPaths;
     MenuModel* menu = nullptr;
     gp::Entity<gp::PopupMenuState> menuPopup;
     // the entry the right button went down on (-1: none) and where, in the
@@ -332,7 +336,6 @@ void HomePageDelete(MainWindow* win) {
     }
     delete h->search;
     str::Free(h->searchQuery);
-    str::Free(h->menuPath);
     DeleteMenuModel(h->menu);
     VecReset(h->files);
     TipSpansFree(h->tipSpans);
@@ -449,6 +452,7 @@ struct HomeView {
     static void OnEntryDown(HomeView* self, gp::Ctx* cx, const gp::MouseDownEvent* ev, int64_t idx);
     static void OnEntryHover(HomeView* self, gp::Ctx* cx, const gp::HoverEvent* ev, int64_t idx);
     static void OnPageDown(HomeView* self, gp::Ctx* cx, const gp::MouseDownEvent* ev);
+    static void OnPageDrag(HomeView* self, gp::Ctx* cx, const gp::DragMoveEvent* ev);
     static void OnPageUp(HomeView* self, gp::Ctx* cx, const gp::MouseUpEvent* ev);
     static void OnMenuAction(HomeView* self, gp::Ctx* cx, const gp::ActionEvent* ev);
     static void OnEntryForget(HomeView* self, gp::Ctx* cx, const gp::ClickEvent*, int64_t idx);
@@ -499,7 +503,19 @@ static void OpenHomeEntry(MainWindow* win, int idx, bool ctrl) {
 }
 
 void HomeView::OnEntryClick(HomeView* self, gp::Ctx* cx, const gp::ClickEvent* ev, int64_t idx) {
-    Ui(self->win)->selIdx = (int)idx;
+    HomePageUI* h = Ui(self->win);
+    if (idx < 0 || idx >= len(h->files)) {
+        return;
+    }
+    h->selIdx = (int)idx;
+    if (!ev->keyboard && ev->button == gp::MouseButton::Left &&
+        (ev->modifiers.control || (OS_DARWIN && ev->modifiers.platform))) {
+        h->selection.Toggle(h->files[h->selIdx]->filePath);
+        HoverTooltipHide(cx);
+        HomeNotify(self->win, cx);
+        return;
+    }
+    h->selection.Reset();
     OpenHomeEntry(self->win, (int)idx, ev->modifiers.control);
     HomeNotify(self->win, cx);
 }
@@ -515,7 +531,7 @@ void HomeView::OnEntryHover(HomeView* self, gp::Ctx* cx, const gp::HoverEvent* e
     MainWindow* win = self->win;
     HomePageUI* h = Ui(win);
     int i = (int)idx;
-    if (!ev->hovered || i < 0 || i >= len(h->files)) {
+    if (h->selection.dragging || !ev->hovered || i < 0 || i >= len(h->files)) {
         HoverTooltipHide(cx);
         return;
     }
@@ -534,13 +550,17 @@ void HomeView::OnEntryHover(HomeView* self, gp::Ctx* cx, const gp::HoverEvent* e
     if (size >= 0) {
         tip = fmt("%s  %s", tip, str::FormatSizeShortTemp(size, nullptr));
     }
+    TempStr serverNote = ServerNameNoteTemp(fs->filePath);
+    if (len(serverNote) > 0) {
+        tip = fmt("%s\n%s", tip, serverNote);
+    }
     HoverTooltipShow(cx, tip, h->entryBounds[i]);
 }
 
 // the entry the right button went down on; OnPageDown, which runs after it for
 // the same press, takes it from here
 void HomeView::OnEntryDown(HomeView* self, gp::Ctx*, const gp::MouseDownEvent* ev, int64_t idx) {
-    if (!IsContextClick(ev->button, ev->modifiers)) {
+    if (ev->button != gp::MouseButton::Right) {
         return;
     }
     HomePageUI* h = Ui(self->win);
@@ -548,16 +568,43 @@ void HomeView::OnEntryDown(HomeView* self, gp::Ctx*, const gp::MouseDownEvent* e
     h->rdownOnEntry = true;
 }
 
+static Rect BoundsRect(const gpui::Bounds& b);
+
+static bool HomeEntryAtPoint(HomePageUI* h, Point pt) {
+    for (int i = 0; i < h->entryCount; i++) {
+        if (BoundsRect(h->entryBounds[i]).Contains(pt)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void UpdateHomeMarquee(HomePageUI* h, Point pt) {
+    h->selection.UpdateDrag(pt, BoundsRect(h->entriesView));
+    for (int i = 0; i < h->entryCount; i++) {
+        h->selection.AddDragHit(h->files[i]->filePath, BoundsRect(h->entryBounds[i]));
+    }
+}
+
 // orig's OnMouseRightButtonDownAbout
 void HomeView::OnPageDown(HomeView* self, gp::Ctx* cx, const gp::MouseDownEvent* ev) {
-    if (!IsContextClick(ev->button, ev->modifiers)) {
+    MainWindow* win = self->win;
+    HomePageUI* h = Ui(win);
+    Point pt{(int)ev->x, (int)ev->y};
+    if (ev->button != gp::MouseButton::Right) {
+        if (ev->button == gp::MouseButton::Left && BoundsRect(h->entriesView).Contains(pt) &&
+            !HomeEntryAtPoint(h, pt)) {
+            bool extend = ev->modifiers.control || (OS_DARWIN && ev->modifiers.platform);
+            h->selection.BeginDrag(pt, extend ? HomeDragMode::Add : HomeDragMode::Replace);
+            AppShellFocusFrame(win);
+            HoverTooltipHide(cx);
+            gp::WindowStopPropagation(cx);
+        }
         return;
     }
     // ng: gpui's ContextMenu would open from this press; orig's opens when
     // the button comes up
     gp::WindowStopPropagation(cx);
-    MainWindow* win = self->win;
-    HomePageUI* h = Ui(win);
     if (!h->rdownOnEntry) {
         h->rdownIdx = -1;
     }
@@ -566,23 +613,32 @@ void HomeView::OnPageDown(HomeView* self, gp::Ctx* cx, const gp::MouseDownEvent*
     h->rdown = Point{(int)ev->x, (int)ev->y};
 }
 
+void HomeView::OnPageDrag(HomeView* self, gp::Ctx* cx, const gp::DragMoveEvent* ev) {
+    HomePageUI* h = Ui(self->win);
+    if (!h->selection.dragging) {
+        return;
+    }
+    if (ev->event.Dragging()) {
+        UpdateHomeMarquee(h, {(int)ev->event.x, (int)ev->event.y});
+    } else {
+        h->selection.EndDrag();
+    }
+    HomeNotify(self->win, cx);
+}
+
 // orig's OnAboutContextMenu: the menu of the file under the click; the
 // keyboard / context-menu key falls back to the keyboard-selected home entry
 static void OnAboutContextMenu(MainWindow* win, gp::Ctx* cx, int idx, float x, float y) {
     HomePageUI* h = Ui(win);
     Vec<FileState*>& files = h->files;
     bool fromClick = idx >= 0 && idx < len(files);
-    if (!fromClick) {
-        idx = h->selIdx;
+    if (fromClick) {
+        h->selIdx = idx;
     }
-    if (idx < 0 || idx >= len(files)) {
-        return;
-    }
-    // Keep keyboard selection in sync with the right-clicked thumbnail
-    h->selIdx = idx;
-    str::ReplaceWithCopy(&h->menuPath, files[idx]->filePath);
+    h->menuPaths.Reset();
+    HomePageMenuPaths(win, fromClick ? files[idx]->filePath : Str{}, h->menuPaths);
     DeleteMenuModel(h->menu);
-    h->menu = BuildHomeContextMenu(win, h->menuPath);
+    h->menu = BuildHomeContextMenu(win, h->menuPaths);
     HomeNotify(win, cx);
     if (!h->menu) {
         return;
@@ -592,11 +648,18 @@ static void OnAboutContextMenu(MainWindow* win, gp::Ctx* cx, int idx, float x, f
 
 // orig's OnMouseRightButtonUpAbout
 void HomeView::OnPageUp(HomeView* self, gp::Ctx* cx, const gp::MouseUpEvent* ev) {
-    if (!IsContextClick(ev->button, ev->modifiers)) {
-        return;
-    }
     MainWindow* win = self->win;
     HomePageUI* h = Ui(win);
+    if (ev->button == gp::MouseButton::Left && h->selection.dragging) {
+        UpdateHomeMarquee(h, {(int)ev->x, (int)ev->y});
+        h->selection.EndDrag();
+        gp::WindowStopPropagation(cx);
+        HomeNotify(win, cx);
+        return;
+    }
+    if (ev->button != gp::MouseButton::Right) {
+        return;
+    }
     if (IsDragDistance((int)ev->x, h->rdown.x, (int)ev->y, h->rdown.y)) {
         return;
     }
@@ -615,21 +678,20 @@ void HomePageContextMenuFromKey(MainWindow* win, gp::Ctx* cx) {
 // the keyboard, so it goes through the ui task queue
 struct HomeMenuCmd {
     MainWindow* win;
-    Str path; // owned
+    StrVec paths;
     int cmdId;
 };
 
 static void RunHomeMenuCmd(HomeMenuCmd* c) {
     if (IsMainWindowValidAndNotClosing(c->win)) {
-        HomeContextMenuCommand(c->win, c->path, c->cmdId);
+        HomeContextMenuCommand(c->win, c->paths, c->cmdId);
     }
-    str::Free(c->path);
     delete c;
 }
 
 void HomeView::OnMenuAction(HomeView* self, gp::Ctx* cx, const gp::ActionEvent* ev) {
     MainWindow* win = self->win;
-    auto* c = new HomeMenuCmd{win, str::Dup(Ui(win)->menuPath), (int)ev->arg};
+    auto* c = new HomeMenuCmd{win, Ui(win)->menuPaths, (int)ev->arg};
     uitask::Post(MkFunc0<HomeMenuCmd>(RunHomeMenuCmd, c), "HomeMenuCmd");
     HomeNotify(win, cx);
 }
@@ -847,11 +909,7 @@ void CopyAboutInfoToClipboard(MainWindow* win) {
 }
 
 void HomeView::OnCopyInfo(HomeView* self, gp::Ctx* cx, const gp::ClickEvent*) {
-    str::Builder info;
-    info.Reserve(1024);
-    AppendBugReportInfo(info);
-    gp::ClipboardSetText(cx->win, ToGpui(ToStr(info)));
-    info.Reset();
+    CopyAboutInfoToClipboard(self->win);
     HomeNotify(self->win, cx);
 }
 
@@ -917,7 +975,7 @@ static gp::El* AboutBoxEl(MainWindow* win, gp::Ctx* cx, bool withBorder) {
                           ->Font((float)kAboutTextFontPx)
                           ->Fg(ToGpui(colMuted))
                           ->H((float)kAboutRowDy));
-        values->Child(AboutLinkEl(win, cx, TrimGitTemp(el->rightTxt), el->url, fmt("about-row-%d", i), i));
+        values->Child(AboutLinkEl(win, cx, el->rightTxt, el->url, fmt("about-row-%d", i), i));
     }
     box->Child(gp::Div(cx->a)->FlexRow()->Gap((float)kAboutColGap)->Child(labels)->Child(values));
 
@@ -1022,6 +1080,7 @@ void ShowAboutWindow(MainWindow* win) {
     }
     gAboutWin = win;
     gAboutVisible = true;
+    DialogsTrackFrameDialog(IsAboutWindowVisible, [] { return gAboutWin; }, CloseAboutWindow);
     AboutOpenToolWindow(win);
     AppShellInvalidate(win);
 }
@@ -1147,7 +1206,6 @@ static gp::El* AboutPageBuild(MainWindow* win, gp::Ctx* cx) {
     if (!showLink) {
         return root;
     }
-    (void)win;
     gp::El* link = gp::TextEl(cx->a, ToGpui(Tr("Show frequently read")))
                        ->Font((float)kAboutTextFontPx)
                        ->BorderB(1, ToGpui(ThemeWindowTextDisabledColor()))
@@ -1289,7 +1347,8 @@ static gp::El* HomeThumbnailEl(MainWindow* win, gp::Ctx* cx, int idx, bool isSel
     // the selection ring, just outside the page; always laid out so its rect
     // is known, drawn for the selected entry
     int ringGap = kThumbsSelectionGap + kThumbsSelectionDx;
-    gp::Rgba ringCol = isSelected ? ToGpui(colText) : gp::Rgba8(0, 0, 0, 0);
+    Color outline = Ui(win)->selection.explicitSelection ? kHomeSelectionColor : colText;
+    gp::Rgba ringCol = isSelected ? ToGpui(outline) : gp::Rgba8(0, 0, 0, 0);
     page->Child(gp::Div(cx->a)
                     ->Absolute()
                     ->Left((float)-ringGap)
@@ -1729,10 +1788,12 @@ gp::El* HomePageBuild(MainWindow* win, gp::Ctx* cx) {
                             ->Shrink0()
                             ->H((float)borderDy)
                             ->BoundsOut(&h->searchBounds)
-                            ->Child(gpc::Input::New(cx, GStrL("home-search"), h->search)
-                                        ->WithSize(gp::UiSize::Small)
-                                        ->W(gp::kFill)
-                                        ->IntoEl()
+                            ->Child(EditStyle(cx,
+                                              gpc::Input::New(cx, GStrL("home-search"), h->search)
+                                                  ->WithSize(gp::UiSize::Small)
+                                                  ->W(gp::kFill)
+                                                  ->IntoEl(),
+                                              h->search, EditLook::Frame, (float)AppShellDpiPx(win, kHomeSearchRadius))
                                         ->Font((float)AppShellDpiPx(win, kHomeSearchFontPx))
                                         ->H((float)borderDy));
     toolRow->Child(searchBox);
@@ -1762,7 +1823,9 @@ gp::El* HomePageBuild(MainWindow* win, gp::Ctx* cx) {
     if (listView) {
         content->Gap(0);
         for (int i = 0; i < nFiles; i++) {
-            content->Child(HomeListRowEl(win, cx, i, i == h->selIdx));
+            bool selected =
+                h->selection.explicitSelection ? h->selection.Contains(h->files[i]->filePath) : i == h->selIdx;
+            content->Child(HomeListRowEl(win, cx, i, selected));
         }
     } else {
         // the row pitch is the frame plus kThumbsSpaceBetweenY; the caption
@@ -1775,14 +1838,18 @@ gp::El* HomePageBuild(MainWindow* win, gp::Ctx* cx) {
                 if (idx >= nFiles) {
                     break;
                 }
-                rowEl->Child(HomeThumbnailEl(win, cx, idx, idx == h->selIdx));
+                bool selected =
+                    h->selection.explicitSelection ? h->selection.Contains(h->files[idx]->filePath) : idx == h->selIdx;
+                rowEl->Child(HomeThumbnailEl(win, cx, idx, selected));
             }
             content->Child(rowEl);
         }
     }
     h->scrollYLaidOut = h->scrollY;
+    // Pressing in a gap needs a click ID so drag moves still arrive over a thumbnail.
     root->Child(gp::Div(cx->a)
                     ->Id(GStrL("home-entries"))
+                    ->Click(gp::HashClickId(GStrL("home-entries")))
                     ->FlexCol()
                     ->Flex1()
                     ->W(gp::kFill)
@@ -1793,6 +1860,7 @@ gp::El* HomePageBuild(MainWindow* win, gp::Ctx* cx) {
                     ->HideScrollbar()
                     ->OnScroll(gp::ListenTo(Ui(win)->view, &HomeView::OnScroll))
                     ->OnScrollWheel(gp::ListenTo(Ui(win)->view, &HomeView::OnWheel))
+                    ->OnDragMove(gp::ListenTo(Ui(win)->view, &HomeView::OnPageDrag))
                     ->BoundsOut(&h->entriesView)
                     ->Child(content));
 
@@ -1813,7 +1881,18 @@ gp::El* HomePageBuild(MainWindow* win, gp::Ctx* cx) {
                        ->BoundsOut(&h->pageBounds)
                        ->OnMouseDown(gp::ListenTo(Ui(win)->view, &HomeView::OnPageDown))
                        ->OnMouseUp(gp::ListenTo(Ui(win)->view, &HomeView::OnPageUp))
+                       ->OnMouseUpOut(gp::ListenTo(Ui(win)->view, &HomeView::OnPageUp))
                        ->Child(root);
+    Rect marquee = h->selection.marquee;
+    if (!marquee.IsEmpty()) {
+        wrap->Child(gp::Div(cx->a)
+                        ->Absolute()
+                        ->Left((float)marquee.x - h->pageBounds.x)
+                        ->Top((float)marquee.y - h->pageBounds.y)
+                        ->W((float)marquee.dx)
+                        ->H((float)marquee.dy)
+                        ->Border(1, ToGpui(kHomeSelectionColor)));
+    }
     StartPageA11y(wrap);
     // orig's UpdateHomeOverlayScrollbar: the canvas' overlay bar, only in the
     // smart / overlay modes, along the whole right edge of the canvas
@@ -1828,6 +1907,8 @@ gp::El* HomePageBuild(MainWindow* win, gp::Ctx* cx) {
     bool show = ScrollbarsUseOverlay() && thumbsVisibleDy > 0 && totalContentDy > thumbsVisibleDy;
     if (show) {
         OverlayScrollbarsSyncMode(win);
+        // the document's find markers, if it was shown last
+        OverlayScrollbarSetFindMarkers(win->overlayScrollV, Vec<float>{}, -1, 0, 0);
         show = IsOverlayScrollbarVisible(win->overlayScrollV);
     }
     h->vbarShown = show;
@@ -1894,13 +1975,14 @@ TempStr HomeSelectionForWindowTemp(int* exitCodeOut, int winIdx) {
     Rect outlineFull;
     Rect outline;
     bool showSel = !HomePageIsListView() && !searchFocus && sel >= 0 && sel < len(h->ringBounds);
+    showSel = showSel && (!h->selection.explicitSelection || h->selection.Contains(path));
     if (showSel) {
         outlineFull = BoundsRect(h->ringBounds[sel]);
         outline = outlineFull.Intersect(BoundsRect(h->entriesView));
     }
     Rect lastCaption;
-    if (!HomePageIsListView() && len(h->entryBounds) > 0) {
-        lastCaption = BoundsRect(h->entryBounds[len(h->entryBounds) - 1]);
+    if (!HomePageIsListView() && h->entryCount > 0 && h->entryCount <= len(h->entryBounds)) {
+        lastCaption = BoundsRect(h->entryBounds[h->entryCount - 1]);
     }
     Rect tipRect = BoundsRect(h->tipBounds);
     // the header row's items, which must not overlap (issue #6367)
@@ -1912,13 +1994,21 @@ TempStr HomeSelectionForWindowTemp(int* exitCodeOut, int winIdx) {
     TempStr header = fmt("vbar=%d logo=%s open=%s views=%s tipText=%s", h->vbarShown ? 1 : 0, RectCsvTemp(logo),
                          RectCsvTemp(BoundsRect(h->openGroupBounds)), RectCsvTemp(BoundsRect(h->viewBtnsBounds)),
                          RectCsvTemp(tipText));
-    return finish(
-        0, fmt("OK sel=%d entries=%d searchFocus=%d searchBox=%d search=%s outline=%s outlineFull=%s path=%s "
-               "listView=%d listIcon=%s thumbsArea=%s lastCaption=%s tip=%d,%d tipRect=%s %s",
-               sel, h->entryCount, searchFocus ? 1 : 0, searchBox, RectCsvTemp(search), RectCsvTemp(outline),
-               RectCsvTemp(outlineFull), path, HomePageIsListView() ? 1 : 0, RectCsvTemp(BoundsRect(h->listIconBounds)),
-               RectCsvTemp(BoundsRect(h->entriesView)), RectCsvTemp(lastCaption), gSelectedIsPromo ? 1 : 0,
-               gSelectedTipIdx, RectCsvTemp(tipRect), header));
+    str::Builder out;
+    out.Append(
+        fmt("OK sel=%d entries=%d searchFocus=%d searchBox=%d search=%s outline=%s outlineFull=%s path=%s "
+            "listView=%d listIcon=%s thumbsArea=%s lastCaption=%s tip=%d,%d tipRect=%s %s",
+            sel, h->entryCount, searchFocus ? 1 : 0, searchBox, RectCsvTemp(search), RectCsvTemp(outline),
+            RectCsvTemp(outlineFull), path, HomePageIsListView() ? 1 : 0, RectCsvTemp(BoundsRect(h->listIconBounds)),
+            RectCsvTemp(BoundsRect(h->entriesView)), RectCsvTemp(lastCaption), gSelectedIsPromo ? 1 : 0,
+            gSelectedTipIdx, RectCsvTemp(tipRect), header));
+    out.Append(fmt("\nmarquee=%s selected=", RectCsvTemp(h->selection.marquee)));
+    for (int i = 0; i < len(h->files); i++) {
+        if (h->selection.Contains(h->files[i]->filePath)) {
+            out.Append(fmt("%d,", i));
+        }
+    }
+    return finish(0, ToStrTemp(out));
 }
 
 TempStr HomeSelectionResultTemp(int* exitCodeOut) {
@@ -1990,11 +2080,14 @@ TempStr HomeListRowsResultTemp(int* exitCodeOut) {
         out.Append(fmt("pathRect=%d,%d,%d,%d\n", pathRc.x, pathRc.y, pathRc.dx, pathRc.dy));
         // 0: not on the server, 1: same size, 2: different size
         out.Append(fmt("server=%d\n", (int)GetServerFileState(fs->filePath, size)));
+        // the stored content hash: "<sha1> <size> <mtime>", empty if none
+        out.Append(fmt("hash=%s\n", len(fs->contentSha1) > 0 ? fs->contentSha1 : StrL("")));
     }
     return finish(0);
 }
 
 void HomePageSelectFirst(MainWindow* win) {
+    Ui(win)->selection.Reset();
     HomePageUI* h = Ui(win);
     h->selIdx = 0;
     h->searchReturnCol = 0;
@@ -2007,6 +2100,33 @@ Str HomePageSelectedFilePathTemp(MainWindow* win) {
         return {};
     }
     return str::DupTemp(h->files[idx]->filePath);
+}
+
+bool HomePageClearSelection(MainWindow* win) {
+    if (!win->homePage) {
+        return false;
+    }
+    auto& selection = win->homePage->selection;
+    if (!selection.dragging && selection.paths.IsEmpty() && selection.explicitSelection) {
+        return false;
+    }
+    selection.Clear();
+    AppShellInvalidate(win);
+    return true;
+}
+
+void HomePageMenuPaths(MainWindow* win, Str target, StrVec& paths) {
+    HomePageUI* h = Ui(win);
+    auto& selection = h->selection;
+    if (len(target) > 0 && selection.explicitSelection && !selection.Contains(target)) {
+        HomePageClearSelection(win);
+        selection.Toggle(target);
+        AppShellInvalidate(win);
+    }
+    if (len(target) == 0 && !selection.explicitSelection) {
+        target = HomePageSelectedFilePathTemp(win);
+    }
+    selection.MenuPaths(target, h->files, paths);
 }
 
 void HomePageFocusSearch(MainWindow* win) {
@@ -2025,6 +2145,11 @@ void HomePageFocusSearch(MainWindow* win) {
 
 // dCol/dRow are in grid steps; in list view only dRow matters
 void HomePageMoveSelection(MainWindow* win, int dCol, int dRow) {
+    auto& selection = Ui(win)->selection;
+    if (selection.explicitSelection) {
+        selection.Reset();
+        AppShellInvalidate(win);
+    }
     HomePageUI* h = Ui(win);
     int n = h->entryCount;
     if (n == 0) {
@@ -2089,13 +2214,77 @@ bool HomePageOnKeyDown(MainWindow* win, int vk, bool ctrl) {
         case VK_BACK:
 #endif
         case VK_DELETE: {
-            // remove the keyboard-selected entry from file history (not from disk)
-            Str path = HomePageSelectedFilePathTemp(win);
-            if (len(path) > 0) {
+            StrVec paths;
+            HomePageMenuPaths(win, {}, paths);
+            for (Str path : paths) {
                 ForgetFileFromFrequentlyRead(win, path);
             }
             return true;
         }
     }
     return false;
+}
+
+// --- ServerFiles hooks ------------------------------------------------------
+
+void ServerFilesChanged() {
+    RedrawAllWindows();
+}
+
+void OpenDownloadedServerFile(MainWindow* win, Str path) {
+    StartLoadDocument(win, path);
+}
+
+struct ServerYesNo {
+    Func1<bool> onAnswer;
+};
+
+static void ServerYesNoAnswered(ServerYesNo* q, int res) {
+    Func1<bool> onAnswer = q->onAnswer;
+    delete q;
+    onAnswer.Call(res == MbRetYes);
+}
+
+void AskServerYesNo(MainWindow* win, Str question, Str caption, Func1<bool> onAnswer) {
+    auto* q = new ServerYesNo{onAnswer};
+    MsgBox(win, question, caption, MbYesNo | MbIconQuestion, MkFunc1(ServerYesNoAnswered, q));
+}
+
+// --- Locate File (CmdLocateFile) ---------------------------------------------
+
+struct LocateFileReq {
+    MainWindow* win = nullptr;
+    Str path;
+};
+
+// the prompt runs a message loop, so it is shown from the ui task queue
+static void LocateFileNow(LocateFileReq* req) {
+    MainWindow* win = req->win;
+    TempStr oldPath = str::DupTemp(req->path);
+    str::Free(req->path);
+    delete req;
+    if (!IsMainWindowValidAndNotClosing(win)) {
+        return;
+    }
+    TempStr picked = AppShellPromptForPathTemp(win, Tr("Locate File"), LocateFileFilterTemp(oldPath), oldPath);
+    if (len(picked) == 0) {
+        return;
+    }
+    TempStr newPath = str::DupTemp(picked);
+    LocateFileInHistory(oldPath, newPath);
+    // the window may have closed while the prompt ran its message loop
+    if (!IsMainWindowValidAndNotClosing(win)) {
+        return;
+    }
+    StartLoadDocument(win, newPath);
+}
+
+// orig's HomePageLocateFile: asks where a moved file is now; its history entry
+// (page, zoom, favorites, ...) follows it there and it opens
+void HomePageLocateFile(MainWindow* win, Str path) {
+    if (len(path) == 0) {
+        return;
+    }
+    auto* req = new LocateFileReq{win, str::Dup(path)};
+    uitask::Post(MkFunc0(LocateFileNow, req), "LocateFile");
 }

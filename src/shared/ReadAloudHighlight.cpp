@@ -60,12 +60,11 @@ static bool ReadAloudHighlightAppend(ReadAloudHighlightMap* map, const ReadAloud
     return true;
 }
 
-static bool ReadAloudHighlightAppendRaw(Vec<ReadAloudRawByte>& raw, char c, const ReadAloudByteLoc& loc) {
+static void ReadAloudHighlightAppendRaw(Vec<ReadAloudRawByte>& raw, char c, const ReadAloudByteLoc& loc) {
     ReadAloudRawByte rb;
     rb.c = c;
     rb.loc = loc;
     VecAppend(raw, rb);
-    return true;
 }
 
 static void ReadAloudByteLocSetFromRect(ReadAloudByteLoc& loc, Location pageLoc, const Rect& r) {
@@ -172,6 +171,24 @@ static bool CleanRawBytes(Vec<ReadAloudRawByte>& raw, ReadAloudHighlightMap* map
     }
 
     return true;
+}
+
+// Cleans plain text for speech, without page positions (fallback when the selection has no glyphs).
+TempStr ReadAloudCleanTextTemp(Str text) {
+    Vec<ReadAloudRawByte> raw;
+    ReadAloudByteLoc noLoc;
+    for (int i = 0; i < len(text); i++) {
+        ReadAloudHighlightAppendRaw(raw, text.s[i], noLoc);
+    }
+
+    ReadAloudHighlightMap map{};
+    str::Builder cleaned;
+    bool ok = CleanRawBytes(raw, &map, cleaned);
+    ReadAloudHighlightFree(&map);
+    if (!ok || len(cleaned) == 0) {
+        return {};
+    }
+    return ToStrTemp(cleaned);
 }
 
 void ReadAloudHighlightFree(ReadAloudHighlightMap* map) {
@@ -466,7 +483,7 @@ int ReadAloudWordEndUtf8(Str text, int pos) {
     return end;
 }
 
-static bool IsReadAloudSentPunct(int c) {
+bool IsReadAloudSentPunct(int c) {
     return c == '.' || c == '!' || c == '?' || c == 0x3002 || c == 0xFF01 || c == 0xFF1F || c == 0x2026;
 }
 
@@ -475,7 +492,7 @@ bool IsReadAloudCloser(int c) {
 }
 
 // Byte after punctuation (and closers / spaces). 0 if this looks like "e.g. the".
-static int ReadAloudAfterSentEnd(Str text, int afterPunct) {
+int ReadAloudAfterSentEnd(Str text, int afterPunct) {
     int after = afterPunct;
     while (after < text.len) {
         int t = after;

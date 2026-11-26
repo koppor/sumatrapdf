@@ -29,6 +29,10 @@ import {
   macSendText,
   macShowWindow,
   macToolWindowMessage,
+  macActivateToolWindow,
+  macPlaceToolWindow,
+  macToolClientRect,
+  macToolInset,
   macWindow,
   macWindows,
   macWithTarget,
@@ -437,6 +441,45 @@ const SPI_GETWORKAREA = 0x0030;
 const SM_CXSCREEN = 0;
 const SM_CYSCREEN = 1;
 
+// NSScreen.visibleFrame in the same top-left space as the app's window rects.
+// A fixed menu and dock guess is wrong when the dock hides or the bar is taller.
+function macVisibleWorkArea(): Rect | null {
+  const script = `ObjC.import("AppKit");
+function rect(r) { return [r.origin.x, r.origin.y, r.size.width, r.size.height].join(","); }
+var screens = $.NSScreen.screens;
+var n = screens.count;
+var lines = [];
+for (var i = 0; i < n; i++) {
+  var s = screens.objectAtIndex(i);
+  lines.push(rect(s.frame) + ";" + rect(s.visibleFrame));
+}
+lines.join("\\n");`;
+  const r = Bun.spawnSync(["osascript", "-l", "JavaScript", "-e", script], { stdout: "pipe", stderr: "pipe" });
+  if (r.exitCode !== 0) {
+    return null;
+  }
+  const rows = r.stdout
+    .toString()
+    .trim()
+    .split("\n")
+    .map((line) => line.split(";").map((part) => part.split(",").map(Number)));
+  const frames = rows.filter(
+    (row) => row.length === 2 && row[0]!.length === 4 && row[1]!.every((n) => Number.isFinite(n)),
+  );
+  if (frames.length === 0) {
+    return null;
+  }
+  const primary = frames.find((row) => row[0]![0] === 0 && row[0]![1] === 0) ?? frames[0]!;
+  const flipH = primary[0]![3]!;
+  const vis = (frames[0] ?? primary)[1]!;
+  const x = vis[0]!;
+  const y = vis[1]!;
+  const w = vis[2]!;
+  const h = vis[3]!;
+  const top = flipH - (y + h);
+  return { left: x, top, right: x + w, bottom: top + h };
+}
+
 function macDisplaySize(): { w: number; h: number } {
   try {
     const cg = dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", {
@@ -457,10 +500,17 @@ function macDisplaySize(): { w: number; h: number } {
 }
 
 // the desktop minus the taskbar (and any other appbar)
+let macWorkArea: Rect | null = null;
+
 export function getWorkArea(): Rect {
   if (IS_MAC) {
+    if (!macWorkArea) {
+      macWorkArea = macVisibleWorkArea();
+    }
+    if (macWorkArea) {
+      return macWorkArea;
+    }
     const s = macDisplaySize();
-    // menu bar on top, dock along the bottom
     return { left: 0, top: 25, right: s.w, bottom: Math.max(s.h - 70, 25) };
   }
   const buf = new Int32Array(4);
@@ -598,6 +648,13 @@ export function getWindowPid(hwnd: number): number {
   return out[0];
 }
 
+export function getWindowThreadId(hwnd: number): number {
+  if (IS_MAC) {
+    return 0;
+  }
+  return user32.symbols.GetWindowThreadProcessId(hwnd, null);
+}
+
 // Which window has keyboard focus in the thread that owns hwnd. GetFocus() only
 // answers for the calling thread, so a test in another process must go through
 // GUITHREADINFO { DWORD cbSize, flags; HWND active, focus, capture, menuOwner,
@@ -669,6 +726,24 @@ export function findTopWindow(pid: number, className: string): number {
   return found;
 }
 
+// Puts a process's visible top-level windows above every non-topmost window,
+// without activating them. Injected touch and pen input goes to whatever window
+// is under the point, so a window in front (a terminal) would get it instead.
+export function raiseProcessWindows(pid: number): void {
+  if (IS_MAC) {
+    return;
+  }
+  const flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+  enumWindows((hwnd) => {
+    if (getWindowPid(hwnd) === pid && isWindowVisible(hwnd)) {
+      // topmost lifts it over everything; not-topmost keeps it at the top of the normal band
+      user32.symbols.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+      user32.symbols.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+    }
+    return true;
+  });
+}
+
 // find a descendant window of a given class (0 if none)
 export function findChildWindow(parent: number, className: string): number {
   let found = 0;
@@ -725,7 +800,7 @@ export async function waitForChildWindow(parent: number, className: string, time
 
 export function getClientRect(hwnd: number): Rect {
   if (IS_MAC) {
-    return macWithTarget(hwnd, macFrameClientRect);
+    return macToolClientRect(hwnd) ?? macWithTarget(hwnd, macFrameClientRect);
   }
   const buf = new Int32Array(4);
   user32.symbols.GetClientRect(hwnd, ptr(buf));
@@ -734,6 +809,11 @@ export function getClientRect(hwnd: number): Rect {
 
 export function clientToScreen(hwnd: number, x: number, y: number): { x: number; y: number } {
   if (IS_MAC) {
+    const w = macWindow(hwnd);
+    if (w?.toolName) {
+      const inset = macToolInset(hwnd);
+      return { x: w.rect.left + inset.x + x, y: w.rect.top + inset.y + y };
+    }
     return macWithTarget(hwnd, () => macClientToScreen(x, y));
   }
   const buf = new Int32Array([x, y]);
@@ -776,7 +856,7 @@ export function getScrollPos(hwnd: number, bar: number = SB_VERT): number {
 }
 
 const WM_RBUTTONDBLCLK = 0x0206;
-const WM_MBUTTONUP = 0x0208;
+export const WM_MBUTTONUP = 0x0208;
 const WM_MBUTTONDBLCLK = 0x0209;
 const WM_MOUSEWHEEL = 0x020a;
 const WM_MOUSEHWHEEL = 0x020e;
@@ -936,6 +1016,32 @@ export function sendCopyDataW(hwnd: number, dataId: number, text: string): bigin
   return sendMessage(hwnd, WM_COPYDATA, 0, BigInt(ptr(cds)));
 }
 
+// Same payload, but returns when the window has not answered. A modal dialog
+// runs on that thread, and a plain SendMessage would block the suite.
+const SMTO_ABORTIFHUNG = 0x0002;
+
+export function sendCopyDataWTimeout(hwnd: number, dataId: number, text: string, timeoutMs: number): boolean {
+  if (IS_MAC) {
+    return sendCopyDataW(hwnd, dataId, text) !== 0n;
+  }
+  const payload = wideZ(text);
+  const cds = new Uint8Array(24);
+  const view = new DataView(cds.buffer);
+  view.setBigUint64(0, BigInt(dataId), true);
+  view.setUint32(8, payload.byteLength, true);
+  view.setBigUint64(16, BigInt(ptr(payload)), true);
+  const ret = user32.symbols.SendMessageTimeoutW(
+    hwnd,
+    WM_COPYDATA,
+    0n,
+    BigInt(ptr(cds)),
+    SMTO_ABORTIFHUNG,
+    timeoutMs,
+    null,
+  );
+  return ret !== 0n;
+}
+
 // The reuse-instance open request (kCopyDataOpen): u32 newWindow, then the
 // UTF-8 path, NUL-terminated. The receiver loads it after replying.
 export function sendOpenCopyData(hwnd: number, path: string, newWindow = 0): bigint {
@@ -1030,14 +1136,16 @@ export function repaintWindow(hwnd: number): void {
 
 export function moveWindow(hwnd: number, x: number, y: number, w: number, h: number, repaint = true): boolean {
   if (IS_MAC) {
-    const res = macControlRequest(122, ["place", x, y, w, h, 0]);
-    return res[0] === 0;
+    return setWindowPos(hwnd, x, y, w, h);
   }
   return user32.symbols.MoveWindow(hwnd, x, y, w, h, repaint);
 }
 
 // SWP_* flags (subset)
 export const HWND_TOPMOST = -1;
+export const HWND_NOTOPMOST = -2;
+export const SWP_NOSIZE = 0x0001;
+export const SWP_NOMOVE = 0x0002;
 export const SWP_NOZORDER = 0x0004;
 export const SWP_NOACTIVATE = 0x0010;
 export const SWP_FRAMECHANGED = 0x0020;
@@ -1076,6 +1184,17 @@ export function setWindowPos(
   flags = SWP_NOZORDER | SWP_NOACTIVATE,
   insertAfter = 0,
 ): boolean {
+  // macOS: a tool window is moved by name. A frame's "place" takes its index.
+  if (IS_MAC) {
+    const windows = macWindows();
+    const listed = windows.find((m) => m.hwnd === hwnd);
+    if (listed?.toolName) {
+      return macPlaceToolWindow(listed.toolName, x, y, w, h);
+    }
+    const idx = windows.filter((m) => !m.toolName).findIndex((m) => m.hwnd === hwnd);
+    const above = insertAfter === HWND_TOPMOST ? 1 : 0;
+    return macControlRequest(TestUiState, ["place", x, y, w, h, idx, above])[0] === 0;
+  }
   return user32.symbols.SetWindowPos(hwnd, insertAfter, x, y, w, h, flags);
 }
 
@@ -1090,6 +1209,10 @@ export function showWindow(hwnd: number, cmd: number): boolean {
     }
     if (cmd === SW_RESTORE && isZoomed(hwnd)) {
       return moveWindow(hwnd, 80, 80, 1200, 900);
+    }
+    if (cmd === SW_MAXIMIZE) {
+      const wa = getWorkArea();
+      return setWindowPos(hwnd, wa.left, wa.top, wa.right - wa.left, wa.bottom - wa.top);
     }
     return true;
   }
@@ -1140,6 +1263,7 @@ const KEYEVENTF_KEYUP = 0x0002;
 
 // ControlCommand.TestUiState (control.ts imports this file)
 const TestUiState = 122;
+const TestWindows = 172;
 
 export function isIconic(hwnd: number): boolean {
   if (IS_MAC) {
@@ -1221,6 +1345,11 @@ const MODIFIER_RELEASE_TRIES = 10;
 // the keys we last warned about as impossible to release, so a session that
 // stays disconnected doesn't repeat the warning before every test
 let unreleasedWarned = "";
+let manageModifiers = true;
+
+export function disableModifierRelease(): void {
+  manageModifiers = false;
+}
 
 function heldModifierKeys(): [string, number][] {
   return MODIFIER_KEYS.filter(([, vk]) => isKeyDownAsync(vk));
@@ -1231,7 +1360,7 @@ function modifierNames(keys: [string, number][]): string {
 }
 
 export async function ensureModifierKeysUp(): Promise<void> {
-  if (!IS_WIN) {
+  if (!IS_WIN || !manageModifiers) {
     return;
   }
   let held = heldModifierKeys();
@@ -1588,7 +1717,13 @@ export function getWindowTextFull(hwnd: number, maxChars = 16384): string {
 // window rectangle in screen coordinates (vs getClientRect's client-relative one)
 export function getWindowRect(hwnd: number): Rect {
   if (IS_MAC) {
-    const text = String(macWithTarget(hwnd, () => macControlRequest(TestLayout, []))[1] ?? "");
+    // TestWindows already has every frame and tool window. Aiming TestLayout
+    // at a tool window's id finds no frame and reports an empty rect.
+    const listed = macWindows().find((m) => (hwnd > 0 ? m.hwnd === hwnd : !m.toolName));
+    if (listed) {
+      return listed.rect;
+    }
+    const text = String(macControlRequest(TestLayout, [])[1] ?? "");
     const m = /window rect=(-?\d+),(-?\d+),(-?\d+),(-?\d+)/.exec(text);
     if (!m) {
       return { left: 0, top: 0, right: 0, bottom: 0 };
@@ -1666,6 +1801,11 @@ export function windowFromPoint(x: number, y: number): number {
 }
 
 export function topLevelWindowFromPoint(x: number, y: number): number {
+  // macOS: the app's frame there, 0 for another app's window or none
+  if (IS_MAC) {
+    const origin = macClientToScreen(0, 0);
+    return Number(macControlRequest(TestWindows, ["at", x - origin.x, y - origin.y])[1] ?? 0);
+  }
   const h = windowFromPoint(x, y);
   if (!h) {
     return 0;
@@ -1680,6 +1820,10 @@ export function getRootWindow(hwnd: number): number {
 
 // the window's DPI: 96 at 100% scaling
 export function getDpiForWindow(hwnd: number): number {
+  // macOS: a test's client pixels are dips
+  if (IS_MAC) {
+    return 96;
+  }
   return user32.symbols.GetDpiForWindow(hwnd) || 96;
 }
 
@@ -1689,6 +1833,10 @@ export function getParentWindow(hwnd: number): number {
 }
 
 export function setForegroundWindow(hwnd: number): boolean {
+  if (IS_MAC) {
+    const name = macWindow(hwnd)?.toolName;
+    return name ? macActivateToolWindow(name) : true;
+  }
   return user32.symbols.SetForegroundWindow(hwnd);
 }
 
@@ -2000,7 +2148,7 @@ export function captureWindowPixels(
 ): { w: number; h: number; data: Uint8Array } | null {
   // the app draws the window into a PNG; there is no non-client area
   if (IS_MAC) {
-    return macCaptureClientPixels();
+    return macCaptureClientPixels(hwnd);
   }
   const rc = area === "client" ? getClientRect(hwnd) : getWindowRect(hwnd);
   const w = rc.right - rc.left;
@@ -2055,20 +2203,22 @@ export function captureWindowDCRegionPixels(
   if (w <= 0 || h <= 0) {
     return null;
   }
-  // macOS: that region of the window's capture
+  // macOS: that region of the window's capture. A tool window's capture is
+  // the client; window-DC coords include the title bar.
   if (IS_MAC) {
-    const cap = macCaptureClientPixels();
+    const cap = macCaptureClientPixels(hwnd);
     if (!cap) {
       return null;
     }
+    const inset = macWindow(hwnd)?.toolName ? macToolInset(hwnd) : { x: 0, y: 0 };
     const out = new Uint8Array(w * h * 4);
     for (let row = 0; row < h; row++) {
-      const sy = y + row;
+      const sy = y + row - inset.y;
       if (sy < 0 || sy >= cap.h) {
         continue;
       }
       for (let col = 0; col < w; col++) {
-        const sx = x + col;
+        const sx = x + col - inset.x;
         if (sx < 0 || sx >= cap.w) {
           continue;
         }
@@ -2690,6 +2840,7 @@ export function getMenuItemText(hmenu: bigint, pos: number): string {
 
 export const MF_BYPOSITION = 0x400;
 export const MF_GRAYED = 0x0001;
+export const MF_CHECKED = 0x0008;
 export const MF_DISABLED = 0x0002;
 
 // the shortcut a menu item advertises (the part after the tab), "" if none
@@ -2704,7 +2855,7 @@ export function getMenuItemAccel(hmenu: bigint, pos: number): string {
   return parts.length > 1 ? parts[1]!.replace(/&/g, "") : "";
 }
 
-export type MenuItem = { text: string; accel?: string; items?: MenuItem[]; disabled?: boolean };
+export type MenuItem = { text: string; accel?: string; items?: MenuItem[]; disabled?: boolean; checked?: boolean };
 
 export function getMenuItemDisabled(hmenu: bigint, pos: number): boolean {
   const st = user32.symbols.GetMenuState(hmenu, pos, MF_BYPOSITION);
@@ -2712,6 +2863,11 @@ export function getMenuItemDisabled(hmenu: bigint, pos: number): boolean {
     return false;
   }
   return (st & (MF_GRAYED | MF_DISABLED)) !== 0;
+}
+
+export function getMenuItemChecked(hmenu: bigint, pos: number): boolean {
+  const st = user32.symbols.GetMenuState(hmenu, pos, MF_BYPOSITION);
+  return st !== 0xffffffff && (st & MF_CHECKED) !== 0;
 }
 
 // the whole menu tree, submenus included. Separators (empty labels) are skipped
@@ -2731,6 +2887,9 @@ export function readMenuTree(hmenu: bigint): MenuItem[] {
       }
       if (getMenuItemDisabled(hmenu, i)) {
         item.disabled = true;
+      }
+      if (getMenuItemChecked(hmenu, i)) {
+        item.checked = true;
       }
       out.push(item);
     }

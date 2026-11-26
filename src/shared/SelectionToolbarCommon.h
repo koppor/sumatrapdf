@@ -17,7 +17,6 @@ struct SelectionToolbarButton {
 };
 const SelectionToolbarButton* FindCandidateButton(int cmdId);
 void CollectBuiltInSelectionToolbarCmds(Vec<int>& out);
-void NormalizeSelectionToolbarSeparators(Vec<SelectionToolbarButton>& buttons);
 bool IsActivelySelecting(MainWindow* win);
 
 void InitButtons(Vec<SelectionToolbarButton>& buttons, MainWindow* win);
@@ -33,4 +32,4 @@ bool GetSelectionBounds(MainWindow* win, Rect& out);
 
 constexpr int kCopiedNotifTimeoutMs = 1500;
 
-static Kind kNotifCopiedToClipboard = "notifCopiedToClipboard";
+extern Kind kNotifCopiedToClipboard;

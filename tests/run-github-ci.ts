@@ -21,6 +21,7 @@
 // waiting for the whole suite.
 
 import { existsSync } from "node:fs";
+import { finishProcessReuse, noteReuseTest } from "./shared-session.ts";
 import { EXE, formatDuration, resetTestTimes, runTest, type NamedTest } from "./util.ts";
 import { getWorkArea, setTestWindowLayout, testWindowPos } from "./winapi.ts";
 import { tests as allTests } from "./run-all.ts";
@@ -31,7 +32,6 @@ export const excludedTests: Record<string, string> = {
   // "Microsoft Print to PDF" is a Windows client feature; the runner images are
   // Windows Server and don't have it (nor any other printer)
   "issue-4967": "prints through Microsoft Print to PDF",
-  "issue-5065": "prints through Microsoft Print to PDF",
   "issue-5353": "prints through Microsoft Print to PDF",
   "print-auto-rotate": "prints through Microsoft Print to PDF",
   "issue-6150": "prints through Microsoft Print to PDF",
@@ -75,17 +75,22 @@ export async function testit(tests: NamedTest[] = ciTests()): Promise<void> {
 
   const failures: Failure[] = [];
   const t0 = performance.now();
-  for (const [name, fn] of tests) {
-    console.log(`\n========== ${name} ==========`);
-    try {
-      await runTest(name, fn);
-    } catch (e) {
-      // runTest already timed and recorded it; keep going so one broken test
-      // doesn't hide the state of everything after it
-      const msg = (e as Error)?.message ?? String(e);
-      console.error(`❌ ${msg}`);
-      failures.push({ name, msg });
+  try {
+    for (const [name, fn] of tests) {
+      console.log(`\n========== ${name} ==========`);
+      try {
+        await noteReuseTest(name);
+        await runTest(name, fn);
+      } catch (e) {
+        // runTest already timed and recorded it; keep going so one broken test
+        // doesn't hide the state of everything after it
+        const msg = (e as Error)?.message ?? String(e);
+        console.error(`❌ ${msg}`);
+        failures.push({ name, msg });
+      }
     }
+  } finally {
+    await finishProcessReuse();
   }
 
   const elapsed = formatDuration(performance.now() - t0);

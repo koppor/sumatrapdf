@@ -23,21 +23,20 @@ static NO_INLINE void CalcDigestWin(Str d, u8* digest, DWORD digestSize, const W
     HCRYPTPROV hProv = 0;
     HCRYPTHASH hHash = 0;
     BOOL ok = CryptAcquireContextW(&hProv, nullptr, provider, type, CRYPT_VERIFYCONTEXT);
-    ReportIf(!ok);
-    ok = CryptCreateHash(hProv, alg, 0, 0, &hHash);
-    ReportIf(!ok);
-
-    // Hash in DWORD-sized chunks when the payload is larger than DWORD_MAX
-    // (only possible with size_t-sized lengths; our API uses int).
-    const BYTE* p = (const BYTE*)data;
-    size_t remaining = (size_t)(dataSize < 0 ? 0 : dataSize);
-    while (remaining > (size_t)DWORD_MAX) {
-        ok = CryptHashData(hHash, p, DWORD_MAX, 0);
-        ReportIf(!ok);
-        p += DWORD_MAX;
-        remaining -= (size_t)DWORD_MAX;
+    if (ReportIf(!ok)) {
+        memset(digest, 0, digestSize);
+        return;
     }
-    ok = CryptHashData(hHash, p, (DWORD)remaining, 0);
+    ok = CryptCreateHash(hProv, alg, 0, 0, &hHash);
+    if (ReportIf(!ok)) {
+        CryptReleaseContext(hProv, 0);
+        memset(digest, 0, digestSize);
+        return;
+    }
+
+    const BYTE* p = (const BYTE*)data;
+    DWORD remaining = (DWORD)(dataSize < 0 ? 0 : dataSize);
+    ok = CryptHashData(hHash, p, remaining, 0);
     ReportIf(!ok);
 
     DWORD hashLen = 0;
@@ -45,9 +44,7 @@ static NO_INLINE void CalcDigestWin(Str d, u8* digest, DWORD digestSize, const W
     ok = CryptGetHashParam(hHash, HP_HASHSIZE, (BYTE*)&hashLen, &argSize, 0);
     ReportIf(sizeof(DWORD) != argSize);
     ReportIf(!ok);
-    if (digestSize != hashLen) {
-        ReportIf(digestSize != hashLen);
-    }
+    ReportIf(digestSize != hashLen);
     ok = CryptGetHashParam(hHash, HP_HASHVAL, digest, &hashLen, 0);
     ReportIf(!ok);
     ReportIf(digestSize != hashLen);
@@ -65,6 +62,34 @@ void CalcSHA1Digest(Str data, u8 digest[20]) {
 
 void CalcSHA2Digest(Str data, u8 digest[32]) {
     CalcDigestWin(data, digest, 32, MS_ENH_RSA_AES_PROV, PROV_RSA_AES, CALG_SHA_256);
+}
+
+struct Sha1Hasher {
+    HCRYPTPROV prov = 0;
+    HCRYPTHASH hash = 0;
+};
+
+Sha1Hasher* NewSha1Hasher() {
+    auto* h = new Sha1Hasher();
+    BOOL ok = CryptAcquireContextW(&h->prov, nullptr, MS_DEF_PROV, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT);
+    ReportIf(!ok);
+    ok = CryptCreateHash(h->prov, CALG_SHA1, 0, 0, &h->hash);
+    ReportIf(!ok);
+    return h;
+}
+
+void Sha1Update(Sha1Hasher* h, Str data) {
+    BOOL ok = CryptHashData(h->hash, (const BYTE*)data.s, (DWORD)data.len, 0);
+    ReportIf(!ok);
+}
+
+void Sha1Finish(Sha1Hasher* h, u8 digest[20]) {
+    DWORD hashLen = 20;
+    BOOL ok = CryptGetHashParam(h->hash, HP_HASHVAL, digest, &hashLen, 0);
+    ReportIf(!ok || hashLen != 20);
+    CryptDestroyHash(h->hash);
+    CryptReleaseContext(h->prov, 0);
+    delete h;
 }
 
 // extracts the content (e.g. PDF) from a PKCS#7 / .p7m wrapper using Win32 crypto APIs
@@ -88,12 +113,17 @@ Str ExtractP7m(Str d) {
 
     DWORD cbContent = 0;
     ok = CryptMsgGetParam(hMsg, CMSG_CONTENT_PARAM, 0, nullptr, &cbContent);
-    if (!ok || cbContent == 0) {
+    if (!ok || cbContent == 0 || cbContent >= INT_MAX) {
         CryptMsgClose(hMsg);
         return {};
     }
 
-    u8* content = AllocArray<u8>((int)cbContent);
+    // +1 for the NUL terminator (AllocArray zeroes)
+    u8* content = AllocArray<u8>((int)cbContent + 1);
+    if (!content) {
+        CryptMsgClose(hMsg);
+        return {};
+    }
     ok = CryptMsgGetParam(hMsg, CMSG_CONTENT_PARAM, 0, content, &cbContent);
     CryptMsgClose(hMsg);
     if (!ok) {
@@ -171,10 +201,10 @@ TempStr GetExecutableSignerTemp(Str exePath) {
                                                         CERT_FIND_SUBJECT_CERT, &certInfo, nullptr);
     TempStr res = {};
     if (certCtx) {
-        char buf[512];
-        DWORD n = CertGetNameStringA(certCtx, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, buf, dimof(buf));
+        WCHAR buf[512];
+        DWORD n = CertGetNameStringW(certCtx, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr, buf, dimof(buf));
         if (n > 1) {
-            res = str::DupTemp(Str(buf));
+            res = ToUtf8Temp(WStr(buf, (int)n - 1));
         }
         CertFreeCertificateContext(certCtx);
     }

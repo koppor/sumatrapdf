@@ -95,6 +95,21 @@ void ByteOrderTests() {
         utassert(s.s[0] == 'I' && s.s[1] == 'I');
         utassert((u8)s.s[2] == 42 && s.s[3] == 0);
     }
+
+    {
+        ByteReader r(d1, sizeof(d1));
+        utassert(!r.CanRead(0, -1));
+    }
+
+    {
+        u8 bytes[] = {0x80, 0xff};
+        BitReader bits(bytes, sizeof(bytes));
+        utassert(bits.Eat(1));
+        utassert(!bits.Eat(-1));
+        utassert(bits.BitsLeft() == 15 && bits.Peek(1) == 0);
+        utassert(!bits.Eat(INT_MAX));
+        utassert(bits.BitsLeft() == 0);
+    }
 }
 
 #undef kAbc

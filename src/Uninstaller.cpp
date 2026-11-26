@@ -34,7 +34,6 @@ static Button* gButtonUninstaller = nullptr;
 static bool gWasSearchFilterInstalled = false;
 static bool gWasPreviewInstaller = false;
 static PreviewHandlers gOurPreviewHandlers;
-static Str gUninstallerLogPath;
 
 static void UninstallerThread() {
     log(StrL("UninstallerThread started\n"));
@@ -108,8 +107,8 @@ static void OnUninstallationFinished() {
     gButtonUninstaller = nullptr;
     gButtonExit = CreateDefaultButton(gHwndFrame, Tr("Close"), isRtl);
     gButtonExit->onClick = MkFunc0Void(OnButtonExit);
-    SetMsg(Tr("SumatraPDF has been uninstalled."), gMsgError ? kColorMsgFailed : kColorMsgOk);
     gMsgError = gFirstError;
+    SetMsg(Tr("SumatraPDF has been uninstalled."), gMsgError ? kColorMsgFailed : kColorMsgOk);
     HwndRepaintNow(gHwndFrame);
 
     SafeCloseThreadHandle(&hThread);
@@ -168,6 +167,13 @@ static LRESULT CALLBACK WndProcUninstallerFrame(HWND hwnd, UINT msg, WPARAM wp, 
             SetBkMode(hdc, TRANSPARENT);
             return (LRESULT)ghbrBackground;
         }
+
+        case WM_CLOSE:
+            // closing mid-uninstall would leave a partial uninstall
+            if (hThread) {
+                return 0;
+            }
+            return DefWindowProc(hwnd, msg, wp, lp);
 
         case WM_DESTROY:
             PostQuitMessage(0);

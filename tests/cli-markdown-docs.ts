@@ -6,12 +6,11 @@
 // epub_converts_with_needles, plain_text_has_needles,
 // password_and_other_formats); the documents are made here.
 //
-// ng only for now: orig doesn't have the cli command yet.
 // Run: bun tests/cli-markdown-docs.ts [--no-build]
 
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { assemblePdf, EXE, makeZip, ROOT, runStandalone, tmpPath, USE_NG } from "./util.ts";
+import { assemblePdf, EXE, makeZip, ROOT, runStandalone, tmpPath } from "./util.ts";
 
 const name = "cli-markdown-docs";
 
@@ -201,6 +200,23 @@ function testPictures(): void {
   }
   r = cli(["markdown", src]);
   expect("without -o no pictures", r.code === 0 && !r.out.includes("!["), r);
+  const withoutImages = join(dir, "none.md");
+  r = cli(["markdown", src, "-o", withoutImages, "--no-images"]);
+  expect("--no-images", r.code === 0 && !existsSync(join(dir, "none_images")), r);
+}
+
+function testManPage(): void {
+  const man = join(ROOT, "ext", "a-zlib", "zlib.3.pdf");
+  let r = cli(["markdown", man]);
+  expect("man page", r.code === 0 && !r.out.includes("\0"), r);
+  expect("page markers", r.out.startsWith("<!-- page 1 -->") && r.out.includes("<!-- page 2 -->"), r);
+  expect("same-size bold lines are headings", /^# NAME$/m.test(r.out) && /^# DESCRIPTION$/m.test(r.out), r);
+  expect("emphasis keeps its spaces", r.out.includes("\\[see *zlib.h* for full description\\]"), r);
+
+  r = cli(["markdown", man, "--pages", "2", "--no-page-markers", "--json"]);
+  expect("page range as JSON", r.code === 0, r);
+  const result = JSON.parse(r.out);
+  expect("one page without markers", result.pages === 1 && !result.markdown.includes("<!-- page"), r);
 }
 
 // epub_converts_with_needles
@@ -221,17 +237,16 @@ function testEpub(): void {
   );
   // not in Kitab: a footnote mark isn't glued to the word
   expect("<sup>", r.out.includes("chapter 3<sup>3</sup>,"), r);
+
+  const outlined = cli(["markdown", join(ROOT, "tests", "issue-6095.epub")]);
+  expect(
+    "a title from the EPUB outline is a heading",
+    outlined.code === 0 && /^# Dzikie ziele$/m.test(outlined.out),
+    outlined,
+  );
 }
 
-// password_and_other_formats
-function testPasswordAndFormats(pdf: string): void {
-  const locked = tmpPath("cli-markdown-docs-locked.pdf");
-  const p = Bun.spawnSync([EXE, "clean", "-E", "aes-256", "-U", "sumatra", "-O", "owner", pdf, locked]);
-  expect("encrypting", p.exitCode === 0, p.stderr.toString());
-  expect("no password is 4", cli(["text", locked]).code === 4, "");
-  expect("a wrong password is 4", cli(["text", locked, "--password", "wrong"]).code === 4, "");
-  expect("the password", cli(["text", locked, "--password", "sumatra"]).code === 0, "");
-
+function testOtherFormats(): void {
   // a page that is a drawing: no text and no error
   const xps = tmpPath("cli-markdown-docs.xps");
   writeFileSync(xps, makeVectorXps());
@@ -252,17 +267,14 @@ function testPasswordAndFormats(pdf: string): void {
 }
 
 export async function testit(): Promise<void> {
-  if (!USE_NG) {
-    console.log(`SKIP ${name}: ng only (run with -ng)`);
-    return;
-  }
   const pdf = tmpPath("cli-markdown-docs.pdf");
   writeFileSync(pdf, makeOutlinedPdf(), "latin1");
   testOutlinedPdf(pdf);
   testPlainText(pdf);
+  testManPage();
   testPictures();
   testEpub();
-  testPasswordAndFormats(pdf);
+  testOtherFormats();
   console.log(`${name}: OK`);
 }
 

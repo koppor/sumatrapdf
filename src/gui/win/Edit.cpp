@@ -102,9 +102,6 @@ static Kind kindEdit = "edit";
 // area: edit client paint on typing would overwrite a WM_PAINT GetDC line)
 static constexpr int kEditBottomBorderDy = 1;
 
-// space between the text and the left / right edges of the client area, in
-// (already DPI-scaled) pixels
-// the placeholder text shown while the edit is empty
 static int EditWidthForChars(PlatformFont* font, int nChars) {
     if (nChars <= 0) {
         return 0;
@@ -116,9 +113,7 @@ Edit::Edit() {
     kind = kindEdit;
 }
 
-Edit::~Edit() {
-    // DeleteObject(bgBrush);
-}
+Edit::~Edit() {}
 
 // null restores the edit's own cursor (I-beam). Must not be done with
 // GCLP_HCURSOR: that is per window class (WC_EDIT), i.e. every edit in the
@@ -127,7 +122,6 @@ void Edit::SetCursorId(LPWSTR id) {
     cursorId = id;
 }
 
-// preferred GetIdealSize width ≈ nChars average character widths (0 clears)
 // set preferred / max width to ~nChars average character widths (0 clears)
 void Edit::SetIdealWidthChars(int nChars) {
     if (!hwnd || nChars <= 0) {
@@ -488,7 +482,7 @@ void Edit::WndProc(ControlBase::WndProcEvent* ev) {
                     HBRUSH br = CreateSolidBrush(col);
                     FrameRect(hdc, &fr, br);
                     DeleteObject(br);
-                } else {
+                } else if (createdWithBottomBorder) {
                     HPEN pen = CreatePen(PS_SOLID, 1, col);
                     HGDIOBJ old = SelectObject(hdc, pen);
                     MoveToEx(hdc, 0, h - 1, nullptr);

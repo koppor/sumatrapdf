@@ -492,7 +492,8 @@ T RemoveRandomElementFromVec(Vec<T>& v) {
 
 static void LimitPagesToRender(Vec<int>& pages, int maxPages) {
     while (len(pages) > maxPages) {
-        RemoveRandomElementFromVec(pages);
+        int idx = rand() % len(pages);
+        VecRemoveAtFast(pages, idx);
     }
 }
 
@@ -553,9 +554,9 @@ static void Finished(StressTest* st, bool success) {
     }
 
 #if defined(SUMATRA_NG)
-    CloseWindow(st->win, st->exitWhenDone, false);
+    CloseWindow(st->win, st->exitWhenDone);
 #else
-    CloseWindow(st->win, st->exitWhenDone && CanCloseWindow(st->win), false);
+    CloseWindow(st->win, st->exitWhenDone && CanCloseWindow(st->win));
 #endif
     delete st;
 }
@@ -621,7 +622,7 @@ static bool OpenFile(StressTest* st, Str fileName) {
         }
     } else {
         if (!w->IsDocLoaded()) { // new MainWindow
-            CloseWindow(w, false, false);
+            CloseWindow(w, false);
             return false;
         }
     }
@@ -666,15 +667,10 @@ static bool OpenFile(StressTest* st, Str fileName) {
                 VecAppend(st->pagesToRender, n);
             }
         }
-        for (auto&& range : st->pageRanges) {
-            for (int n = range.start; n <= range.end && n <= nPages; n++) {
-                VecAppend(st->pagesToRender, n);
-            }
-        }
-        if (len(st->pagesToRender) == 0) {
-            return false;
-        }
         LimitPagesToRender(st->pagesToRender, kStressTestMaxPagesPerFile);
+    }
+    if (len(st->pagesToRender) == 0) {
+        return false;
     }
 
     int randomPageIdx = rand() % len(st->pagesToRender);

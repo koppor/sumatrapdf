@@ -4,6 +4,7 @@
 #include "base/Base.h"
 #include "base/File.h"
 #include "base/Win.h"
+#include "base/WinDynCalls.h"
 #include "gui/Dpi.h"
 #include "base/UITask.h"
 
@@ -160,7 +161,7 @@ void ViewCertDer(HWND parent, Str der) {
         return;
     }
     using Fn = BOOL(WINAPI*)(DWORD, const void*, HWND, LPCWSTR, DWORD, void*);
-    HMODULE h = LoadLibraryW(L"cryptui.dll");
+    HMODULE h = SafeLoadLibrary(StrL("cryptui.dll"));
     Fn fn = h ? (Fn)GetProcAddress(h, "CryptUIDlgViewContext") : nullptr;
     if (fn) {
         fn(CERT_STORE_CERTIFICATE_CONTEXT, cert, parent, L"Certificate", 0, nullptr);
@@ -381,7 +382,6 @@ bool PropertiesWnd::Create(HWND parent) {
         args.style = WS_OVERLAPPEDWINDOW;
         args.font = DlgUiFont(kToolDlgTextFontPx);
         args.isRtl = isRtl;
-        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
         args.bgColor = colBg;
         CreateCustom(args);
     }

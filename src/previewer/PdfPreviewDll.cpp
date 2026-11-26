@@ -18,9 +18,9 @@ static AtomicInt g_lRefCount = 0;
 
 class PreviewClassFactory : public IClassFactory {
   public:
-    explicit PreviewClassFactory(REFCLSID rclsid) : m_lRef(1), m_clsid(rclsid) { AtomicIntInc(&g_lRefCount); }
+    explicit PreviewClassFactory(PreviewType type) : m_lRef(1), m_type(type) { AtomicIntInc(&g_lRefCount); }
 
-    ~PreviewClassFactory() { InterlockedDecrement(&g_lRefCount); }
+    ~PreviewClassFactory() { AtomicIntDec(&g_lRefCount); }
 
     // IUnknown
     IFACEMETHODIMP QueryInterface(REFIID riid, void** ppv) {
@@ -32,53 +32,27 @@ class PreviewClassFactory : public IClassFactory {
     IFACEMETHODIMP_(ULONG) AddRef() { return AtomicIntInc(&m_lRef); }
 
     IFACEMETHODIMP_(ULONG) Release() {
-        long cRef = InterlockedDecrement(&m_lRef);
+        int cRef = AtomicIntDec(&m_lRef);
         if (cRef == 0) {
             delete this;
         }
         return cRef;
     }
 
-    bool IsClsid(Str s) {
-        CLSID clsid;
-        WCHAR* ws = CWStrTemp(s);
-        return SUCCEEDED(CLSIDFromString(ws, &clsid)) && IsEqualCLSID(m_clsid, clsid);
-    }
-
     // IClassFactory
     IFACEMETHODIMP CreateInstance(IUnknown* punkOuter, REFIID riid, void** ppv) {
         log(StrL("PdfPreview: CreateInstance()\n"));
 
+        if (!ppv) {
+            return E_POINTER;
+        }
         *ppv = nullptr;
         if (punkOuter) {
             return CLASS_E_NOAGGREGATION;
         }
 
-        PreviewType type;
-        if (IsClsid(StrL(kPdfPreviewClsid))) {
-            type = PreviewType::Pdf;
-        } else if (IsClsid(StrL(kXpsPreviewClsid))) {
-            type = PreviewType::Xps;
-        } else if (IsClsid(StrL(kDjVuPreviewClsid))) {
-            type = PreviewType::DjVu;
-        } else if (IsClsid(StrL(kEpubPreviewClsid))) {
-            type = PreviewType::Epub;
-        } else if (IsClsid(StrL(kFb2PreviewClsid))) {
-            type = PreviewType::Fb2;
-        } else if (IsClsid(StrL(kMobiPreviewClsid))) {
-            type = PreviewType::Mobi;
-        } else if (IsClsid(StrL(kCbxPreviewClsid))) {
-            type = PreviewType::Cbx;
-        } else if (IsClsid(StrL(kTgaPreviewClsid))) {
-            type = PreviewType::Tga;
-        } else if (IsClsid(StrL(kOfdPreviewClsid))) {
-            type = PreviewType::Ofd;
-        } else {
-            return E_NOINTERFACE;
-        }
-
         AutoReleaseComPtr<IInitializeWithStream> pObject;
-        pObject = new PdfPreview(&g_lRefCount, type);
+        pObject = new PdfPreview(&g_lRefCount, m_type);
 
         if (!pObject) {
             return E_OUTOFMEMORY;
@@ -91,54 +65,52 @@ class PreviewClassFactory : public IClassFactory {
         if (bLock) {
             AtomicIntInc(&g_lRefCount);
         } else {
-            InterlockedDecrement(&g_lRefCount);
+            AtomicIntDec(&g_lRefCount);
         }
         return S_OK;
     }
 
   private:
     AtomicInt m_lRef;
-    CLSID m_clsid;
+    PreviewType m_type;
 };
-
-static Str GetReason(DWORD dwReason) {
-    switch (dwReason) {
-        case DLL_PROCESS_ATTACH:
-            return StrL("DLL_PROCESS_ATTACH");
-        case DLL_THREAD_ATTACH:
-            return StrL("DLL_THREAD_ATTACH");
-        case DLL_THREAD_DETACH:
-            return StrL("DLL_THREAD_DETACH");
-        case DLL_PROCESS_DETACH:
-            return StrL("DLL_PROCESS_DETACH");
-    }
-    return StrL("Unknown reason");
-}
 
 void UnregisterPreviewWndClass();
 
-STDAPI_(BOOL) DllMain(HINSTANCE hInstance, DWORD dwReason, void* /*lpReserved*/) {
+STDAPI_(BOOL) DllMain(HINSTANCE hInstance, DWORD dwReason, void* lpReserved) {
     if (dwReason == DLL_PROCESS_ATTACH) {
         ReportIf(hInstance != GetInstance());
+        gLogAppName = StrL("PdfPreview");
+    } else if (dwReason == DLL_PROCESS_DETACH) {
+        // lpReserved is non-null when the process is exiting; skip teardown
+        // then so we don't take locks under the loader as other DLLs die.
+        if (!lpReserved) {
+            UnregisterPreviewWndClass();
+            DestroyLogging();
+            DestroyTempArena();
+            DestroyPermArena();
+        }
     }
-    if (dwReason == DLL_PROCESS_DETACH) {
-        UnregisterPreviewWndClass();
-    }
-    gLogAppName = StrL("PdfPreview");
-    logf("PdfPreview: DllMain %s\n", GetReason(dwReason));
     return TRUE;
 }
 
 STDAPI DllCanUnloadNow(VOID) {
-    return g_lRefCount == 0 ? S_OK : S_FALSE;
+    return AtomicIntGet(&g_lRefCount) == 0 ? S_OK : S_FALSE;
 }
 
 STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv) {
+    if (!ppv) {
+        return E_POINTER;
+    }
     // route our log to a file if the user enabled it (no-op otherwise). Done
     // here rather than in DllMain to avoid file/registry I/O under loader lock.
     StartPdfPreviewLoggingIfEnabled();
     *ppv = nullptr;
-    AutoReleaseComPtr<PreviewClassFactory> pClassFactory(new PreviewClassFactory(rclsid));
+    PreviewType type;
+    if (!FindPreviewType(rclsid, type)) {
+        return CLASS_E_CLASSNOTAVAILABLE;
+    }
+    AutoReleaseComPtr<PreviewClassFactory> pClassFactory(new PreviewClassFactory(type));
     if (!pClassFactory) {
         return E_OUTOFMEMORY;
     }
@@ -176,26 +148,14 @@ STDAPI DllUnregisterServer() {
     return S_OK;
 }
 
-// TODO: maybe remove, is anyone using this functionality?
-STDAPI DllInstall(BOOL bInstall, const WCHAR* pszCmdLine) {
-    TempStr s = ToUtf8Temp(pszCmdLine);
-    DisablePreviewInstallExts(s);
-    if (!bInstall) {
-        return DllUnregisterServer();
-    }
-    return DllRegisterServer();
-}
-
 #ifdef _WIN64
 #pragma comment(linker, "/EXPORT:DllCanUnloadNow=DllCanUnloadNow,PRIVATE")
 #pragma comment(linker, "/EXPORT:DllGetClassObject=DllGetClassObject,PRIVATE")
 #pragma comment(linker, "/EXPORT:DllRegisterServer=DllRegisterServer,PRIVATE")
 #pragma comment(linker, "/EXPORT:DllUnregisterServer=DllUnregisterServer,PRIVATE")
-#pragma comment(linker, "/EXPORT:DllInstall=DllInstall,PRIVATE")
 #else
 #pragma comment(linker, "/EXPORT:DllCanUnloadNow=_DllCanUnloadNow@0,PRIVATE")
 #pragma comment(linker, "/EXPORT:DllGetClassObject=_DllGetClassObject@12,PRIVATE")
 #pragma comment(linker, "/EXPORT:DllRegisterServer=_DllRegisterServer@0,PRIVATE")
 #pragma comment(linker, "/EXPORT:DllUnregisterServer=_DllUnregisterServer@0,PRIVATE")
-#pragma comment(linker, "/EXPORT:DllInstall=_DllInstall@8,PRIVATE")
 #endif

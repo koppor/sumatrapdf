@@ -371,12 +371,20 @@ TempStr TrimmedAsciiTemp(ByteReader r, int off, u32 count) {
 
 const ExifEntry* FindEntry(const ExifParser& parser, ExifProp prop) {
     u16 tag = (u16)prop;
+    const ExifEntry* fallback = nullptr;
     for (const ExifEntry& entry : parser.entries) {
-        if (entry.tag == tag) {
+        if (entry.tag != tag) {
+            continue;
+        }
+        // prefer main Image/Exif/Gps tags over Thumbnail/MakerNote duplicates
+        if (entry.group != (u8)IfdGroup::Thumbnail && entry.group != (u8)IfdGroup::MakerNote) {
             return &entry;
         }
+        if (!fallback) {
+            fallback = &entry;
+        }
     }
-    return nullptr;
+    return fallback;
 }
 
 u16 ReadWord(const ExifParser& parser, int off) {
@@ -583,9 +591,7 @@ TempStr FormatValuesTemp(const ExifParser& parser, IfdGroup g, u16 tag, u16 type
                 } else {
                     s.Append(FormatRationalPair((u32)rat.num, (u32)rat.den, true));
                 }
-                if (i < count - 1) {
-                    s.Append(StrL(", "));
-                } else {
+                if (i == count - 1) {
                     s.Append(StrL("]"));
                 }
             } else if (sr) {
@@ -606,12 +612,6 @@ TempStr FormatValuesTemp(const ExifParser& parser, IfdGroup g, u16 tag, u16 type
                  type == TiffSLong;
     if (isInt) {
         bool isSigned = type == TiffSByte || type == TiffSShort || type == TiffSLong;
-        if (type == TiffShort && g == IfdGroup::Exif && tag == (u16)ExifProp::Flash && count == 1) {
-            Str fs = LookupEnumName(g, tag, ReadWord(parser, off));
-            if (fs) {
-                return fs;
-            }
-        }
         // byte arrays and SubjectArea (0x9214) are shown in brackets
         bool brackets = elemSize == 1 || (count > 1 && tag == 0x9214);
         char sScratch[256]{};
@@ -651,6 +651,8 @@ void AddEntry(ExifParser& parser, IfdGroup group, u16 tag, u16 type, u32 count, 
 }
 
 static void ParseIfd(ExifParser& parser, IfdGroup group, int ifdRel, int makerNoteEndian = 0, int depth = 0);
+
+constexpr int kMaxExifEntries = 10'000;
 
 void ParseMakerNote(ExifParser& parser, int dataOff, u32 count, int depth) {
     ByteReader r(parser.exifBlob);
@@ -697,6 +699,13 @@ void ParseIfd(ExifParser& parser, IfdGroup group, int ifdRel, int makerNoteEndia
         return;
     }
     int ifdAbs = (int)ifdAbs64;
+
+    // an IFD that points back at itself (or an ancestor) would recurse exponentially
+    if (VecContains(parser.parsedIfds, ifdAbs)) {
+        return;
+    }
+    VecAppend(parser.parsedIfds, ifdAbs);
+
     bool savedBE = parser.isBE;
     if (makerNoteEndian) {
         parser.isBE = makerNoteEndian == 'M';
@@ -705,7 +714,7 @@ void ParseIfd(ExifParser& parser, IfdGroup group, int ifdRel, int makerNoteEndia
     int nextIfdOff = 0;
     for (u16 i = 0; i < nTags; i++) {
         int ent = ifdAbs + 2 + (i * 12);
-        if (ent + 12 > r.len) {
+        if (ent + 12 > r.len || len(parser.entries) >= kMaxExifEntries) {
             break;
         }
         u16 tag = ReadWord(parser, ent);
@@ -804,6 +813,9 @@ bool ExtractJpegExif(Str d, Str& out) {
             return false;
         }
         int segLen = r.UInt16BE(idx + 2);
+        if (segLen < 2) {
+            return false;
+        }
         if (marker == 0xE1 && idx + 10 <= r.len && memcmp(r.d + idx + 4, "Exif\0\0", 6) == 0) {
             int payload = idx + 4;
             int total = segLen + 2;
@@ -836,7 +848,7 @@ bool LooksLikeTiffExif(const u8* p, int n) {
     }
     u32 ifdOff = le ? (u32)(p[4] | (p[5] << 8) | (p[6] << 16) | (p[7] << 24))
                     : (u32)((p[4] << 24) | (p[5] << 16) | (p[6] << 8) | p[7]);
-    if (ifdOff < 8 || (int)ifdOff + 2 >= n) {
+    if (ifdOff < 8 || ifdOff >= (u32)n - 2) {
         return false;
     }
     u16 nTags = le ? (u16)(p[ifdOff] | (p[ifdOff + 1] << 8)) : (u16)((p[ifdOff] << 8) | p[ifdOff + 1]);
@@ -936,9 +948,9 @@ ExifParser::~ExifParser() {
 }
 
 void ExifParser::Reset() {
-    data = {};
     dumpLines.Reset();
     VecReset(entries);
+    VecReset(parsedIfds);
     free(ownedExif);
     ownedExif = nullptr;
     exifBlob = {};
@@ -949,7 +961,6 @@ void ExifParser::Reset() {
 
 bool ExifParser::Parse(Str imageData) {
     Reset();
-    data = imageData;
     if (!ExtractExifBlob(imageData, exifBlob, &ownedExif)) {
         return false;
     }
@@ -977,8 +988,9 @@ TempStr ExifParser::GetStringProp(ExifProp prop, ExifProp altProp) const {
         Str bytes((char*)(r.d + entry->dataOff), (int)entry->count);
         if (bytes.len > 8 && MemEq(bytes.s, "ASCII\0\0\0", 8)) {
             res = TrimmedAsciiTemp(r, entry->dataOff + 8, entry->count - 8);
-        } else if (bytes.len > 10 && MemEq(bytes.s, "UNICODE\0", 8)) {
-            res = Utf16LeToUtf8Temp(Str(bytes.s + 8, bytes.len - 8));
+        } else if (bytes.len >= 10 && MemEq(bytes.s, "UNICODE\0", 8)) {
+            strconv::ByteOrder order = isBE ? strconv::ByteOrder::BigEndian : strconv::ByteOrder::LittleEndian;
+            res = strconv::Utf16ToUtf8Temp(Str(bytes.s + 8, bytes.len - 8), order);
         }
     }
     if (str::IsEmptyOrWhiteSpace(res)) {
@@ -989,7 +1001,7 @@ TempStr ExifParser::GetStringProp(ExifProp prop, ExifProp altProp) const {
 
 bool ExifParser::GetIntProp(ExifProp prop, i64* valOut) const {
     const ExifEntry* entry = FindEntry(*this, prop);
-    if (!entry || !valOut) {
+    if (!entry || !valOut || entry->count < 1) {
         return false;
     }
     if (entry->type == TiffByte || entry->type == TiffSByte || entry->type == TiffUndefined) {
@@ -1021,7 +1033,7 @@ bool ExifParser::GetIntProp(ExifProp prop, i64* valOut) const {
 
 bool ExifParser::GetRationalProp(ExifProp prop, ExifRational* valOut) const {
     const ExifEntry* entry = FindEntry(*this, prop);
-    if (!entry || !valOut || (entry->type != TiffRational && entry->type != TiffSRational)) {
+    if (!entry || !valOut || entry->count < 1 || (entry->type != TiffRational && entry->type != TiffSRational)) {
         return false;
     }
     return ReadRational(*this, entry->dataOff, valOut, entry->type == TiffSRational);

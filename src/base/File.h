@@ -99,19 +99,29 @@ constexpr FileHandle kInvalidFileHandle = -1;
 bool Exists(Str path);
 
 FILE* OpenFILE(Str path);
-FileHandle OpenReadOnly(Str path);
+
+struct ReadStamp {
+    i64 size = 0;
+    u64 mtime = 0;
+    u64 device = 0;
+    u64 id = 0;
+    bool operator==(const ReadStamp&) const = default;
+};
+
+bool GetReadStamp(FILE*, ReadStamp&);
+bool ReadStampMatchesPath(Str path, const ReadStamp&);
 
 // handle-based i/o, for files kept open across many reads / appends
 FileHandle OpenReadWrite(Str path, bool createIfMissing);
 void Close(FileHandle);
 i64 SeekEnd(FileHandle);
 bool WriteAll(FileHandle, Str data);
-bool Flush(FileHandle);
 
 Str ReadFileWithArena(Str path, Arena*);
 Str ReadFile(Str path);
 int ReadN(Str path, u8* buf, size_t toRead);
 bool WriteFile(Str path, Str);
+bool WriteFileAtomic(Str path, Str data);
 
 i64 GetSize(Str path);
 
@@ -147,11 +157,6 @@ struct CopyProgress {
 };
 using CopyProgressCb = Func1<CopyProgress*>;
 
-// Thread-local progress callback honored by long-running copies (e.g.
-// caching a network-drive cbx locally). Caller sets it before triggering
-// an operation that may copy large files; clears it afterwards.
-extern thread_local CopyProgressCb gFileCopyProgressCb;
-
 bool Copy(Str dst, Str src, bool dontOverwrite);
 bool Copy(Str dst, Str src, bool dontOverwrite, const CopyProgressCb& cbProgress);
 bool Rename(Str newPath, Str oldPath);
@@ -178,6 +183,7 @@ bool HasWriteAccess(Str dir);
 
 bool FileSystemEntryExists(Str s);
 TempStr GetDownloadsDirTemp();
+TempStr GetHomeDirTemp();
 
 bool FileTimeEq(const FILETIME& a, const FILETIME& b);
 int FileTimeDiffInSecs(const FILETIME& ft1, const FILETIME& ft2);

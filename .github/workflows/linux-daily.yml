@@ -15,7 +15,7 @@ jobs:
       - name: dev packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libx11-dev libxcursor-dev libcairo2-dev libpango1.0-dev libgdk-pixbuf-2.0-dev libglib2.0-dev libssl-dev
+          sudo apt-get install -y build-essential pkg-config libx11-dev libxcursor-dev libxi-dev libcairo2-dev libpango1.0-dev libgdk-pixbuf-2.0-dev libglib2.0-dev libssl-dev
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       # on a Linux host -linux is implied
       - name: test_util
@@ -37,6 +37,10 @@ jobs:
           "$e" out/posix-print.pdf out/posix-print.png 1 | tee out/posix-print.txt
           grep -q 'pages: 1' out/posix-print.txt
           grep -q 'page 1: 792 x 612' out/posix-print.txt
+          # dpi= is the image's resolution: 681 x 26 px at 300 dpi is 163 x 6 pt
+          "$app" -for-testing -silent -print-to PDF -print-settings "dpi=300,output=out/posix-print-dpi.pdf" docs/test/test.png
+          "$e" out/posix-print-dpi.pdf out/posix-print-dpi.png 1 | tee out/posix-print-dpi.txt
+          grep -Eq 'page 1: 16[34] x [67] ' out/posix-print-dpi.txt
       - name: print through spooler
         run: |
           mkdir -p out/fake-bin

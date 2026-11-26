@@ -63,7 +63,9 @@ void HexViewFree(HexView* hex) {
 
 // bytes at `at`, from the piece of the file around it that is kept in memory
 int HexBytesAt(HexView* hex, u64 at, const u8** out, int want) {
-    bool inCache = at >= hex->cacheAt && at + (u64)want <= hex->cacheAt + (u64)hex->cacheLen;
+    u64 cacheEnd = hex->cacheAt + (u64)hex->cacheLen;
+    bool inCache = hex->cacheLen > 0 && at >= hex->cacheAt &&
+                   (at + (u64)want <= cacheEnd || (at < cacheEnd && cacheEnd >= hex->size));
     if (!inCache) {
         // the file can change under us: re-read its size when re-filling
         hex->size = HexFileSize(hex->f);
@@ -205,10 +207,10 @@ TempStr HexColumnsHeaderTemp(int perRow) {
 
 // "100 - 1FF of 4.5 MB": what's on screen, for the status line
 TempStr HexPositionTemp(HexView* hex, int shown) {
-    u64 last = hex->top + (u64)shown;
+    u64 last = shown > 0 ? hex->top + (u64)shown - 1 : hex->top;
     TempStr from = HexOffsetTemp(hex->top, hex->size);
     TempStr to = HexOffsetTemp(last, hex->size);
-    return fmt("%s - %s of %s", from, to, FormatFileSizeTemp(hex->size));
+    return fmt("%s - %s of %s", from, to, FormatSizeCompactTemp(hex->size));
 }
 
 static char HexFoldAscii(char c) {

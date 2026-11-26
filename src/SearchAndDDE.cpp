@@ -163,10 +163,8 @@ void FindDebounceTimerFired(MainWindow* win) {
     }
 }
 
-// if a debounced search is pending, cancel the timer and start it now (so Enter
-// forces the search to start immediately). Returns true if one was pending.
-void FindDebounceStop(MainWindow* win) {
-    KillTimer(win->hwndFrame, kFindDebounceTimerId);
+bool FindDebouncePending(MainWindow* win) {
+    return win->findDebouncePending;
 }
 
 // the find buttons are disabled while a find runs
@@ -223,7 +221,6 @@ void UpdateFindStatus(UpdateFindStatusData* d) {
 // the term) recompute the index instantly from the cache, and a new scan only
 // runs when the search term or match-case option changes.
 
-// returns true if did abort a thread or hidden the notification
 // cancel a pending debounced find-as-you-type search
 void CancelPendingFind(MainWindow* win) {
     if (!win->findDebouncePending) {
@@ -233,19 +230,6 @@ void CancelPendingFind(MainWindow* win) {
     if (win->hwndFrame) {
         KillTimer(win->hwndFrame, kFindDebounceTimerId);
     }
-}
-
-// TODO: for https://github.com/sumatrapdfreader/sumatrapdf/issues/2655
-__unused static TempStr ReverseTextTemp(Str s) {
-    TempWStr ws = ToWStrTemp(s);
-    int n = len(ws);
-    for (int i = 0; i < n / 2; i++) {
-        WCHAR c1 = ws.s[i];
-        WCHAR c2 = ws.s[n - 1 - i];
-        ws.s[i] = c2;
-        ws.s[n - 1 - i] = c1;
-    }
-    return ToUtf8Temp(ws);
 }
 
 // the canvas area find marks are clipped to
@@ -356,7 +340,7 @@ Go to a page and select the search term, but only if it's found on that page
 static MainWindow* FindEmptyWinToReuse() {
     MainWindow* elsewhere = nullptr;
     for (auto& w : gWindows) {
-        if (w->HasDocsLoaded()) {
+        if (HasOpenedDocuments(w)) {
             continue;
         }
         if (IsOnCurrentDesktop(w->hwndFrame)) {
@@ -721,11 +705,13 @@ LRESULT OnCopyData(HWND hwnd, WPARAM wp, LPARAM lp) {
         }
         const auto* data = (const SumatraOpenCopyData*)cds->lpData;
         size_t pathMax = cds->cbData - sizeof(SumatraOpenCopyData);
-        Str pathZ = Str((char*)(const u8*)(data + 1), (int)pathMax);
-        // require null-terminator within bounds
-        if (strnlen_s(pathZ.s, pathMax) >= pathMax) {
+        // require null-terminator within bounds; the NUL is not part of the path
+        const char* pathS = (const char*)(const u8*)(data + 1);
+        size_t pathLen = strnlen_s(pathS, pathMax);
+        if (pathLen >= pathMax) {
             return FALSE;
         }
+        Str pathZ((char*)pathS, (int)pathLen);
         // During startup (cmdline load, often blocked on a password dialog) the
         // message pump can deliver COPYDATA opens. Match HandleOpenCmd: queue
         // them so they load after the current LoadDocument finishes, instead of

@@ -34,16 +34,26 @@
 #include "TabsCommon.h"
 #include "StripGroups.h"
 
+int gTabTooltipSizeLookups = 0;
+
 // always full path (FullPathInTitle only affects tab/window title text).
 // Append size when GetSize succeeds (may fail for offline network paths).
 // Used by Tabs and Toolbar (toolbar was overwriting tooltips with path-only).
 // full path + size (if available); optional dirty suffix for unsaved annotations
-TempStr MakeTabTooltipTemp(Str path, bool dirty) {
+// The size is cached on the tab: a stat per hover blocks on an offline share.
+TempStr MakeTabTooltipTemp(WindowTab* tab, bool dirty) {
+    Str path = tab ? tab->filePath : Str{};
     if (len(path) == 0) {
         return Str{};
     }
+    // saving annotations clears dirty and changes the size
+    if (tab->tooltipFileSize == kTabFileSizeUnknown || tab->tooltipFileSizeDirty != dirty) {
+        tab->tooltipFileSize = file::GetSize(path);
+        tab->tooltipFileSizeDirty = dirty;
+        gTabTooltipSizeLookups++;
+    }
+    i64 size = tab->tooltipFileSize;
     TempStr tip;
-    i64 size = file::GetSize(path);
     if (size >= 0) {
         tip = fmt("%s  %s", PathForDisplayTemp(path), str::FormatSizeShortTemp(size, nullptr));
     } else {
@@ -141,7 +151,7 @@ void CloseWindowIfNoDocuments(MainWindow* win) {
     if (HasOpenedDocuments(win)) {
         return;
     }
-    CloseWindow(win, true, false);
+    CloseWindow(win, true);
 }
 
 WindowTab* NewHomeTab(MainWindow* win, HomeTabKind kind) {
@@ -179,18 +189,34 @@ void CollectClosableTabs(MainWindow* win, Vec<WindowTab*>& out) {
 
 // what the close commands can act on, relative to ctx.tab
 void SetTabCloseFlags(AppCommandCtx& ctx) {
-    Vec<WindowTab*> other;
-    Vec<WindowTab*> right;
-    Vec<WindowTab*> left;
-    CollectTabsToClose(ctx.win, ctx.tab, other, right, left);
-    ctx.canCloseOtherTabs = len(other) > 0;
-    ctx.canCloseTabsToRight = len(right) > 0;
-    ctx.canCloseTabsToLeft = ctx.tab && len(left) > 0;
+    bool hasOther = false;
+    bool hasRight = false;
+    bool hasLeft = false;
+    bool seenCurrent = false;
+    int nTabs = ctx.win->TabCount();
+    for (int i = 0; i < nTabs; i++) {
+        WindowTab* tab = ctx.win->GetTab(i);
+        if (ctx.tab == tab) {
+            seenCurrent = true;
+            continue;
+        }
+        if (tab->IsPinnedHomeTab()) {
+            continue;
+        }
+        hasOther = true;
+        if (seenCurrent) {
+            hasRight = true;
+        } else {
+            hasLeft = true;
+        }
+    }
+    ctx.canCloseOtherTabs = hasOther;
+    ctx.canCloseTabsToRight = hasRight;
+    ctx.canCloseTabsToLeft = ctx.tab && hasLeft;
     ctx.hasDocTabs = HasOpenedDocuments(ctx.win);
     StripGroupSetFlags(ctx);
 }
 
-// create a new window if win==nullptr
 void CollectTabsToClose(MainWindow* win, WindowTab* currTab, Vec<WindowTab*>& toCloseOther,
                         Vec<WindowTab*>& toCloseRight, Vec<WindowTab*>& toCloseLeft) {
     int nTabs = win->TabCount();

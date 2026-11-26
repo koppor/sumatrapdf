@@ -227,7 +227,9 @@ static bool ReadAloudIsWordRectVisibleInViewport(MainWindow* win, const Rect& wo
     if (!win) {
         return false;
     }
-    return !wordRect.Intersect(win->canvasRc).IsEmpty();
+    // wordRect is canvas-relative; ng's canvasRc has a non-zero origin
+    Rect canvas(0, 0, win->canvasRc.dx, win->canvasRc.dy);
+    return !wordRect.Intersect(canvas).IsEmpty();
 }
 
 bool ReadAloudIsWordRectFullyVisibleInViewport(MainWindow* win, const Rect& wordRect, int margin) {
@@ -321,10 +323,6 @@ void ReadAloudSaveVoicePref(Str voiceId) {
 // WinRT speech synthesis is too slow for whole-document requests; speak in chunks.
 static constexpr int kReadAloudMaxChunkLen = 1024;
 
-static bool IsReadAloudSentencePunct(int c) {
-    return c == '.' || c == '!' || c == '?' || c == 0x3002 || c == 0xFF01 || c == 0xFF1F || c == 0x2026;
-}
-
 // Prefer a sentence end in the window so TTS does not drop intonation mid-clause
 // (issue #6110). Skip "e.g. the" (lowercase after the period). Else last space.
 static int ReadAloudFindChunkEnd(Str text, int start, int maxLen) {
@@ -347,33 +345,13 @@ static int ReadAloudFindChunkEnd(Str text, int start, int maxLen) {
             bestSpace = i;
             continue;
         }
-        if (!IsReadAloudSentencePunct(c)) {
+        if (!IsReadAloudSentPunct(c)) {
             continue;
         }
 
-        int after = i;
-        while (after < textLen) {
-            int t = after;
-            int d = Utf8CodepointNext(text, t);
-            if (!IsReadAloudCloser(d)) {
-                break;
-            }
-            after = t;
-        }
-        while (after < textLen) {
-            int t = after;
-            int d = Utf8CodepointNext(text, t);
-            if (d != ' ' && d != '\t') {
-                break;
-            }
-            after = t;
-        }
-        if (after < textLen) {
-            int t = after;
-            int d = Utf8CodepointNext(text, t);
-            if (d >= 'a' && d <= 'z') {
-                continue;
-            }
+        int after = ReadAloudAfterSentEnd(text, i);
+        if (after == 0) {
+            continue;
         }
         if (after > start && after <= limit) {
             bestSent = after;
@@ -412,7 +390,10 @@ static void ReadAloudQueueNext(WindowTab* tab) {
 }
 
 static void ReadAloudOnQueuedStarted(WindowTab* tab) {
-    if (!tab || tab->readAloudQueuedEnd <= tab->readAloudChunkEnd) {
+    if (!tab) {
+        return;
+    }
+    if (tab->readAloudQueuedEnd <= tab->readAloudChunkEnd) {
         tab->readAloudQueuedEnd = 0;
         return;
     }
@@ -422,7 +403,6 @@ static void ReadAloudOnQueuedStarted(WindowTab* tab) {
     dbgtts("queued-now %d..%d of %d\n", tab->readAloudChunkStart, tab->readAloudChunkEnd, tab->readAloudText.len);
 }
 
-// Promote a prefetched chunk and start the next prefetch.
 // a voice engine thread crashed and was ended: stop reading, forget that voice
 static void ReadAloudOnEngineCrash() {
     if (!TtsTakeEngineCrash()) {
@@ -440,6 +420,7 @@ static void ReadAloudOnEngineCrash() {
     }
 }
 
+// Promote a prefetched chunk and start the next prefetch.
 void ReadAloudAfterTtsEvents() {
     ReadAloudOnEngineCrash();
     WindowTab* tab = GetReadAloudSourceTab();
@@ -546,91 +527,6 @@ SpeakChunkResult ReadAloudSpeakChunk(WindowTab* tab, Str errMsg) {
     ToolbarUpdateStateForWindow(tab->win, true);
     tab->win->RedrawCanvas();
     return SpeakChunkResult::Ok;
-}
-
-// Text cleanup for speech
-static TempStr CleanReadAloudTextTemp(Str text) {
-    if (len(text) == 0) {
-        return {};
-    }
-
-    str::Builder out;
-    int i = 0;
-    bool lastWasSpace = false;
-
-    while (i < text.len) {
-        char c = text.s[i];
-
-        // Remove likely soft hyphenation caused by PDF line wrapping:
-        // "cap-\nturing" -> "capturing"
-        //
-        // Conservative rule: only join lowercase ASCII on both sides.
-        // This avoids damaging many intentional hyphen cases.
-        if (c == '-' && i + 1 < text.len && IsReadAloudLineBreak(text.s[i + 1])) {
-            int after = i + 1;
-
-            while (after < text.len && IsReadAloudLineBreak(text.s[after])) {
-                after++;
-            }
-
-            bool prevIsLower = i > 0 && IsReadAloudLowerAscii(text.s[i - 1]);
-            bool nextIsLower = after < text.len && IsReadAloudLowerAscii(text.s[after]);
-
-            if (prevIsLower && nextIsLower) {
-                i = after;
-                lastWasSpace = false;
-                continue;
-            }
-        }
-
-        // Convert extracted visual line breaks into spaces.
-        if (IsReadAloudLineBreak(c)) {
-            int lineBreaks = 0;
-
-            while (i < text.len && IsReadAloudLineBreak(text.s[i])) {
-                if (text.s[i] == '\n') {
-                    lineBreaks++;
-                }
-                i++;
-            }
-
-            while (i < text.len && IsReadAloudHorizontalSpace(text.s[i])) {
-                i++;
-            }
-
-            if (!lastWasSpace && len(out) > 0) {
-                out.AppendChar(' ');
-                lastWasSpace = true;
-            }
-
-            // Keep a slightly stronger pause for paragraph breaks.
-            if (lineBreaks >= 2) {
-                out.AppendChar(' ');
-            }
-
-            continue;
-        }
-
-        // Collapse spaces and tabs.
-        if (IsReadAloudHorizontalSpace(c)) {
-            if (!lastWasSpace && len(out) > 0) {
-                out.AppendChar(' ');
-                lastWasSpace = true;
-            }
-
-            i++;
-            continue;
-        }
-
-        out.AppendChar(c);
-        lastWasSpace = false;
-        i++;
-    }
-
-    if (len(out) == 0) {
-        return {};
-    }
-    return ToStrTemp(out);
 }
 
 // Read-aloud lifetime and commands
@@ -788,7 +684,7 @@ int ReadAloudClosestSpeedIdx() {
     return idx;
 }
 
-// dir is +1 (next speed) or -1 (previous speed), wraps around
+// idx into the speed list
 void ReadAloudSetSpeedIdx(int idx) {
     ReadAloudSetSpeed(ReadAloudSpeedAt(idx));
 }
@@ -816,6 +712,9 @@ static void ReadAloudStartText(WindowTab* tab, Str cleaned, ReadAloudHighlightMa
                                Str errMsg) {
     if (len(cleaned) == 0) {
         logf("tts: StartText: empty cleaned text\n");
+        if (newMap) {
+            ReadAloudHighlightFree(newMap);
+        }
         ReadAloudShowNotif(tab, errMsg);
         return;
     }
@@ -836,6 +735,7 @@ static void ReadAloudStartText(WindowTab* tab, Str cleaned, ReadAloudHighlightMa
             newMap->cap = 0;
         } else {
             dbgtts("StartText: highlight map empty (len=%d locs=%p)\n", newMap->len, newMap->locs);
+            ReadAloudHighlightFree(newMap);
         }
     } else if (highlightBase == 0 && tab->readAloudHighlight) {
         ReadAloudHighlightFree(tab->readAloudHighlight);
@@ -905,7 +805,7 @@ static void ReadAloudStartFromSelection(WindowTab* tab, Str errMsg) {
     if (!ReadAloudHighlightBuildFromTextSelection(dm->textSelection, &map, cleaned)) {
         bool isTextOnlySelection = false;
         TempStr text = GetSelectedTextTemp(tab, StrL("\r\n"), isTextOnlySelection);
-        TempStr cleanedStr = CleanReadAloudTextTemp(text);
+        TempStr cleanedStr = ReadAloudCleanTextTemp(text);
         ReadAloudStartText(tab, cleanedStr, nullptr, 0, errMsg);
         return;
     }
@@ -928,13 +828,12 @@ void ReadAloudInTab(WindowTab* tab) {
     bool isTextOnlySelection = false;
     TempStr text = GetSelectedTextTemp(tab, StrL("\r\n"), isTextOnlySelection);
 
+    tab->readAloudScope = WindowTab::ReadAloudScopeSmart;
     if (len(text) > 0 && isTextOnlySelection) {
         dbgtts("InTab: using selection path (len=%d)\n", len(text));
-        tab->readAloudScope = WindowTab::ReadAloudScopeSmart;
         ReadAloudStartFromSelection(tab, Tr("No text available to read aloud"));
     } else {
         dbgtts("InTab: using viewport-top path (hasSelection=%d isTextOnly=%d)\n", len(text) > 0, isTextOnlySelection);
-        tab->readAloudScope = WindowTab::ReadAloudScopeSmart;
         ReadAloudStartFromViewportTop(tab, Tr("No text available to read aloud"));
     }
 }

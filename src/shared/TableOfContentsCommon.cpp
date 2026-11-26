@@ -192,7 +192,7 @@ GoToTocLinkData* NewGoToTocLinkData(MainWindow* win, TocItem* tocItem, bool sele
     return data;
 }
 
-bool IsScrollToLink(IPageDestination* link) {
+static bool IsScrollToLink(IPageDestination* link) {
     if (!link) {
         return false;
     }
@@ -307,7 +307,7 @@ void AddFavoriteFromToc(MainWindow* win, TocItem* dti) {
         pageNo = PageDestGetPageNo(dti->dest);
     }
     Str name = dti->title;
-    TempStr pageLabel = win->ctrl->GetPageLabeTemp(pageNo);
+    TempStr pageLabel = win->ctrl->GetPageLabelTemp(pageNo);
     AddFavoriteWithLabelAndName(win, pageNo, pageLabel, name);
 }
 

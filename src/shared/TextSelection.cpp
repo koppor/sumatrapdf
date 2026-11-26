@@ -13,11 +13,7 @@ uint distSq(int x, int y) {
 }
 // underscore is mainly used for programming and is thus considered a word character
 bool isWordChar(int c) {
-#if OS_WIN
-    return (c > 0 && c <= 0xffff && IsCharAlphaNumericW((WCHAR)c)) || c == '_';
-#else
-    return (c > 0 && c <= 0xffff && iswalnum((wint_t)c)) || c == '_';
-#endif
+    return (c > 0 && c <= 0xffff && IsAlNumW(c)) || c == '_';
 }
 
 static bool isDigit(int c) {
@@ -369,6 +365,8 @@ static void AppendSelectedLines(Str text, Rect* coords, int textLen, int glyph, 
     }
 
     const PageLine* prev = nullptr;
+    int cpCursor = 0;
+    int byteCursor = 0;
     for (const PageLine& l : lines) {
         if (!selected(l)) {
             continue;
@@ -395,7 +393,18 @@ static void AppendSelectedLines(Str text, Rect* coords, int textLen, int glyph, 
             }
         }
         if (to > from) {
-            b.Append(Utf8SliceByCodepoints(text, from, to - from));
+            // Advance running UTF-8 cursor instead of rescanning from byte 0 per line.
+            if (from < cpCursor) {
+                cpCursor = 0;
+                byteCursor = 0;
+            }
+            Str tail(text.s + byteCursor, text.len - byteCursor);
+            Str slice = Utf8SliceByCodepoints(tail, from - cpCursor, to - from);
+            b.Append(slice);
+            if (slice.s) {
+                byteCursor = (int)((slice.s - text.s) + slice.len);
+                cpCursor = to;
+            }
         }
         if (len(b) > 0) {
             out->Append(ToStr(b));
@@ -827,7 +836,8 @@ static bool MoveFreeEndByLine(EngineBase* engine, int& page, int& glyph, int dir
 
     int bestIx = -1;
     int bestDist = INT_MAX;
-    int targetBandY = -1;
+    int targetBandY = 0;
+    bool hasTargetBand = false;
 
     bool forward = dir > 0;
     for (int i = 0; i < textLen; i++) {
@@ -838,11 +848,12 @@ static bool MoveFreeEndByLine(EngineBase* engine, int& page, int& glyph, int dir
         if (forward ? cy <= refY + ySlop : cy >= refY - ySlop) {
             continue;
         }
-        if (targetBandY < 0 || (forward ? cy < targetBandY : cy > targetBandY)) {
+        if (!hasTargetBand || (forward ? cy < targetBandY : cy > targetBandY)) {
             targetBandY = cy;
+            hasTargetBand = true;
         }
     }
-    if (targetBandY < 0) {
+    if (!hasTargetBand) {
         return MoveTextPage(engine, page, glyph, dir, nPages);
     }
     for (int i = 0; i < textLen; i++) {

@@ -26,9 +26,31 @@ static bool IsWebUrl(Str s) {
 
 bool gBlockExternalLaunch = false;
 int gExternalLaunchesBlocked = 0;
+static Str gExternalLaunchAllowDir;
+
+void SetExternalLaunchAllowDir(Str dir) {
+    str::ReplaceWithCopy(&gExternalLaunchAllowDir, dir);
+    int n = len(gExternalLaunchAllowDir);
+    if (n > 1) {
+        char c = gExternalLaunchAllowDir.s[n - 1];
+        if (c == '\\' || c == '/') {
+            gExternalLaunchAllowDir.len--;
+            gExternalLaunchAllowDir.s[n - 1] = 0;
+        }
+    }
+}
+
+static bool ExternalLaunchAllowed(Str what) {
+    int n = len(gExternalLaunchAllowDir);
+    if (n == 0 || len(what) <= n || !str::StartsWithI(what, gExternalLaunchAllowDir)) {
+        return false;
+    }
+    char sep = what.s[n];
+    return sep == '\\' || sep == '/';
+}
 
 bool ExternalLaunchBlocked(Str what) {
-    if (!gBlockExternalLaunch) {
+    if (!gBlockExternalLaunch || ExternalLaunchAllowed(what)) {
         return false;
     }
     logf("ExternalLaunchBlocked: not opening '%s' in test mode\n", what);
@@ -37,7 +59,7 @@ bool ExternalLaunchBlocked(Str what) {
 }
 
 bool LaunchFileShell(Str path, Str, Str, bool) {
-    if (ExternalLaunchBlocked(path)) {
+    if (len(path) == 0 || ExternalLaunchBlocked(path)) {
         return false;
     }
     if (!IsWebUrl(path)) {
@@ -46,6 +68,11 @@ bool LaunchFileShell(Str path, Str, Str, bool) {
     }
     WasmOpenUrl(path.s, path.len);
     return true;
+}
+
+bool LaunchProgram(Str exe, Str) {
+    logf("LaunchProgram: '%s' cannot run in a browser\n", exe);
+    return false;
 }
 
 bool LaunchBrowser(Str url) {
@@ -60,6 +87,4 @@ void OpenPathInDefaultFileManager(Str) {
     // there is no file manager to show a path in
 }
 
-ChildProcess* StartChildProcess(Str) {
-    return nullptr;
-}
+void OpenFilesInDefaultManager(Str, const StrVec&) {}

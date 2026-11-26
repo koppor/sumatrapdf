@@ -9,6 +9,17 @@
 
 #include "gui/PlatformFont.h"
 
+static PlatformFontStyle FontStyle(bool bold, bool italic) {
+    PlatformFontStyle style = PlatformFontStyle::Regular;
+    if (bold) {
+        style = style | PlatformFontStyle::Bold;
+    }
+    if (italic) {
+        style = style | PlatformFontStyle::Italic;
+    }
+    return style;
+}
+
 PlatformFont* GetScaledPlatformFont(PlatformFont* font, int percent) {
     if (!font || percent <= 0) {
         return nullptr;
@@ -90,13 +101,7 @@ int PlatformFontLineHeight(PlatformFont* font) {
 }
 
 PlatformFont* GetDefaultGuiFont(bool bold, bool italic) {
-    PlatformFontStyle style = PlatformFontStyle::Regular;
-    if (bold) {
-        style = style | PlatformFontStyle::Bold;
-    }
-    if (italic) {
-        style = style | PlatformFontStyle::Italic;
-    }
+    PlatformFontStyle style = FontStyle(bold, italic);
     return GetPlatformFont(StrL("Sans"), 10.0f, style);
 }
 
@@ -108,13 +113,7 @@ PlatformFont* GetUserGuiFontEx(Str fontName, int size, bool bold, bool italic) {
     if (len(fontName) == 0 || str::EqI(fontName, StrL("automatic")) || str::EqI(fontName, StrL("auto"))) {
         fontName = StrL("Sans");
     }
-    PlatformFontStyle style = PlatformFontStyle::Regular;
-    if (bold) {
-        style = style | PlatformFontStyle::Bold;
-    }
-    if (italic) {
-        style = style | PlatformFontStyle::Italic;
-    }
+    PlatformFontStyle style = FontStyle(bold, italic);
     float sizePt = (float)size * 72.0f / 96.0f;
     return GetPlatformFont(fontName, sizePt, style);
 }
@@ -217,17 +216,6 @@ int PlatformFontLineHeight(PlatformFont* font) {
     return (int)ceil(CTFontGetAscent(native) + CTFontGetDescent(native) + CTFontGetLeading(native));
 }
 
-static PlatformFontStyle FontStyle(bool bold, bool italic) {
-    PlatformFontStyle style = PlatformFontStyle::Regular;
-    if (bold) {
-        style = style | PlatformFontStyle::Bold;
-    }
-    if (italic) {
-        style = style | PlatformFontStyle::Italic;
-    }
-    return style;
-}
-
 PlatformFont* GetDefaultGuiFont(bool bold, bool italic) {
     return GetPlatformFont(Str(), 12.0f, FontStyle(bold, italic));
 }
@@ -247,13 +235,13 @@ PlatformFont* GetUserGuiFontEx(Str fontName, int size, bool bold, bool italic) {
 // same constants StubTextRender uses, so layout and drawing agree
 constexpr float kAvgCharWidthRatio = 0.55f;
 constexpr float kLineSpacingRatio = 1.25f;
-constexpr float kDefaultGuiFontSizePt = 12.0f;
+// 12 px, the size the stub has always used
+constexpr float kDefaultGuiFontSizePt = 9.0f;
 
+// sizePt is in points, as on Linux and macOS; text is measured in 96 dpi pixels
 static float FontSizeOf(PlatformFont* font) {
-    if (font && font->sizePt > 0) {
-        return font->sizePt;
-    }
-    return kDefaultGuiFontSizePt;
+    float sizePt = (font && font->sizePt > 0) ? font->sizePt : kDefaultGuiFontSizePt;
+    return sizePt * 96.0f / 72.0f;
 }
 
 bool PlatformFontCreateNative(PlatformFont* f) {
@@ -280,13 +268,7 @@ int PlatformFontLineHeight(PlatformFont* font) {
 }
 
 PlatformFont* GetDefaultGuiFont(bool bold, bool italic) {
-    PlatformFontStyle style = PlatformFontStyle::Regular;
-    if (bold) {
-        style = style | PlatformFontStyle::Bold;
-    }
-    if (italic) {
-        style = style | PlatformFontStyle::Italic;
-    }
+    PlatformFontStyle style = FontStyle(bold, italic);
     return GetPlatformFont(Str(), kDefaultGuiFontSizePt, style);
 }
 
@@ -298,13 +280,8 @@ PlatformFont* GetUserGuiFontEx(Str fontName, int size, bool bold, bool italic) {
     if (str::EqI(fontName, StrL("automatic")) || str::EqI(fontName, StrL("auto"))) {
         fontName = Str();
     }
-    PlatformFontStyle style = PlatformFontStyle::Regular;
-    if (bold) {
-        style = style | PlatformFontStyle::Bold;
-    }
-    if (italic) {
-        style = style | PlatformFontStyle::Italic;
-    }
-    return GetPlatformFont(fontName, (float)size, style);
+    PlatformFontStyle style = FontStyle(bold, italic);
+    float sizePt = (float)size * 72.0f / 96.0f;
+    return GetPlatformFont(fontName, sizePt, style);
 }
 #endif

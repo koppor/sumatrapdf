@@ -30,9 +30,9 @@ void UpdateTabFileDisplayStateForTab(WindowTab* tab);
 void RememberDefaultWindowPosition(MainWindow* win);
 TempStr WindowStateDuringLoadResultTemp(int* exitCodeOut = nullptr);
 TempStr RenameFileResultTemp(Str dstPath, int* exitCodeOut);
+TempStr SaveFileAsResultTemp(Str dstPath, int* exitCodeOut);
 Str CliPassword();
 
-// orig's sidebar layout limits (SumatraPDF.cpp)
 // orig re-arms a WM_TIMER on the canvas; the shell's tick counts this down
 constexpr int kAutoReloadDelayInMs = 100;
 // give up waiting for a writer to go quiet after this long
@@ -54,6 +54,8 @@ void SetTocVisibility(MainWindow* win, bool tocVisible, SidebarResizeFrame = Sid
 
 void UpdateWindowTitle(MainWindow* win);
 void RebuildMenuBar(MainWindow* win);
+void RebuildMenuIfDirty(MainWindow* win);
+int MenuBuildCount();
 void ExecuteCmd(MainWindow* win, int cmdId);
 // set by the last ExecuteCmd() that reached its default branch
 extern bool gLastCmdFellThrough;
@@ -172,24 +174,24 @@ StrVec* GetNextPrevFilesReady(Str path);
 void CloseCurrentTab(MainWindow* win, bool quitIfLast);
 void CloseTab(WindowTab* tab, bool quitIfLast);
 void RequestCloseWindow(MainWindow* win, bool quitIfLast);
-void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose);
+void CloseWindow(MainWindow* win, bool quitIfLast);
 void CloseWindowIfCan(MainWindow* win, bool quitIfLast);
 void OnMenuExit();
 void CopyFilePath(WindowTab* tab);
 void ShowFileInFolder(MainWindow* win, Str path);
+void DeleteFilesFromHomePage(MainWindow* win, const StrVec& paths);
 enum class DisplayMode;
 void SwitchToDisplayMode(MainWindow* win, DisplayMode displayMode, bool keepContinuous = false);
 
 // if pt is given (a point on the canvas) that point stays put across the zoom
 void SmartZoom(MainWindow* win, float factor, Point* pt, bool smartZoom);
-
-enum class FileType : u8;
-// true for the ebook formats EbookDoc handles (epub, fb2, mobi, palmdoc)
+void RefreshEbookLayoutForDde(MainWindow* win, DisplayMode oldMode, float oldZoom);
 
 bool SettingsUseTabs();
 bool SettingsRememberOpenedFiles();
 
-void CrashHandlerSetSettings(Str settings);
+struct Settings;
+void CrashHandlerSetSettings(const Settings* settings);
 
 void InitializePolicies(bool restrict);
 bool HasPermission(Perm permission);
@@ -216,11 +218,11 @@ struct SettingsApplyState {
     bool showMenubarWithTabs = false;
     bool disableAntiAlias = false;
     bool chmUseFixedPageUI = false;
-    bool markdownUseFixedPageUI = false;
-    bool markdownPreserveLineBreaks = false;
     bool explorerQuickLook = false;
     // owned copy of the ebook layout inputs; ApplyChangedSettingsAndRelayout frees it
     Str ebookLayout;
+    Str markdownLayout;
+    Str htmlLayout;
     // owned copy of the AI chat look (AIChat section, BgColor); freed the same way
     Str aiChatStyle;
     // owned copy of ThumbnailsType; freed the same way

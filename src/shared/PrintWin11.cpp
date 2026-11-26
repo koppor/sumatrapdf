@@ -8,6 +8,7 @@
 #include "base/ScopedWin.h"
 #include "base/UITask.h"
 #include "base/Win.h"
+#include "base/WinDynCalls.h"
 #include "gui/UIModels.h"
 
 #include "Settings.h"
@@ -145,7 +146,7 @@ struct WinRtApi {
         // handle we can take without adding a reference on every print
         HMODULE combase = GetModuleHandleW(L"combase.dll");
         if (!combase) {
-            combase = LoadLibraryW(L"combase.dll");
+            combase = SafeLoadLibrary(StrL("combase.dll"));
         }
         if (!combase) {
             return false;
@@ -347,8 +348,8 @@ class PrintGraphics {
             return S_OK;
         }
 
-        HMODULE d2dModule = LoadLibraryW(L"d2d1.dll");
-        HMODULE d3dModule = LoadLibraryW(L"d3d11.dll");
+        HMODULE d2dModule = SafeLoadLibrary(StrL("d2d1.dll"));
+        HMODULE d3dModule = SafeLoadLibrary(StrL("d3d11.dll"));
         if (!d2dModule || !d3dModule) {
             return HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
         }
@@ -505,6 +506,8 @@ class PrintDocumentSource final
     EngineBase* engine = nullptr;
     int currentPage = 1;
     Print_Advanced_Data advanced;
+    // CmdToggleMirror: print as shown
+    bool mirror = false;
     float previewDpi = 96.f;
     Mutex mutex;
     Vec<int> pages;
@@ -652,6 +655,10 @@ class PrintDocumentSource final
                 }
                 return E_FAIL;
             }
+            // CmdToggleMirror: a band is the page's full width, so flipping it mirrors the page
+            if (mirror) {
+                FlipPixmapHorizontally(band);
+            }
             // the engine can be a pixel off on either axis; copy what both agree on
             UINT32 w = (UINT32)std::min(band->width, fullW);
             UINT32 rows = (UINT32)std::min(band->height, fullH - dy);
@@ -702,7 +709,8 @@ class PrintDocumentSource final
     }
 
   public:
-    HRESULT RuntimeClassInitialize(EngineBase* sourceEngine, int currentPage, PrintScaleAdv scale, float previewDpi) {
+    HRESULT RuntimeClassInitialize(EngineBase* sourceEngine, int currentPage, PrintScaleAdv scale, float previewDpi,
+                                   bool mirrorPages) {
         if (!sourceEngine) {
             return E_INVALIDARG;
         }
@@ -710,7 +718,8 @@ class PrintDocumentSource final
         engine->AddRef();
         this->currentPage = currentPage;
         advanced = Print_Advanced_Data(PrintRangeAdv::All, scale);
-        advanced.autoRotate = gSettings->printerDefaults.autoRotate;
+        SetPrintAdvancedDefaults(&advanced);
+        mirror = mirrorPages;
         this->previewDpi = previewDpi;
         UseAllPages();
         return S_OK;
@@ -984,14 +993,19 @@ class Win11PrintSession {
             return hr;
         }
 
-        PrintDocumentSource* src = source.Get();
-        auto handler = Callback<OptionChangedHandler>(
-            [src](OptDetails::IPrintTaskOptionDetails*, OptDetails::IPrintTaskOptionChangedEventArgs*) -> HRESULT {
-                src->InvalidatePreview();
+        ComPtr<PrintDocumentSource> retainedSource = source;
+        auto handler =
+            Callback<OptionChangedHandler>([retainedSource](OptDetails::IPrintTaskOptionDetails*,
+                                                            OptDetails::IPrintTaskOptionChangedEventArgs*) -> HRESULT {
+                retainedSource->InvalidatePreview();
                 return S_OK;
             });
         if (!handler) {
             return E_OUTOFMEMORY;
+        }
+        if (optionDetails && optionToken.value) {
+            optionDetails->remove_OptionChanged(optionToken);
+            optionToken.value = 0;
         }
         optionDetails = details;
         return details->add_OptionChanged(handler.Get(), &optionToken);
@@ -1126,7 +1140,8 @@ class Win11PrintSession {
         wstr::Free(jobTitle);
     }
 
-    HRESULT Initialize(HWND hwnd, EngineBase* engine, int currentPage, PrintScaleAdv scale, float previewDpi) {
+    HRESULT Initialize(HWND hwnd, EngineBase* engine, int currentPage, PrintScaleAdv scale, float previewDpi,
+                       bool mirror) {
         HRESULT hr = EnsureWinRt();
         if (FAILED(hr)) {
             logf("Win11 print: EnsureWinRt failed: 0x%08x\n", (uint)hr);
@@ -1141,7 +1156,7 @@ class Win11PrintSession {
             printEngine = engine;
             printEngine->AddRef();
         }
-        hr = MakeAndInitialize<PrintDocumentSource>(&source, printEngine, currentPage, scale, previewDpi);
+        hr = MakeAndInitialize<PrintDocumentSource>(&source, printEngine, currentPage, scale, previewDpi, mirror);
         printEngine->Release();
         if (FAILED(hr)) {
             logf("Win11 print: PrintDocumentSource initialization failed: 0x%08x\n", (uint)hr);
@@ -1175,6 +1190,7 @@ class Win11PrintSession {
     }
 
     HRESULT Show(MainWindow* win) {
+        u64 lifetimeId = win->lifetimeId;
         ComPtr<__FIAsyncOperation_1_boolean> operation;
         HRESULT hr = interop->ShowPrintUIForWindowAsync(hwnd, IID_PPV_ARGS(&operation));
         logf("Win11 print: ShowPrintUIForWindowAsync result=0x%08x operation=%p\n", (uint)hr, operation.Get());
@@ -1189,7 +1205,7 @@ class Win11PrintSession {
         // completes with false (or fails) when the host process couldn't put the
         // dialog up, which is otherwise silent -- printing just does nothing
         auto completed = Callback<__FIAsyncOperationCompletedHandler_1_boolean>(
-            [win](__FIAsyncOperation_1_boolean* op, Foundation::AsyncStatus status) -> HRESULT {
+            [win, lifetimeId](__FIAsyncOperation_1_boolean* op, Foundation::AsyncStatus status) -> HRESULT {
                 boolean shown = false;
                 HRESULT opHr = op->GetResults(&shown);
                 logf("Win11 print: ShowPrintUI done status=%d shown=%d hr=0x%08x\n", (int)status, (int)shown,
@@ -1198,7 +1214,7 @@ class Win11PrintSession {
                     return S_OK;
                 }
                 gWin11PrintUnavailable = true;
-                PostForWindow(win, PrintCurrentFileDeferred, "Win11PrintFallback");
+                PostForWindow(win, lifetimeId, PrintCurrentFileDeferred, "Win11PrintFallback");
                 return S_OK;
             });
         if (!completed) {
@@ -1265,8 +1281,8 @@ bool TryPrintCurrentFileWin11(MainWindow* win, HWND hwndFrame, PrintScaleAdv def
 
     delete gPrintSession;
     gPrintSession = new Win11PrintSession();
-    HRESULT hr =
-        gPrintSession->Initialize(hwndFrame, engine, win->AsFixed()->CurrentPageNo(), defaultScale, previewDpi);
+    HRESULT hr = gPrintSession->Initialize(hwndFrame, engine, win->AsFixed()->CurrentPageNo(), defaultScale, previewDpi,
+                                           win->AsFixed()->GetMirror());
     if (SUCCEEDED(hr)) {
         hr = gPrintSession->Show(win);
     }

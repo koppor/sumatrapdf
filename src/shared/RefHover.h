@@ -373,10 +373,18 @@ RectF NoteBox(RectF mediabox, float destY, WStr text, const Rect* coords);
 
 RectF DetectEquationBox(WStr text, const Rect* coords, RectF mediabox, float destX, float destY);
 
-RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX, float destY,
-                     RectF* continuationOut = nullptr, bool* outIsBibEntry = nullptr, bool* mayWrapPageOut = nullptr);
+// an entry that may continue on the next page
+struct EntryPageWrap {
+    bool mayWrap = false;
+    // X of its continuation lines relative to its head; 0 if unknown
+    int indentDx = 0;
+};
 
-RectF FindPageWrapContinuation(WStr text, const Rect* coords, RectF mediabox, int colLeftX);
+RectF DetectEntryBox(WStr text, const Rect* coords, RectF mediabox, float destX, float destY,
+                     RectF* continuationOut = nullptr, bool* outIsBibEntry = nullptr,
+                     EntryPageWrap* pageWrapOut = nullptr);
+
+RectF FindPageWrapContinuation(WStr text, const Rect* coords, RectF mediabox, int indentDx);
 
 RectF DetectEntryBoxAt(WStr text, const Rect* coords, RectF mediabox, float x, float y, bool* outIsBibEntry);
 
@@ -437,8 +445,6 @@ constexpr int kRefHoverScrollStepPx = 60;
 constexpr float kRefHoverMinUserZoom = 0.4f;
 constexpr float kRefHoverMaxUserZoom = 3.0f;
 constexpr float kRefHoverUserZoomStep = 1.15f;
-
-constexpr int kRefHoverMaxLiveStates = 32;
 
 bool RefHoverIsLiveState(RefHoverState* s);
 void RefHoverRegisterLiveState(RefHoverState* s);

@@ -36,7 +36,8 @@ struct AppCommandCtx;
 void SetTabCloseFlags(AppCommandCtx&);
 void TabsOnCtrlTab(MainWindow* win, bool reverse);
 void RemoveTab(WindowTab*);
-TempStr MakeTabTooltipTemp(Str path, bool dirty = false);
+TempStr MakeTabTooltipTemp(WindowTab* tab, bool dirty = false);
+extern int gTabTooltipSizeLookups;
 void CloseAllTabs(MainWindow*);
 void MoveTab(MainWindow* win, int dir);
 
@@ -48,8 +49,6 @@ bool TabIsDirty(WindowTab* tab);
 
 // is the tab bar shown at all (orig's UpdateTabWidth)
 bool TabsAreVisible(MainWindow* win);
-// orig's UpdateAfterDrag: move the tab at `from` so it lands at `to`
-void TabsMoveTab(MainWindow* win, int from, int to);
 // a tab dropped outside the strip moves to `newWin`, or into a new window
 void MaybeMigrateTab(WindowTab* tab, MainWindow* newWin);
 

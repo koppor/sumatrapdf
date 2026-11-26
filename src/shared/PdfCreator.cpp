@@ -3,6 +3,7 @@
 
 #include "base/Base.h"
 #include "base/Pixmap.h"
+#include "base/File.h"
 #include "base/Win.h"
 #include "base/GdiPlusUtil.h"
 
@@ -47,6 +48,9 @@ static fz_image* FzImageFromRgbData(fz_context* ctx, u8* data, int width, int he
         fz_drop_pixmap(ctx, pixmap);
     }
     fz_catch(ctx) {
+        if (!pixmap) {
+            fz_free(ctx, data);
+        }
         fz_report_error(ctx);
         fz_rethrow(ctx);
     }
@@ -146,6 +150,9 @@ PdfCreator::PdfCreator() {
 }
 
 PdfCreator::~PdfCreator() {
+    if (!ctx) {
+        return;
+    }
     pdf_drop_document(ctx, doc);
     fz_flush_warnings(ctx);
     fz_drop_context_windows(ctx);
@@ -267,11 +274,17 @@ bool PdfCreator::AddPageFromImageData(Str data, float imgDpi) const {
     }
 
     fz_image* img = nullptr;
+    fz_buffer* buf = nullptr;
     fz_var(img);
+    fz_var(buf);
 
     fz_try(ctx) {
-        fz_buffer* buf = fz_new_buffer_from_copied_data(ctx, (u8*)data.s, (size_t)data.len);
+        buf = fz_new_buffer_from_copied_data(ctx, (u8*)data.s, (size_t)data.len);
         img = fz_new_image_from_buffer(ctx, buf);
+    }
+    fz_always(ctx) {
+        // img keeps its own reference
+        fz_drop_buffer(ctx, buf);
     }
     fz_catch(ctx) {
         fz_report_error(ctx);
@@ -430,4 +443,29 @@ bool PdfCreator::SaveImageCollectionAsPdf(Str pdfFileName, EngineBase* engine) {
     bool ok = c->SaveToFile(pdfFileName);
     delete c;
     return ok;
+}
+
+// A PDF with a page per image, in the order given; mupdf's decoders first
+// (JPEG, PNG, GIF, BMP, TIFF, JPEG 2000 keep their bytes), then SumatraPDF's
+// (WebP, HEIC, AVIF, ...). *badIdxOut: the image that failed (BadImage).
+ImagesPdfResult PdfCreator::SaveImagesAsPdf(const StrVec& paths, Str dest, int* badIdxOut) {
+    PdfCreator c;
+    for (int i = 0; i < len(paths); i++) {
+        Str data = file::ReadFile(paths[i]);
+        bool ok = len(data) > 0 && c.AddPageFromImageData(data);
+        if (!ok && len(data) > 0 && !ImageDecodedPixmapWouldBeHuge(data)) {
+            Pixmap* px = PixmapFromData(data);
+            ok = px && c.AddPageFromPixmap(px);
+            FreePixmap(px);
+        }
+        str::Free(data);
+        if (!ok) {
+            if (badIdxOut) {
+                *badIdxOut = i;
+            }
+            return ImagesPdfResult::BadImage;
+        }
+    }
+    dir::CreateForFile(dest);
+    return c.SaveToFile(dest) ? ImagesPdfResult::Ok : ImagesPdfResult::WriteFailed;
 }

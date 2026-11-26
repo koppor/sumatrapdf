@@ -205,6 +205,21 @@ Shortcut* FindScreenshotShortcutEntry() {
     return nullptr;
 }
 
+// removes and frees the CmdScreenshot entry; settings structs are malloc'ed (AllocStruct)
+void RemoveScreenshotShortcutEntry() {
+    Shortcut* sc = FindScreenshotShortcutEntry();
+    if (!sc) {
+        return;
+    }
+    VecRemove(*gSettings->shortcuts, sc);
+    str::Free(sc->cmd);
+    str::Free(sc->key);
+    str::Free(sc->name);
+    str::Free(sc->toolbarText);
+    str::Free(sc->toolbarSvgIcon);
+    free(sc);
+}
+
 TempStr FavoritePromptTemp(Str pageLabel) {
     int chapter = 0, page = 0;
     if (str::Parse(pageLabel, "%d/%d%$", &chapter, &page)) {
@@ -218,14 +233,6 @@ bool AnnotationHasText(Annotation* annot) {
         return false;
     }
     return len(Contents(annot)) > 0;
-}
-
-// the text stays readable on a tab that carries a color of its own
-Color TabTextColorForBackground(Color text, Color tabBg) {
-    if (abs((int)GetLightness(text) - (int)GetLightness(tabBg)) >= 80) {
-        return text;
-    }
-    return IsLightColor(tabBg) ? kColBlack : kColWhite;
 }
 
 // cameFrom when it is a direct child of dir (so Back / Forward select it), else empty
@@ -308,68 +315,4 @@ void ShowSaveTabGroupDialog(MainWindow* win) {
 
 void ShowOpenTabGroupDialog(MainWindow* win) {
     ShowTabGroupsDialog(win, TabGroupDialogMode::Open);
-}
-
-// find the saved state for a lazy tab by file path. Because gInitialSessionData
-// is kept in sync with the live session, this never matches a closed window;
-// per-tab disambiguation (e.g. same file in two windows) comes from the more
-// reliable tab->tabState, which RememberSessionState prefers.
-TabState* FindSessionTabState(Str fp) {
-    if (!gInitialSessionData) {
-        return nullptr;
-    }
-    for (SessionData* psd : *gInitialSessionData) {
-        for (TabState* pts : *psd->tabStates) {
-            if (str::Eq(pts->filePath, fp)) {
-                return pts;
-            }
-        }
-    }
-    return nullptr;
-}
-
-// lazy tabs borrow tab->tabState from gInitialSessionData. After we replace that
-// snapshot, repoint those pointers so the next SaveSettings() does not clone freed
-// TabState objects
-void RefreshLazyTabStatePointers() {
-    int sdIdx = 0;
-    for (MainWindow* win : gWindows) {
-        bool hasFileTab = false;
-        for (WindowTab* tab : win->Tabs()) {
-            if (tab->filePath) {
-                hasFileTab = true;
-                break;
-            }
-        }
-        if (!hasFileTab) {
-            continue;
-        }
-        SessionData* sd = nullptr;
-        if (gInitialSessionData && sdIdx < len(*gInitialSessionData)) {
-            sd = (*gInitialSessionData)[sdIdx++];
-        }
-        for (WindowTab* tab : win->Tabs()) {
-            if (len(tab->filePath) == 0) {
-                continue;
-            }
-            // by path, not position: the snapshot skips tabs that had no state
-            TabState* ts = nullptr;
-            if (sd) {
-                for (TabState* cand : *sd->tabStates) {
-                    if (str::Eq(cand->filePath, tab->filePath)) {
-                        ts = cand;
-                        break;
-                    }
-                }
-            }
-            if (!ts) {
-                ts = FindSessionTabState(tab->filePath);
-            }
-            if (!tab->ctrl && tab->tabState) {
-                // null when the new snapshot has nothing to borrow: the old one
-                // was just freed and must not be left dangling
-                tab->tabState = ts;
-            }
-        }
-    }
 }

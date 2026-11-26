@@ -83,6 +83,8 @@ static void OverlayScrollbarsOnWindowMoved(MainWindow* win) {
 }
 
 MainWindow::MainWindow(HWND hwnd) {
+    static u64 nextLifetimeId = 0;
+    lifetimeId = ++nextLifetimeId;
     hwndFrame = hwnd;
     linkHandler = new LinkHandler(this);
     cbHandler = CreateControllerCallbackHandler(this);
@@ -207,7 +209,7 @@ MainWindow::~MainWindow() {
     ShutdownAIChatForMainWindow(this);
     auto tabs = Tabs();
     DeleteVecMembers(tabs);
-    {
+    if (tabsCtrl) {
         TabsCtrl* tabsCtrlToDelete = tabsCtrl;
         logf("~MainWindow: destroy tabsCtrl: 0x%p, HWND: 0x%p\n", tabsCtrlToDelete, tabsCtrlToDelete->hwnd);
         // Tab close can re-enter comctl32 subclass dispatch while unwinding
@@ -608,10 +610,6 @@ void LinkHandler::GotoLink(IPageDestination* dest) {
         return;
     }
 
-    if (kindDestinationLaunchURL == kind) {
-        return;
-    }
-
     logf("LinkHandler::GotoLink: unhandled kind %s\n", Str(kind));
     ReportIf(true);
 }
@@ -640,7 +638,6 @@ void LinkHandler::LaunchFile(Str pathOrig, IPageDestination* remoteLink) {
     }
     path::Type pathType = path::GetType(fullPath);
     if (pathType == path::Type::None) {
-        auto* win = gWindows[0];
         ShowErrorLoadingNotification(win, fullPath, true);
         return;
     }

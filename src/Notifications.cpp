@@ -511,8 +511,11 @@ void NotificationWnd::Layout(Str message) {
                 message = parsed->PlainTextTemp();
                 HwndSetText(hwnd, message);
             }
-            uint fmt = DT_SINGLELINE | DT_NOPREFIX;
-            u32 gfxFmt = gfxTextSingleLine;
+            // "first\nsecond" is two lines; measured as one, the second
+            // poked out of the bottom
+            bool multiLine = str::ContainsChar(message, '\n');
+            uint fmt = multiLine ? DT_NOPREFIX : DT_SINGLELINE | DT_NOPREFIX;
+            u32 gfxFmt = multiLine ? gfxTextLeft : gfxTextSingleLine;
             if (isRtl) {
                 fmt |= DT_RIGHT | DT_RTLREADING;
                 gfxFmt |= gfxTextRight | gfxTextRtl;
@@ -632,18 +635,14 @@ Size NotifProgressCtrl::GetIdealSize() {
     return {0, h};
 }
 
+// flat: a light track with the done part in the progress color over it
 void NotifProgressCtrl::Paint(VirtPaintCtx& ctx) {
     Rect rc = ctx.bounds;
-    int progressWidth = rc.dx;
-
-    Color col = ThemeNotificationsProgressColor();
-    ctx.gfx->DrawRect(rc, col);
-
-    rc.x += 2;
-    rc.dx = (progressWidth - 3) * notif->progressPerc / 100;
-    rc.y += 2;
-    rc.dy -= 3;
-    ctx.gfx->FillRect(rc, col);
+    ctx.gfx->FillRect(rc, ThemeNotificationsProgressTrackColor(notif->Colors().bg));
+    rc.dx = rc.dx * std::clamp(notif->progressPerc, 0, 100) / 100;
+    if (rc.dx > 0) {
+        ctx.gfx->FillRect(rc, ThemeNotificationsProgressColor());
+    }
 }
 
 void NotificationWnd::UpdateMessage(Str msg, int timeoutMs, bool highlight) {
@@ -667,7 +666,7 @@ bool UpdateNotificationProgress(NotificationWnd* wnd, Str msg, int perc) {
     }
     ReportIf(perc < 0 || perc > 100);
     wnd->progressPerc = perc;
-    wnd->UpdateMessage(msg);
+    wnd->UpdateMessage(msg, wnd->timeoutMs, wnd->highlight);
     return true;
 }
 
@@ -801,12 +800,12 @@ NotificationWnd* ShowNotification(const NotificationCreateArgs& argsIn) {
     } else if (wnd->delayTimerId == 0) {
         BringWindowToTop(wnd->hwnd);
     }
+    // NotifsAdd also relayouts
     bool ok = NotifsAdd(wnd, args.groupId);
     if (!ok) {
         delete wnd;
         return nullptr;
     }
-    RelayoutNotifications(args.hwndParent);
     return wnd;
 }
 
@@ -873,14 +872,14 @@ NotificationWnd* ShowPlainWarningNotification(HWND hwndParent, Str msg, int time
 }
 
 void NotificationUpdateMessage(NotificationWnd* wnd, Str msg, int timeoutInMS, bool highlight) {
-    if (!wnd) {
+    if (NotificationIndexOf(wnd) < 0) {
         return;
     }
     wnd->UpdateMessage(msg, timeoutInMS, highlight);
 }
 
 TempStr NotificationGetMessageTemp(NotificationWnd* wnd) {
-    if (!wnd) {
+    if (NotificationIndexOf(wnd) < 0) {
         return {};
     }
     return HwndGetTextTemp(wnd->hwnd);
@@ -950,6 +949,11 @@ bool RemoveNotificationsForGroup(MainWindow* win, Kind kind) {
 
 NotificationWnd* GetNotificationForGroup(MainWindow* win, Kind kind) {
     return GetNotificationForGroup(CanvasOf(win), kind);
+}
+
+// the tab a notification is shown for, nullptr if any
+WindowTab* NotificationTab(NotificationWnd* wnd) {
+    return wnd ? wnd->tab : nullptr;
 }
 
 NotificationWnd* ShowTemporaryNotification(MainWindow* win, Str msg, int timeoutMs) {

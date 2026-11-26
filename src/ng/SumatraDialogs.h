@@ -31,6 +31,8 @@ enum class DialogAccels {
     None
 };
 DialogAccels DialogsAccelTable(MainWindow* win);
+void DialogsTrackFrameDialog(bool (*isFrameVisible)(), MainWindow* (*owner)(), void (*close)());
+void DialogsCloseFrameDialogsFor(MainWindow* win);
 // Up / Down (dir -1 / 1) in a dialog whose list they drive, as orig's do
 bool DialogsOnArrowKey(MainWindow* win, int dir, bool editFocused);
 // Enter in a dialog that has no focused text field (orig's default button)
@@ -95,6 +97,8 @@ struct SavePathArgs {
     Str nativeDir;            // owned; lpstrInitialDir
     bool noDefExt = false;    // no lpstrDefExt
     bool nativeTitle = false; // lpstrTitle is title; otherwise the system's "Save As"
+    // onDone only picks the path; the caller writes (and on wasm downloads) later
+    bool pickOnly = false;
     // out: the path the user picked, empty if cancelled. Only valid during
     // onDone; the args are deleted afterwards
     Str path;
@@ -107,6 +111,8 @@ void CloseSavePathDialogFor(MainWindow* win);
 bool IsSavePathDialogVisible();
 // -dbg-control's stand-in for picking a name in the dialog ({} is Cancel)
 void SetTestSavePath(Str path);
+void SetTestOpenFileNames(Str paths);
+bool TakeTestOpenFileNames(StrVec& out);
 gpui::El* SavePathDialogBuild(MainWindow* win, gpui::Ctx* cx);
 
 void ShowGoToPageDialog(MainWindow* win);
@@ -120,6 +126,7 @@ gpui::El* RenameStripGroupDialogBuild(MainWindow* win, gpui::Ctx* cx);
 void ShowAddFavoriteDialog(MainWindow* win, Str filePath, int pageNo, Str pageLabel, Str name);
 void ShowEditFavoritesDialog(MainWindow* win);
 void CloseAddFavoriteDialog();
+void AddFavoriteOnSettingsReloaded();
 bool IsAddFavoriteDialogVisible();
 gpui::El* AddFavoriteDialogBuild(MainWindow* win, gpui::Ctx* cx);
 void CloseOpenFromUrlDialog();
@@ -281,8 +288,8 @@ int PageGridMarkPixels(MainWindow* win);
 // --- print options ----------------------------------------------------------
 
 // ng: the Advanced page of the print dialog is a win32 property sheet page
-// (the print dialog itself is the OS one), so it stays win32; it lives in
-// Print.cpp because there is no .rc here and the template is built in memory.
+// (the print dialog itself is the OS one), so it stays win32. There is no .rc
+// here: SumatraDialogs.cpp builds the template in memory.
 
 enum class PrintRangeAdv {
     All = 0,

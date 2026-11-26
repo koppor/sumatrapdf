@@ -209,10 +209,12 @@ void HwndEnsureOnScreen(HWND hwnd) {
 
 // returns available area of the screen i.e. screen minus taskbar area
 Rect GetWorkAreaRect(Rect rect, HWND hwnd) {
-    RECT tmpRect = ToRECT(rect);
-    HMONITOR hmon = MonitorFromRect(&tmpRect, MONITOR_DEFAULTTONEAREST);
+    HMONITOR hmon;
     if (hwnd) {
         hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+    } else {
+        RECT tmpRect = ToRECT(rect);
+        hmon = MonitorFromRect(&tmpRect, MONITOR_DEFAULTTONEAREST);
     }
     MONITORINFO mi{};
     mi.cbSize = sizeof mi;
@@ -495,7 +497,7 @@ void HwndSetText(HWND hwnd, Str sv) {
     // Every caller is fine with this: those that need a re-search/notification on
     // unchanged text trigger it explicitly, not via the EN_CHANGE side effect.
     TempStr current = HwndGetTextTemp(hwnd);
-    if (current && str::Eq(current, sv)) {
+    if (str::Eq(current, sv)) {
         return;
     }
     WCHAR* ws = CWStrTemp(sv);
@@ -629,9 +631,11 @@ void EditGetSelection(HWND hwnd, int& start, int& end) {
     if (!hwnd) {
         return;
     }
-    DWORD sel = (DWORD)Edit_GetSel(hwnd);
-    start = (int)LOWORD(sel);
-    end = (int)HIWORD(sel);
+    DWORD s = 0;
+    DWORD e = 0;
+    SendMessageW(hwnd, EM_GETSEL, (WPARAM)&s, (LPARAM)&e);
+    start = (int)s;
+    end = (int)e;
 }
 
 void EditSetCursorPos(HWND hwnd, int pos) {
@@ -722,7 +726,8 @@ int LbAddString(HWND hwnd, WStr text) {
 }
 
 int LbAddString(HWND hwnd, Str text) {
-    return LbAddString(hwnd, ToWStrTemp(text));
+    TempWStr ws = ToWStrTemp(text);
+    return (int)SendMessageW(hwnd, LB_ADDSTRING, 0, (LPARAM)(ws.s ? ws.s : L""));
 }
 
 int LbGetCurrentSelection(HWND hwnd) {
@@ -1117,20 +1122,30 @@ HBITMAP RenderedBitmap::GetBitmap() const {
 HBITMAP CreateMemoryBitmap(Size size, HANDLE* hDataMapping) {
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    if (size.dx <= 0 || size.dy <= 0 || (i64)size.dx * 4 * size.dy > INT_MAX) {
+        return nullptr;
+    }
     bmi.bmiHeader.biWidth = size.dx;
     bmi.bmiHeader.biHeight = -size.dy;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biCompression = BI_RGB;
     // trading speed for memory (32 bits yields far better performance)
     bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biSizeImage = size.dx * 4 * size.dy;
+    bmi.bmiHeader.biSizeImage = (DWORD)((i64)size.dx * 4 * size.dy);
 
     void* data = nullptr;
+    bool createdMapping = false;
     if (hDataMapping && !*hDataMapping) {
         *hDataMapping =
             CreateFileMapping(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, bmi.bmiHeader.biSizeImage, nullptr);
+        createdMapping = *hDataMapping != nullptr;
     }
-    return CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &data, hDataMapping ? *hDataMapping : nullptr, 0);
+    HBITMAP hbmp = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &data, hDataMapping ? *hDataMapping : nullptr, 0);
+    if (!hbmp && createdMapping) {
+        CloseHandle(*hDataMapping);
+        *hDataMapping = nullptr;
+    }
+    return hbmp;
 }
 
 //--- double-buffer / deferred window positioning
@@ -1160,12 +1175,12 @@ DoubleBuffer::DoubleBuffer(HWND hwnd, Rect rect) : hTarget(hwnd), hdcCanvas(::Ge
         XFORM ctm = {1.0, 0, 0, 1.0, (float)-rect.x, (float)-rect.y};
         SetWorldTransform(hdcBuffer, &ctm);
     }
-    DeleteObject(SelectObject(hdcBuffer, doubleBuffer));
+    SelectObject(hdcBuffer, doubleBuffer);
 }
 
 DoubleBuffer::~DoubleBuffer() {
-    DeleteObject(doubleBuffer);
     DeleteDC(hdcBuffer);
+    DeleteObject(doubleBuffer);
     ReleaseDC(hTarget, hdcCanvas);
 }
 
@@ -1428,7 +1443,7 @@ void MenuSetText(HMENU m, int id, WStr s) {
     mii.cbSize = sizeof(mii);
     mii.fMask = MIIM_STRING;
     mii.fType = MFT_STRING;
-    mii.dwTypeData = s.s;
+    mii.dwTypeData = CWStrTemp(s);
     mii.cch = (uint)s.len;
     if (MenuSetTextRec(m, id, &mii)) {
         return;
@@ -1489,6 +1504,24 @@ bool TakeTestSaveFileName(OPENFILENAMEW* ofn) {
     ofn->lpstrFile[n] = 0;
     SetTestSaveFileName({});
     return true;
+}
+
+// paths, a line each, the next multi-file Open takes instead of showing the
+// dialog: tests set them through the control channel
+static Str gTestOpenFileNames;
+
+void SetTestOpenFileNames(Str paths) {
+    str::ReplaceWithCopy(&gTestOpenFileNames, paths);
+}
+
+// call before an Open dialog: true when a test's paths were put in out
+bool TakeTestOpenFileNames(StrVec& out) {
+    if (len(gTestOpenFileNames) == 0) {
+        return false;
+    }
+    Split(&out, gTestOpenFileNames, StrL("\n"), true);
+    SetTestOpenFileNames({});
+    return len(out) > 0;
 }
 
 bool IsCtrlPressed() {
@@ -1579,11 +1612,9 @@ void SetCursorCached(LPWSTR cursorId) {
 }
 
 void DeleteCachedCursors() {
+    // LoadCursor(nullptr, id) returns shared system cursors that must not be destroyed
     for (HCURSOR& cur : cachedCursors) {
-        if (cur) {
-            DestroyCursor(cur);
-            cur = nullptr;
-        }
+        cur = nullptr;
     }
 }
 
@@ -1733,16 +1764,16 @@ bool GetOsVersion(OSVERSIONINFOEX& ver) {
 
 TempStr OsNameFromVerTemp(const OSVERSIONINFOEX& ver) {
     if (VER_PLATFORM_WIN32_NT != ver.dwPlatformId) {
-        return str::DupTemp(StrL("9x"));
+        return StrL("9x");
     }
     if (ver.dwMajorVersion == 6 && ver.dwMinorVersion == 3) {
-        return str::DupTemp(StrL("8.1")); // or Server 2012 R2
+        return StrL("8.1"); // or Server 2012 R2
     }
     if (ver.dwMajorVersion == 6 && ver.dwMinorVersion == 2) {
-        return str::DupTemp(StrL("8")); // or Server 2012
+        return StrL("8"); // or Server 2012
     }
     if (ver.dwMajorVersion == 6 && ver.dwMinorVersion == 1) {
-        return str::DupTemp(StrL("7")); // or Server 2008 R2
+        return StrL("7"); // or Server 2008 R2
     }
     if (ver.dwMajorVersion == 10) {
         // ver.dwMinorVersion seems to always be 0
@@ -1757,7 +1788,7 @@ TempStr OsNameFromVerTemp(const OSVERSIONINFOEX& ver) {
 TempStr GetWindowsVerTemp() {
     OSVERSIONINFOEX ver{};
     if (!GetOsVersion(ver)) {
-        return str::DupTemp(StrL("unknown"));
+        return StrL("unknown");
     }
     return OsNameFromVerTemp(ver);
 }
@@ -1911,7 +1942,7 @@ Str GetLastErrorAsStr(Arena* arena) {
     return str::Dup(arena, fmt("0x%08lX '%s'", err, msg));
 }
 
-// returns nullptr if not set
+// empty if not set
 TempStr GetEnvVariableTemp(Str name) {
     WCHAR bufStatic[256];
     WCHAR* buf = &bufStatic[0];
@@ -1927,9 +1958,12 @@ TempStr GetEnvVariableTemp(Str name) {
         cchBufSize = res + 4; // +4 jic
         buf = AllocArrayTemp<WCHAR>((int)cchBufSize);
         res = GetEnvironmentVariableW(nameW, buf, cchBufSize);
-        ReportIf(res == 0 || res > cchBufSize);
+        if (res == 0 || res >= cchBufSize) {
+            ReportIf(true);
+            return {};
+        }
     }
-    return ToUtf8Temp(buf);
+    return ToUtf8Temp(WStr(buf, (int)res));
 }
 
 TempStr GetLastErrorStrTemp(DWORD& err) {
@@ -1939,18 +1973,20 @@ TempStr GetLastErrorStrTemp(DWORD& err) {
     if (err == 0) {
         return StrL("");
     }
-    if (err == ERROR_INTERNET_EXTENDED_ERROR) {
-        WCHAR buf[4096]{};
-        DWORD bufSize = dimof(buf) - 1;
-        // ignoring a case where buffer is too small. 4 kB should be enough for everybody
-        InternetGetLastResponseInfoW(&err, buf, &bufSize);
-        buf[dimof(buf) - 1] = 0;
-        return ToUtf8Temp(buf);
-    }
     WCHAR* msgBuf = nullptr;
     DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
+    // WinHTTP's errors (12001 - 12999) are in its own message table
+    constexpr DWORD kWinHttpErrorFirst = 12001;
+    constexpr DWORD kWinHttpErrorLast = 12999;
+    HMODULE from = nullptr;
+    if (err >= kWinHttpErrorFirst && err <= kWinHttpErrorLast) {
+        from = GetModuleHandleW(L"winhttp.dll");
+    }
+    if (from) {
+        flags |= FORMAT_MESSAGE_FROM_HMODULE;
+    }
     DWORD lang = MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT);
-    DWORD ferr = FormatMessageW(flags, nullptr, err, lang, (LPWSTR)&msgBuf, 0, nullptr);
+    DWORD ferr = FormatMessageW(flags, from, err, lang, (LPWSTR)&msgBuf, 0, nullptr);
     if (!ferr || !msgBuf) {
         return StrL("");
     }
@@ -2038,7 +2074,7 @@ TempStr ResolveLnkTemp(Str path) {
         return {};
     }
 
-    hRes = lnk->Resolve(nullptr, SLR_UPDATE);
+    hRes = lnk->Resolve(nullptr, SLR_NO_UI | SLR_NOSEARCH);
     if (FAILED(hRes)) {
         return {};
     }
@@ -2167,9 +2203,32 @@ Run:
 
 bool gBlockExternalLaunch = false;
 int gExternalLaunchesBlocked = 0;
+static Str gExternalLaunchAllowDir;
+
+void SetExternalLaunchAllowDir(Str dir) {
+    str::ReplaceWithCopy(&gExternalLaunchAllowDir, dir);
+    int n = len(gExternalLaunchAllowDir);
+    if (n > 1) {
+        char c = gExternalLaunchAllowDir.s[n - 1];
+        if (c == '\\' || c == '/') {
+            gExternalLaunchAllowDir.len--;
+            gExternalLaunchAllowDir.s[n - 1] = 0;
+        }
+    }
+}
+
+// a stand-in the test put in its -appdata directory, not a browser or a folder
+static bool ExternalLaunchAllowed(Str what) {
+    int n = len(gExternalLaunchAllowDir);
+    if (n == 0 || len(what) <= n || !str::StartsWithI(what, gExternalLaunchAllowDir)) {
+        return false;
+    }
+    char sep = what.s[n];
+    return sep == '\\' || sep == '/';
+}
 
 bool ExternalLaunchBlocked(Str what) {
-    if (!gBlockExternalLaunch) {
+    if (!gBlockExternalLaunch || ExternalLaunchAllowed(what)) {
         return false;
     }
     logf("ExternalLaunchBlocked: not opening '%s' in test mode\n", what);
@@ -2204,13 +2263,20 @@ bool LaunchBrowser(Str url) {
     return LaunchFileShell(url, Str(), StrL("open"));
 }
 
+static Str FileManagerPathTemp(Str path) {
+    // strip \\?\ prefix — shell APIs (ILCreateFromPath, explorer.exe) don't understand it
+    if (str::TrimPrefix(path, StrL("\\\\?\\UNC\\"))) {
+        return str::JoinTemp(StrL("\\\\"), path);
+    }
+    str::TrimPrefix(path, StrL("\\\\?\\"));
+    return path;
+}
+
 void OpenPathInDefaultFileManager(Str path) {
     if (len(path) == 0 || ExternalLaunchBlocked(path)) {
         return;
     }
-
-    // strip \\?\ prefix — shell APIs (ILCreateFromPath, explorer.exe) don't understand it
-    str::TrimPrefix(path, StrL("\\\\?\\"));
+    path = FileManagerPathTemp(path);
 
     // Use SHOpenFolderAndSelectItems which respects the default file manager
     // (e.g. Directory Opus) instead of hardcoding explorer.exe
@@ -2228,9 +2294,38 @@ void OpenPathInDefaultFileManager(Str path) {
     if (n == 0 || n >= MAX_PATH) return;
     TempStr explorer = ToUtf8Temp(winDir);
     explorer = path::JoinTemp(explorer, StrL("explorer.exe"));
-    if (file::Exists(explorer)) return;
+    if (!file::Exists(explorer)) return;
     TempStr args = fmt("/select,\"%s\"", path);
     CreateProcessHelper(explorer, args);
+}
+
+void OpenFilesInDefaultManager(Str folder, const StrVec& files) {
+    if (len(folder) == 0 || files.IsEmpty() || ExternalLaunchBlocked(folder)) {
+        return;
+    }
+    folder = FileManagerPathTemp(folder);
+    PIDLIST_ABSOLUTE parent = ILCreateFromPathW(CWStrTemp(folder));
+    if (parent) {
+        Vec<PIDLIST_ABSOLUTE> items;
+        Vec<PCUITEMID_CHILD> children;
+        for (Str path : files) {
+            PIDLIST_ABSOLUTE item = ILCreateFromPathW(CWStrTemp(FileManagerPathTemp(path)));
+            if (item) {
+                VecAppend(items, item);
+                VecAppend(children, (PCUITEMID_CHILD)ILFindLastID(item));
+            }
+        }
+        HRESULT result =
+            len(children) > 0 ? SHOpenFolderAndSelectItems(parent, len(children), children.els, 0) : E_FAIL;
+        for (auto item : items) {
+            ILFree(item);
+        }
+        ILFree(parent);
+        if (SUCCEEDED(result)) {
+            return;
+        }
+    }
+    LaunchFileShell(folder, {}, StrL("open"));
 }
 
 HANDLE LaunchProcessWithCmdLine(Str exe, Str cmdLine) {
@@ -2283,20 +2378,6 @@ bool CreateProcessHelper(Str exe, Str args) {
     return process != nullptr;
 }
 
-struct ChildProcess {
-    HANDLE process = nullptr;
-};
-
-ChildProcess* StartChildProcess(Str cmdLine) {
-    HANDLE h = LaunchProcessInDir(cmdLine);
-    if (!h) {
-        return nullptr;
-    }
-    auto* p = new ChildProcess();
-    p->process = h;
-    return p;
-}
-
 bool LaunchElevated(Str path, Str cmdline) {
     return LaunchFileShell(path, cmdline, StrL("runas"));
 }
@@ -2337,15 +2418,12 @@ enum class ConsoleState {
 static ConsoleState gConsoleState = ConsoleState::Uninitialized;
 static HANDLE gOriginalStdout = INVALID_HANDLE_VALUE;
 static HANDLE gOriginalStderr = INVALID_HANDLE_VALUE;
-static HWND gStartupForegroundWindow = nullptr;
-static bool gLoggedToConsole = false;
 
 static void InitConsoleState() {
     if (gConsoleState != ConsoleState::Uninitialized) {
         return;
     }
 
-    gStartupForegroundWindow = GetForegroundWindow();
     gOriginalStdout = GetStdHandle(STD_OUTPUT_HANDLE);
     gOriginalStderr = GetStdHandle(STD_ERROR_HANDLE);
     if (gOriginalStdout != INVALID_HANDLE_VALUE && gOriginalStdout != nullptr) {
@@ -2474,10 +2552,9 @@ void LogConsole(Str s) {
     if (StdoutRedirected()) {
         if (gOriginalStdout != INVALID_HANDLE_VALUE) {
             DWORD written;
-            BOOL ok = WriteFile(gOriginalStdout, s.s, s.len, &written, nullptr);
-            if (!ok) {
-                logf("error: %s\n", GetLastErrorAsStr(GetTempArena()));
-            }
+            // Don't call logf() on failure: LogConsole() is invoked from log()
+            // and would recurse infinitely on a broken stdout pipe.
+            WriteFile(gOriginalStdout, s.s, s.len, &written, nullptr);
         }
         return;
     }
@@ -2493,9 +2570,7 @@ void LogConsole(Str s) {
     }
     DWORD written;
     // fails harmlessly if the handle is not a console (e.g. a pipe we chose not to write to)
-    if (WriteConsoleA(hConsole, s.s, s.len, &written, nullptr)) {
-        gLoggedToConsole = true;
-    }
+    WriteConsoleA(hConsole, s.s, s.len, &written, nullptr);
 }
 
 //--- registry
@@ -2529,14 +2604,22 @@ TempStr ReadRegStrTemp(HKEY keySub, Str keyName, Str valName) {
 TryAgainWOW64:
     LONG res = RegOpenKeyEx(keySub, keyNameW, 0, access, &hKey);
     if (ERROR_SUCCESS == res) {
-        DWORD valLen;
-        res = RegQueryValueEx(hKey, valNameW, nullptr, nullptr, nullptr, &valLen);
-        if (ERROR_SUCCESS == res) {
-            val = WStr(AllocArray<WCHAR>((int)(valLen / sizeof(WCHAR)) + 1));
-            res = RegQueryValueEx(hKey, valNameW, nullptr, nullptr, (LPBYTE)val.s, &valLen);
-            if (ERROR_SUCCESS != res) {
-                wstr::FreePtr(&val);
+        DWORD valLen = 0;
+        DWORD valType = 0;
+        res = RegQueryValueEx(hKey, valNameW, nullptr, &valType, nullptr, &valLen);
+        if (ERROR_SUCCESS == res && (valType == REG_SZ || valType == REG_EXPAND_SZ)) {
+            int cch = (int)(valLen / sizeof(WCHAR));
+            WCHAR* buf = AllocArrayTemp<WCHAR>(cch + 1);
+            res = RegQueryValueEx(hKey, valNameW, nullptr, &valType, (LPBYTE)buf, &valLen);
+            if (ERROR_SUCCESS == res) {
+                int gotCch = (int)(valLen / sizeof(WCHAR));
+                while (gotCch > 0 && buf[gotCch - 1] == 0) {
+                    gotCch--;
+                }
+                val = WStr(buf, gotCch);
             }
+        } else if (ERROR_SUCCESS == res) {
+            res = ERROR_INVALID_DATATYPE;
         }
         RegCloseKey(hKey);
     }
@@ -2550,9 +2633,7 @@ TryAgainWOW64:
 #endif
         goto TryAgainWOW64;
     }
-    TempStr resv = ToUtf8Temp(val.s);
-    wstr::Free(val);
-    return resv;
+    return ToUtf8Temp(val);
 }
 
 TempStr LoggedReadRegStrTemp(HKEY keySub, Str keyName, Str valName) {
@@ -2581,29 +2662,33 @@ TempStr LoggedReadRegStr2Temp(Str keyName, Str valName) {
 }
 
 // the Logged* registry writers do the plain call and log it when enabled
-static void LogRegCall(bool ok, TempStr call) {
+static void LogRegCall(bool ok, LSTATUS err, TempStr call) {
     if (!gLogRegistryCalls) {
         return;
     }
     logf("%s => %s\n", call, ok ? StrL("ok") : StrL("failed"));
     if (!ok) {
-        LogLastError();
+        LogLastError((DWORD)err);
     }
 }
 
-bool WriteRegStr(HKEY keySub, Str keyName, Str valName, Str value) {
+static LSTATUS WriteRegStrStatus(HKEY keySub, Str keyName, Str valName, Str value) {
     WCHAR* keyNameW = CWStrTemp(keyName);
     WCHAR* valNameW = CWStrTemp(valName);
     int cch;
     WCHAR* valueW = CWStrTemp(value, cch);
     DWORD cbData = (DWORD)(cch + 1) * sizeof(WCHAR);
-    LSTATUS res = SHSetValueW(keySub, keyNameW, valNameW, REG_SZ, (const void*)valueW, cbData);
-    return ERROR_SUCCESS == res;
+    return SHSetValueW(keySub, keyNameW, valNameW, REG_SZ, (const void*)valueW, cbData);
+}
+
+bool WriteRegStr(HKEY keySub, Str keyName, Str valName, Str value) {
+    return ERROR_SUCCESS == WriteRegStrStatus(keySub, keyName, valName, value);
 }
 
 bool LoggedWriteRegStr(HKEY keySub, Str keyName, Str valName, Str value) {
-    bool ok = WriteRegStr(keySub, keyName, valName, value);
-    LogRegCall(ok, fmt("WriteRegStr(%s, %s, %s, %s)", RegKeyNameTemp(keySub), keyName, valName, value));
+    LSTATUS res = WriteRegStrStatus(keySub, keyName, valName, value);
+    bool ok = ERROR_SUCCESS == res;
+    LogRegCall(ok, res, fmt("WriteRegStr(%s, %s, %s, %s)", RegKeyNameTemp(keySub), keyName, valName, value));
     return ok;
 }
 
@@ -2615,29 +2700,33 @@ bool ReadRegDWORD(HKEY keySub, Str keyName, Str valName, DWORD& value) {
     return ERROR_SUCCESS == res && sizeof(DWORD) == size;
 }
 
-bool WriteRegDWORD(HKEY keySub, Str keyName, Str valName, DWORD value) {
+static LSTATUS WriteRegDWORDStatus(HKEY keySub, Str keyName, Str valName, DWORD value) {
     WCHAR* keyNameW = CWStrTemp(keyName);
     WCHAR* valNameW = CWStrTemp(valName);
-    LSTATUS res = SHSetValueW(keySub, keyNameW, valNameW, REG_DWORD, (const void*)&value, sizeof(DWORD));
-    return ERROR_SUCCESS == res;
+    return SHSetValueW(keySub, keyNameW, valNameW, REG_DWORD, (const void*)&value, sizeof(DWORD));
 }
 
-static bool WriteRegNone(HKEY hkey, Str key, Str valName) {
+bool WriteRegDWORD(HKEY keySub, Str keyName, Str valName, DWORD value) {
+    return ERROR_SUCCESS == WriteRegDWORDStatus(keySub, keyName, valName, value);
+}
+
+static LSTATUS WriteRegNoneStatus(HKEY hkey, Str key, Str valName) {
     WCHAR* keyW = CWStrTemp(key);
     WCHAR* valNameW = CWStrTemp(valName);
-    LSTATUS res = SHSetValueW(hkey, keyW, valNameW, REG_NONE, nullptr, 0);
-    return ERROR_SUCCESS == res;
+    return SHSetValueW(hkey, keyW, valNameW, REG_NONE, nullptr, 0);
 }
 
 bool LoggedWriteRegDWORD(HKEY keySub, Str keyName, Str valName, DWORD value) {
-    bool ok = WriteRegDWORD(keySub, keyName, valName, value);
-    LogRegCall(ok, fmt("WriteRegDWORD(%s, %s, %s, %d)", RegKeyNameTemp(keySub), keyName, valName, (int)value));
+    LSTATUS res = WriteRegDWORDStatus(keySub, keyName, valName, value);
+    bool ok = ERROR_SUCCESS == res;
+    LogRegCall(ok, res, fmt("WriteRegDWORD(%s, %s, %s, %d)", RegKeyNameTemp(keySub), keyName, valName, (int)value));
     return ok;
 }
 
 bool LoggedWriteRegNone(HKEY hkey, Str key, Str valName) {
-    bool ok = WriteRegNone(hkey, key, valName);
-    LogRegCall(ok, fmt("WriteRegNone(%s, %s, %s)", RegKeyNameTemp(hkey), key, valName));
+    LSTATUS res = WriteRegNoneStatus(hkey, key, valName);
+    bool ok = ERROR_SUCCESS == res;
+    LogRegCall(ok, res, fmt("WriteRegNone(%s, %s, %s)", RegKeyNameTemp(hkey), key, valName));
     return ok;
 }
 
@@ -2707,32 +2796,41 @@ static void ResetRegKeyAcl(HKEY hkey, Str keyName) {
     RegCloseKey(hKey);
 }
 
-bool DeleteRegKey(HKEY keySub, Str keyName, bool resetACLFirst) {
+static LSTATUS DeleteRegKeyStatus(HKEY keySub, Str keyName, bool resetACLFirst) {
     if (resetACLFirst) {
         ResetRegKeyAcl(keySub, keyName);
     }
     WCHAR* keyNameW = CWStrTemp(keyName);
-    LSTATUS res = SHDeleteKeyW(keySub, keyNameW);
+    return SHDeleteKeyW(keySub, keyNameW);
+}
+
+bool DeleteRegKey(HKEY keySub, Str keyName, bool resetACLFirst) {
+    LSTATUS res = DeleteRegKeyStatus(keySub, keyName, resetACLFirst);
     return ERROR_SUCCESS == res || ERROR_FILE_NOT_FOUND == res;
 }
 
 bool LoggedDeleteRegKey(HKEY keySub, Str keyName, bool resetACLFirst) {
-    bool ok = DeleteRegKey(keySub, keyName, resetACLFirst);
-    LogRegCall(ok, fmt("DeleteRegKey(%s, %s, %d)", RegKeyNameTemp(keySub), keyName, resetACLFirst));
+    LSTATUS res = DeleteRegKeyStatus(keySub, keyName, resetACLFirst);
+    bool ok = ERROR_SUCCESS == res || ERROR_FILE_NOT_FOUND == res;
+    LogRegCall(ok, res, fmt("DeleteRegKey(%s, %s, %d)", RegKeyNameTemp(keySub), keyName, resetACLFirst));
     return ok;
 }
 
-bool DeleteRegValue(HKEY keySub, Str keyName, Str val) {
+static LSTATUS DeleteRegValueStatus(HKEY keySub, Str keyName, Str val) {
     WCHAR* keyNameW = CWStrTemp(keyName);
     WCHAR* valW = CWStrTemp(val);
+    return SHDeleteValueW(keySub, keyNameW, valW);
+}
 
-    auto res = SHDeleteValueW(keySub, keyNameW, valW);
+bool DeleteRegValue(HKEY keySub, Str keyName, Str val) {
+    LSTATUS res = DeleteRegValueStatus(keySub, keyName, val);
     return ERROR_SUCCESS == res || ERROR_FILE_NOT_FOUND == res;
 }
 
 bool LoggedDeleteRegValue(HKEY keySub, Str keyName, Str val) {
-    bool ok = DeleteRegValue(keySub, keyName, val);
-    LogRegCall(ok, fmt("DeleteRegValue(%s, %s, %s)", RegKeyNameTemp(keySub), keyName, val));
+    LSTATUS res = DeleteRegValueStatus(keySub, keyName, val);
+    bool ok = ERROR_SUCCESS == res || ERROR_FILE_NOT_FOUND == res;
+    LogRegCall(ok, res, fmt("DeleteRegValue(%s, %s, %s)", RegKeyNameTemp(keySub), keyName, val));
     return ok;
 }
 
@@ -2836,11 +2934,11 @@ bool DDEExecute(WStr server, WStr topic, WStr command) {
         return false;
     }
 
-    hszServer = DdeCreateStringHandleW(inst, server.s, CP_WINNEUTRAL);
+    hszServer = DdeCreateStringHandleW(inst, CWStrTemp(server), CP_WINNEUTRAL);
     if (!hszServer) {
         goto Exit;
     }
-    hszTopic = DdeCreateStringHandleW(inst, topic.s, CP_WINNEUTRAL);
+    hszTopic = DdeCreateStringHandleW(inst, CWStrTemp(topic), CP_WINNEUTRAL);
     if (!hszTopic) {
         goto Exit;
     }
@@ -2850,8 +2948,8 @@ bool DDEExecute(WStr server, WStr topic, WStr command) {
     }
 
     cbLen = ((DWORD)command.len + 1) * sizeof(WCHAR);
-    answer =
-        DdeClientTransaction((BYTE*)command.s, cbLen, hconv, nullptr, CF_UNICODETEXT, XTYP_EXECUTE, 10000, nullptr);
+    answer = DdeClientTransaction((BYTE*)CWStrTemp(command), cbLen, hconv, nullptr, CF_UNICODETEXT, XTYP_EXECUTE, 10000,
+                                  nullptr);
     if (answer) {
         DdeFreeDataHandle(answer);
         ok = true;
@@ -3002,11 +3100,15 @@ TempStr HGLOBALToStrTemp(HGLOBAL h, bool isUnicode) {
         return {};
     }
 
+    // bounded by the allocation: a DDE client's buffer may lack the NUL
+    size_t size = GlobalSize(h);
     TempStr res;
     if (isUnicode) {
-        res = ToUtf8Temp(WStr((WCHAR*)mem));
+        WCHAR* ws = (WCHAR*)mem;
+        res = ToUtf8Temp(WStr(ws, (int)wcsnlen(ws, size / sizeof(WCHAR))));
     } else {
-        res = str::DupTemp(Str((char*)mem));
+        char* s = (char*)mem;
+        res = str::DupTemp(Str(s, (int)strnlen(s, size)));
     }
     GlobalUnlock(h);
     return res;
@@ -3018,9 +3120,11 @@ HGLOBAL MemToHGLOBAL(void* src, int n, UINT flags) {
         return nullptr;
     }
     void* d = GlobalLock(h);
-    if (d) {
-        memcpy(d, src, n);
+    if (!d) {
+        GlobalFree(h);
+        return nullptr;
     }
+    memcpy(d, src, n);
     GlobalUnlock(h);
     return h;
 }
@@ -3068,7 +3172,7 @@ TempStr NormalizeString(Str strA, int /* NORM_FORM */ form) {
     if (sizeEst <= 0) {
         return {};
     }
-    return ToUtf8Temp(WStr(res));
+    return ToUtf8Temp(WStr(res, sizeEst));
 }
 
 // Get the name of default printer or nullptr if not exists.
@@ -3093,14 +3197,6 @@ void MaskFpExceptions() {
     _controlfp_s(&unused, _MCW_EM, _MCW_EM);
 }
 
-static const DWORD groupsToCheck[] = {
-    DOMAIN_ALIAS_RID_USERS,
-    // every user belongs to the users group, hence users come before guests
-    DOMAIN_ALIAS_RID_GUESTS,
-    DOMAIN_ALIAS_RID_POWER_USERS,
-    DOMAIN_ALIAS_RID_ADMINS,
-};
-
 void DeferWinPosHelper::SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags) {
     hdwp = ::DeferWindowPos(hdwp, hWnd, hWndInsertAfter, x, y, cx, cy, uFlags);
 }
@@ -3108,45 +3204,6 @@ void DeferWinPosHelper::SetWindowPos(HWND hWnd, HWND hWndInsertAfter, int x, int
 void DeferWinPosHelper::SetWindowPos(HWND hwnd, const Rect rc) {
     uint flags = SWP_NOZORDER;
     hdwp = ::DeferWindowPos(hdwp, hwnd, nullptr, rc.x, rc.y, rc.dx, rc.dy, flags);
-}
-
-bool BlitHBITMAP(HBITMAP hbmp, HDC hdc, Rect target) {
-    HDC bmpDC = CreateCompatibleDC(hdc);
-    if (!bmpDC) {
-        return false;
-    }
-
-    BITMAP bi{};
-    GetObject(hbmp, sizeof(BITMAP), &bi);
-    int dx = bi.bmWidth;
-    int dy = bi.bmHeight;
-
-    HGDIOBJ oldBmp = SelectObject(bmpDC, hbmp);
-    if (!oldBmp) {
-        DeleteDC(bmpDC);
-        return false;
-    }
-    int x = target.x;
-    int y = target.y;
-    int tdx = target.dx;
-    int tdy = target.dy;
-    bool ok = false;
-    // StretchBlt(HALFTONE) even at 1:1 smears scanlines; some printer drivers
-    // (Xerox PCL) turn that into regular white stripes (issue #919).
-    if (tdx == dx && tdy == dy) {
-        ok = BitBlt(hdc, x, y, tdx, tdy, bmpDC, 0, 0, SRCCOPY) != 0;
-    } else {
-        if (IsPrinterDC(hdc)) {
-            SetStretchBltMode(hdc, COLORONCOLOR);
-        } else {
-            SetStretchBltMode(hdc, HALFTONE);
-            SetBrushOrgEx(hdc, 0, 0, nullptr);
-        }
-        ok = StretchBlt(hdc, x, y, tdx, tdy, bmpDC, 0, 0, dx, dy, SRCCOPY) != 0;
-    }
-    SelectObject(bmpDC, oldBmp);
-    DeleteDC(bmpDC);
-    return ok;
 }
 
 LARGE_INTEGER TimeNow() {

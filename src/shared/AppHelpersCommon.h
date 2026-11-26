@@ -7,7 +7,6 @@ struct TabGroup;
 struct MainWindow;
 struct Annotation;
 struct Shortcut;
-struct TabState;
 
 void FreeTabGroup(TabGroup* group);
 void SetTabGroupFiles(TabGroup* group, MainWindow* win);
@@ -17,16 +16,14 @@ void SyncTabGroup(MainWindow* win);
 TempStr TabGroupInfoTemp(TabGroup* group);
 Str ScrollbarModeDisplayName(int idx);
 int FindMatchIndex(MainWindow* win, int page, int glyph);
-TabState* FindSessionTabState(Str fp);
-void RefreshLazyTabStatePointers();
 int FindCurrentMatchIndex(MainWindow* win);
 int FindFirstMatchFromPage(MainWindow* win);
 int FieldFontPx(Annotation* widget, Rect rc);
 int DecimalDigits(int n);
 Shortcut* FindScreenshotShortcutEntry();
+void RemoveScreenshotShortcutEntry();
 TempStr FavoritePromptTemp(Str pageLabel);
 bool AnnotationHasText(Annotation* annot);
-Color TabTextColorForBackground(Color text, Color tabBg);
 Str SelectIfChildOf(Str cameFrom, Str dir);
 
 enum class TabGroupDialogMode {

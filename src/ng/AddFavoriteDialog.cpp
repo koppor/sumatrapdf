@@ -144,6 +144,17 @@ static void ReloadRows(Favorite* toSelect) {
     SelectRow(sel);
 }
 
+// ReloadSettings() freed the FileState / Favorite objects the rows point at:
+// build them again from the new gSettings, keeping the selected row
+void AddFavoriteOnSettingsReloaded() {
+    if (!gAddFav.visible) {
+        return;
+    }
+    int sel = gAddFav.sel;
+    BuildFavEditRows(gAddFav.rows);
+    SelectRow(sel < len(gAddFav.rows) ? sel : -1);
+}
+
 // orig's AddFavoriteWnd::OnOk
 static void AddFavoriteOk() {
     if (gAddFav.mode == FavDlgMode::Add) {
@@ -275,8 +286,9 @@ static void ShowFavoriteDialog(MainWindow* win, FavDlgMode mode, Str filePath, i
     if (mode == FavDlgMode::Add && len(filePath) == 0) {
         return;
     }
-    // orig reuses the open dialog and re-targets it
-    if (gAddFav.visible && gAddFav.mode != mode) {
+    // orig reuses the open dialog and re-targets it; one up for another
+    // window would be left behind, empty and modal to it
+    if (gAddFav.visible && (gAddFav.mode != mode || gAddFav.win != win)) {
         CloseAddFavoriteDialog();
     }
     bool wasVisible = gAddFav.visible;
@@ -300,6 +312,7 @@ static void ShowFavoriteDialog(MainWindow* win, FavDlgMode mode, Str filePath, i
         gp::InputSetValue(gAddFav.editName, ToGpui(name));
     }
     gAddFav.visible = true;
+    DialogsTrackFrameDialog(IsAddFavoriteDialogVisible, [] { return gAddFav.win; }, CloseAddFavoriteDialog);
     DlgWindowSpec spec;
     spec.name = "addfavorite";
     spec.title = AddFavoriteDlgTitle;

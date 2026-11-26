@@ -46,6 +46,7 @@
 #include "AnnotFilterToolbar.h"
 #include "AnnotTextPopup.h"
 #include "AnnotPlacement.h"
+#include "AnnotPlacementCommon.h"
 #include "FormFields.h"
 #include "SystemFonts.h"
 #include "gui/DialogWidgets.h"
@@ -156,16 +157,6 @@ static Color BarHoverBg() {
     }
     return AccentColor(BarBg(), 10);
 }
-
-// --- PdfColor helpers (orig's) ----------------------------------------------
-
-// --- which chips an annotation gets (orig's CollectItems) --------------------
-
-// clang-format on
-
-// --- the names each list drop-down offers -----------------------------------
-
-// clang-format on
 
 // orig paints the annotation list's rows itself (type on the left, contents in
 // a muted color, page on the right). gpui's list rows are text, so the three
@@ -299,12 +290,18 @@ void RefreshAnnotEditToolbar(MainWindow* win) {
     UpdateAnnotEditToolbar(win);
 }
 
+// the toolbar whose contents editor is open
+static AnnotEditToolbar* gEditingTb = nullptr;
+
 void DeleteAnnotEditToolbar(MainWindow* win) {
     AnnotEditToolbar* tb = win ? win->annotEditToolbar : nullptr;
     if (!tb) {
         return;
     }
     win->annotEditToolbar = nullptr;
+    if (gEditingTb == tb) {
+        gEditingTb = nullptr;
+    }
     delete tb;
 }
 
@@ -332,8 +329,6 @@ bool AnnotContentsEditJustEnded() {
     gContentsEditJustEnded = false;
     return res;
 }
-
-static AnnotEditToolbar* gEditingTb = nullptr;
 
 // A kill-focus with no new window is the on-screen keyboard, not a click away.
 void AnnotContentsKeepOnKillFocus(MainWindow* win) {
@@ -423,8 +418,7 @@ void StartSelectedAnnotContentsEdit(MainWindow* win) {
 // Ctrl+Enter, Esc or clicking away ends it and the rendered annotation comes
 // back.
 // ng: orig's box is a win32 edit that does not wrap and grows with its text.
-// This one stays on the annotation. A taller box covers the property row,
-// which orig draws in its own window. The annotation rect grows on commit.
+// The editor keeps the annotation width and grows downward as its text wraps.
 struct FreeTextInPlaceEdit {
     MainWindow* win = nullptr;
     WindowTab* tab = nullptr;
@@ -434,6 +428,7 @@ struct FreeTextInPlaceEdit {
     gp::InputState* edit = nullptr;
     // where gpui put the box last frame, in dips
     gp::Bounds box;
+    int layoutHeight = 0;
     bool wantFocus = false;
 };
 
@@ -476,8 +471,6 @@ bool FreeTextInPlaceCommitOnChar(MainWindow* win, int ch) {
     return true;
 }
 
-constexpr float kInPlaceLineHeight = 1.2f;
-
 static Str InPlaceMeasureFamily(Str family) {
 #if OS_WIN
     if (str::EqI(family, StrL("Courier"))) {
@@ -497,9 +490,7 @@ static Str InPlaceMeasureFamily(Str family) {
     return family;
 }
 
-// Screen pixels `text` needs. Width is the longest line; height is one row
-// per newline. The caller keeps the annotation's own size as a minimum.
-static Size MeasureInPlaceText(Annotation* annot, Str text, float scale) {
+static float MeasureInPlaceHeight(Annotation* annot, Str text, float scale, int width) {
     int textSize = DefaultAppearanceTextSize(annot);
     if (textSize <= 0) {
         textSize = 12;
@@ -516,35 +507,35 @@ static Size MeasureInPlaceText(Annotation* annot, Str text, float scale) {
     float sizePt = (float)fontPx * 72.f / 96.f;
     PlatformFont* font = GetPlatformFont(InPlaceMeasureFamily(FreeTextFontFamily(annot)), sizePt, style);
 
-    int maxPx = 0;
-    int nLines = 1;
+    int border = BorderWidth(annot);
+    int textWidth = std::max(1, width - (int)ceilf(2.f * FreeTextPadding(border) * scale) - 2);
+    int lineDy = std::max(1, PlatformFontMeasureText(font, StrL("Ag")).dy);
+    int lines = 0;
     int start = 0;
     for (int i = 0; i <= len(text); i++) {
         if (i < len(text) && text.s[i] != '\n') {
             continue;
         }
         int n = i - start;
-        if (n > 0 && text.s[start + n - 1] == '\r') {
+        if (n > 0 && text.s[i - 1] == '\r') {
             n--;
         }
-        Size ts = PlatformFontMeasureText(font, Str(text.s + start, n));
-        if (ts.dx > maxPx) {
-            maxPx = ts.dx;
-        }
-        if (i < len(text)) {
-            nLines++;
-        }
+        Size size = PlatformFontMeasureText(font, Str(text.s ? text.s + start : nullptr, n), textWidth);
+        int wrapped = (int)lroundf((float)size.dy / (float)lineDy);
+        // GDI may return an over-wide word even when measuring with wrapping.
+        int extra = size.dx > textWidth ? (size.dx - 1) / textWidth : 0;
+        lines += std::max(wrapped, 1) + extra;
         start = i + 1;
     }
+    return FreeTextWrappedHeight(lines, textSize, border);
+}
 
-    int border = std::max(BorderWidth(annot), 0);
-    float emDx = fontPx > 0 ? (float)maxPx / (float)fontPx : 0.f;
-    // MuPDF pads by twice the border width on each side
-    float padPts = 4.f * (float)border;
-    int caret = std::max(DpiScale(3), 2);
-    int dx = (int)((emDx * (float)textSize * kInPlaceWidthSlack + padPts) * scale) + caret;
-    int dy = (int)((((float)nLines * kInPlaceLineHeight * (float)textSize) + padPts) * scale);
-    return {dx, dy};
+static int InPlaceEditorHeight(MainWindow* win, Annotation* annot, RectF pageRect, Rect rc) {
+    float scale = pageRect.dy > 0 ? (float)rc.dy / pageRect.dy : 1.f;
+    Str text = FromGpui(gp::InputValue(gInPlace.edit));
+    int height = (int)ceilf(MeasureInPlaceHeight(annot, text, scale, rc.dx) * scale);
+    int canvasHeight = (int)((float)win->canvasRc.dy / CanvasScale(win));
+    return std::min(std::max(rc.dy, height), std::max(rc.dy, canvasHeight - rc.y));
 }
 
 TempStr FreeTextInPlaceEditStateTemp(MainWindow* win) {
@@ -559,13 +550,9 @@ TempStr FreeTextInPlaceEditStateTemp(MainWindow* win) {
         s = 1.f;
     }
     if (dm && annot) {
-        r = dm->CvtToScreen(PageNo(annot), GetRect(annot));
-        float scale = r.dy > 0 ? ((float)r.dy / GetRect(annot).dy) : 1.f;
-        Size fit = MeasureInPlaceText(annot, str::DupTemp(FromGpui(gp::InputValue(gInPlace.edit))), scale);
-        // the box on screen stays on the annotation so it does not cover the
-        // property row; the reported size is what the text needs
-        r.dx = std::max(r.dx, fit.dx);
-        r.dy = std::max(r.dy, fit.dy);
+        RectF pageRect = GetRect(annot);
+        r = dm->CvtToScreen(PageNo(annot), pageRect);
+        r.dy = InPlaceEditorHeight(win, annot, pageRect, r);
         r.x += (int)((float)win->canvasRc.x / s);
         r.y += (int)((float)win->canvasRc.y / s);
     }
@@ -588,6 +575,7 @@ void EndFreeTextInPlaceEdit(bool accept) {
     gInPlace.tab = nullptr;
     gInPlace.annot = nullptr;
     gInPlace.box = {};
+    gInPlace.layoutHeight = 0;
     gContentsEditJustEnded = true;
     // the annotation is drawn again
     EngineMupdfSetEditedAnnot(tab ? tab->GetEngine() : nullptr, nullptr);
@@ -603,19 +591,17 @@ void EndFreeTextInPlaceEdit(bool accept) {
         DisplayModel* dm = winOk ? win->AsFixed() : nullptr;
         int pageNo = PageNo(annot);
         if (dm && dm->ValidPageNo(pageNo)) {
-            // make room so MuPDF doesn't clip or wrap what was just written:
-            // to the right and down, in page units, so the top-left corner
-            // stays put. The annotation still has the old text.
-            RectF cur = GetRect(annot);
-            Rect curScreen = dm->CvtToScreen(pageNo, cur);
-            float scale = cur.dy > 0 ? ((float)curScreen.dy / cur.dy) : 1.f;
-            Size fitOld = MeasureInPlaceText(annot, Contents(annot), scale);
-            Size fitNew = MeasureInPlaceText(annot, text, scale);
-            Size grow = FreeTextGrowth(curScreen.Size(), fitOld, fitNew);
-            if ((grow.dx > 0 || grow.dy > 0) && scale > 0) {
-                cur.dx += (float)grow.dx / scale;
-                cur.dy += (float)grow.dy / scale;
-                SetRect(annot, cur);
+            RectF rect = GetRect(annot);
+            Rect screen = dm->CvtToScreen(pageNo, rect);
+            float scale = rect.dy > 0 ? (float)screen.dy / rect.dy : 1.f;
+            Str oldText = Contents(annot);
+            if (scale > 0 && !str::Eq(oldText, text)) {
+                float oldHeight = MeasureInPlaceHeight(annot, oldText, scale, screen.dx);
+                float newHeight = MeasureInPlaceHeight(annot, text, scale, screen.dx);
+                if (newHeight > oldHeight && newHeight > rect.dy) {
+                    rect.dy = newHeight;
+                    SetRect(annot, rect);
+                }
             }
         }
         SetContents(annot, text);
@@ -684,6 +670,7 @@ AnnotEditKind ChipColorKind(AnnotEditToolbarBase* tb) {
 // the dialog the pencil opens. cmdId 0 is the annotation preset list, not a
 // toolbar button's (orig's ShowAnnotColorsDialog).
 struct AnnotColorDlgTarget {
+    MainWindow* win = nullptr;
     AnnotEditToolbar* tb = nullptr;
 };
 
@@ -692,7 +679,10 @@ static void AnnotColorDlgPicked(AnnotColorDlgTarget* target, ChangeColorsArgs* a
         str::ReplaceWithCopy(&gSettings->annotations.presetColors, SerializeColorList(args->colors));
         ScheduleSaveSettings();
     }
-    if (args->didSelect && args->color != kColorUnset && target->tb) {
+    // the dialog is not modal: the window or its toolbar may be gone by now
+    MainWindow* win = target->win;
+    bool tbLive = IsMainWindowValidAndNotClosing(win) && win->annotEditToolbar == target->tb;
+    if (args->didSelect && args->color != kColorUnset && tbLive) {
         ChipColorPicked(target->tb, args->color);
     }
     delete target;
@@ -706,6 +696,7 @@ static void OpenAnnotColorsDialog(AnnotEditToolbar* tb) {
         return;
     }
     auto* target = new AnnotColorDlgTarget();
+    target->win = win;
     target->tb = tb;
 
     auto* args = new ChangeColorsArgs();
@@ -926,7 +917,12 @@ static void OnChipClick(AnnotEditToolbar* tb, int chipIdx) {
         case AnnotEditKind::Bold:
         case AnnotEditKind::Italic:
         case AnnotEditKind::Underline:
+        case AnnotEditKind::Strikeout:
             SetFreeTextFont(annot, FreeTextFontFamily(annot), FreeTextFontStyle(annot) ^ StyleBitForKind(kind));
+            AnnotChanged(tab);
+            break;
+        case AnnotEditKind::VAlign:
+            SetFreeTextFont(annot, FreeTextFontFamily(annot), NextVAlignStyle(FreeTextFontStyle(annot)));
             AnnotChanged(tab);
             break;
         case AnnotEditKind::Alignment:
@@ -950,11 +946,15 @@ static void OnChipClick(AnnotEditToolbar* tb, int chipIdx) {
             if (AppShellPickFileAsync(tb->win, Tr("Open"), {}, MkFunc1(OnAttachPicked, tb->win))) {
                 break;
             }
-            TempStr path = AppShellPromptForPathTemp(tb->win, Tr("Open"), {});
-            if (len(path) > 0 && SetEmbeddedFileFromPath(annot, path)) {
-                AnnotChanged(tab);
+            // the prompt's nested loop can close the window or drop the annotation
+            MainWindow* win = tb->win;
+            TempStr path = AppShellPromptForPathTemp(win, Tr("Open"), {});
+            bool ok = len(path) > 0 && IsMainWindowValidAndNotClosing(win);
+            if (ok && LiveToolbarAnnot(win->annotEditToolbar) == annot && SetEmbeddedFileFromPath(annot, path)) {
+                AnnotChanged(win->CurrentTab());
             }
-            break;
+            AppShellInvalidate(win);
+            return;
         }
         case AnnotEditKind::SaveAttachment: {
             if (!HasEmbeddedFile(annot)) {
@@ -1044,6 +1044,26 @@ static void PaintAlignment(gp::PaintCtx* ctx, gp::Bounds r, int quadding, Color 
     }
 }
 
+// the box's top and bottom edges and a text line at the top, middle or bottom
+static void PaintVAlign(gp::PaintCtx* ctx, gp::Bounds r, int valign, Color col) {
+    float pad = (float)DpiScale(6);
+    gp::Bounds inner{r.x + pad, r.y + pad, r.w - 2 * pad, r.h - 2 * pad};
+    if (inner.w < 6 || inner.h < 8) {
+        inner = gp::Bounds{r.x + 2, r.y + 2, r.w - 4, r.h - 4};
+    }
+    float edge = 1;
+    float lineH = (float)std::max(DpiScale(2), 1);
+    gp::Rgba c = ToGpui(col);
+    gp::CanvasFillRect(ctx, inner.x, inner.y, inner.w, edge, c);
+    gp::CanvasFillRect(ctx, inner.x, inner.y + inner.h - edge, inner.w, edge, c);
+    float gap = lineH;
+    float top = inner.y + edge + gap;
+    float bottom = inner.y + inner.h - edge - gap - lineH;
+    float y = valign == 1 ? (top + bottom) / 2 : valign == 2 ? bottom : top;
+    float inset = inner.w / 5;
+    gp::CanvasFillRect(ctx, inner.x + inset, y, inner.w - 2 * inset, lineH, c);
+}
+
 // a point in canvas dips; gpui's Point is a text cursor position
 struct FPt {
     float x = 0;
@@ -1125,125 +1145,56 @@ static void PaintLineEnding(gp::PaintCtx* ctx, gp::Bounds r, int style, bool isS
     }
 }
 
-// a path being turned into an SVG `d` attribute, and the box around it
-struct IconSvgPath {
+// ng: orig has mupdf fill the parsed glyph path into a pixmap
+// (RenderMupdfAnnotIcon). gpui draws an SVG at any size, so the same parse
+// writes an SVG `d` attribute here, and the box around it
+struct IconSvgPath : MupdfIconPathSink {
     str::Builder d;
-    // the current transform (a b c d e f), as a PDF `cm` leaves it
-    float m[6] = {1, 0, 0, 1, 0, 0};
     float x0 = 1e9f;
     float y0 = 1e9f;
     float x1 = -1e9f;
     float y1 = -1e9f;
     PointF cur{};
 
-    PointF Xf(float x, float y) const { return {x * m[0] + y * m[2] + m[4], x * m[1] + y * m[3] + m[5]}; }
     void Grow(PointF p) {
         x0 = std::min(x0, p.x);
         y0 = std::min(y0, p.y);
         x1 = std::max(x1, p.x);
         y1 = std::max(y1, p.y);
     }
-};
-
-// ng: orig parses a pdf_write_icon_appearance glyph stream (m/l/c/re/h/cm/f)
-// into an fz_path and has mupdf fill it into a pixmap (ParseMupdfIconPath,
-// RenderMupdfAnnotIcon). gpui draws an SVG at any size, so the same parse
-// writes an SVG path here
-static void ParseMupdfIconPath(IconSvgPath& out, const char* s) {
-    float stk[32];
-    int top = 0;
-    const char* p = s;
-    for (;;) {
-        SkipPdfPathWs(p);
-        if (*p == 0) {
-            break;
-        }
-        if (*p == '.' || *p == '-' || *p == '+' || (*p >= '0' && *p <= '9')) {
-            char* end = nullptr;
-            float v = strtof(p, &end);
-            if (end == p || top >= dimofi(stk)) {
-                break;
-            }
-            stk[top++] = v;
-            p = end;
-            continue;
-        }
-        if (!IsPdfPathOpChar(*p)) {
-            p++;
-            continue;
-        }
-        const char* op = p;
-        while (IsPdfPathOpChar(*p)) {
-            p++;
-        }
-        int nOp = (int)(p - op);
-        if (nOp == 1 && (op[0] == 'm' || op[0] == 'l') && top >= 2) {
-            float y = PdfPathPop(stk, top);
-            float x = PdfPathPop(stk, top);
-            PointF pt = out.Xf(x, y);
-            out.d.Append(fmt("%c%g %g", op[0] == 'm' ? 'M' : 'L', pt.x, pt.y));
-            out.Grow(pt);
-            out.cur = pt;
-        } else if (nOp == 1 && op[0] == 'c' && top >= 6) {
-            float y3 = PdfPathPop(stk, top);
-            float x3 = PdfPathPop(stk, top);
-            float y2 = PdfPathPop(stk, top);
-            float x2 = PdfPathPop(stk, top);
-            float y1 = PdfPathPop(stk, top);
-            float x1 = PdfPathPop(stk, top);
-            PointF p0 = out.cur;
-            PointF p1 = out.Xf(x1, y1);
-            PointF p2 = out.Xf(x2, y2);
-            PointF p3 = out.Xf(x3, y3);
-            out.d.Append(fmt("C%g %g %g %g %g %g", p1.x, p1.y, p2.x, p2.y, p3.x, p3.y));
-            // the box of the curve itself, not of its control points
-            constexpr int kSteps = 8;
-            for (int i = 1; i <= kSteps; i++) {
-                float t = (float)i / (float)kSteps;
-                float u = 1 - t;
-                float b0 = u * u * u;
-                float b1 = 3 * u * u * t;
-                float b2 = 3 * u * t * t;
-                float b3 = t * t * t;
-                out.Grow(
-                    {b0 * p0.x + b1 * p1.x + b2 * p2.x + b3 * p3.x, b0 * p0.y + b1 * p1.y + b2 * p2.y + b3 * p3.y});
-            }
-            out.cur = p3;
-        } else if (nOp == 2 && op[0] == 'r' && op[1] == 'e' && top >= 4) {
-            float h = PdfPathPop(stk, top);
-            float w = PdfPathPop(stk, top);
-            float y = PdfPathPop(stk, top);
-            float x = PdfPathPop(stk, top);
-            PointF a = out.Xf(x, y);
-            PointF b = out.Xf(x + w, y);
-            PointF c = out.Xf(x + w, y + h);
-            PointF e = out.Xf(x, y + h);
-            out.d.Append(fmt("M%g %g L%g %g L%g %g L%g %gZ", a.x, a.y, b.x, b.y, c.x, c.y, e.x, e.y));
-            out.Grow(a);
-            out.Grow(b);
-            out.Grow(c);
-            out.Grow(e);
-            out.cur = a;
-        } else if (nOp == 1 && op[0] == 'h') {
-            out.d.Append(StrL("Z"));
-        } else if (nOp == 2 && op[0] == 'c' && op[1] == 'm' && top >= 6) {
-            float f = PdfPathPop(stk, top);
-            float e = PdfPathPop(stk, top);
-            float d = PdfPathPop(stk, top);
-            float c = PdfPathPop(stk, top);
-            float b = PdfPathPop(stk, top);
-            float a = PdfPathPop(stk, top);
-            // the new matrix applies first, then the one in force
-            float* m = out.m;
-            float r[6] = {a * m[0] + b * m[2], a * m[1] + b * m[3],        c * m[0] + d * m[2],
-                          c * m[1] + d * m[3], e * m[0] + f * m[2] + m[4], e * m[1] + f * m[3] + m[5]};
-            memcpy(m, r, sizeof(r));
-        } else {
-            // 'f' and unknown ops: drop the operands, keep the path
-            top = 0;
-        }
+    void MoveOrLine(char op, PointF pt) {
+        d.Append(fmt("%c%g %g", op, pt.x, pt.y));
+        Grow(pt);
+        cur = pt;
     }
-}
+    void MoveTo(PointF p) override { MoveOrLine('M', p); }
+    void LineTo(PointF p) override { MoveOrLine('L', p); }
+    void CurveTo(PointF p1, PointF p2, PointF p3) override {
+        PointF p0 = cur;
+        d.Append(fmt("C%g %g %g %g %g %g", p1.x, p1.y, p2.x, p2.y, p3.x, p3.y));
+        // the box of the curve itself, not of its control points
+        constexpr int kSteps = 8;
+        for (int i = 1; i <= kSteps; i++) {
+            float t = (float)i / (float)kSteps;
+            float u = 1 - t;
+            float b0 = u * u * u;
+            float b1 = 3 * u * u * t;
+            float b2 = 3 * u * t * t;
+            float b3 = t * t * t;
+            Grow({b0 * p0.x + b1 * p1.x + b2 * p2.x + b3 * p3.x, b0 * p0.y + b1 * p1.y + b2 * p2.y + b3 * p3.y});
+        }
+        cur = p3;
+    }
+    void AddRect(PointF a, PointF b, PointF c, PointF e) override {
+        d.Append(fmt("M%g %g L%g %g L%g %g L%g %gZ", a.x, a.y, b.x, b.y, c.x, c.y, e.x, e.y));
+        Grow(a);
+        Grow(b);
+        Grow(c);
+        Grow(e);
+        cur = a;
+    }
+    void Close() override { d.Append(StrL("Z")); }
+};
 
 struct IconSvgEntry {
     const char* stream = nullptr;
@@ -1307,6 +1258,9 @@ static void PaintChip(gp::PaintCtx* ctx, gp::El* e, void* user) {
             break;
         case AnnotEditKind::Alignment:
             PaintAlignment(ctx, b, p->number, p->fg);
+            break;
+        case AnnotEditKind::VAlign:
+            PaintVAlign(ctx, b, p->number, p->fg);
             break;
         case AnnotEditKind::LineStart:
         case AnnotEditKind::LineEnd:
@@ -1537,6 +1491,7 @@ static bool ChipIsCustomPainted(AnnotEditKind kind) {
         case AnnotEditKind::InteriorColor:
         case AnnotEditKind::TextColor:
         case AnnotEditKind::Alignment:
+        case AnnotEditKind::VAlign:
         case AnnotEditKind::LineStart:
         case AnnotEditKind::LineEnd:
             return true;
@@ -1583,8 +1538,8 @@ static gp::El* BuildChip(AnnotEditToolbar* tb, gp::Ctx* cx, int idx, int rowDy) 
                        ->PathClick(GpuiDup(cx->a, id))
                        ->OnHover(gp::ListenTo(gAnnotEditView, &AnnotEditView::OnChipHover, (intptr_t)idx))
                        ->OnClick(gp::ListenTo(gAnnotEditView, &AnnotEditView::OnChip, (intptr_t)idx));
-    bool isStyleToggle =
-        item.kind == AnnotEditKind::Bold || item.kind == AnnotEditKind::Italic || item.kind == AnnotEditKind::Underline;
+    bool isStyleToggle = item.kind == AnnotEditKind::Bold || item.kind == AnnotEditKind::Italic ||
+                         item.kind == AnnotEditKind::Underline || item.kind == AnnotEditKind::Strikeout;
     if (isStyleToggle && item.number != 0) {
         chip->Bg(ToGpui(BarActiveBg()));
     }
@@ -1592,7 +1547,8 @@ static gp::El* BuildChip(AnnotEditToolbar* tb, gp::Ctx* cx, int idx, int rowDy) 
         AnnotChipPaint* p = &tb->chipPaint[idx];
         p->kind = item.kind;
         p->color = item.color;
-        p->number = item.kind == AnnotEditKind::Alignment ? item.number : item.lineEnding;
+        bool numbered = item.kind == AnnotEditKind::Alignment || item.kind == AnnotEditKind::VAlign;
+        p->number = numbered ? item.number : item.lineEnding;
         p->lineIsStart = item.lineIsStart;
         p->fg = fg;
         chip->customPaint = &PaintChip;
@@ -1650,7 +1606,9 @@ static gp::El* BuildContentsEditor(AnnotEditToolbar* tb, gp::Ctx* cx, int annotD
                       ->Gap((float)DpiScale(kBtnGap))
                       ->W((float)wantDx)
                       ->CaptureKeyDown(gp::ListenTo(gAnnotEditView, &AnnotEditView::OnContentsKey));
-    col->Child(gpc::Textarea::New(cx, GStrL("annot-contents"), tb->contentsEdit)->Rows(kContentsLines)->IntoEl());
+    col->Child(
+        EditStyle(cx, gpc::Textarea::New(cx, GStrL("annot-contents"), tb->contentsEdit)->Rows(kContentsLines)->IntoEl(),
+                  tb->contentsEdit, EditLook::Frame));
     gp::El* row = gp::Div(cx->a)->FlexRow()->Gap((float)DpiScale(kBtnGap))->JustifyStart()->W(gp::kFill);
     row->Child(ContentsButton(cx, StrL("annot-contents-ok"), Tr("Accept"), StrL("Ctrl + Enter"), true,
                               gp::ListenTo(gAnnotEditView, &AnnotEditView::OnContentsOk)));
@@ -1790,66 +1748,45 @@ static gp::El* BuildPopup(AnnotEditToolbar* tb, gp::Ctx* cx) {
         card->Child(list);
     }
     if (tb->popupKind == AnnotPopupKind::FontList) {
-        // only the rows in view are built, between two spacers that stand in
-        // for the rest
         constexpr int kFontRows = 12;
-        constexpr int kOverscan = 4;
         float rowDy = (float)DpiScale(22);
         int n = len(tb->popupNames);
         float viewDy = rowDy * (float)std::min(n, kFontRows);
         float maxScroll = std::max(0.f, (float)n * rowDy - viewDy);
-        tb->fontScrollY = std::max(0.f, std::min(tb->fontScrollY, maxScroll));
-        int first = std::max((int)(tb->fontScrollY / rowDy) - kOverscan, 0);
-        int last = std::min(first + kFontRows + 1 + 2 * kOverscan, n);
-        gp::El* rows = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->PadR((float)DpiScale(10));
-        if (first > 0) {
-            rows->Child(gp::Div(cx->a)->W(gp::kFill)->H((float)first * rowDy)->Shrink0());
-        }
-        for (int i = first; i < last; i++) {
-            TempStr id = fmt("annot-font-%d", i);
+        tb->fontScrollY = std::min(std::max(tb->fontScrollY, 0.f), maxScroll);
+        auto rowFn = [](void* user, gp::Ctx* cx, int i) -> gp::El* {
+            auto* bar = (AnnotEditToolbar*)user;
+            float dy = (float)DpiScale(22);
             gp::El* row = gp::Div(cx->a)
                               ->FlexRow()
                               ->ItemsCenter()
                               ->W(gp::kFill)
-                              ->H(rowDy)
+                              ->H(dy)
                               ->Shrink0()
                               ->PadX(6)
                               ->Radius(4)
                               ->HoverBg(ToGpui(BarHoverBg()))
                               ->Cursor(gp::CursorKind::Pointer)
-                              ->PathClick(GpuiDup(cx->a, id))
+                              ->PathClick(GpuiDup(cx->a, fmt("annot-font-%d", i)))
                               ->OnClick(gp::ListenTo(gAnnotEditView, &AnnotEditView::OnFontItem, (intptr_t)i));
-            if (i == tb->popupCurrent) {
+            if (i == bar->popupCurrent) {
                 row->Bg(ToGpui(BarActiveBg()));
             }
-            row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, tb->popupNames[i]))
+            row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, bar->popupNames[i]))
                            ->Font(13)
-                           ->Fg(ToGpui(fg))
+                           ->Fg(ToGpui(BarTextColor()))
                            ->Flex1()
                            ->MinW(0)
                            ->Truncate());
-            rows->Child(row);
-        }
-        if (last < n) {
-            rows->Child(gp::Div(cx->a)->W(gp::kFill)->H((float)(n - last) * rowDy)->Shrink0());
-        }
-        card->Child(gp::Div(cx->a)
-                        ->Id(GStrL("annot-font-list"))
-                        ->FlexCol()
-                        ->W(gp::kFill)
+            return gp::Div(cx->a)->W(gp::kFill)->H(dy)->Shrink0()->PadR((float)DpiScale(10))->Child(row);
+        };
+        card->Child(VirtualRows(cx, GStrL("annot-font-list"), n, rowDy, viewDy, tb->fontScrollY, rowFn, tb)
                         ->MinW((float)DpiScale(240))
-                        ->H(viewDy)
                         ->Shrink0()
-                        ->ScrollY(tb->fontScrollY)
-                        ->ScrollFromPath()
-                        ->OnScroll(gp::ListenTo(gAnnotEditView, &AnnotEditView::OnFontScroll))
-                        ->Child(rows));
+                        ->OnScroll(gp::ListenTo(gAnnotEditView, &AnnotEditView::OnFontScroll)));
     }
     return card;
 }
-
-// MuPDF pads free text by twice the border width (pdf_write_free_text_appearance)
-constexpr float kFreeTextPadPerBorder = 2.f;
 
 gp::El* FreeTextInPlaceEditBuild(MainWindow* win, gp::Ctx* cx) {
     if (!IsEditingFreeTextInPlace(win)) {
@@ -1883,7 +1820,9 @@ gp::El* FreeTextInPlaceEditBuild(MainWindow* win, gp::Ctx* cx) {
         textSize = 12;
     }
     float fontPx = std::max(6.f, roundf((float)textSize * scale)) * k;
-    float pad = kFreeTextPadPerBorder * (float)std::max(BorderWidth(annot), 0) * scale * k;
+    float pad = FreeTextPadding(BorderWidth(annot)) * scale * k;
+    gInPlace.layoutHeight = InPlaceEditorHeight(win, annot, pageRect, rc);
+    float height = (float)gInPlace.layoutHeight * k;
     // the annotation's text color on its background, or on the page under the
     // box (the annotation is left out of rendering while edited), as orig's
     // FreeTextInPlaceEditCtlColor (#6534)
@@ -1914,8 +1853,8 @@ gp::El* FreeTextInPlaceEditBuild(MainWindow* win, gp::Ctx* cx) {
                       ->Left((float)rc.x * k)
                       ->Top((float)rc.y * k)
                       ->W((float)rc.dx * k)
-                      ->H((float)rc.dy * k)
-                      ->MaxH((float)rc.dy * k)
+                      ->H(height)
+                      ->MaxH(height)
                       ->ClipY()
                       ->Pad(pad)
                       ->Bg(bg)
@@ -1941,6 +1880,9 @@ gp::El* AnnotEditToolbarBuild(MainWindow* win, gp::Ctx* cx) {
     Rect bounds;
     if (!annot || len(tb->items) == 0 || !GetAnnotScreenBounds(win, annot, bounds)) {
         return nullptr;
+    }
+    if (IsEditingFreeTextInPlace(win) && gInPlace.annot == annot) {
+        bounds.dy = std::max(bounds.dy, gInPlace.layoutHeight);
     }
     if (!gAnnotEditView.IsValid()) {
         gAnnotEditView = gp::EntityNewState<AnnotEditView>(cx->app);
@@ -2078,9 +2020,6 @@ TempStr AnnotColorPopupStateTemp(MainWindow* win) {
 
 // --- selection and the annotation lists -------------------------------------
 
-// Drop non-owning Annotation* held by UI (selection, drag, hover, form edit).
-// Call before DeleteAnnotation frees the wrapper, or when the engine is about
-// to die and raw Annotation* must not be used again.
 // drops the click anchor of an annotation that is going away
 void DetachAnnotationFromEditors(Annotation* annot) {
     if (annot == gClickAnchorAnnot) {
@@ -2155,8 +2094,6 @@ bool AnnotResizeRerenderPending(MainWindow* win) {
 }
 
 // --- the hover card of the annotation under the cursor (Edit PDF) -----------
-
-// clang-format on
 
 // ng: orig's card is a layered popup window (a VirtHost); here it is an
 // element the canvas draws, so this keeps what the card shows and where
@@ -2282,23 +2219,9 @@ TempStr AnnotationHoverOverlayStateTemp(MainWindow* win) {
     if (!(k > 0.f)) {
         k = 1.f;
     }
-    int ox = 0;
-    int oy = 0;
-#if OS_WIN
-    POINT origin{0, 0};
-    if (HWND hwnd = MainWindowHwnd(win)) {
-        ClientToScreen(hwnd, &origin);
-    }
-    ox = origin.x;
-    oy = origin.y;
-#else
-    Rect content = win->gpuiWin ? FromGpui(gp::WindowContentBounds(win->gpuiWin)) : Rect{};
-    if (content.IsEmpty()) {
-        content = AppShellWindowScreenRect(win);
-    }
-    ox = content.x;
-    oy = content.y;
-#endif
+    Point origin = AppShellContentOrigin(win);
+    int ox = origin.x;
+    int oy = origin.y;
     // measured is window dips. screen= is frame pixels, and tests add the
     // content origin on top of that.
     gp::Bounds b = overlay->measured;

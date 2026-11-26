@@ -2,6 +2,7 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
+#include "base/Dict.h"
 #include "base/LzmaSimpleArchive.h"
 #include "EmbeddedResources.h"
 
@@ -22,6 +23,8 @@ static Str gCurrLangCode;
 static int gCurrLangIdx = 0;
 // for each translation: english string followed by a translation
 static StrVec* gTranslationCache = nullptr;
+// english string => its index in gTranslationCache
+static dict::StrToInt* gTranslationIdx = nullptr;
 
 static TempStr UnescapeTemp(Str sOrig) {
     TempStr s = str::DupTemp(sOrig);
@@ -83,6 +86,8 @@ static TempStr UnescapeTemp(Str sOrig) {
 static void FreeTranslations() {
     delete gTranslationCache;
     gTranslationCache = nullptr;
+    delete gTranslationIdx;
+    gTranslationIdx = nullptr;
 }
 
 static void ParseTranslationsTxt(Str d, Str langCode) {
@@ -99,8 +104,9 @@ static void ParseTranslationsTxt(Str d, Str langCode) {
     int nLines = len(lines);
     logf("ParseTranslationsTxt: %d lines, nStrings: %d\n", nLines, nStrings);
 
-    delete gTranslationCache;
+    FreeTranslations();
     gTranslationCache = new StrVec();
+    gTranslationIdx = new dict::StrToInt(nStrings * 2);
     auto* c = gTranslationCache;
     int nUntranslated = 0;
 
@@ -126,6 +132,8 @@ static void ParseTranslationsTxt(Str d, Str langCode) {
             nUntranslated++;
         }
         TempStr unescaped = UnescapeTemp(orig);
+        // keeps the first of duplicates, like the linear scan did
+        gTranslationIdx->Insert(unescaped, len(*c));
         c->Append(unescaped);
         if (len(trans) == 0) {
             c->Append({});
@@ -151,30 +159,41 @@ Str GetTranslation(Str s) {
         // translations failed to load (e.g. corrupted resource data)
         return s;
     }
-    int n = len(*c);
-    ReportDebugIf(n % 2 != 0);
-    n = n / 2;
-    int sLen = len(s);
-    for (int i = 0; i < n; i++) {
-        int idx = i * 2;
-        Str s2 = c->At(idx);
-        if (s2.len == sLen && str::Eq(s, s2)) {
-            Str tr = c->At(idx + 1);
-            if (len(tr) == 0) {
-                logf("Didn't find translation for '%s'\n", s);
-                return s;
-            }
-            // special case of "Change Language"
-            // if we accidentally change language, we want be able to
-            // change it back so add ("Change Language") to translation
-            if (str::ContainsI(s, StrL("Change Language")) && !str::ContainsI(tr, StrL("Change Language"))) {
-                tr = str::JoinTemp(tr, StrL(" (Change Language)"));
-            }
-            return tr;
-        }
+    ReportDebugIf(len(*c) % 2 != 0);
+    int idx = -1;
+    if (!gTranslationIdx || !gTranslationIdx->Get(s, &idx)) {
+        ReportDebugIf(true);
+        return s;
     }
-    ReportDebugIf(true);
-    return s;
+    Str tr = c->At(idx + 1);
+    if (len(tr) == 0) {
+        logf("Didn't find translation for '%s'\n", s);
+        return s;
+    }
+    // special case of "Change Language"
+    // if we accidentally change language, we want be able to
+    // change it back so add ("Change Language") to translation
+    if (str::ContainsI(s, StrL("Change Language")) && !str::ContainsI(tr, StrL("Change Language"))) {
+        // "Sprache wechseln..." => "Sprache wechseln (Change Language)..."
+        // Cache in stable storage (not TempStr) so callers can hold the Str.
+        static Str gChangeLangSrc[2];
+        static Str gChangeLangDst[2];
+        Str dots = StrL("...");
+        int slot = str::EndsWith(tr, dots) ? 1 : 0;
+        if (!str::Eq(gChangeLangSrc[slot], tr)) {
+            TempStr full;
+            if (slot == 1) {
+                Str base = Str(tr.s, len(tr) - len(dots));
+                full = str::JoinTemp(base, StrL(" (Change Language)"), dots);
+            } else {
+                full = str::JoinTemp(tr, StrL(" (Change Language)"));
+            }
+            str::ReplaceWithCopy(&gChangeLangSrc[slot], tr);
+            str::ReplaceWithCopy(&gChangeLangDst[slot], full);
+        }
+        tr = gChangeLangDst[slot];
+    }
+    return tr;
 }
 
 Str GetCurrentLangCode() {
@@ -185,7 +204,7 @@ Str GetCurrentLangCode() {
 // GetTranslation() doesn't try to use a gTranslationCache that was never built
 static void FallbackToEnglish() {
     gCurrLangIdx = 0;
-    gCurrLangCode = GetLangCodeByIdxTemp(0);
+    gCurrLangCode = GetLangCodeByIdx(0);
 }
 
 void SetCurrentLangByCode(Str langCode) {
@@ -201,7 +220,7 @@ void SetCurrentLangByCode(Str langCode) {
     }
     ReportDebugIf(-1 == idx);
     gCurrLangIdx = idx;
-    gCurrLangCode = GetLangCodeByIdxTemp(idx);
+    gCurrLangCode = GetLangCodeByIdx(idx);
     if (idx == 0 && !gIsDebugBuild) {
         // perf: in release builds we skip parsing translations for english
         // in debug we want to execute this code to catch errors
@@ -237,7 +256,7 @@ void SetCurrentLangByCode(Str langCode) {
         FallbackToEnglish();
         return;
     }
-    ParseTranslationsTxt(d, langCode);
+    ParseTranslationsTxt(d, gCurrLangCode);
     free(data);
 }
 
@@ -247,7 +266,7 @@ Str ValidateLangCode(Str langCode) {
     if (idx < 0) {
         return {};
     }
-    return GetLangCodeByIdxTemp(idx);
+    return GetLangCodeByIdx(idx);
 }
 
 bool IsCurrLangRtl() {
@@ -283,7 +302,7 @@ Str LangCodeFromLocale(Str locale) {
     while (len(tag) > 0) {
         int idx = FindLangIdxByTag(tag);
         if (idx >= 0) {
-            return GetLangCodeByIdxTemp(idx);
+            return GetLangCodeByIdx(idx);
         }
         int dash = str::LastIndexOfChar(tag, '-');
         if (dash <= 0) {
@@ -322,7 +341,7 @@ Str DetectUserLang() {
     // try the exact match
     for (int i = 0; i < GetLangsCount(); i++) {
         if (langId == GetLangIdByIdx(i)) {
-            return GetLangCodeByIdxTemp(i);
+            return GetLangCodeByIdx(i);
         }
     }
 
@@ -331,7 +350,7 @@ Str DetectUserLang() {
     LANGID userLangIdNeutral = MAKELANGID(PRIMARYLANGID(langId), SUBLANG_NEUTRAL);
     for (int i = 0; i < GetLangsCount(); i++) {
         if (userLangIdNeutral == GetLangIdByIdx(i)) {
-            return GetLangCodeByIdxTemp(i);
+            return GetLangCodeByIdx(i);
         }
     }
 
@@ -396,6 +415,34 @@ bool Translations_UnitTestUnescape() {
         }
     }
     return true;
+}
+
+bool Translations_UnitTestLookup() {
+    using namespace trans;
+    StrVec* savedCache = gTranslationCache;
+    dict::StrToInt* savedIdx = gTranslationIdx;
+    int savedLangIdx = gCurrLangIdx;
+    gTranslationCache = nullptr;
+    gTranslationIdx = nullptr;
+
+    Str d = StrL(
+        "header\nheader\n:Open\nde:Offnen\n:Close\nfr:Fermer\n:Change Language\nde:Sprache\n:Change "
+        "Language...\nde:Sprache...\n:Open\nde:Dup\n");
+    ParseTranslationsTxt(d, StrL("de"));
+    gCurrLangIdx = FindLangIdx(StrL("de"));
+
+    bool ok = str::Eq(GetTranslation(StrL("Open")), StrL("Offnen"));
+    ok = ok && str::Eq(GetTranslation(StrL("Close")), StrL("Close"));
+    ok = ok && str::Eq(GetTranslation(StrL("Change Language")), StrL("Sprache (Change Language)"));
+    ok = ok && str::Eq(GetTranslation(StrL("Change Language...")), StrL("Sprache (Change Language)..."));
+    // a substring of a key must not match
+    ok = ok && str::Eq(GetTranslation(Str("Openx", 4)), StrL("Offnen"));
+
+    FreeTranslations();
+    gTranslationCache = savedCache;
+    gTranslationIdx = savedIdx;
+    gCurrLangIdx = savedLangIdx;
+    return ok;
 }
 #endif
 

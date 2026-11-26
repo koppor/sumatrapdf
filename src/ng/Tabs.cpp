@@ -47,11 +47,13 @@
 #include "gui/TabsUI.h"
 #include "gui/DocCanvas.h"
 #include "AnnotPlacement.h"
+#include "AnnotEditToolbar.h"
 #include "MeasurementToolbar.h"
 #include "LinkFollow.h"
 #include "SelectTextKeyboard.h"
 
 #include "SessionState.h"
+#include "SessionStateCommon.h"
 #include "AIChatCommon.h"
 #include "AIChatPanel.h"
 #include "HomePage.h"
@@ -164,6 +166,12 @@ void LoadModelIntoTab(WindowTab* tab) {
         StopKeyboardLinkFollowing(win);
         StopSelectTextWithKeyboard(win);
         CancelAnnotationPlacement(win);
+        // as orig's CloseDocumentInCurrentTab: keep typed contents, and don't
+        // let a signature placed in the outgoing document land in this one
+        if (IsEditingAnnotContents(win)) {
+            EndAnnotContentsEdit(true);
+        }
+        CloseSignDocumentDialog(win);
         if (win->mouseAction != MouseAction::None || win->annotationBeingDragged || win->annotationBeingResized) {
             CanvasCancelDrag(win);
         }
@@ -495,27 +503,6 @@ void TabsSetOrder(MainWindow* win, const Vec<WindowTab*>& order) {
 
 void TabsStripGroupsChanged(MainWindow* win) {
     TabsUIOnTabsChanged(win);
-    win->RedrawAll();
-}
-
-// orig's UpdateAfterDrag: `from` is pulled out of the strip and re-inserted so
-// it ends up in front of what used to be at `to`
-void TabsMoveTab(MainWindow* win, int from, int to) {
-    int nTabs = win->TabCount();
-    bool badState = (from == to) || (from < 0) || (to < 0) || (from >= nTabs) || (to > nTabs);
-    if (badState) {
-        return;
-    }
-    WindowTab* moved = win->tabs[from];
-    VecRemoveAt(win->tabs, from);
-    if (from < to) {
-        // we moved from left to right e.g. from 1 to 3
-        // after removing 1 we insert not at 3 but 2
-        to -= 1;
-    }
-    VecInsertAt(win->tabs, to, moved);
-    TabsUIOnTabsChanged(win);
-    TabsSelect(win, to);
     win->RedrawAll();
 }
 

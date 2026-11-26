@@ -5,6 +5,7 @@
 #include "base/Dict.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
+#include "base/JsonParser.h"
 #include "base/UITask.h"
 #include "gui/UIModels.h"
 #include "gui/BrowserView.h"
@@ -14,6 +15,7 @@
 #include "DocController.h"
 #include "DocProperties.h"
 #include "EngineBase.h"
+#include "EngineAll.h"
 #include "AppSettings.h"
 
 #include "SumatraPDF.h"
@@ -23,8 +25,8 @@
 #include "PagePosition.h"
 #include "MarkdownModel.h"
 
-constexpr const char* kMdVirtualHost = "https://sumatrapdf.markdown/";
-constexpr int kMdVirtualHostLen = sizeof("https://sumatrapdf.markdown/") - 1;
+constexpr const char* kMdVirtualHost = SUMATRA_MARKDOWN_HOST;
+constexpr int kMdVirtualHostLen = LenL(SUMATRA_MARKDOWN_HOST);
 
 // The url without its ?query / #fragment. Unlike url::GetFullPathTemp() this
 // does not percent-decode: a virtual url stays encoded end to end, so a file
@@ -215,6 +217,7 @@ MarkdownModel::~MarkdownModel() {
     DestroyOwnedTocTree(tocTree);
     ArenaDelete(poolAlloc);
     str::Free(fileName);
+    str::Free(baseDir);
 }
 
 Str MarkdownModel::GetFilePath() const {
@@ -511,6 +514,16 @@ void MarkdownModel::OnDocumentComplete(Str url) {
         return;
     }
     TempStr plainUrl = NormalizeMarkdownUrlTemp(url);
+    if (isHtml && docView && IsMarkdownVirtualHostUrl(plainUrl)) {
+        TempStr css = BrowserTypographyCssTemp(GetWebDocStyle(FileType::HTML));
+        if (css) {
+            BrowserViewEval(
+                docView, fmt("(() => { const style = document.querySelector('style[data-sumatra-font]')"
+                             " || document.createElement('style'); style.dataset.sumatraFont = '';"
+                             " style.textContent = \"%s\"; if (!style.isConnected) document.head.append(style); })()",
+                             json::EscapeStrTemp(css)));
+        }
+    }
     TempStr filePath = VirtualUrlToFileTemp(plainUrl);
     MaybeCaptureThumbnail(filePath);
     int pageNo = pages.Find(filePath) + 1;
@@ -541,7 +554,7 @@ static bool IsPageScriptUrl(Str url, Str name) {
 // scripts the page MarkdownToHtmlPage makes loads: pele for ```mermaid
 // fences, microlighter and code-run.js for code blocks
 static Str PageScriptData(Str url) {
-    Str embedded[] = {StrL("pele.min.js"), StrL("microlighter.min.js")};
+    Str embedded[] = {StrL(SUMATRA_MARKDOWN_PELE), StrL(SUMATRA_MARKDOWN_HIGHLIGHT)};
     for (Str name : embedded) {
         if (!IsPageScriptUrl(url, name)) {
             continue;
@@ -552,10 +565,10 @@ static Str PageScriptData(Str url) {
         free(js);
         return res;
     }
-    if (IsPageScriptUrl(url, StrL("mermaid-run.js"))) {
+    if (IsPageScriptUrl(url, StrL(SUMATRA_MARKDOWN_MERMAID))) {
         return str::Dup(MermaidRunJs());
     }
-    if (IsPageScriptUrl(url, StrL("code-run.js"))) {
+    if (IsPageScriptUrl(url, StrL(SUMATRA_MARKDOWN_CODE))) {
         return str::Dup(CodeRunJs());
     }
     return {};

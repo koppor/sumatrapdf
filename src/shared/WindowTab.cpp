@@ -36,6 +36,8 @@
 #include "WindowTab.h"
 
 WindowTab::WindowTab(MainWindow* win) {
+    static u64 nextLifetimeId = 0;
+    lifetimeId = ++nextLifetimeId;
     this->win = win;
 }
 
@@ -62,11 +64,10 @@ void WindowTab::SetFilePath(Str path) {
     if (changed) {
         DeleteOpenCacheCopyOf(this, filePath);
         temporaryFileNotified = false;
-    }
-    if (changed) {
         str::FreePtr(&pendingFindText);
     }
     str::ReplaceWithCopy(&filePath, path);
+    tooltipFileSize = kTabFileSizeUnknown;
 }
 
 void WindowTab::SetDisplayName(Str name) {

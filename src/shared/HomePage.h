@@ -37,7 +37,10 @@ void HomePageFocusSearch(MainWindow* win);
 void HomePageOnVScroll(MainWindow* win, ScrollMsg msg, int nTrackPos);
 void HomePageMoveSelection(MainWindow* win, int dCol, int dRow);
 Str HomePageSelectedFilePathTemp(MainWindow* win);
+void HomePageMenuPaths(MainWindow* win, Str target, StrVec& paths);
+bool HomePageClearSelection(MainWindow* win);
 void HomePageSelectFirst(MainWindow* win);
+void HomePageLocateFile(MainWindow* win, Str path);
 bool HomePageOnKeyDown(MainWindow* win, int vk, bool ctrl);
 // orig's WM_CONTEXTMENU from the keyboard: the selected entry's menu
 void HomePageContextMenuFromKey(MainWindow* win, gpui::Ctx* cx);
@@ -61,6 +64,7 @@ bool HomePageOnCanvasMessage(MainWindow* win, UINT msg, WPARAM wp, LPARAM lp, LR
 void HomePageOnWindowActivate(MainWindow* win, bool active);
 bool HomePageOnHover(MainWindow* win, int x, int y);
 Str HomePageFilePathAtTemp(MainWindow* win, int x, int y);
+void HomePageOpenFile(MainWindow* win, Str path);
 void HomePageClearActiveEntry(MainWindow* win);
 #endif
 TempStr HomeListRowsResultTemp(int* exitCodeOut);

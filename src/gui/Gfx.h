@@ -119,7 +119,6 @@ struct GfxHdc : Gfx {
     HDC hdc = nullptr;
     Vec<int> savedDCs; // one per PushClip()
 
-    GfxHdc() = default;
     explicit GfxHdc(HDC);
     ~GfxHdc() override = default;
 
@@ -153,9 +152,7 @@ struct GfxGdiplus : Gfx {
     Color textColor = 0;
     Vec<u32> savedStates; // one per PushClip()
 
-    GfxGdiplus() = default;
     explicit GfxGdiplus(HDC);
-    explicit GfxGdiplus(Gdiplus::Graphics*);
     ~GfxGdiplus() override;
 
     void FillRect(const Rect&, Color) override;
@@ -193,12 +190,12 @@ struct GfxDirect2D : Gfx {
     bool ownsTarget = true;                // false when borrowed from the DC-target pool
     ID2D1SolidColorBrush* brush = nullptr; // owned, re-colored per draw
     ID2D1StrokeStyle* dottedStroke = nullptr;
+    ID2D1StrokeStyle* dashedStroke = nullptr;
     bool drawing = false; // between BeginDraw() and EndDraw()
     // d2d has no "current text color", so kColorUnset resolves to this
     Color textColor = 0;
     Vec<u8> clipDepth; // one per PushClip()
 
-    GfxDirect2D() = default;
     explicit GfxDirect2D(HDC);
     ~GfxDirect2D() override;
 
@@ -232,9 +229,6 @@ Size GdiplusMeasureText(PlatformFont*, Str);
 
 void GfxThinLine(Gfx*, const Rect&, Color, int thickness);
 void AddRoundedRectPath(Gdiplus::GraphicsPath&, const Rect&, int d);
-
-// flip to draw with Direct2D instead of gdiplus, for comparing the two
-extern bool gUseDirect2D;
 
 // Persistent 32-bit DIB for GfxCreateWithDoubleBuffer. A new memory DC every
 // paint makes d3d11 throw a first-chance C++ EH on BindDC.

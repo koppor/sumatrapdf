@@ -138,6 +138,16 @@ bool IsSavePathDialogVisible() {
     return gSave.visible;
 }
 
+static void FreeSaveArgs(SavePathArgs* args) {
+    str::Free(args->title);
+    str::Free(args->initialPath);
+    str::Free(args->defExt);
+    str::Free(args->filter);
+    str::Free(args->nativeFile);
+    str::Free(args->nativeDir);
+    delete args;
+}
+
 static void FinishSavePathDialog(Str path) {
     SavePathArgs* args = gSave.args;
     gSave.args = nullptr;
@@ -160,17 +170,11 @@ static void FinishSavePathDialog(Str path) {
         args->onDone.Call(args);
 #if OS_WASM
         // a file in MEMFS is not a file the user has; hand it to the browser
-        if (len(path) > 0) {
+        if (len(path) > 0 && !args->pickOnly) {
             WasmDownloadFile(path);
         }
 #endif
-        str::Free(args->title);
-        str::Free(args->initialPath);
-        str::Free(args->defExt);
-        str::Free(args->filter);
-        str::Free(args->nativeFile);
-        str::Free(args->nativeDir);
-        delete args;
+        FreeSaveArgs(args);
     }
 }
 
@@ -195,6 +199,24 @@ void SetTestSavePath(Str path) {
     str::ReplaceWithCopy(&gTestSavePath, path);
 }
 
+#if !OS_WIN
+// orig's live in base/Win.cpp, which this build does not link. A line each.
+static Str gTestOpenFileNames;
+
+void SetTestOpenFileNames(Str paths) {
+    str::ReplaceWithCopy(&gTestOpenFileNames, paths);
+}
+
+bool TakeTestOpenFileNames(StrVec& out) {
+    if (len(gTestOpenFileNames) == 0) {
+        return false;
+    }
+    Split(&out, gTestOpenFileNames, StrL("\n"), true);
+    SetTestOpenFileNames({});
+    return len(out) > 0;
+}
+#endif
+
 void ShowSavePathDialog(SavePathArgs* args) {
     if (!args) {
         return;
@@ -205,7 +227,7 @@ void ShowSavePathDialog(SavePathArgs* args) {
     MainWindow* win = args->win;
     if (!win || !win->gpuiWin) {
         args->onDone.Call(args);
-        delete args;
+        FreeSaveArgs(args);
         return;
     }
 #if OS_WIN
@@ -275,7 +297,9 @@ static void TryAccept() {
         }
         return;
     }
-    if (file::Exists(path) && !gSave.confirmingOverwrite) {
+    // confirm again when the name changed after the question
+    bool confirmed = gSave.confirmingOverwrite && str::Eq(path, gSave.pendingPath);
+    if (file::Exists(path) && !confirmed) {
         gSave.confirmingOverwrite = true;
         str::ReplaceWithCopy(&gSave.pendingPath, path);
         AppShellInvalidate(gSave.args ? gSave.args->win : nullptr);
@@ -409,8 +433,10 @@ gp::El* SavePathDialogBuild(MainWindow* win, gp::Ctx* cx) {
     if (!OS_WASM) {
         AddDirBrowser(cx, th, body);
     }
-    body->Child(
-        gpc::Input::New(cx, GStrL("save-name"), gSave.nameEdit)->WithSize(gp::UiSize::Small)->W(gp::kFill)->IntoEl());
+    body->Child(EditStyle(
+        cx,
+        gpc::Input::New(cx, GStrL("save-name"), gSave.nameEdit)->WithSize(gp::UiSize::Small)->W(gp::kFill)->IntoEl(),
+        gSave.nameEdit, EditLook::Frame));
     if (gSave.confirmingOverwrite) {
         TempStr msg = fmt(Tr("File %s already exists. Overwrite?").s, path::GetBaseNameTemp(gSave.pendingPath));
         body->Child(gp::TextEl(cx->a, GpuiDup(cx->a, msg))->Font(13)->Fg(th.danger)->Wrap());

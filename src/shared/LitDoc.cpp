@@ -25,12 +25,18 @@ extern "C" {
 // d3des, in ext/msdes
 #include <d3des.h>
 
-// the LZX decompressor inside ext/chmdec/chm.c
+// the LZX decompressor inside ext/chmdec/chm.c; must match its definitions
+// (extern "C": a mismatch links and corrupts the arguments). A null ctx uses malloc.
+struct chm_ctx;
 struct LZXstate;
-struct LZXstate* LZXinit(int window);
-void LZXteardown(struct LZXstate* pState);
+struct LZXstate* LZXinit(struct chm_ctx* ctx, int window);
+void LZXteardown(struct chm_ctx* ctx, struct LZXstate* pState);
 int LZXreset(struct LZXstate* pState);
 int LZXdecompress(struct LZXstate* pState, u8* inpos, u8* outpos, int inlen, int outlen);
+}
+
+static void FreeLzx(struct LZXstate* lzx) {
+    LZXteardown(nullptr, lzx);
 }
 
 #include "LitDoc.h"
@@ -558,8 +564,8 @@ Str LitFile::GetFile(Str name) {
     return Str(sec.s + e->offset, e->size);
 }
 
-static bool LitParseSectionNames(LitFile* lit) {
-    Str raw = lit->GetFile(StrL("::DataSpace/NameList"));
+// names are UTF-16LE: [u16 ?][u16 count] then per name [u16 nChars][chars][u16 0]
+static bool LitDecodeSectionNames(Str raw, StrVec& names) {
     if (len(raw) < 4) {
         return false;
     }
@@ -577,11 +583,16 @@ static bool LitParseSectionNames(LitFile* lit) {
         if (((i64)nChars * 2) + 2 > (i64)len(raw) - pos) {
             return false;
         }
-        WStr ws((const WCHAR*)(raw.s + pos), nChars);
-        lit->sectionNames.Append(ToUtf8Temp(ws));
+        Str utf16(raw.s + pos, nChars * 2);
+        names.Append(strconv::Utf16ToUtf8Temp(utf16, strconv::ByteOrder::LittleEndian));
         pos += (nChars * 2) + 2;
     }
     return true;
+}
+
+static bool LitParseSectionNames(LitFile* lit) {
+    Str raw = lit->GetFile(StrL("::DataSpace/NameList"));
+    return LitDecodeSectionNames(raw, lit->sectionNames);
 }
 
 static void LitDesDecrypt(u8* dst, const u8* src, int n, const u8 key[8]) {
@@ -663,12 +674,12 @@ static Str LitLzxDecompress(Str content, Str control, Str resetTable) {
     if (windowSize < 15 || windowSize > 21) {
         return {};
     }
-    struct LZXstate* lzx = LZXinit(windowSize);
+    struct LZXstate* lzx = LZXinit(nullptr, windowSize);
     if (!lzx) {
         return {};
     }
 
-    AutoCall teardown(LZXteardown, lzx);
+    AutoCall teardown(FreeLzx, lzx);
 
     u32 ofsEntry32 = LitU32(resetTable, 12);
     if (ofsEntry32 > (u32)len(resetTable) - 8) {
@@ -680,15 +691,18 @@ static Str LitLzxDecompress(Str content, Str control, Str resetTable) {
     }
     int interval = (int)LitU32(resetTable, 32);
     int bytesRemaining = (int)LitU32(resetTable, 16);
-    if (interval <= 0) {
+    // Decode reset-table intervals, resetting LZX only at window boundaries.
+    // interval comes from the file: bound it before allocating
+    int windowBytes = 1 << windowSize;
+    if (interval <= 0 || interval > windowBytes) {
         return {};
     }
-
-    // Decode reset-table intervals, resetting LZX only at window boundaries.
-    int windowBytes = 1 << windowSize;
-    int intervalsPerWindow = (windowBytes >= interval) ? (windowBytes / interval) : 1;
+    int intervalsPerWindow = windowBytes / interval;
     str::Builder out;
     AutoFree<u8> obuf(AllocArray<u8>(interval));
+    if (!obuf) {
+        return {};
+    }
     int base = 0;
     int idx = 0;
     // Without a table entry, only one final interval may remain.
@@ -1641,11 +1655,11 @@ bool LitDoc_UnitTestLzxOverrun() {
     f2.Put(kCodeB, 2);
     f2.Flush();
 
-    struct LZXstate* lzx = LZXinit(kWindowBits);
+    struct LZXstate* lzx = LZXinit(nullptr, kWindowBits);
     if (!lzx) {
         return false;
     }
-    AutoCall teardown(LZXteardown, lzx);
+    AutoCall teardown(FreeLzx, lzx);
 
     char out[6];
     if (LZXdecompress(lzx, f1.d, (u8*)out, f1.off, 4) != kLzxOk || !MemEq(out, "abbb", 4)) {
@@ -1691,6 +1705,18 @@ bool LitDoc_UnitTestOpfStrayClose() {
     bool ok = str::EndsWith(opf, StrL("</dc-metadata></metadata><manifest></manifest></package>"));
     str::Free(opf);
     return ok;
+}
+
+// WCHAR is 4 bytes off Windows, so names must not be read through WCHAR*
+bool LitDoc_UnitTestSectionNames() {
+    // "Uncompressed", "ąb"
+    const u8 raw[] = {0,   0, 2,   0, 12,  0, 'U', 0, 'n', 0, 'c', 0, 'o', 0, 'm',  0,    'p', 0, 'r', 0,
+                      'e', 0, 's', 0, 's', 0, 'e', 0, 'd', 0, 0,   0, 2,   0, 0x05, 0x01, 'b', 0, 0,   0};
+    StrVec names;
+    if (!LitDecodeSectionNames(Str((const char*)raw, (int)sizeof(raw)), names) || len(names) != 2) {
+        return false;
+    }
+    return str::Eq(names.At(0), StrL("Uncompressed")) && str::Eq(names.At(1), StrL("\xc4\x85\x62"));
 }
 
 bool LitDoc_UnitTestZipName() {

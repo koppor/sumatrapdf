@@ -48,7 +48,6 @@
 // set tooltip for this item but only if the text isn't fully shown
 // TODO: I might have lost something in translation
 static void TocCustomizeTooltip(TreeView::GetTooltipEvent* ev) {
-    auto* treeView = ev->treeView;
     auto ti = ev->treeItem;
     auto* nm = ev->info;
     TocItem* tocItem = (TocItem*)ti;
@@ -78,18 +77,6 @@ static void TocCustomizeTooltip(TreeView::GetTooltipEvent* ev) {
     ReportIf(!isOk);
 
     str::Builder infotip;
-
-    // Display the item's full label, if it's overlong
-    Rect rcLine, rcLabel;
-    treeView->GetItemRect(ev->treeItem, false, rcLine);
-    treeView->GetItemRect(ev->treeItem, true, rcLabel);
-
-    // TODO: this causes a duplicate. Not sure what changed
-    if (false && rcLine.x + rcLine.dx + 2 < rcLabel.x + rcLabel.dx) {
-        Str currInfoTip = treeView->treeModel->Text(ti);
-        infotip.Append(currInfoTip);
-        infotip.Append(StrL("\r\n"));
-    }
 
     if (kindDestinationLaunchEmbedded == k || kindDestinationAttachment == k) {
         TempStr tmp = fmt(Tr("Attachment: %s").s, path);
@@ -566,12 +553,12 @@ static void TocContextMenu(ContextMenuEvent* ev) {
         TempStr delText;
         if (win->ctrl->HasChapters()) {
             Location loc = win->ctrl->LocationFromPageNo(pageNo);
-            addText = fmt(Tr("Add chapter %d page %d to favorites").s, loc.chapter, loc.page);
-            delText = fmt(Tr("Remove chapter %d page %d from favorites").s, loc.chapter, loc.page);
+            addText = fmt(Tr("Add Chapter %d Page %d to Favorites").s, loc.chapter, loc.page);
+            delText = fmt(Tr("Remove Chapter %d Page %d from Favorites").s, loc.chapter, loc.page);
         } else {
-            TempStr pageLabel = win->ctrl->GetPageLabeTemp(pageNo);
-            addText = fmt(Tr("Add page %s to favorites").s, pageLabel);
-            delText = fmt(Tr("Remove page %s from favorites").s, pageLabel);
+            TempStr pageLabel = win->ctrl->GetPageLabelTemp(pageNo);
+            addText = fmt(Tr("Add Page %s to Favorites").s, pageLabel);
+            delText = fmt(Tr("Remove Page %s from Favorites").s, pageLabel);
         }
 
         if (isBookmarked) {
@@ -806,7 +793,7 @@ static int TocPageReserveDx(MainWindow* win, TocItem* tocItem, Gfx& gfx, Platfor
     if (!gSettings->showTocPageNumbers || !win || !win->ctrl || tocItem->pageNo <= 0) {
         return 0;
     }
-    TempStr label = win->ctrl->GetPageLabeTemp(tocItem->pageNo);
+    TempStr label = win->ctrl->GetPageLabelTemp(tocItem->pageNo);
     if (len(label) == 0) {
         return 0;
     }
@@ -885,7 +872,7 @@ static void DrawTocItemPostPaint(TreeView::CustomDrawEvent* ev, MainWindow* win)
     bool showPage = gSettings->showTocPageNumbers && win && win->ctrl && tocItem->pageNo > 0;
     TempStr pageLabel{};
     if (showPage) {
-        pageLabel = win->ctrl->GetPageLabeTemp(tocItem->pageNo);
+        pageLabel = win->ctrl->GetPageLabelTemp(tocItem->pageNo);
         if (len(pageLabel) == 0) {
             showPage = false;
         }
@@ -1046,12 +1033,6 @@ void OnTocCustomDraw(TreeView::CustomDrawEvent* ev) {
     }
 }
 
-// disabled because of https://github.com/sumatrapdfreader/sumatrapdf/issues/2202
-// it was added for https://github.com/sumatrapdfreader/sumatrapdf/issues/1716
-// but unclear if its still needed
-// this calls GoToTocLinkTask) which will eventually call GoToPage()
-// which adds nav point. Maybe I should not add nav point
-// if going to the same page?
 // set when a mouse click changed the tree selection (handled by
 // TocTreeSelectionChanged), so the NM_CLICK that follows doesn't navigate again
 static bool gTocSelChangedByMouseClick = false;

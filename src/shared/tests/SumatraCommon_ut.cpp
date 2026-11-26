@@ -5,6 +5,8 @@
 #include "base/CmdLineArgs.h"
 #include "base/File.h"
 #include "base/Http.h"
+#include "base/SettingsUtil.h"
+#include "base/Timer.h"
 
 #include "gui/UIModels.h"
 
@@ -25,6 +27,16 @@
 #include "FileThumbnails.h"
 #include "HexViewCommon.h"
 #include "SumatraPDFWebCommon.h"
+#include "base/HtmlTags.h"
+#include "GumboHtmlParser.h"
+#include "gui/PlatformFont.h"
+#include "gui/PlatformText.h"
+#include "HtmlFormatter.h"
+#if OS_WIN
+#include "base/ScopedWin.h"
+#include "SumatraDialogs.h"
+#include "Print.h"
+#endif
 
 struct OpenDdeArgs {
     bool parsed = false;
@@ -73,6 +85,33 @@ void RestrictedUseConfigTest() {
         utassert(roundTrip.items[i].enabled == cfg.items[i].enabled);
     }
     utassert(str::Eq(roundTrip.linkProtocols, StrL("https")));
+    int crashIdx = RestrictedUseFeatureCount() - 1;
+    utassert(str::Eq(RestrictedUseFeatureName(crashIdx), StrL("CrashReports")));
+    utassert(!roundTrip.items[crashIdx].enabled);
+    LoadRestrictedUseConfig(cfg, StrL("[Policies]\nInternetAccess = 1\nCrashReports = 1\n"), RestrictedUseFile::Exists);
+    utassert(cfg.items[0].enabled && cfg.items[crashIdx].enabled);
+}
+
+void CrashReportSettingsTest() {
+    Settings* settings =
+        NewSettings(StrL("OnlineApiKey = test-web-key\nDefaultPasswords = test-password\n"
+                         "SessionData [\n  [\n    TabStates [\n      [\n"
+                         "        FilePath = C:/test/session.pdf\n      ]\n    ]\n  ]\n]\n"));
+    Str all = SerializeSettings(settings, {}, SerializeOpt::All);
+    Str report = SerializeSettings(settings, {}, SerializeOpt::NoSecrets);
+    utassert(str::Contains(all, StrL("test-web-key")));
+    utassert(str::Contains(all, StrL("test-password")));
+    utassert(!str::Contains(report, StrL("test-web-key")));
+    utassert(!str::Contains(report, StrL("test-password")));
+    utassert(str::Contains(report, StrL("session.pdf")));
+    utassert(!settings->disableCrashReports);
+    utassert(settings->checkForUpdates);
+    auto* disabled = NewSettings(StrL("DisableCrashReports = true\nCheckForUpdates = true\n"));
+    utassert(disabled->disableCrashReports && disabled->checkForUpdates);
+    DeleteSettings(disabled);
+    str::Free(all);
+    str::Free(report);
+    DeleteSettings(settings);
 }
 
 void BenchRangeTest() {
@@ -188,6 +227,11 @@ void UpdateCheckDecisionTest() {
     // ng: yy.mm.dd[.n]
     utassert(ShouldOfferProgramUpdate(StrL("26.11.20.1"), StrL("26.11.20"), false));
     utassert(ShouldOfferProgramUpdate(StrL("26.12.01"), StrL("26.11.20.3"), false));
+
+    // a server-supplied url shown in a task dialog must not add a link
+    TempStr shown = NoLinkMarkupTemp(StrL("x <a href=\"https://evil\">y</a>"));
+    utassert(str::Eq(shown, StrL("x _a href=\"https://evil\"_y_/a_")));
+    utassert(str::Eq(NoLinkMarkupTemp(StrL("https://a/b")), StrL("https://a/b")));
     utassert(!ShouldOfferProgramUpdate(StrL("26.11.20"), StrL("26.11.20.1"), false));
     utassert(IsValidProgramVersion(StrL("26.11.20.1")));
 
@@ -208,14 +252,13 @@ void UpdateCheckDecisionTest() {
 }
 
 void ControlFrameActionTest() {
-    utassert(ControlFrameActionFor((u16)ControlFrameCmd::WaitRenderIdle) == ControlFrameAction::WaitRenderIdle);
-    utassert(ControlFrameActionFor((u16)ControlFrameCmd::WaitSessionRestored) ==
-             ControlFrameAction::WaitSessionRestored);
-    utassert(ControlFrameActionFor((u16)ControlFrameCmd::Quit) == ControlFrameAction::RunOnUi);
-    utassert(ControlFrameActionFor((u16)ControlFrameCmd::CrashMe) == ControlFrameAction::RunOnUi);
+    utassert(ControlFrameActionFor((u16)ControlCmd::WaitRenderIdle) == ControlFrameAction::WaitRenderIdle);
+    utassert(ControlFrameActionFor((u16)ControlCmd::WaitSessionRestored) == ControlFrameAction::WaitSessionRestored);
+    utassert(ControlFrameActionFor((u16)ControlCmd::Quit) == ControlFrameAction::RunOnUi);
+    utassert(ControlFrameActionFor((u16)ControlCmd::CrashMe) == ControlFrameAction::RunOnUi);
     utassert(ControlFrameActionFor(1) == ControlFrameAction::RunOnUi);
-    utassert(ControlCmdEndsListener((u16)ControlFrameCmd::Quit));
-    utassert(!ControlCmdEndsListener((u16)ControlFrameCmd::CrashMe));
+    utassert(ControlCmdEndsListener((u16)ControlCmd::Quit));
+    utassert(!ControlCmdEndsListener((u16)ControlCmd::CrashMe));
     utassert(!ControlCmdEndsListener(11));
 }
 
@@ -384,6 +427,16 @@ void DocPropertiesTest() {
     utassert(str::Eq(PropNameTemp(DocProp::FocalLength35mm), StrL("focalLength35mm")));
     utassert(str::Eq(PropNameTemp(DocProp::ImagePath), StrL("imagePath")));
     utassert(str::Eq(PropNameTemp(DocProp::CreationDate), StrL("creationDate")));
+}
+
+void JsMenuTest() {
+    // \xNN is a code point, UTF-8 encoded like \u00NN
+    StrVec items;
+    Vec<int> levels;
+    utassert(ParseJsPopUpMenuItems(StrL("app.popUpMenu('caf\\xe9', 'a\\u00e9');"), items, levels));
+    utassert(len(items) == 2);
+    utassert(str::Eq(items[0], StrL("caf\xc3\xa9")));
+    utassert(str::Eq(items[1], StrL("a\xc3\xa9")));
 }
 
 void ParseFileArgsTest() {
@@ -569,6 +622,14 @@ void PngSizeTest() {
 }
 
 void HexViewTest() {
+    {
+        // the range ends at the last byte shown
+        HexView hex;
+        hex.size = 0x1000;
+        hex.top = 0x100;
+        TempStr want = fmt("%s - %s of", HexOffsetTemp(0x100, hex.size), HexOffsetTemp(0x1FF, hex.size));
+        utassert(str::StartsWith(HexPositionTemp(&hex, 0x100), want));
+    }
     u64 v = 0;
     utassert(HexParseOffset(StrL("31"), &v) && v == 31);
     utassert(HexParseOffset(StrL("0x1F"), &v) && v == 31);
@@ -664,6 +725,97 @@ void SumatraPDFWebTest() {
 
     utassert(!ParseOnlineFiles(StrL("{\"files\":[{\"name\":"), files));
     utassert(len(files) == 0);
+
+    utassert(!ParseOnlineFiles(StrL("{\"files\":[{\"name\":\"a.pdf\",\"size\":1.5}]}"), files));
+    utassert(!ParseOnlineFiles(StrL("{\"files\":[{\"name\":\"a.pdf\",\"size\":-1}]}"), files));
+    utassert(!ParseOnlineFiles(StrL("{\"files\":[{\"name\":\"a.pdf\",\"size\":9223372036854775808}]}"), files));
+    utassert(len(files) == 0);
+}
+
+struct TestStreamSink : HttpStreamSink {
+    HttpStreamCancel* cancel = nullptr;
+    str::Builder data;
+    int status = 0;
+    void OnStatus(int s) override { status = s; }
+    bool OnData(Str bytes) override {
+        data.Append(bytes);
+        return true;
+    }
+    bool IsCanceled() override { return cancel->IsCanceled(); }
+};
+
+struct SlowStreamRun {
+    HttpStreamCancel cancel;
+    TestStreamSink sink;
+    Str url;
+    bool ok = true;
+};
+
+static void RunSlowStream(SlowStreamRun* run) {
+    run->ok = HttpPostStream(run->url, Str(), StrL("{}"), &run->sink, &run->cancel);
+}
+
+static void CountProgress(int* calls, HttpProgress* p) {
+    *calls += 1;
+    utassert(p->nDownloaded > 0);
+}
+
+// HttpGet / HttpGetToFile: any url (no origin check), redirects followed
+static void HttpGetTest(Str base) {
+#if OS_WIN
+    HttpRsp rsp;
+    utassert(HttpGet(fmt("%s/public-redirect", base), &rsp));
+    utassert(rsp.httpStatusCode == 200 && len(rsp.data) == 100000);
+    HttpRsp missing;
+    utassert(!HttpGet(fmt("%s/nope", base), &missing));
+    utassert(missing.httpStatusCode != 200);
+
+    TempStr dest = GetTempFilePathTemp(StrL("sumatra-get-"));
+    int calls = 0;
+    auto cb = MkFunc1(CountProgress, &calls);
+    utassert(HttpGetToFile(fmt("%s/public-redirect", base), dest, cb));
+    utassert(file::GetSize(dest) == 100000);
+    utassert(calls > 0);
+    // over maxSize: fails and leaves no file
+    file::Delete(dest);
+    utassert(!HttpGetToFile(fmt("%s/public", base), dest, cb, 1000));
+    utassert(file::GetSize(dest) < 0);
+    utassert(!HttpGetToFile(fmt("%s/nope", base), dest, cb));
+    utassert(file::GetSize(dest) < 0);
+#else
+    (void)base;
+#endif
+}
+
+// HttpPostStream: a whole streamed reply, and a cancel that ends a stalled one
+static void HttpStreamTest(Str base) {
+    {
+        HttpStreamCancel cancel;
+        TestStreamSink sink;
+        sink.cancel = &cancel;
+        utassert(HttpPostStream(fmt("%s/stream", base), Str(), StrL("{}"), &sink, &cancel));
+        utassert(sink.status == 200);
+        utassert(str::Eq(ToStr(sink.data), StrL("abc")));
+    }
+
+    auto* run = new SlowStreamRun();
+    run->sink.cancel = &run->cancel;
+    run->url = fmt("%s/slowstream", base);
+    ThreadHandle th = StartThread(MkFunc0(RunSlowStream, run), StrL("SlowStreamTest"));
+    // let the first piece arrive, then cancel the read that waits for more
+    for (int i = 0; i < 100 && len(run->sink.data) == 0; i++) {
+        SleepInMs(20);
+    }
+    utassert(len(run->sink.data) == 1);
+    TimeStamp start = TimeGet();
+    run->cancel.Cancel();
+    bool joined = JoinThread(&th, 5000);
+    utassert(joined);
+    utassert(TimeSinceInMs(start) < 3000);
+    utassert(!run->ok);
+    if (joined) {
+        delete run;
+    }
 }
 
 // Run by tests/ad-hoc-http-transfer.ts, which serves 127.0.0.1:9332 and sets
@@ -693,6 +845,17 @@ void HttpTransferTest() {
     utassert(HttpGetWithHeaders(fmt("%s/api/files", kBase), kAuth, &list));
     utassert(list.httpStatusCode == 200 && list.error == 0);
     utassert(str::IndexOf(ToStr(list.data), StrL("\"files\"")) >= 0);
+
+    // a body cut short after the status line is a failure
+    HttpRsp cut;
+    utassert(!HttpGetWithHeaders(fmt("%s/truncated", kBase), kAuth, &cut));
+    utassert(cut.error != 0);
+    HttpRsp cutPost;
+    utassert(!HttpPostUrlNoRedirect(fmt("%s/truncated", kBase), kBlob, kAuth, Str(), &cutPost));
+    utassert(cutPost.error != 0);
+    HttpRsp cutPost2;
+    utassert(!HttpPostUrl(fmt("%s/truncated", kBase), kBlob, kAuth, Str(), &cutPost2));
+    utassert(cutPost2.error != 0);
 
     HttpRsp redir;
     utassert(!HttpGetWithHeaders(fmt("%s/redirect", kBase), kAuth, &redir));
@@ -742,4 +905,92 @@ void HttpTransferTest() {
     utassert(file::GetSize(part) < 0);
 
     file::Delete(dest);
+    HttpStreamTest(kBase);
+    HttpGetTest(kBase);
 }
+
+// a 2x2 RGBA PNG
+static const u8 kTinyPng[] = {
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x06, 0x00, 0x00, 0x00, 0x72, 0xb6, 0x0d, 0x24, 0x00, 0x00, 0x00, 0x12, 0x49,
+    0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x84, 0x19, 0xa0, 0xf4, 0x7f, 0x00, 0x43, 0xce,
+    0x07, 0xf9, 0xfa, 0x81, 0x4a, 0xfd, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+};
+
+// an ebook page render draws its images from the cache, decoding each once
+void HtmlImageCacheTest() {
+#if OS_WIN
+    // the cache keeps GDI+ bitmaps; test_util doesn't start GDI+ otherwise
+    ScopedGdiPlus gdiPlus;
+#endif
+    HtmlImageCache* cache = NewHtmlImageCache();
+    Str png((char*)kTinyPng, (int)sizeof(kTinyPng));
+    utassert(HtmlImageCacheHas(cache, png));
+    utassert(HtmlImageCacheHas(cache, png));
+    utassert(HtmlImageCacheDecodes(cache) == 1);
+
+    // what doesn't decode isn't tried again either
+    Str junk = StrL("not an image");
+    utassert(!HtmlImageCacheHas(cache, junk));
+    utassert(!HtmlImageCacheHas(cache, junk));
+    utassert(HtmlImageCacheDecodes(cache) == 2);
+    DeleteHtmlImageCache(cache);
+}
+
+// a page narrower than one character still lays out every character (used to hang)
+void HtmlFormatterNarrowPageTest() {
+#if OS_WIN
+    ScopedGdiPlus gdiPlus;
+#endif
+    Arena* arena = ArenaNew();
+    HtmlFormatterArgs args;
+    args.pageDx = 2;
+    args.pageDy = 1000;
+    args.SetFontName(WStrL(L"Georgia"));
+    args.fontSize = 12;
+    args.textAllocator = arena;
+    args.htmlStr = StrL("<p>Hello</p>");
+
+    HtmlFormatter formatter(&args);
+    Vec<HtmlPage*>* pages = formatter.FormatAllPages();
+    str::Builder text;
+    for (HtmlPage* page : *pages) {
+        for (DrawInstr& di : page->instructions) {
+            if (di.type == DrawInstrType::String) {
+                text.Append(di.str);
+            }
+        }
+    }
+    utassert(str::Eq(ToStr(text), StrL("Hello")));
+    DeleteVecMembers(*pages);
+    delete pages;
+    ArenaDelete(arena);
+}
+
+// the classic dialog, -print-to and the Windows 11 dialog all start from
+// PrinterDefaults (the Windows 11 one used to ignore PrintDpi)
+// orig only: ng's test_util doesn't link Print.cpp
+#if OS_WIN && !defined(SUMATRA_NG)
+void PrintAdvancedDefaultsTest() {
+    Settings* prevSettings = gSettings;
+    if (!gSettings) {
+        gSettings = NewSettings({});
+    }
+    float prevDpi = gSettings->printerDefaults.printDpi;
+    bool prevAutoRotate = gSettings->printerDefaults.autoRotate;
+    gSettings->printerDefaults.printDpi = 300;
+    gSettings->printerDefaults.autoRotate = false;
+
+    Print_Advanced_Data advanced;
+    SetPrintAdvancedDefaults(&advanced);
+    utassert(advanced.dpiOverride == 300);
+    utassert(!advanced.autoRotate);
+
+    gSettings->printerDefaults.printDpi = prevDpi;
+    gSettings->printerDefaults.autoRotate = prevAutoRotate;
+    if (!prevSettings) {
+        DeleteSettings(gSettings);
+        gSettings = nullptr;
+    }
+}
+#endif

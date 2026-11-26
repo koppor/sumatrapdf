@@ -12,18 +12,18 @@ extern bool gBlockExternalLaunch;
 // how many were blocked, for a test to check
 extern int gExternalLaunchesBlocked;
 bool ExternalLaunchBlocked(Str what);
+void SetExternalLaunchAllowDir(Str dir);
+void OpenFilesInDefaultManager(Str folder, const StrVec& files);
 
 #if !OS_WIN
-// runs `path` with `params` as its command line. A path that isn't an
-// executable is handed to the desktop (xdg-open on Linux, open on mac).
+// hands `path` to the desktop (xdg-open on Linux, open on mac); params are ignored
 bool LaunchFileShell(Str path, Str params = {}, Str verb = {}, bool hidden = false);
+#if !OS_WASM
 bool LaunchFileShellArgs(const StrVec& args);
+void ProgramArgs(Str exe, Str argsTemplate, const Func1<Str*>& expand, StrVec& args);
+#endif
+bool LaunchProgram(Str exe, Str cmdLine);
 bool LaunchBrowser(Str url);
 // shows the file's directory in the desktop file manager
 void OpenPathInDefaultFileManager(Str path);
 #endif
-
-// a program we start and later ask whether it is done (-regen-thumbnails).
-// StartChildProcess returns nullptr where there are no processes (wasm)
-struct ChildProcess;
-ChildProcess* StartChildProcess(Str cmdLine);

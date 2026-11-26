@@ -135,6 +135,10 @@ void ShowOpenFromUrlDialog(MainWindow* win) {
     if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
+    // one up for another window would be left behind, empty and modal to it
+    if (gUrlDlg.visible && gUrlDlg.win != win) {
+        CloseOpenFromUrlDialog();
+    }
     if (!gUrlDlg.visible) {
         gUrlDlg.editUrl = NewInput(win, {});
         if (!OS_WASM) {
@@ -144,6 +148,7 @@ void ShowOpenFromUrlDialog(MainWindow* win) {
     }
     gUrlDlg.win = win;
     gUrlDlg.visible = true;
+    DialogsTrackFrameDialog(IsOpenFromUrlDialogVisible, [] { return gUrlDlg.win; }, CloseOpenFromUrlDialog);
     DlgWindowSpec spec;
     spec.name = "openfromurl";
     spec.title = OpenFromUrlDlgTitle;

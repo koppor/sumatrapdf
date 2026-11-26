@@ -12,11 +12,6 @@
 //   handler fills in (e.g. VirtCtrl::onGetTooltip), and there is no didHandle.
 
 LRESULT TryReflectMessages(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
-enum WindowBorderStyle {
-    kWindowBorderNone,
-    kWindowBorderClient,
-    kWindowBorderStatic
-};
 
 struct WindowBase;
 struct ControlBase;
@@ -66,10 +61,12 @@ struct CreateCustomArgs {
     int cmdId = 0; // command sent on click
     bool visible = true;
     PlatformFont* font = nullptr;
-    HICON icon = nullptr;
+    HICON icon = nullptr; // nullptr: top-level windows get the default icon
     Color bgColor = kColorUnset;
     bool isRtl = false;
 };
+
+void SetDefaultWindowIcon(HICON);
 
 struct WmEvent {
     HWND hwnd = nullptr;
@@ -137,12 +134,11 @@ struct HwndBase {
     void Destroy();
     void Subclass();
     void UnSubclass();
-    HWND Detach();
 
     void SetText(Str);
     TempStr GetTextTemp();
     void SetPos(Rect* r);
-    void SetColors(Color textColor, Color bgColor);
+    virtual void SetColors(Color textColor, Color bgColor);
     HBRUSH BackgroundBrush();
     HBRUSH BackgroundBrush(Color);
 
@@ -182,9 +178,6 @@ struct WindowBase : HwndBase {
     };
     struct DestroyEvent {
         WmEvent* e = nullptr;
-    };
-    struct AttachEvent {
-        WindowBase* w = nullptr;
     };
     struct FocusEvent {
         WindowBase* w = nullptr;
@@ -234,11 +227,6 @@ struct WindowBase : HwndBase {
         LPARAM lparam = 0;
         bool didHandle = false;
     };
-    struct CreateEvent {
-        WindowBase* w = nullptr;
-        CREATESTRUCT* cs = nullptr;
-        int result = 0;
-    };
     struct DropFilesEvent {
         WindowBase* w = nullptr;
         HDROP dropInfo = nullptr;
@@ -246,14 +234,6 @@ struct WindowBase : HwndBase {
     struct GetMinMaxInfoEvent {
         WindowBase* w = nullptr;
         MINMAXINFO* mmi = nullptr;
-    };
-    struct MouseEvent {
-        WindowBase* w = nullptr;
-        UINT msg = 0;
-        WPARAM wparam = 0;
-        LPARAM lparam = 0;
-        LRESULT result = 0;
-        bool didHandle = false;
     };
     struct MoveEvent {
         WindowBase* w = nullptr;
@@ -269,11 +249,6 @@ struct WindowBase : HwndBase {
         UINT msg = 0;
         UINT type = 0;
         Size size;
-    };
-    struct TaskbarCallbackEvent {
-        WindowBase* w = nullptr;
-        UINT msg = 0;
-        LPARAM lparam = 0;
     };
     struct TimerEvent {
         WindowBase* w = nullptr;
@@ -306,7 +281,6 @@ struct WindowBase : HwndBase {
 
     using CloseHandler = Func1<CloseEvent*>;
     using DestroyHandler = Func1<DestroyEvent*>;
-    using AttachHandler = Func1<AttachEvent*>;
     using FocusHandler = Func1<FocusEvent*>;
     using ActivateHandler = Func1<ActivateEvent*>;
     using DpiChangedHandler = Func1<DpiChangedEvent*>;
@@ -314,14 +288,11 @@ struct WindowBase : HwndBase {
     using NcHitTestHandler = Func1<NcHitTestEvent*>;
     using ShowWindowHandler = Func1<ShowWindowEvent*>;
     using CommandHandler = Func1<CommandEvent*>;
-    using CreateHandler = Func1<CreateEvent*>;
     using DropFilesHandler = Func1<DropFilesEvent*>;
     using GetMinMaxInfoHandler = Func1<GetMinMaxInfoEvent*>;
-    using MouseHandler = Func1<MouseEvent*>;
     using MoveHandler = Func1<MoveEvent*>;
     using PaintHandler = Func1<PaintEvent*>;
     using SizeHandler = Func1<SizeEvent*>;
-    using TaskbarCallbackHandler = Func1<TaskbarCallbackEvent*>;
     using TimerHandler = Func1<TimerEvent*>;
     using WindowPosChangingHandler = Func1<WindowPosChangingEvent*>;
     using WndProcHandler = Func1<WndProcEvent*>;
@@ -356,8 +327,6 @@ struct WindowBase : HwndBase {
 
     void SetVisibility(Visibility);
     Visibility GetVisibility();
-
-    void Attach(HWND hwnd);
 
     // PreTranslateMessage: onPreTranslate, then key-down -> onKeyDown, then
     // closeOnEsc / closeOnCtrlW, then Enter (focused or default button), then
@@ -411,7 +380,6 @@ struct WindowBase : HwndBase {
     // runs right before a ScheduleDelete()-ed window is deleted, so the owner
     // can clear the pointer it keeps to this window
     Func0 onBeforeDelete;
-    AttachHandler onAttach;
     FocusHandler onFocus;
     ActivateHandler onActivate;
     DpiChangedHandler onDpiChanged;
@@ -419,14 +387,11 @@ struct WindowBase : HwndBase {
     NcHitTestHandler onNcHitTest;
     ShowWindowHandler onShowWindow;
     CommandHandler onCommand;
-    CreateHandler onCreate;
     DropFilesHandler onDropFiles;
     GetMinMaxInfoHandler onGetMinMaxInfo;
-    MouseHandler onMouseEvent;
     MoveHandler onMove;
     PaintHandler onPaint;
     SizeHandler onSize;
-    TaskbarCallbackHandler onTaskbarCallback;
     TimerHandler onTimer;
     WindowPosChangingHandler onWindowPosChanging;
     WndProcHandler onWndProc;
@@ -468,9 +433,6 @@ struct ControlBase : ILayout, HwndBase {
     struct DestroyEvent {
         WmEvent* e = nullptr;
     };
-    struct AttachEvent {
-        ControlBase* w = nullptr;
-    };
     struct FocusEvent {
         ControlBase* w = nullptr;
     };
@@ -478,19 +440,6 @@ struct ControlBase : ILayout, HwndBase {
         ControlBase* w = nullptr;
         WPARAM wparam = 0;
         LPARAM lparam = 0;
-        bool didHandle = false;
-    };
-    struct CreateEvent {
-        ControlBase* w = nullptr;
-        CREATESTRUCT* cs = nullptr;
-        int result = 0;
-    };
-    struct MouseEvent {
-        ControlBase* w = nullptr;
-        UINT msg = 0;
-        WPARAM wparam = 0;
-        LPARAM lparam = 0;
-        LRESULT result = 0;
         bool didHandle = false;
     };
     struct PaintEvent {
@@ -538,11 +487,8 @@ struct ControlBase : ILayout, HwndBase {
     };
 
     using DestroyHandler = Func1<DestroyEvent*>;
-    using AttachHandler = Func1<AttachEvent*>;
     using FocusHandler = Func1<FocusEvent*>;
     using CommandHandler = Func1<CommandEvent*>;
-    using CreateHandler = Func1<CreateEvent*>;
-    using MouseHandler = Func1<MouseEvent*>;
     using PaintHandler = Func1<PaintEvent*>;
     using SizeHandler = Func1<SizeEvent*>;
     using TimerHandler = Func1<TimerEvent*>;
@@ -571,8 +517,6 @@ struct ControlBase : ILayout, HwndBase {
     void SetBounds(Rect) override;
     ControlBase* AsControl() override;
 
-    void Attach(HWND hwnd);
-
     // for reflection from parents (WindowBase / ControlBase WndProcDefault)
     bool DispatchCommand(WPARAM wparam, LPARAM lparam);
     LRESULT DispatchMessageReflect(UINT msg, WPARAM wparam, LPARAM lparam);
@@ -598,11 +542,8 @@ struct ControlBase : ILayout, HwndBase {
     // default true: native subclassed controls keep system erase
     bool shouldEraseBackground = true;
 
-    AttachHandler onAttach;
     FocusHandler onFocus;
     CommandHandler onCommand;
-    CreateHandler onCreate;
-    MouseHandler onMouseEvent;
     PaintHandler onPaint;
     SizeHandler onSize;
     TimerHandler onTimer;
@@ -678,7 +619,6 @@ struct Tooltip : ControlBase {
     TempStr GetTextTemp(int id = 0);
 
     void SetDelayTime(int type, int timeInMs);
-    void SetMaxWidth(int dx);
 
     // window this tooltip is associated with
     HWND parent = nullptr;
@@ -865,8 +805,6 @@ struct Progress : ControlBase {
 
     void SetMax(int);
     void SetCurrent(int);
-    int GetMax();
-    int GetCurrent();
 
     Size GetIdealSize() override;
 };
@@ -931,47 +869,6 @@ struct DropDown : ControlBase {
     void SetItemsKeepText(StrVec& newItems);
     void SetItemsSeqStrings(SeqStrings items);
     void SetCursorId(LPWSTR);
-};
-
-//--- Trackbar
-
-struct Trackbar;
-
-struct Trackbar : ControlBase {
-    struct CreateArgs {
-        HWND parent = nullptr;
-        bool isHorizontal = true;
-        int rangeMin = 1;
-        int rangeMax = 5;
-        PlatformFont* font = nullptr;
-        bool isRtl = false;
-    };
-
-    struct PositionChangingEvent {
-        Trackbar* trackbar = nullptr;
-        int pos = -1;
-        NMTRBTHUMBPOSCHANGING* info = nullptr;
-    };
-
-    using PositionChangingHandler = Func1<PositionChangingEvent*>;
-
-    Size idealSize;
-
-    // for WM_NOTIFY with TRBN_THUMBPOSCHANGING
-    PositionChangingHandler onPositionChanging;
-
-    Trackbar();
-    ~Trackbar() override = default;
-
-    HWND Create(const CreateArgs&);
-
-    void OnMessageReflect(ControlBase::MessageReflectEvent* ev);
-
-    Size GetIdealSize() override;
-    void SetRange(int min, int max);
-
-    void SetValue(int);
-    int GetValue();
 };
 
 //--- TreeView
@@ -1053,7 +950,7 @@ struct TreeView : ControlBase {
 
     HWND Create(const CreateArgs&);
 
-    void SetColors(Color col, Color bgCol);
+    void SetColors(Color col, Color bgCol) override;
 
     void WndProc(ControlBase::WndProcEvent* ev);
     void OnNotifyReflect(ControlBase::NotifyReflectEvent* ev);
@@ -1075,8 +972,6 @@ struct TreeView : ControlBase {
     TreeItem GetItemAt(int x, int y);
     TreeItem GetTreeItemByHandle(HTREEITEM item);
     void SetTreeModel(TreeModel* tm);
-    void SetState(TreeItem item, bool enable);
-    bool GetState(TreeItem item);
     void SetWrapText(bool wrap);
     void RemeasureItems();
     int ItemLines(TreeItem ti, int depth);
@@ -1124,7 +1019,6 @@ void DeleteWnd(T** wnd) {
     *wnd = nullptr;
 }
 
-int RunMessageLoop(HACCEL accelTable, HWND hwndDialog);
 void RunModalWindow(HWND hwndDialog, HWND hwndParent);
 
 HWND GetCurrentModelessDialog();

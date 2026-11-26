@@ -19,9 +19,8 @@ void GetAddressInfo(str::Builder& s, DWORD64 addr, bool /*compact*/) {
     s.Append(fmt("%p\n", p));
 }
 
-void WriteMiniDump(WStr /*crashDumpFilePath*/, MINIDUMP_EXCEPTION_INFORMATION* /*mei*/, bool /*fullDump*/) {}
-
-void GetThreadCallstack(str::Builder& /*s*/, ThreadId /*threadId*/) {}
+void WriteMiniDump(WStr /*crashDumpFilePath*/, MINIDUMP_EXCEPTION_INFORMATION* /*mei*/, bool /*fullDump*/,
+                   Str /*comment*/) {}
 
 int GetSuspendedThreadCallstackAddrs(ThreadHandle /*hThread*/, u64* /*addrs*/, int /*maxAddrs*/) {
     return 0;

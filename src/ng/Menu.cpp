@@ -9,6 +9,8 @@
 
 #include "base/Base.h"
 #include "base/File.h"
+#include "base/Launch.h"
+#include "base/Pixmap.h"
 
 #include "gui/UIModels.h"
 
@@ -51,85 +53,21 @@
 #include "MenuCommon.h"
 #include "MenuDefs.h"
 #include "HomePage.h"
+#include "HomePageCommon.h"
 #include "ServerFiles.h"
 
 #include "SumatraLog.h"
 
 // clang-format off
-//[ ACCESSKEY_GROUP Context Menu (Selection)
-static MenuDef menuDefSelection[] = {
-    {
-        TrN("&Copy To Clipboard"),
-        CmdCopySelection,
-    },
-    {
-        TrN("Copy As &Image To Clipboard"),
-        CmdCopySelectionAsImage,
-    },
-    {
-        TrN("&Save As Image..."),
-        CmdSaveSelectionAsImage,
-    },
-    {
-        TrN("&Print Selection..."),
-        CmdPrintSelection,
-    },
-    {
-        TrN("Visual Search With Google &Lens"),
-        CmdSearchGoogleLens,
-    },
-    {
-        TrN("&Zoom To Selection"),
-        CmdZoomToSelection,
-    },
-    {
-        TrN("&Trim Pages To Selection"),
-        CmdTrimPagesToSelection,
-    },
-    {
-        TrN("Count &Words"),
-        CmdCountWords,
-    },
-    {
-        TrN("Show Selected Te&xt"),
-        CmdShowSelectedText,
-    },
-    {
-        StrL(kMenuSeparator),
-        kMenuSeparatorID,
-    },
-    {
-        TrN("&Translate with"),
-        (UINT_PTR)menuDefTranslateWith,
-    },
-    {
-        TrN("S&earch with"),
-        (UINT_PTR)menuDefSearchWith,
-    },
-    {
-        TrN("Select C&urrent Page"),
-        CmdSelectCurrentPage,
-    },
-    {
-        TrN("Select &All"),
-        CmdSelectAll,
-    },
-    {
-        {},
-        0,
-    },
-};
-//] ACCESSKEY_GROUP Context Menu (Selection)
-
 //[ ACCESSKEY_GROUP Context Menu (Main)
 static MenuDef menuDefContext[] = {
     {
         TrN("S&election"),
-        (UINT_PTR)menuDefSelection,
+        menuDefSelection,
     },
     {
-        TrN("Visual Search With Google &Lens"),
-        (UINT_PTR)menuDefGoogleLens,
+        TrN("Visual Search with Google &Lens"),
+        menuDefGoogleLens,
     },
     {
         TrN("Copy Link &Address"),
@@ -144,12 +82,12 @@ static MenuDef menuDefContext[] = {
         CmdShowAnnotationText,
     },
     {
-        TrN("Save Attachment"),
+        TrN("Save Attachment..."),
         CmdSaveAttachment,
     },
     {
         TrN("Selected &Image"),
-        (UINT_PTR)menuDefContextImage,
+        menuDefContextImage,
     },
     // note: strings cannot be "" or else items are not there
     {
@@ -161,51 +99,31 @@ static MenuDef menuDefContext[] = {
         CmdFavoriteDel,
     },
     {
-        TrN("Show &Favorites"),
-        CmdFavoriteToggle,
-    },
-    {
-        TrN("Show &Bookmarks"),
-        CmdToggleBookmarks,
-    },
-    {
-        TrN("Show &Thumbnails"),
-        CmdToggleThumbnails,
-    },
-    {
-        TrN("Sh&ow Toolbar"),
-        CmdToggleToolbar,
-    },
-    {
-        TrN("Show Caption"),
-        CmdToggleCaption,
-    },
-    {
-        TrN("Auto-hide Sidebar"),
-        CmdToggleSidebarAutoHide,
+        TrN("Sh&ow"),
+        menuDefShow,
     },
     {
         StrL(kMenuSeparator),
-        kMenuSeparatorID,
+        0,
     },
     {
-        TrN("AI chat with document using"),
-        (UINT_PTR)menuDefDocumentAIChat,
+        TrN("AI Chat with Document Using"),
+        menuDefDocumentAIChat,
     },
     {
         TrN("Document"),
-        (UINT_PTR)menuDefDocumentOperations,
+        menuDefDocumentOperations,
     },
     {
         TrN("Read Aloud"),
-        (UINT_PTR)menuDefContextReadAloud,
+        menuDefContextReadAloud,
     },
     {
         TrN("Annotations"),
-        (UINT_PTR)menuDefContextAnnotations,
+        menuDefContextAnnotations,
     },
     {
-        TrN("Show Errors"),
+        TrN("Show Errors..."),
         CmdShowErrors,
     },
     {
@@ -533,7 +451,7 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
         }
         i++;
 
-        int cmdId = (int)md.idOrSubmenu;
+        int cmdId = md.cmdId;
         // orig appends the user's external viewers after CmdOpenWithHtmlHelp
         if (addExternalViewersNext && ctx) {
             WindowTab* evTab = ctx->tab;
@@ -544,7 +462,7 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
             addExternalViewersNext = true;
         }
         // custom selection handlers go before the built-in translate / search submenus
-        if (md.idOrSubmenu == (UINT_PTR)menuDefTranslateWith) {
+        if (md.submenu == menuDefTranslateWith) {
             // handlers run on selected text; comics and images have none
             bool canSelectText = !ctx || !ctx->isImageCollection;
             if (canSelectText && menuDef == menuDefMainSelection) {
@@ -562,9 +480,8 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
             AppendRecentFilesToMenu(menu);
         }
 
-        MenuDef* subMenuDef = (MenuDef*)md.idOrSubmenu;
-        // hacky but works: small number is command id, large is submenu (a pointer)
-        bool isSubMenu = md.idOrSubmenu > CmdLast + 10000;
+        MenuDef* subMenuDef = md.submenu;
+        bool isSubMenu = subMenuDef != nullptr;
 
         // handle separators before command state checks
         if (str::Eq(md.title, StrL(kMenuSeparator))) {
@@ -572,8 +489,7 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
             continue;
         }
 
-        // Only real commands have a command-state. For submenu entries cmdId is a
-        // truncated pointer (garbage), so don't run it through GetCommandIdState.
+        // Command availability applies to leaf items.
         bool removeMenu = false;
         bool disableMenu = false;
         if (!isSubMenu && ctx) {
@@ -581,31 +497,7 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
         }
         if (ctx) {
             removeMenu |= (menuDef == menuDefMainSelection) && !ctx->hasTextSelection && cmdIdInList(selectionTextCmds);
-            removeMenu |= !ctx->isCursorOnPage && (subMenuDef == menuDefCreateAnnotUnderCursor);
-            // these annotations need text to mark up, except Highlight, which can
-            // fill a drawn rectangle
-            bool canMarkUp = ctx->hasTextSelection || ctx->hasDrawnRectSelection;
-            removeMenu |= (!canMarkUp || !ctx->supportsAnnots) && (subMenuDef == menuDefCreateAnnotFromSelection);
-            // in the context menu only show translate / search items for a text
-            // selection (the menubar variant is live-updated via
-            // SetMenuStateForSelection instead)
-            bool isTextSelSubMenu = (subMenuDef == menuDefTranslateWith) || (subMenuDef == menuDefSearchWith);
-            removeMenu |= (menuDef == menuDefSelection) && !ctx->hasTextSelection && isTextSelSubMenu;
-            bool isRectSel = ctx->hasSelection && !ctx->hasTextSelection;
-            if (menuDef == menuDefSelection) {
-                removeMenu |= !ctx->hasSelection && cmdId == CmdCopySelection;
-                if (!isRectSel) {
-                    removeMenu |= cmdId == CmdCopySelectionAsImage || cmdId == CmdSaveSelectionAsImage ||
-                                  cmdId == CmdPrintSelection || cmdId == CmdSearchGoogleLens ||
-                                  cmdId == CmdZoomToSelection;
-                }
-            }
-            if (menuDef == menuDefGoogleLens) {
-                removeMenu |= cmdId == CmdSearchGoogleLens && !ctx->hasSelection;
-                removeMenu |= cmdId == CmdSearchGoogleLensPage && !ctx->isCursorOnPage;
-                bool onImage = ctx->cursorOnImage || ctx->engineKind == kindEngineImage;
-                removeMenu |= cmdId == CmdSearchGoogleLensImage && !onImage;
-            }
+            removeMenu |= HideContextMenuEntry(menuDef, md, *ctx);
         }
         removeMenu |= !isSubMenu && cmdId == CmdSignWithImage && len(gSettings->annotations.signatureImage) == 0;
         removeMenu |= ((subMenuDef == menuDefDebug) && !ShowDebugMenu());
@@ -616,7 +508,7 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
             continue;
         }
 
-        bool noTranslate = isDebugMenu || cmdIdInList(menusNoTranslate);
+        bool noTranslate = isDebugMenu || (!isSubMenu && cmdIdInList(menusNoTranslate));
         noTranslate |= (subMenuDef == menuDefDebug);
         Str title = md.title;
         if (!noTranslate) {
@@ -704,6 +596,20 @@ static bool SetFixedLayoutState(MenuItemModel& it, DisplayModel* dm) {
 
 // ng: orig checks the radio items through MENUITEMINFO; here the model carries
 // the flag and the shell draws the tick
+// the Show submenu's items are on/off toggles: check the ones that are on
+static void SetShowMenuChecks(MenuModel* m, MainWindow* win) {
+    for (MenuDef* d = menuDefShow; d->title.s; d++) {
+        int cmdId = d->cmdId;
+        if (cmdId == 0) {
+            continue; // separator
+        }
+        bool on = false;
+        if (ToggleCmdState(win, nullptr, cmdId, on)) {
+            MenuSetChecked(m, cmdId, on);
+        }
+    }
+}
+
 static void SetMenuChecks(MenuModel* menu, MainWindow* win) {
     DocController* ctrl = win->ctrl;
     DisplayMode displayMode = gSettings->defaultDisplayModeEnum;
@@ -881,7 +787,7 @@ static void AdaptMenuToMac(MenuModel* menu, BuildMenuCtx* ctx) {
         MenuRemove(menu, cmdId);
     }
     MenuSetText(menu, CmdShowInFolder, Tr("Show in Finder"));
-    MenuSetText(menu, CmdOpenFileWithOSFilePicker, Tr("Open using macOS File Picker..."));
+    MenuSetText(menu, CmdOpenFileWithOSFilePicker, Tr("Open Using macOS File Picker..."));
     for (MenuItemModel& it : menu->items) {
         if (it.submenu) {
             RemoveBadMenuSeparators(it.submenu);
@@ -912,6 +818,7 @@ MenuModel* BuildMenu(MainWindow* win) {
     }
 #endif
     SetMenuChecks(menu, win);
+    SetShowMenuChecks(menu, win);
     return menu;
 }
 
@@ -1007,19 +914,32 @@ TempStr MainMenuResultTemp(MainWindow* win) {
 }
 
 // The page context menu at a canvas point, in the same row format.
-TempStr ContextMenuAtPointResultTemp(MainWindow* win, int x, int y) {
+TempStr ContextMenuAtPointResultTemp(MainWindow* win, int x, int y, int invoke) {
     if (!win) {
         return StrL("NOTREADY no-window\n");
     }
     MenuModel* menu = nullptr;
     if (win->IsCurrentTabAbout()) {
         // the home page: the menu of the selected entry, else the first
-        Str path = HomePageSelectedFilePathTemp(win);
-        if (len(path) == 0) {
-            HomePageSelectFirst(win);
-            path = HomePageSelectedFilePathTemp(win);
+        StrVec paths;
+        HomePageMenuPaths(win, {}, paths);
+        menu = BuildHomeContextMenu(win, paths);
+        if (invoke != 0) {
+            const MenuItemModel* item = menu ? MenuFind(menu, invoke) : nullptr;
+            bool enabled = item && !item->disabled;
+            DeleteMenuModel(menu);
+            if (!enabled) {
+                return StrL("ERR command unavailable");
+            }
+            bool blocked = gBlockExternalLaunch;
+            if (invoke == CmdShowInFolder) {
+                gBlockExternalLaunch = true;
+            }
+            int before = gExternalLaunchesBlocked;
+            HomeContextMenuCommand(win, paths, invoke);
+            gBlockExternalLaunch = blocked;
+            return fmt("OK launchesBlocked=%d", gExternalLaunchesBlocked - before);
         }
-        menu = BuildHomeContextMenu(win, path);
     } else {
         menu = BuildWindowContextMenu(win, Point{x, y});
     }
@@ -1096,16 +1016,23 @@ MenuModel* BuildWindowContextMenu(MainWindow* win, Point cursorPos) {
 
     BuildMenuCtx* ctx = NewBuildMenuCtx(tab, cursorPos);
     MenuModel* popup = BuildMenuFromDef(menuDefContext, ctx);
+    // before the fullscreen menu bar goes in front: MenuSetChecked sets the first match
+    SetShowMenuChecks(popup, win);
 
     // in fullscreen, add "Menu" as first item containing the full menu bar
     bool isFullScreen = win->IsFullScreenOrPresentation();
     if (isFullScreen) {
         MenuModel* bar = BuildMenuFromDef(menuDefMenubar, ctx);
         SetMenuChecks(bar, win);
+        SetShowMenuChecks(bar, win);
         PrependMenuBarSubmenu(popup, bar);
     }
 
     int pageNoUnderCursor = dm->GetPageNoByPoint(cursorPos);
+    win->contextMenuPageNo = pageNoUnderCursor;
+    if (pageNoUnderCursor > 0) {
+        win->contextMenuPagePt = dm->CvtFromScreen(cursorPos, pageNoUnderCursor);
+    }
 
     bool onImage = pageEl && pageEl->Is(kindPageElementImage);
     onImage = onImage || (engine && engine->kind == kindEngineImage);
@@ -1115,7 +1042,7 @@ MenuModel* BuildWindowContextMenu(MainWindow* win, Point cursorPos) {
             Location loc = win->ctrl->LocationFromPageNo(pageNoUnderCursor);
             pageItem = fmt(Tr("Chapter %d Page %d").s, loc.chapter, loc.page);
         } else {
-            TempStr pageLabel = win->ctrl->GetPageLabeTemp(pageNoUnderCursor);
+            TempStr pageLabel = win->ctrl->GetPageLabelTemp(pageNoUnderCursor);
             pageItem = fmt(Tr("Page %s").s, pageLabel);
         }
         MenuSetText(popup, CmdSearchGoogleLensPage, pageItem);
@@ -1178,12 +1105,12 @@ MenuModel* BuildWindowContextMenu(MainWindow* win, Point cursorPos) {
             TempStr delText;
             if (ShowChapterUi(win->ctrl)) {
                 Location loc = win->ctrl->LocationFromPageNo(pageNoUnderCursor);
-                addText = fmt(Tr("Add chapter %d page %d to favorites").s, loc.chapter, loc.page);
-                delText = fmt(Tr("Remove chapter %d page %d from favorites").s, loc.chapter, loc.page);
+                addText = fmt(Tr("Add Chapter %d Page %d to Favorites...").s, loc.chapter, loc.page);
+                delText = fmt(Tr("Remove Chapter %d Page %d from Favorites").s, loc.chapter, loc.page);
             } else {
-                TempStr pageLabel = win->ctrl->GetPageLabeTemp(pageNoUnderCursor);
-                addText = fmt(Tr("Add page %s to favorites").s, pageLabel);
-                delText = fmt(Tr("Remove page %s from favorites").s, pageLabel);
+                TempStr pageLabel = win->ctrl->GetPageLabelTemp(pageNoUnderCursor);
+                addText = fmt(Tr("Add Page %s to Favorites...").s, pageLabel);
+                delText = fmt(Tr("Remove Page %s from Favorites").s, pageLabel);
             }
 
             if (isBookmarked) {
@@ -1199,10 +1126,6 @@ MenuModel* BuildWindowContextMenu(MainWindow* win, Point cursorPos) {
         }
     }
 
-    // if toolbar is not shown, add option to show it
-    if (gSettings->showToolbar) {
-        MenuRemove(popup, CmdToggleToolbar);
-    }
     MenuRemoveEmptySubmenus(popup);
     RemoveBadMenuSeparators(popup);
     DeleteBuildMenuCtx(ctx);
@@ -1240,8 +1163,8 @@ static void ContextMenuEditImage(MainWindow* win, IPageElement* pageEl, int page
         ShowImageEditWindow(win, m, imgEngine->FilePath(), nullptr, selectPdf);
         return;
     }
-    RenderedBitmap* bmp = imgEngine->GetImageForPageElement(pageEl);
-    if (!bmp) {
+    Pixmap* px = PageElementImagePixmap(imgEngine, pageEl);
+    if (!px) {
         return;
     }
     Str filePath = win->ctrl ? win->ctrl->GetFilePath() : Str{};
@@ -1254,9 +1177,29 @@ static void ContextMenuEditImage(MainWindow* win, IPageElement* pageEl, int page
         ext = StrL(".png");
     }
     TempStr destPath = path::JoinTemp(dir, fmt("%s_page_%d%s", noExt, pageNo, ext));
-    // ShowImageEditWindow takes ownership of the bitmap
-    ShowImageEditWindow(win, m, destPath, bmp, selectPdf, origData);
+    // the editor takes ownership of the bitmap
+    ShowImageEditWindowPixmap(win, m, destPath, px, selectPdf, origData);
     str::Free(origData);
+}
+
+// the commands below that act on the link, image or annotation under the menu
+static bool ActsOnElementUnderMenu(int cmdId) {
+    switch (cmdId) {
+        case CmdSearchGoogleLensImage:
+        case CmdReplaceImage:
+        case CmdEditImageExternally:
+        case CmdSaveImage:
+        case CmdCropImage:
+        case CmdResizeImage:
+        case CmdConvertImageToPdf:
+        case CmdCopyLinkTarget:
+        case CmdShowAnnotationText:
+        case CmdCopyComment:
+        case CmdSaveAttachment:
+        case CmdCopyImage:
+            return true;
+    }
+    return false;
 }
 
 // orig's switch after TrackPopupMenu returned
@@ -1265,14 +1208,31 @@ void WindowContextMenuCommand(MainWindow* win, int cmdId) {
         return;
     }
     win->contextMenuHighlightPageNo = 0;
+    DisplayModel* dm = win->AsFixed();
+    // the popup isn't modal: move the point to where its page is now. If the
+    // page scrolled out of view, nothing is under the point the menu was for.
+    int pageNoUnderCursor = win->contextMenuPageNo;
+    bool pointGone = false;
+    if (dm && pageNoUnderCursor > 0 && dm->ValidPageNo(pageNoUnderCursor)) {
+        win->contextMenuPt = dm->CvtToScreen(pageNoUnderCursor, win->contextMenuPagePt);
+        pointGone = !dm->PageVisible(pageNoUnderCursor);
+    } else {
+        pageNoUnderCursor = 0;
+    }
+    if (pointGone) {
+        win->contextMenuPtValid = false;
+    }
     if (HandleReadAloudMenuCommand(win, cmdId)) {
         return;
     }
-    DisplayModel* dm = win->AsFixed();
     if (!dm || !win->ctrl) {
         return;
     }
     logf("WindowContextMenuCommand: %d (%s)\n", cmdId, GetCommandName(cmdId));
+    if (pointGone && (CommandUsesContextMenuPoint(cmdId) || ActsOnElementUnderMenu(cmdId))) {
+        logf("WindowContextMenuCommand: page %d scrolled out of view\n", pageNoUnderCursor);
+        return;
+    }
     Point cursorPos = win->contextMenuPt;
     WindowTab* tab = win->CurrentTab();
     Str filePath = win->ctrl->GetFilePath();
@@ -1281,7 +1241,6 @@ void WindowContextMenuCommand(MainWindow* win, int cmdId) {
     int pageNoUnderEl = 0;
     IPageElement* pageEl = dm->GetElementAtPos(cursorPos, &pageNoUnderEl);
     Str value = pageEl ? pageEl->GetValue() : Str{};
-    int pageNoUnderCursor = dm->GetPageNoByPoint(cursorPos);
     EngineBase* engine = dm->GetEngine();
     BuildMenuCtx* ctx = NewBuildMenuCtx(tab, cursorPos);
     AutoDelete<AppCommandCtx> delCtx(ctx);
@@ -1318,7 +1277,7 @@ void WindowContextMenuCommand(MainWindow* win, int cmdId) {
 
         case CmdCopyLinkTarget: {
             if (len(value) > 0) {
-                TempStr tmp = CleanupURLForClipbardCopyTemp(value);
+                TempStr tmp = CleanupURLForClipboardCopyTemp(value);
                 CopyTextToClipboard(win, tmp);
             }
             return;
@@ -1402,18 +1361,18 @@ static void AppendServerItems(MenuModel* popup, Str filePath) {
     if (!ServerFilesListed()) {
         return;
     }
-    MenuSetText(popup, CmdDeleteFile, Tr("Delete local"));
+    MenuSetText(popup, CmdDeleteFile, Tr("Delete Local"));
     MenuAppendSeparator(popup);
     ServerFileState st = GetServerFileState(filePath, file::GetSize(filePath));
     if (st != ServerFileState::Same) {
-        MenuAppendString(popup, Tr("Upload to server"), CmdUploadToServer);
+        MenuAppendString(popup, Tr("Upload to Server"), CmdUploadToServer);
     }
     if (st != ServerFileState::None) {
-        MenuAppendString(popup, Tr("Delete from server"), CmdDeleteFromServer);
+        MenuAppendString(popup, Tr("Delete from Server"), CmdDeleteFromServer);
     }
 }
 
-MenuModel* BuildHomeContextMenu(MainWindow* win, Str filePath) {
+static MenuModel* BuildHomeContextMenu(MainWindow* win, Str filePath) {
     if (!HasPermission(Perm::SavePreferences | Perm::DiskAccess) || !SettingsRememberOpenedFiles() ||
         !gSettings->showStartPage) {
         return nullptr;
@@ -1425,7 +1384,7 @@ MenuModel* BuildHomeContextMenu(MainWindow* win, Str filePath) {
     if (IsServerOnlyFile(filePath)) {
         auto* popup = new MenuModel();
         MenuAppendString(popup, Tr("&Open Document"), CmdOpenSelectedDocument);
-        MenuAppendString(popup, Tr("Delete from server"), CmdDeleteFromServer);
+        MenuAppendString(popup, Tr("Delete from Server"), CmdDeleteFromServer);
         return popup;
     }
     FileState* fs = FileHistoryFindByPath(filePath);
@@ -1446,11 +1405,43 @@ MenuModel* BuildHomeContextMenu(MainWindow* win, Str filePath) {
         it->accel = str::Dup(StrL("Del"));
     }
     AppendServerItems(popup, filePath);
+    // the file moved: point its history entry at where it is now
+    if (!file::Exists(filePath)) {
+        MenuAppendSeparator(popup);
+        MenuAppendString(popup, Tr("Locate File..."), CmdLocateFile);
+    }
     logf("BuildHomeContextMenu: '%s': %s\n", path::GetBaseNameTemp(filePath), MenuRowsTemp(popup));
     return popup;
 }
 
-void HomeContextMenuCommand(MainWindow* win, Str filePathIn, int cmdId) {
+MenuModel* BuildHomeContextMenu(MainWindow* win, const StrVec& paths) {
+    if (paths.IsEmpty()) {
+        return nullptr;
+    }
+    MenuModel* menu = BuildHomeContextMenu(win, paths[0]);
+    if (!menu || len(paths) == 1) {
+        return menu;
+    }
+    for (int i = 1; i < len(paths); i++) {
+        MenuModel* other = BuildHomeContextMenu(win, paths[i]);
+        for (int j = len(menu->items) - 1; j >= 0; j--) {
+            const MenuItemModel& it = menu->items[j];
+            if (it.separator || it.submenu) {
+                continue;
+            }
+            const MenuItemModel* match = other ? MenuFind(other, it.cmdId) : nullptr;
+            if (!match || match->disabled) {
+                MenuRemove(menu, it.cmdId);
+            }
+        }
+        DeleteMenuModel(other);
+    }
+    MenuSetChecked(menu, CmdPinSelectedDocument, HomeFilesAllPinned(paths));
+    RemoveBadMenuSeparators(menu);
+    return menu;
+}
+
+static void HomeContextMenuCommand(MainWindow* win, Str filePathIn, int cmdId) {
     if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
@@ -1485,11 +1476,35 @@ void HomeContextMenuCommand(MainWindow* win, Str filePathIn, int cmdId) {
         case CmdUploadToServer:
             UploadFileToServer(win, path);
             return;
+        case CmdLocateFile:
+            HomePageLocateFile(win, path);
+            return;
         case CmdDeleteFromServer:
             DeleteFileFromServer(win, path);
             return;
     }
     ExecuteCmd(win, cmdId);
+}
+
+void HomeContextMenuCommand(MainWindow* win, const StrVec& paths, int cmdId) {
+    if (!IsMainWindowValidAndNotClosing(win) || RunHomeFilesCommand(win, paths, cmdId)) {
+        return;
+    }
+    if (cmdId == CmdDeleteFile && len(paths) > 1) {
+        DeleteFilesFromHomePage(win, paths);
+        return;
+    }
+    StrVec serverPaths;
+    for (Str path : paths) {
+        if (len(paths) > 1 && cmdId == CmdOpenSelectedDocument && IsServerOnlyFile(path)) {
+            serverPaths.Append(path);
+        } else {
+            HomeContextMenuCommand(win, path, cmdId);
+        }
+    }
+    if (!serverPaths.IsEmpty()) {
+        RunServerFilesBatch(win, serverPaths, ServerFileAction::Open);
+    }
 }
 
 // orig's ToggleMenuBar, without the win32 menu / rebar handling: in fullscreen

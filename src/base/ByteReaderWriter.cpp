@@ -9,13 +9,11 @@
 // Bit reader is a streaming reader of bits from underlying memory data
 
 // data has to be valid for the lifetime of this class
-BitReader::BitReader(u8* data, int n) : data(data), dataLen(n) {
-    bitsCount = n * 8;
-}
+BitReader::BitReader(u8* data, int n) : data(data), dataLen(data && n > 0 ? n : 0), bitsCount((i64)dataLen * 8) {}
 
 BitReader::~BitReader() = default;
 
-u8 BitReader::GetByte(int pos) const {
+u8 BitReader::GetByte(i64 pos) const {
     if (pos >= dataLen) {
         return 0;
     }
@@ -25,22 +23,28 @@ u8 BitReader::GetByte(int pos) const {
 // advance position in the bit stream
 // returns false if we've eaten bits more than we have
 bool BitReader::Eat(int nBits) {
+    if (nBits < 0) {
+        return false;
+    }
+    if (nBits > BitsLeft()) {
+        currBitPos = bitsCount;
+        return false;
+    }
     currBitPos += nBits;
-    return currBitPos <= bitsCount;
+    return true;
 }
 
-int BitReader::BitsLeft() const {
-    if (currBitPos < bitsCount) {
-        return bitsCount - currBitPos;
-    }
-    return 0;
+i64 BitReader::BitsLeft() const {
+    return bitsCount - currBitPos;
 }
 
 // Read nBits (up to 32) bits, without advancing the position in the bit stream
 // If asked for more bits than we have left, the extra bits will be 0
 u32 BitReader::Peek(int nBits) {
-    ReportIf((nBits == 0) || (nBits > 32));
-    int currBytePos = currBitPos / 8;
+    if (ReportIf(nBits <= 0 || nBits > 32)) {
+        return 0;
+    }
+    i64 currBytePos = currBitPos / 8;
     u8 currByte = GetByte(currBytePos);
     u8 currBit = currBitPos % 8;
     currByte = currByte << currBit;
@@ -75,65 +79,6 @@ u32 BitReader::Peek(int nBits) {
 
 // --- ByteReader
 
-// Unpacks a structure from the data according to the given format
-// e.g. the format "32b2w6d" unpacks 32 Bytes, 2 16-bit Words and 6 32-bit Dwords
-bool ByteReader::Unpack(void* strct, int size, Str format, int off, bool isBE) const {
-    if (::len(format) == 0) {
-        return false;
-    }
-    int repeat = 0;
-    int idx = 0;
-    for (int i = 0; i < format.len; i++) {
-        char c = format.s[i];
-        if (isdigit((u8)c)) {
-            repeat = ParseInt(Str(format.s + i, format.len - i));
-            for (i++; i < format.len && isdigit((u8)format.s[i]); i++) {
-                ;
-            }
-            if (i >= format.len) {
-                break;
-            }
-            c = format.s[i];
-        }
-        switch (c) {
-            case 'b':
-                if (off + idx + 1 > len || idx + 1 > size) {
-                    return false;
-                }
-                *(u8*)((u8*)strct + idx) = UInt8(off + idx);
-                idx += 1;
-                break;
-            case 'w':
-                if (off + idx + 2 > len || idx + 2 > size) {
-                    return false;
-                }
-                *(u16*)((u8*)strct + idx) = UInt16(off + idx, isBE);
-                idx += 2;
-                break;
-            case 'd':
-                if (off + idx + 4 > len || idx + 4 > size) {
-                    return false;
-                }
-                *(u32*)((u8*)strct + idx) = UInt32(off + idx, isBE);
-                idx += 4;
-                break;
-            case 'q':
-                if (off + idx + 8 > len || idx + 8 > size) {
-                    return false;
-                }
-                *(u64*)((u8*)strct + idx) = UInt64(off + idx, isBE);
-                idx += 8;
-                break;
-            default:
-                return false;
-        }
-        if (--repeat > 0) {
-            i--;
-        }
-    }
-    return idx == size;
-}
-
 ByteReader::ByteReader(Str data) : d((const u8*)data.s), len(data.len) {}
 
 ByteReader::ByteReader(const u8* data, int n) : d(data), len(n) {}
@@ -141,7 +86,7 @@ ByteReader::ByteReader(const u8* data, int n) : d(data), len(n) {}
 // true if n bytes at off are inside the buffer. Compares against len - n
 // rather than off + n, which overflows for an off near INT_MAX
 bool ByteReader::CanRead(int off, int n) const {
-    return off >= 0 && n <= len && off <= len - n;
+    return off >= 0 && n >= 0 && n <= len && off <= len - n;
 }
 
 u8 ByteReader::UInt8(int off) const {
@@ -171,14 +116,14 @@ u16 ByteReader::UInt16(int off, bool isBE) const {
 
 u32 ByteReader::UInt32LE(int off) const {
     if (CanRead(off, 4)) {
-        return d[off] | (d[off + 1] << 8) | (d[off + 2] << 16) | (d[off + 3] << 24);
+        return (u32)d[off] | ((u32)d[off + 1] << 8) | ((u32)d[off + 2] << 16) | ((u32)d[off + 3] << 24);
     }
     return 0;
 }
 
 u32 ByteReader::UInt32BE(int off) const {
     if (CanRead(off, 4)) {
-        return (d[off] << 24) | (d[off + 1] << 16) | (d[off + 2] << 8) | d[off + 3];
+        return ((u32)d[off] << 24) | ((u32)d[off + 1] << 16) | ((u32)d[off + 2] << 8) | (u32)d[off + 3];
     }
     return 0;
 }
@@ -199,10 +144,6 @@ u64 ByteReader::UInt64BE(int off) const {
         return ((u64)UInt32BE(off) << 32) | UInt32BE(off + 4);
     }
     return 0;
-}
-
-u64 ByteReader::UInt64(int off, bool isBE) const {
-    return isBE ? UInt64BE(off) : UInt64LE(off);
 }
 
 u8 ByteReader::UInt8() {
@@ -232,8 +173,6 @@ SEQUENTIAL_READ(UInt16LE, u16, 2)
 SEQUENTIAL_READ(UInt16BE, u16, 2)
 SEQUENTIAL_READ(UInt32LE, u32, 4)
 SEQUENTIAL_READ(UInt32BE, u32, 4)
-SEQUENTIAL_READ(UInt64LE, u64, 8)
-SEQUENTIAL_READ(UInt64BE, u64, 8)
 
 #undef SEQUENTIAL_READ
 
@@ -242,7 +181,9 @@ void ByteReader::Bytes(void* dst, int n) {
         ok = false;
         return;
     }
-    memcpy(dst, d + off, (size_t)n);
+    if (n > 0) {
+        memcpy(dst, d + off, (size_t)n);
+    }
     off += n;
 }
 
@@ -270,19 +211,6 @@ bool ByteReader::IsOk() const {
     return ok;
 }
 
-const u8* ByteReader::Find(int off, u8 byte) const {
-    if (off >= len) {
-        return nullptr;
-    }
-    return (const u8*)memchr(d + off, byte, (size_t)(len - off));
-}
-
-// Unpacks a structure from the data according to the given format
-// e.g. the format "32b2w6d" unpacks 32 Bytes, 2 16-bit Words and 6 32-bit Dwords
-bool ByteReader::Unpack(void* strct, int size, Str format, bool isBE, int off) const {
-    return Unpack(strct, size, format, off, isBE);
-}
-
 u16 UInt16BE(const u8* d) {
     return d[1] | (d[0] << 8);
 }
@@ -292,11 +220,7 @@ u16 UInt16LE(const u8* d) {
 }
 
 u32 UInt32BE(const u8* d) {
-    return d[3] | (d[2] << 8) | (d[1] << 16) | (d[0] << 24);
-}
-
-u32 UInt32LE(const u8* d) {
-    return d[0] | (d[1] << 8) | (d[2] << 16) | (d[3] << 24);
+    return (u32)d[3] | ((u32)d[2] << 8) | ((u32)d[1] << 16) | ((u32)d[0] << 24);
 }
 
 // --- ByteWriter

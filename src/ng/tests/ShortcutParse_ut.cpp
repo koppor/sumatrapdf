@@ -101,6 +101,21 @@ bool ShortcutParse_UnitTestShiftedPunct() {
     utassert(ParseShortcutString(StrL("Ctrl + '"), a));
     utassert(a.vk == VK_OEM_7 && a.Mods() == (kCtrl | kVirt));
 
+    // an accelerator for bare punctuation is the typed character (#6578)
+    for (Str s : {StrL("+"), StrL("*"), StrL("="), StrL(" ? ")}) {
+        a = {};
+        utassert(ParseAccelShortcutString(s, a));
+        Str c = s;
+        str::TrimWs(c);
+        utassert(!a.isVirt && a.Mods() == 0 && a.vk == (u16)*c.s);
+    }
+    a = {};
+    utassert(ParseAccelShortcutString(StrL("Ctrl + ="), a));
+    utassert(a.isVirt && a.ctrl);
+    a = {};
+    utassert(ParseAccelShortcutString(StrL("a"), a));
+    utassert(a.isVirt && a.vk == 'A');
+
     // media and browser keys, in both spellings
     static const struct {
         Str s;
@@ -322,6 +337,11 @@ static const struct {
     {StrL("Cmd + ,"), CmdOptions},
     {StrL("Cmd + I"), CmdProperties},
     {StrL("Cmd + D"), CmdFavoriteAdd},
+    // ⌘+ / ⌘- zoom, as in other Mac apps; rotate keeps [ and ]
+    {StrL("Cmd + Shift + ="), CmdZoomIn},
+    {StrL("Cmd + Shift + _"), CmdZoomOut},
+    {StrL("Cmd + E"), CmdFindNextSel},
+    {StrL("Cmd + Shift + W"), CmdCloseWindow},
     {StrL("Cmd + 0"), CmdZoomActualSize},
     {StrL("Cmd + 9"), CmdZoomFitPage},
     {StrL("Ctrl + Cmd + F"), CmdToggleFullscreen},

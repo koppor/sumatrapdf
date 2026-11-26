@@ -100,22 +100,40 @@ static void CopyPixmapToThumbnail(const Pixmap* bmp, u8* dst, int dx, int dy) {
 }
 
 IFACEMETHODIMP PdfPreview::GetThumbnail(uint cx, HBITMAP* phbmp, WTS_ALPHATYPE* pdwAlpha) {
+    if (!phbmp) {
+        return E_POINTER;
+    }
+    *phbmp = nullptr;
+    if (cx == 0) {
+        return E_INVALIDARG;
+    }
+    // thumbnail hosts live long; temp data never outlives a call
+    ResetTempArena();
     EngineBase* engine = GetEngine();
     if (!engine) {
         logf("PdfPreview::GetThumbnail: failed to get the engine\n");
         return E_FAIL;
     }
 
-    logf("PdfPreview::GetThumbnail(cx=%d, engine: %s\n", (int)cx, Str(engine->kind));
+    logf("PdfPreview::GetThumbnail(cx=%d, engine: %s)\n", (int)cx, Str(engine->kind));
 
     RectF page = engine->Transform(engine->PageMediabox(1), 1, 1.0, 0);
+    if (page.dx <= 0 || page.dy <= 0) {
+        return E_FAIL;
+    }
     float zoom = std::min((float)cx / page.dx, (float)cx / page.dy) - 0.001f;
+    if (zoom <= 0) {
+        zoom = std::min((float)cx / page.dx, (float)cx / page.dy);
+    }
     Rect thumb = RectF(0, 0, page.dx * zoom, page.dy * zoom).Round();
+    if (thumb.IsEmpty()) {
+        return E_FAIL;
+    }
 
     page = engine->Transform(ToRectF(thumb), 1, zoom, 0, true);
     RenderPageArgs args(1, zoom, 0, &page);
     Pixmap* bmp = PixmapToBgra(engine->RenderPage(args));
-    if (!bmp || !bmp->data) {
+    if (!bmp || !bmp->data || bmp->width <= 0 || bmp->height <= 0) {
         log(StrL("PdfPreview::GetThumbnail: RenderPage() failed\n"));
         FreePixmap(bmp);
         return E_FAIL;
@@ -191,7 +209,7 @@ class PageRenderer {
     RectF reqPageRect;
     bool reqUseClip = false;
     bool reqAbort = false;
-    AbortCookie* volatile abortCookie = nullptr;
+    AtomicPtr abortCookie = nullptr;
 
     Mutex currAccess;
     ThreadHandle thread = nullptr;
@@ -208,12 +226,14 @@ class PageRenderer {
         this->engine = engine;
         this->hwnd = hwnd;
     }
+    PageRenderer(const PageRenderer&) = delete;
+    PageRenderer& operator=(const PageRenderer&) = delete;
     ~PageRenderer() {
         ThreadHandle th = nullptr;
         {
             AutoUnlockMutex scope(&currAccess);
-            if (abortCookie) {
-                abortCookie->Abort();
+            if (auto* cookie = (AbortCookie*)AtomicPtrGet(&abortCookie)) {
+                cookie->Abort();
             }
             reqAbort = true;
             th = thread;
@@ -308,8 +328,8 @@ class PageRenderer {
             } else {
                 FreePixmap(bmp);
             }
-            toDelete = pr->abortCookie;
-            pr->abortCookie = nullptr;
+            toDelete = (AbortCookie*)AtomicPtrGet(&pr->abortCookie);
+            AtomicPtrSet(&pr->abortCookie, nullptr);
 
             // once thread is null ~PageRenderer won't wait for us, so don't touch pr after this
             th = pr->thread;
@@ -376,8 +396,8 @@ void PageRenderer::Render(HDC hdc, const PreviewLayout& lo, int pageNo) {
         reqAbort = false;
         thread = CreateThread(nullptr, 0, RenderThread, this, 0, nullptr);
     } else if (!ClipCovers(reqPage, reqZoom, reqClip, pageNo, lo.zoom, visInPage)) {
-        if (abortCookie) {
-            abortCookie->Abort();
+        if (auto* cookie = (AbortCookie*)AtomicPtrGet(&abortCookie)) {
+            cookie->Abort();
         }
         reqAbort = true;
     }
@@ -428,20 +448,30 @@ static PreviewLayout ComputePreviewLayout(HWND hwnd, PdfPreview* preview, int pa
 }
 
 // "3 / 120" in the bottom-right corner: shows the page count without opening the file
-static void DrawPageNumber(HWND hwnd, HDC hdc, Rect client) {
+static void DrawPageNumber(HWND hwnd, PdfPreview* preview, HDC hdc, Rect client) {
     SCROLLINFO si{};
     si.cbSize = sizeof(si);
     si.fMask = SIF_POS | SIF_RANGE;
     if (!GetScrollInfo(hwnd, SB_VERT, &si)) {
         return;
     }
-    NONCLIENTMETRICS ncm{};
-    if (!GetNonClientMetricsForDpi(DpiGetForHwnd(hwnd), &ncm)) {
-        return;
+
+    // re-create the font only when the dpi changes
+    int dpi = DpiGetForHwnd(hwnd);
+    if (!preview->pageNoFont || preview->pageNoFontDpi != dpi) {
+        NONCLIENTMETRICS ncm{};
+        if (!GetNonClientMetricsForDpi(dpi, &ncm)) {
+            return;
+        }
+        if (preview->pageNoFont) {
+            DeleteObject(preview->pageNoFont);
+        }
+        preview->pageNoFont = CreateFontIndirectW(&ncm.lfMessageFont);
+        preview->pageNoFontDpi = dpi;
     }
+    HFONT font = preview->pageNoFont;
 
     TempStr s = fmt("%d / %d", si.nPos, si.nMax);
-    HFONT font = CreateFontIndirectW(&ncm.lfMessageFont);
     uint format = DT_SINGLELINE | DT_NOPREFIX;
     Size sz = HdcMeasureText(hdc, s, client.dx, format, font);
     int pad = sz.dy / 4;
@@ -458,7 +488,6 @@ static void DrawPageNumber(HWND hwnd, HDC hdc, Rect client) {
     HdcDrawText(hdc, s, r, format | DT_CENTER | DT_VCENTER, font);
     SetTextColor(hdc, prevCol);
     SetBkMode(hdc, prevMode);
-    DeleteObject(font);
 }
 
 static LRESULT OnPaint(HWND hwnd) {
@@ -467,8 +496,7 @@ static LRESULT OnPaint(HWND hwnd) {
     HDC hdc = buffer.GetDC();
     HBRUSH brushBg = CreateSolidBrush(kColWindowBg);
     HBRUSH brushWhite = GetStockBrush(WHITE_BRUSH);
-    RECT rcClient = ToRECT(rect);
-    HdcFillRect(hdc, ToRect(rcClient), brushBg);
+    HdcFillRect(hdc, rect, brushBg);
 
     PdfPreview* preview = PreviewFromHwnd(hwnd);
     if (preview && preview->renderer) {
@@ -478,15 +506,16 @@ static LRESULT OnPaint(HWND hwnd) {
             HdcFillRect(hdc, lo.visible, brushWhite);
             preview->renderer->Render(hdc, lo, pageNo);
         }
-        DrawPageNumber(hwnd, hdc, rect);
+        DrawPageNumber(hwnd, preview, hdc, rect);
     }
 
     DeleteObject(brushBg);
-    DeleteObject(brushWhite);
 
     PAINTSTRUCT ps;
     buffer.Flush(BeginPaint(hwnd, &ps));
     EndPaint(hwnd, &ps);
+    // nothing on this thread keeps temp data across messages
+    ResetTempArena();
     return 0;
 }
 
@@ -525,15 +554,17 @@ static LRESULT OnVScroll(HWND hwnd, WPARAM wp, PreviewPagePan pagePan = PreviewP
             si.nPos = si.nTrackPos;
             break;
     }
+    si.nPos = limitValue(si.nPos, si.nMin, si.nMax);
+    if (si.nPos == oldPos) {
+        return 0;
+    }
     si.fMask = SIF_POS;
     SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
 
-    if (si.nPos != oldPos) {
-        if (PdfPreview* preview = PreviewFromHwnd(hwnd)) {
-            preview->panX = 0;
-            preview->panY = pagePan == PreviewPagePan::Bottom ? INT_MIN : 0;
-            preview->panning = false;
-        }
+    if (PdfPreview* preview = PreviewFromHwnd(hwnd)) {
+        preview->panX = 0;
+        preview->panY = pagePan == PreviewPagePan::Bottom ? INT_MIN : 0;
+        preview->panning = false;
     }
 
     HwndInvalidate(hwnd, false);
@@ -692,6 +723,11 @@ static LRESULT OnDestroy(HWND hwnd) {
         delete preview->renderer;
         preview->renderer = nullptr;
         preview->panning = false;
+        if (preview->pageNoFont) {
+            DeleteObject(preview->pageNoFont);
+            preview->pageNoFont = nullptr;
+            preview->pageNoFontDpi = 0;
+        }
     }
     return 0;
 }
@@ -768,6 +804,9 @@ void UnregisterPreviewWndClass() {
 
 IFACEMETHODIMP PdfPreview::DoPreview() {
     log(StrL("PdfPreview::DoPreview()\n"));
+    if (!IsWindow(m_hwndParent)) {
+        return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
+    }
 
     WNDCLASSEX wcex{};
     wcex.cbSize = sizeof(wcex);
@@ -782,8 +821,13 @@ IFACEMETHODIMP PdfPreview::DoPreview() {
         return HRESULT_FROM_WIN32(GetLastError());
     }
 
-    m_hwnd = CreateWindow(wcex.lpszClassName, nullptr, WS_CHILD | WS_VSCROLL | WS_VISIBLE, m_rcParent.x, m_rcParent.y,
-                          m_rcParent.dx, m_rcParent.dy, m_hwndParent, nullptr, GetInstance(), nullptr);
+    // a repeated DoPreview() replaces the window instead of leaking it
+    if (m_hwnd) {
+        DestroyWindow(m_hwnd);
+        m_hwnd = nullptr;
+    }
+    m_hwnd = CreateWindow(wcex.lpszClassName, nullptr, WS_CHILD | WS_VSCROLL, m_rcParent.x, m_rcParent.y, m_rcParent.dx,
+                          m_rcParent.dy, m_hwndParent, nullptr, GetInstance(), nullptr);
     if (!m_hwnd) {
         return HRESULT_FROM_WIN32(GetLastError());
     }
@@ -795,7 +839,7 @@ IFACEMETHODIMP PdfPreview::DoPreview() {
     EngineBase* engine = GetEngine();
     int pageCount = 1;
     if (engine) {
-        pageCount = engine->PageCount();
+        pageCount = std::max(1, engine->PageCount());
         this->renderer = new PageRenderer(engine, m_hwnd);
         // don't use the engine afterwards directly (cf. PageRenderer::preventRecursion)
         engine = nullptr;
@@ -814,6 +858,26 @@ IFACEMETHODIMP PdfPreview::DoPreview() {
     return S_OK;
 }
 
+static Mutex gGdiPlusMutex;
+static int gGdiPlusRefCount = 0;
+static AutoGdiPlusShutdown* gGdiPlusScope = nullptr;
+
+static void AcquirePreviewGdiPlus() {
+    ScopedMutex scope(&gGdiPlusMutex);
+    if (gGdiPlusRefCount++ == 0) {
+        gGdiPlusScope = new AutoGdiPlusShutdown();
+    }
+}
+
+static void ReleasePreviewGdiPlus() {
+    ScopedMutex scope(&gGdiPlusMutex);
+    if (--gGdiPlusRefCount == 0) {
+        PlatformFontDestroy();
+        delete gGdiPlusScope;
+        gGdiPlusScope = nullptr;
+    }
+}
+
 static bool NeedsGdiPlus(PreviewType type) {
     return type == PreviewType::DjVu || type == PreviewType::Epub || type == PreviewType::Fb2 ||
            type == PreviewType::Mobi || type == PreviewType::Cbx || type == PreviewType::Tga;
@@ -824,19 +888,17 @@ PdfPreview::PdfPreview(AtomicInt* plRefCount, PreviewType type) {
     m_plModuleRef = plRefCount;
     AtomicIntInc(m_plModuleRef);
     if (NeedsGdiPlus(type)) {
-        m_gdiScope = new AutoGdiPlusShutdown();
+        AcquirePreviewGdiPlus();
+        m_usesGdiPlus = true;
     }
 }
 
 PdfPreview::~PdfPreview() {
     Unload();
-    if (m_gdiScope) {
-        // the cached gdiplus objects text measuring keeps around must go before
-        // gdiplus itself does
-        PlatformFontDestroy();
-        delete m_gdiScope;
+    if (m_usesGdiPlus) {
+        ReleasePreviewGdiPlus();
     }
-    InterlockedDecrement(m_plModuleRef);
+    AtomicIntDec(m_plModuleRef);
 }
 
 // If data is a zip (fb2z/fbz/fb2.zip), return owned bytes of the .fb2 member.

@@ -79,13 +79,17 @@ static WStr GetDefaultChmFontName() {
     return GetDefaultFontName();
 }
 
-static float GetDefaultFontSize() {
+static float DpiAdjustedFontSize(float size) {
     // fonts are scaled at higher DPI settings,
     // undo this here for (mostly) consistent results
+    return size * 96.0f / (float)DpiGetForHwnd(nullptr);
+}
+
+static float GetDefaultFontSize() {
     if (gDefaultFontSize == 0) {
         gDefaultFontSize = 10;
     }
-    return gDefaultFontSize * 96.0f / (float)DpiGetForHwnd(nullptr);
+    return DpiAdjustedFontSize(gDefaultFontSize);
 }
 
 void SetDefaultEbookFont(Str name, float size) {
@@ -174,6 +178,8 @@ class EngineEbook : public EngineBase {
     // itself takes this lock) while a caller already holds it (RenderPage,
     // ExtractPageText, ...)
     RecursiveMutex pagesAccess;
+    // decoded images, so each page render doesn't decode them again; under pagesAccess
+    HtmlImageCache* imageCache = NewHtmlImageCache();
     Str sourceData;
     TocTree* tocTree = nullptr;
     bool tocBuilt = false;
@@ -205,16 +211,6 @@ class EngineEbook : public EngineBase {
 };
 
 static IPageElement* NewEbookLink(Rect rect, IPageDestination* dest, int pageNo = 0, bool destOwned = true) {
-    if (!dest) {
-        // TODO: this doesn't make sense
-        dest = new PageDestination();
-        dest->kind = kindDestinationLaunchURL;
-        // TODO: not sure about this
-        // dest->value = str::Dup(res->value);
-        dest->rect = ToRectF(rect);
-        destOwned = true;
-    }
-
     auto res = new PageElementDestination(dest, destOwned);
     res->pageNo = pageNo;
     res->rect = ToRectF(rect);
@@ -262,6 +258,7 @@ EngineEbook::~EngineEbook() {
         DeleteVecMembers(*pages);
     }
     delete pages;
+    DeleteHtmlImageCache(imageCache);
 
     pagesAccess.Unlock();
     DestroyTocTree(tocTree);
@@ -449,7 +446,7 @@ Pixmap* EngineEbook::RenderPage(RenderPageArgs& args) {
     ScopedRecursiveMutex scope(&pagesAccess);
     PlatformTextRender* textDraw = CreateCairoTextRender(cairo);
     DrawHtmlPage(cairo, textDraw, GetHtmlPage(loc), pageBorder, pageBorder, false, kColBlack,
-                 cookie ? &cookie->abort : nullptr);
+                 cookie ? &cookie->abort : nullptr, imageCache);
     delete textDraw;
     cairo_surface_flush(surface);
     cairo_destroy(cairo);
@@ -497,7 +494,7 @@ Pixmap* EngineEbook::RenderPage(RenderPageArgs& args) {
     ScopedRecursiveMutex scope(&pagesAccess);
     PlatformTextRender* textDraw = CreateCoreTextRender(context);
     DrawHtmlPage(context, textDraw, GetHtmlPage(loc), pageBorder, pageBorder, false, kColBlack,
-                 cookie ? &cookie->abort : nullptr);
+                 cookie ? &cookie->abort : nullptr, imageCache);
     delete textDraw;
     CGContextFlush(context);
     CGContextRelease(context);
@@ -546,7 +543,7 @@ Pixmap* EngineEbook::RenderPage(RenderPageArgs& args) {
 
     PlatformTextRender* textDraw = CreateGdiplusTextRender(&g);
     DrawHtmlPage(&g, textDraw, GetHtmlPage(loc), pageBorder, pageBorder, false, kColBlack,
-                 cookie ? &cookie->abort : nullptr);
+                 cookie ? &cookie->abort : nullptr, imageCache);
     delete textDraw;
     DeleteDC(hDC);
 
@@ -578,6 +575,9 @@ PageText EngineEbook::ExtractPageText(int pageNo) {
     bool insertSpace = false;
 
     Vec<DrawInstr>* pageInstrs = GetHtmlPage(pageNo);
+    if (!pageInstrs) {
+        return {};
+    }
     for (DrawInstr& i : *pageInstrs) {
         Rect bbox = GetInstrBbox(i, pageBorder);
         bool hasCoords = len(coords) > 0;
@@ -625,7 +625,9 @@ PageText EngineEbook::ExtractPageText(int pageNo) {
         VecAppendBlanks(coords, len(lineSep));
     }
     int nCodepoints = Utf8CodepointCount(ToStr(content));
-    ReportIf(len(coords) != nCodepoints);
+    if (ReportIf(len(coords) != nCodepoints)) {
+        return {};
+    }
 
     PageText res;
     res.nCodepoints = nCodepoints;
@@ -638,7 +640,9 @@ IPageElement* EngineEbook::CreatePageLink(DrawInstr* link, Rect rect, int pageNo
     Str linkStr = link->str;
     TempStr url = ResolveHtmlEntitiesTemp(linkStr);
     if (url::IsAbsolute(url)) {
-        return NewEbookLink(rect, nullptr, pageNo);
+        auto* dest = new PageDestinationURL(url);
+        dest->rect = ToRectF(rect);
+        return NewEbookLink(rect, dest, pageNo);
     }
 
     // out of range for a chaptered engine (EngineMobi never populates
@@ -661,7 +665,11 @@ IPageElement* EngineEbook::CreatePageLink(DrawInstr* link, Rect rect, int pageNo
 }
 
 Vec<IPageElement*> EngineEbook::GetElements(int pageNo) {
+    ScopedRecursiveMutex scope(&pagesAccess);
     HtmlPage* pi = GetHtmlPage2(pageNo);
+    if (!pi) {
+        return Vec<IPageElement*>();
+    }
     if (pi->gotElements) {
         return pi->elements;
     }
@@ -715,6 +723,9 @@ RenderedBitmap* EngineEbook::GetImageForPageElement(IPageElement* iel) {
     PageElementImage* el = (PageElementImage*)iel;
     int idx = el->imageID;
     Vec<DrawInstr>* pageInstrs = el->loc.IsValid() ? GetHtmlPage(el->loc) : GetHtmlPage(el->pageNo);
+    if (!pageInstrs || idx < 0 || idx >= len(*pageInstrs)) {
+        return nullptr;
+    }
     auto&& i = (*pageInstrs)[idx];
     ReportIf(i.type != DrawInstrType::Image);
     return getImageFromData(i.GetImage());
@@ -764,7 +775,7 @@ IPageDestination* EngineEbook::GetNamedDest(Str name) {
     DrawInstr* baseAnchor = nullptr;
     int basePageNo = 0;
     if (hash && hash.s > name.s) {
-        int base_len = (int)(hash.s - name.s - 1);
+        int base_len = (int)(hash.s - name.s);
         for (int i = 0; i < len(baseAnchors); i++) {
             DrawInstr* anchor = baseAnchors[i];
             if (anchor && base_len == anchor->str.len && str::EqNI(name, anchor->str, base_len)) {
@@ -1189,6 +1200,29 @@ EngineBase* CreateEngineFb2FromFile(Str fileName) {
 EngineBase* CreateEngineFb2FromData(Str data) {
     return EngineFb2::CreateFromData(data);
 }
+
+#if IS_DEBUG
+// an absolute link must carry its url so a click opens it in the browser
+bool EngineEbook_UnitTestUrlLink() {
+    Str xml = StrL(
+        "<FictionBook xmlns:l=\"http://www.w3.org/1999/xlink\"><body><section>"
+        "<p><a l:href=\"https://example.com/x\">link</a></p></section></body></FictionBook>");
+    EngineBase* engine = CreateEngineFb2FromData(xml);
+    if (!engine) {
+        return false;
+    }
+    bool ok = false;
+    for (IPageElement* el : engine->GetElements(1)) {
+        IPageDestination* dest = el->AsLink();
+        if (!dest || dest->GetKind() != kindDestinationLaunchURL) {
+            continue;
+        }
+        ok = str::Eq(dest->GetValue(), StrL("https://example.com/x"));
+    }
+    engine->Release();
+    return ok;
+}
+#endif
 
 /* EngineBase for handling Mobi documents */
 
@@ -1622,7 +1656,7 @@ class ChmDataCache {
     Vec<ImageData> images;
 
   public:
-    ChmDataCache(ChmFile* doc, Str html) : doc(doc), html(html.s) {}
+    ChmDataCache(ChmFile* doc, Str html) : doc(doc), html(html) {}
 
     ~ChmDataCache() {
         FreeImages(images);
@@ -2007,7 +2041,12 @@ bool EngineHtml::Load(Str fileName) {
     }
 
     HtmlFormatterArgs args;
-    InitFormatterArgs(args, doc->htmlData, GetDefaultFontName());
+    WebDocStyle style = GetWebDocStyle(FileType::HTML);
+    Str fontName = style.fontName;
+    InitFormatterArgs(args, doc->htmlData, fontName ? ToWStrTemp(fontName) : WStrL(L"Georgia"));
+    args.overrideFontName = len(fontName) > 0;
+    args.fontSize = DpiAdjustedFontSize(style.fontSize > 0 ? style.fontSize : 8.f);
+    args.lineHeight = style.lineSpacing;
     if (!SetFormattedPages(HtmlFileFormatter(&args, doc).FormatAllPages(false))) {
         return false;
     }

@@ -3,8 +3,8 @@
 
 // ng: orig's src/tests/Sumatra_ut.cpp is also the unit test driver
 // (RunAppUnitTests). src/tools/test_util.cpp is the driver here, so this file
-// keeps only the test bodies. ParseTip_UnitTests and SvgTextIcon_UnitTests are
-// left out: they need VirtCtrl / SvgIcons (step 12).
+// keeps only the test bodies. ParseTip_UnitTests is TipMarkup_ut.cpp here;
+// SvgTextIcon_UnitTests is left out: it tests orig's VirtCtrl / SvgIcons.
 
 #include "base/Base.h"
 #include "base/CmdLineArgs.h"
@@ -24,20 +24,14 @@
 #include "AIChatCommon.h"
 #include "SystemFonts.h"
 
-#if OS_LINUX || OS_DARWIN
-extern "C" {
-#include <mupdf/fitz.h>
-#if OS_LINUX
-void install_load_linux_font_funcs(fz_context* ctx);
-#else
-void install_load_mac_font_funcs(fz_context* ctx);
-#endif
-}
-#endif
-
 extern "C" {
 #include <mupdf/fitz.h>
 #include <mupdf/ucdn.h>
+#if OS_LINUX
+void install_load_linux_font_funcs(fz_context* ctx);
+#elif OS_DARWIN
+void install_load_mac_font_funcs(fz_context* ctx);
+#endif
 }
 #include "mupdf/noto_sumatra.h"
 #include "EmbeddedResources.h"
@@ -53,14 +47,21 @@ void colorTest();
 void PngSizeTest();
 void parseCommandsTest();
 void DocPropertiesTest();
+void JsMenuTest();
+void HtmlImageCacheTest();
+void HtmlFormatterNarrowPageTest();
 void ParseFileArgsTest();
 void ParseCommandLineTest();
 void HexViewTest();
 void SumatraPDFWebTest();
 void HttpTransferTest();
 void RestrictedUseConfigTest();
+void CrashReportSettingsTest();
 void ControlFrameActionTest();
 void OpenDdeCmdTest();
+#if OS_WIN && IS_DEBUG
+bool PlatformTextCache_UnitTest();
+#endif
 void UpdateCheckDecisionTest();
 
 void CachedObjects_UnitTests();
@@ -69,6 +70,10 @@ void ImageReader_UnitTests();
 bool RenderCache_UnitTestCookieUnlocked();
 bool RenderCache_UnitTestFullOfOneVisiblePage();
 bool RenderCache_UnitTestFullOfOldZoom();
+bool RenderCache_UnitTestReduceTileSize();
+bool DisplayModel_UnitTestZoomFallback();
+bool EngineEbook_UnitTestUrlLink();
+bool DisplayModel_UnitTestFreePanFirstPage();
 
 #if OS_POSIX && !OS_WASM
 static void AIChatProcessTest() {
@@ -241,7 +246,7 @@ static void PlatformSystemFontTest() {
 }
 #endif
 
-#if OS_WIN || OS_LINUX || defined(__APPLE__)
+#if OS_WIN || OS_LINUX || OS_DARWIN
 static void SystemFontNamesTest() {
     StrVec names;
     GetInstalledFontNames(names);
@@ -267,8 +272,12 @@ static void PageAspectViewTest() {
 
 void SumatraPDF_UnitTests() {
     RestrictedUseConfigTest();
+    CrashReportSettingsTest();
     ControlFrameActionTest();
     OpenDdeCmdTest();
+#if OS_WIN && IS_DEBUG
+    utassert(PlatformTextCache_UnitTest());
+#endif
     UpdateCheckDecisionTest();
     CachedObjects_UnitTests();
     CommandPaletteModel_UnitTests();
@@ -276,6 +285,13 @@ void SumatraPDF_UnitTests() {
     utassert(RenderCache_UnitTestCookieUnlocked());
     utassert(RenderCache_UnitTestFullOfOneVisiblePage());
     utassert(RenderCache_UnitTestFullOfOldZoom());
+    utassert(RenderCache_UnitTestReduceTileSize());
+    utassert(DisplayModel_UnitTestZoomFallback());
+#if !OS_WIN
+    // test_util has no GDI+ for the ebook formatter on Windows
+    utassert(EngineEbook_UnitTestUrlLink());
+#endif
+    utassert(DisplayModel_UnitTestFreePanFirstPage());
 #if OS_POSIX && !OS_WASM
     AIChatProcessTest();
 #endif
@@ -284,10 +300,13 @@ void SumatraPDF_UnitTests() {
 #if OS_LINUX || OS_DARWIN
     PlatformSystemFontTest();
 #endif
-#if OS_WIN || OS_LINUX || defined(__APPLE__)
+#if OS_WIN || OS_LINUX || OS_DARWIN
     SystemFontNamesTest();
 #endif
     DocPropertiesTest();
+    JsMenuTest();
+    HtmlImageCacheTest();
+    HtmlFormatterNarrowPageTest();
     PageAspectViewTest();
     parseCommandsTest();
     colorTest();

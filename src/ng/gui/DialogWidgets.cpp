@@ -10,16 +10,26 @@
 #include "SumatraLog.h"
 
 float DialogScrollToRow(float scrollY, int row, int nRows, float rowDy, float viewDy) {
-    float maxY = std::max(0.f, (float)nRows * rowDy - viewDy);
     if (row >= 0 && row < nRows) {
-        float top = (float)row * rowDy;
-        if (top < scrollY) {
-            scrollY = top;
-        } else if (top + rowDy > scrollY + viewDy) {
-            scrollY = top + rowDy - viewDy;
-        }
+        return gp::VirtualListScrollToRow(nRows, rowDy, row, scrollY, viewDy, gp::ScrollStrategy::Top);
     }
+    float maxY = std::max(0.f, (float)nRows * rowDy - viewDy);
     return std::max(0.f, std::min(scrollY, maxY));
+}
+
+// viewH of 0 fills the parent. sizes is per-row height when the rows are not all rowH.
+gp::El* VirtualRows(gp::Ctx* cx, gp::Str id, int count, float rowH, float viewH, float scrollY, gp::VirtualRowFn row,
+                    void* user, const float* sizes) {
+    gp::VirtualListOpts o;
+    o.count = count;
+    o.rowH = rowH;
+    o.viewH = viewH;
+    o.scrollY = scrollY;
+    o.axis = gp::ScrollAxis::Vertical;
+    o.sizes = sizes;
+    o.row = row;
+    o.user = user;
+    return gp::VirtualList::New(cx, id, o)->ScrollFromPath();
 }
 
 float DialogListViewDy(int nRows, float rowDy, float minDy, float maxDy, float borderDy) {
@@ -34,9 +44,10 @@ static gp::Entity<gp::PopupMenuState> gFitPopup;
 static int gFitPopupFrames = 0;
 
 // orig's TrackPopupMenu keeps a menu on the screen: one that doesn't fit right
-// of / below the point opens left of / above it. gpui puts a menu where it is
-// told to, so one opened near the window's right or bottom edge was cut off.
-// Its size is only known once it was painted, so it moves on its second frame.
+// of / below the point opens left of / above it. The size is only known once
+// it was painted, so AnchoredCornerResolve runs on the second frame. st->x/y
+// are relative to the element that opened the menu; the resolver works in
+// window coordinates, and the delta is applied back.
 static void FitPopupInWindow(gp::Ctx* cx, gp::PopupMenuState* st) {
     if (!st->open || !cx->win) {
         gFitPopup = {};
@@ -53,14 +64,23 @@ static void FitPopupInWindow(gp::Ctx* cx, gp::PopupMenuState* st) {
     if (b.w <= 0 || b.h <= 0) {
         return;
     }
-    float dx = 0;
-    float dy = 0;
-    if (b.x + b.w > ws.dipW) {
-        dx = -std::min(b.w, b.x);
+    bool overX = b.x + b.w > ws.dipW;
+    bool overY = b.y + b.h > ws.dipH;
+    if (!overX && !overY) {
+        return;
     }
-    if (b.y + b.h > ws.dipH) {
-        dy = -std::min(b.h, b.y);
+    gp::Anchor anchor = gp::Anchor::TopLeft;
+    if (overX && overY) {
+        anchor = gp::Anchor::BottomRight;
+    } else if (overX) {
+        anchor = gp::Anchor::TopRight;
+    } else {
+        anchor = gp::Anchor::BottomLeft;
     }
+    gp::AnchoredPosition pos =
+        gp::AnchoredCornerResolve(anchor, gp::Point{b.x, b.y}, gp::Size{b.w, b.h}, gp::Size{ws.dipW, ws.dipH}, 0);
+    float dx = pos.bounds.x - b.x;
+    float dy = pos.bounds.y - b.y;
     if (dx == 0 && dy == 0) {
         return;
     }
@@ -227,6 +247,24 @@ static DialogSelect* OpenCombo();
 
 bool IsTrackedPopupOpen(gp::Ctx* cx) {
     return OpenTrackedPopup(cx) != nullptr || OpenTrackedSelect(cx) != nullptr || OpenCombo() != nullptr;
+}
+
+// an open popup menu and its open submenus, in window dips as last laid out
+void AppendPopupMenuBounds(gp::Ctx* cx, gp::PopupMenuState* st, Vec<gp::Bounds>& out) {
+    if (!st || !st->open) {
+        return;
+    }
+    VecAppend(out, st->bounds);
+    int sub = st->openSubmenu;
+    if (sub >= 0 && sub < len(st->rows)) {
+        AppendPopupMenuBounds(cx, st->rows[sub].submenuState.Get(cx), out);
+    }
+}
+
+void TrackedPopupBounds(gp::Ctx* cx, Vec<gp::Bounds>& out) {
+    for (auto& e : gTrackedPopups) {
+        AppendPopupMenuBounds(cx, e.Get(cx), out);
+    }
 }
 
 bool IsTrackedPopupOpenInApp(gp::App* app) {
@@ -555,6 +593,7 @@ gp::El* DialogSelect::BuildCombo(gp::Ctx* cx, Str id, gp::InputState* edit, floa
                         ->Disabled(disabled)
                         ->W(gp::kFill)
                         ->IntoEl();
+    EditStyle(cx, field, edit, EditLook::Combo);
     if (dy > 0) {
         field->H(dy);
     }
@@ -671,13 +710,23 @@ struct DlgAccel {
 static Vec<DlgAccel> gDlgAccels;
 static bool gDlgCues = false;
 
+// -1: not read yet. Asked for every frame, so read once per setting change
+static int gMenuCuesAlways = -1;
+
+void MenuCuesRefresh() {
+    gMenuCuesAlways = -1;
+}
+
 // Windows underlines the access keys always or only once Alt was pressed
 // ("Underline access keys when available", off by default)
 bool MenuCuesAlways() {
 #if OS_WIN
-    BOOL on = FALSE;
-    SystemParametersInfoW(SPI_GETKEYBOARDCUES, 0, &on, 0);
-    return on != FALSE;
+    if (gMenuCuesAlways < 0) {
+        BOOL on = FALSE;
+        SystemParametersInfoW(SPI_GETKEYBOARDCUES, 0, &on, 0);
+        gMenuCuesAlways = on ? 1 : 0;
+    }
+    return gMenuCuesAlways == 1;
 #else
     return false;
 #endif
@@ -724,17 +773,27 @@ bool DlgDefaultOnEnter(gp::Ctx* cx, bool editFocused) {
     return false;
 }
 
+static void DlgAccelsForget(gp::Window* win) {
+    for (int i = len(gDlgAccels) - 1; i >= 0; i--) {
+        if (gDlgAccels[i].win == win) {
+            VecRemoveAt(gDlgAccels, i);
+        }
+    }
+}
+
 void DlgAccelBeginFrame(gp::Window* win) {
     DlgDefaultsBeginFrame(win);
     if (len(gDlgAccels) == 0) {
         // no dialog was up: win32 forgets the cue state with the dialog
         gDlgCues = false;
     }
-    for (int i = len(gDlgAccels) - 1; i >= 0; i--) {
-        if (gDlgAccels[i].win == win) {
-            VecRemoveAt(gDlgAccels, i);
-        }
-    }
+    DlgAccelsForget(win);
+}
+
+// a closed window's entries point into its freed frame and dialog state
+void DlgAccelWindowClosed(gp::Window* win) {
+    DlgDefaultsBeginFrame(win);
+    DlgAccelsForget(win);
 }
 
 void DlgAccelOnAlt() {
@@ -821,7 +880,7 @@ gp::El* DlgAccelUnderline(gp::Ctx* cx, gp::El* el, gp::Str text) {
     }
     const DlgAccel* acc = nullptr;
     for (const DlgAccel& a : gDlgAccels) {
-        if (a.text.s == text.s) {
+        if (a.win == cx->win && a.text.s == text.s) {
             acc = &a;
         }
     }
@@ -994,6 +1053,19 @@ gp::El* DlgGhostButton(gp::Ctx* cx, gp::Str id, Str label, gp::Listener onClick,
     }
     b->Child(gp::TextEl(cx->a, text)->Font(fontPx)->Fg(ToGpui(colText)));
     return DlgAccelUnderline(cx, b, text);
+}
+
+// Gives a gpc::Input / Textarea's field (what IntoEl() returns) orig's edit border.
+// gpui's own look darkens the border and draws a ring around it while focused;
+// orig's edits look the same with and without focus, except an editable
+// DropDown, whose border turns the highlight color (blue).
+gp::El* EditStyle(gp::Ctx* cx, gp::El* field, gp::InputState* edit, EditLook look, float radius) {
+    Color col = ThemeEdgeColor();
+    bool focused = edit && cx->win && gp::FocusHandleIsFocused(cx->win, edit->focus);
+    if (look == EditLook::Combo && focused) {
+        col = SysHighlightBgColor();
+    }
+    return field->Border(1, ToGpui(col))->Radius(radius)->FocusRing(false);
 }
 
 gp::El* DlgUnderlineInput(gp::Ctx* cx, gp::Str id, gp::InputState* edit, float fontPx, Color underline, bool masked,

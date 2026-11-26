@@ -4,11 +4,15 @@
 #include "base/Base.h"
 #include "base/DirScan.h"
 #include "base/File.h"
+#include "base/GuessFileType.h"
 
 #include "base/HtmlTags.h"
+#include "gui/UIModels.h"
 
 #include "Settings.h"
 #include "AppSettings.h"
+#include "EngineBase.h"
+#include "EngineAll.h"
 #include "Theme.h"
 #include "GumboHtmlParser.h"
 
@@ -403,11 +407,10 @@ static CodeBlockCounts RewriteCodeBlocks(str::Builder& out, Str body) {
 // pele.min.js (Pele 1.13.0, a Mermaid renderer) lives in IDR_EMBEDDED_PAK and
 // mermaid-run.js is kMermaidRunJs, both served from the markdown virtual host
 // (GetDataForUrl). Not inline, so kMarkdownCsp can allow just these two scripts.
-// Must match kMdVirtualHost in MarkdownModel.cpp.
-static const char kMermaidBootstrap[] = R"HTML(
-<script src="https://sumatrapdf.markdown/pele.min.js"></script>
-<script src="https://sumatrapdf.markdown/mermaid-run.js"></script>
-)HTML";
+static const char kMermaidBootstrap[] =
+    "\n<script src=\"" SUMATRA_MARKDOWN_HOST SUMATRA_MARKDOWN_PELE
+    "\"></script>\n"
+    "<script src=\"" SUMATRA_MARKDOWN_HOST SUMATRA_MARKDOWN_MERMAID "\"></script>\n";
 
 static const char kMermaidRunJs[] = R"JS(
 (function () {
@@ -423,8 +426,9 @@ static const char kMermaidRunJs[] = R"JS(
 static const char kMarkdownCsp[] =
     "<meta http-equiv=\"Content-Security-Policy\" content=\""
     "default-src 'self' data:; img-src * data:; media-src * data:; style-src 'self' 'unsafe-inline'; "
-    "script-src https://sumatrapdf.markdown/pele.min.js https://sumatrapdf.markdown/mermaid-run.js "
-    "https://sumatrapdf.markdown/microlighter.min.js https://sumatrapdf.markdown/code-run.js; "
+    "script-src " SUMATRA_MARKDOWN_HOST SUMATRA_MARKDOWN_PELE " " SUMATRA_MARKDOWN_HOST SUMATRA_MARKDOWN_MERMAID
+    " " SUMATRA_MARKDOWN_HOST SUMATRA_MARKDOWN_HIGHLIGHT " " SUMATRA_MARKDOWN_HOST SUMATRA_MARKDOWN_CODE
+    "; "
     "object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'\">";
 
 Str MermaidRunJs() {
@@ -434,8 +438,8 @@ Str MermaidRunJs() {
 // microlighter.min.js (ext/, in IDR_EMBEDDED_PAK) colors code blocks that name a
 // language; code-run.js is kCodeRunJs. Both from the markdown virtual host.
 static const char kCodeHighlightScript[] =
-    "<script src=\"https://sumatrapdf.markdown/microlighter.min.js\"></script>\n";
-static const char kCodeRunScript[] = "<script src=\"https://sumatrapdf.markdown/code-run.js\"></script>\n";
+    "<script src=\"" SUMATRA_MARKDOWN_HOST SUMATRA_MARKDOWN_HIGHLIGHT "\"></script>\n";
+static const char kCodeRunScript[] = "<script src=\"" SUMATRA_MARKDOWN_HOST SUMATRA_MARKDOWN_CODE "\"></script>\n";
 
 // A copy button on every code block, then syntax coloring through the CSS Custom
 // Highlight API (where missing, code stays plain).
@@ -886,10 +890,11 @@ static void PreserveSafeEmptyAnchors(cmark_node* parent) {
 // Give headings anchors with the TOC's slugs so links like "#intr_state"
 // reach their headings through cmark's safe renderer (#5883).
 static void AddHeadingAnchors(cmark_node* doc) {
-    for (cmark_node* node = cmark_node_first_child(doc); node; node = cmark_node_next(node)) {
-        if (cmark_node_get_type(node) != CMARK_NODE_HEADING) {
-            continue;
-        }
+    // all headings, like the TOC (nested in lists and quotes too); collected
+    // first so inserting doesn't disturb the tree walk
+    Vec<cmark_node*> headings;
+    VisitMarkdownNodes(doc, CMARK_NODE_HEADING, [&](cmark_node* node) { VecAppend(headings, node); });
+    for (cmark_node* node : headings) {
         Str title = ExtractHeadingTitle(node);
         if (len(title) == 0) {
             continue;
@@ -930,11 +935,30 @@ static char* MarkdownToHtmlBody(Str markdown, int options = CMARK_OPT_DEFAULT) {
     return body;
 }
 
-// Convert markdown source to a full HTML page (body only is rendered with cmark-gfm).
+TempStr BrowserTypographyCssTemp(const WebDocStyle& style) {
+    str::Builder css;
+    if (style.fontName) {
+        // A CSS escape also keeps '<' from ending the HTML style element.
+        TempStr font = str::ReplaceTemp(style.fontName, StrL("<"), StrL("\\3c "));
+        css.Append(
+            fmt("body, body :where(:not(pre, code, kbd, samp, tt, svg,"
+                "pre *, code *, kbd *, samp *, tt *, svg *))"
+                " { font-family: \"%s\" !important; }\n",
+                font));
+    }
+    css.Append(WebDocMetricsCssTemp(style, style.fontSize));
+    if (style.maxContentWidth > 0) {
+        css.Append(fmt("body { max-width: %dpx !important; }\n", style.maxContentWidth));
+    }
+    return str::DupTemp(ToStr(css));
+}
+
+// Convert Markdown to a full HTML page around the cmark-gfm-rendered body.
 Str MarkdownToHtmlPage(Str markdown) {
     // raw HTML is kept; tagfilter and kMarkdownCsp keep it from running script
     int options = CMARK_OPT_DEFAULT | CMARK_OPT_UNSAFE;
-    if (gSettings && gSettings->markdownUI.preserveLineBreaks) {
+    WebDocStyle style = GetWebDocStyle(FileType::Markdown);
+    if (style.preserveLineBreaks) {
         options |= CMARK_OPT_HARDBREAKS;
     }
     char* body = MarkdownToHtmlBody(markdown, options);
@@ -949,6 +973,7 @@ Str MarkdownToHtmlPage(Str markdown) {
     html.Append(Str(kMarkdownCsp, (int)(sizeof(kMarkdownCsp) - 1)));
     html.Append(StrL("<style>"));
     html.Append(Str(MarkdownPageCssTemp()));
+    html.Append(BrowserTypographyCssTemp(style));
     html.Append(StrL("</style></head><body>"));
     CodeBlockCounts counts = RewriteCodeBlocks(html, Str(body));
     cmark_mem* mem = cmark_get_default_mem_allocator();
@@ -1163,12 +1188,15 @@ bool MarkdownToc_UnitTestHighlightWikilinks() {
         return false;
     }
 
-    char* headed = MarkdownToHtmlBody(StrL("See [[#Hello World]]\n\n## Hello World\n"), CMARK_OPT_UNSAFE);
+    char* headed = MarkdownToHtmlBody(StrL("See [[#Hello World]]\n\n## Hello World\n\n> ## Quoted\n\n- ## Listed\n"),
+                                      CMARK_OPT_UNSAFE);
     if (!headed) {
         return false;
     }
     Str head(headed);
-    bool headOk = str::Contains(head, StrL("href=\"#hello-world\"")) && str::Contains(head, StrL("id=\"hello-world\""));
+    bool headOk = str::Contains(head, StrL("href=\"#hello-world\"")) &&
+                  str::Contains(head, StrL("id=\"hello-world\"")) && str::Contains(head, StrL("id=\"quoted\"")) &&
+                  str::Contains(head, StrL("id=\"listed\""));
     cmark_get_default_mem_allocator()->free(headed);
     return headOk;
 }

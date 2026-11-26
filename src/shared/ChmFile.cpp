@@ -136,7 +136,7 @@ void ChmFile::ParseWindowsData() {
         return;
     }
 
-    for (int i = 0; i < entries && (i + 1) * entrySize <= windowsLen; i++) {
+    for (int i = 0; i < entries && (i64)8 + (i64)(i + 1) * entrySize <= windowsLen; i++) {
         int off = 8 + (i * entrySize);
         for (const auto& field : chmStrings) {
             Str& value = this->*field.field;
@@ -256,7 +256,7 @@ bool ChmFile::Load(Str path) {
     uint fileCodepage = codepage;
     char header[24]{};
     int n = file::ReadN(path, (u8*)header, sizeof(header));
-    if (n < sizeofi(header)) {
+    if (n == sizeofi(header)) {
         ByteReader r(Str(header, sizeof(header)));
         DWORD lcid = r.UInt32LE(20);
         fileCodepage = LcidToCodepage(lcid);
@@ -277,6 +277,7 @@ bool ChmFile::Load(Str path) {
         for (Str testPath : pathsToTest) {
             if (HasData(testPath)) {
                 str::ReplaceWithCopy(&homePath, testPath);
+                break;
             }
         }
         if (!HasData(homePath)) {

@@ -3,7 +3,9 @@
 
 #include "base/Base.h"
 #include "base/AutoWin.h"
-#if !OS_WIN
+#if OS_WIN
+#include <io.h>
+#else
 #include <limits.h>
 #include <unistd.h>
 #endif
@@ -122,15 +124,14 @@ TempStr GetSelfExePathTemp() {
     return ToUtf8Temp(GetModulePathTemp((HMODULE)&__ImageBase, MAX_PATH + 1));
 }
 
-// Directory containing GetSelfExePathTemp().
+#endif
 
 int FileTimeDiffInSecs(const FILETIME& ft1, const FILETIME& ft2) {
     i64 diff = (i64)FileTimeToU64(ft1) - (i64)FileTimeToU64(ft2);
     return (int)(diff / (i64)kFileTimeTicksPerSec);
 }
 
-#endif
-
+// Directory containing GetSelfExePathTemp().
 TempStr GetSelfExeDirTemp() {
     TempStr path = GetSelfExePathTemp();
 #if !OS_WIN
@@ -183,10 +184,11 @@ static S JoinTempT(S dir, S name, S name2, S sep) {
     if (name && IsSep(name.s[0])) {
         name = S(name.s + 1, name.len - 1);
     }
+    S dirSep = sep;
     if (len(dir) == 0 || IsSep(dir.s[dir.len - 1])) {
-        sep = {};
+        dirSep = {};
     }
-    S res = str::JoinTemp(dir, sep, name);
+    S res = str::JoinTemp(dir, dirSep, name);
     if (name2) {
         res = JoinTempT(res, name2, S{}, sep);
     }
@@ -274,7 +276,11 @@ TempStr GetPathNoExtTemp(Str path) {
 }
 
 TempStr ToOSTemp(Str path) {
+#if OS_WIN
     return str::ReplaceTemp(path, StrL("/"), StrL("\\"));
+#else
+    return str::DupTemp(path);
+#endif
 }
 
 static Str AdvanceUntilWildcardMatch(Str fileName, Str filter);
@@ -296,7 +302,7 @@ static bool MatchWildcardsRec(Str fileName, Str filter) {
             return len(fileName) > 0 &&
                    MatchWildcardsRec(Str(fileName.s + 1, fileName.len - 1), Str(filter.s + 1, filter.len - 1));
         default:
-            return tolower(fileName.s[0]) == tolower(filter.s[0]) &&
+            return len(fileName) > 0 && tolower((u8)fileName.s[0]) == tolower((u8)filter.s[0]) &&
                    MatchWildcardsRec(Str(fileName.s + 1, fileName.len - 1), Str(filter.s + 1, filter.len - 1));
     }
 }
@@ -336,7 +342,7 @@ bool IsWslMount(Str path) {
         return false;
     }
     char drive = (char)tolower((unsigned char)path.s[5]);
-    return drive >= 'a' && drive <= 'z' && (IsSep(path.s[6]) || path.s[6] == '\0');
+    return drive >= 'a' && drive <= 'z' && (path.len == 6 || IsSep(path.s[6]));
 }
 
 TempStr WslUncToUnixTemp(Str path) {
@@ -510,6 +516,8 @@ struct DriveAvailEntry {
 static DriveAvailEntry* gDriveAvailHead = nullptr;
 constexpr u64 kDriveAvailTtlMs = 4ull * 60ull * 1000ull; // 4 minutes
 
+static UINT GetCachedDriveType(char drive);
+
 // Fill keyOut with a non-fixed drive key ("X" or "\\server\share"). Returns
 // false for fixed drives, relative paths, and paths we do not guard.
 static bool GetNonFixedDriveKey(Str path, char* keyOut, int keyCap) {
@@ -586,9 +594,7 @@ static bool GetNonFixedDriveKey(Str path, char* keyOut, int keyCap) {
     if (drive < 'A' || drive > 'Z') {
         return false;
     }
-    WCHAR root[] = LR"(?:\)";
-    root[0] = (WCHAR)drive;
-    UINT type = GetDriveTypeW(root);
+    UINT type = GetCachedDriveType(drive);
     // Guard everything that is not a local fixed disk. DRIVE_NO_ROOT_DIR is a
     // disconnected mapping — still use the availability cache.
     if (type == DRIVE_FIXED || type == DRIVE_UNKNOWN) {
@@ -881,18 +887,16 @@ bool IsSame(Str path1, Str path2) {
         return true;
     }
 
-    TempStr base1 = path::GetBaseNameTemp(path1);
-    TempStr base2 = path::GetBaseNameTemp(path2);
-    if (!str::EqI(base1, base2)) {
-        return false;
-    }
-
     WCHAR* path1W = CWStrTemp(path1);
     WCHAR* path2W = CWStrTemp(path2);
     bool isSame = false;
     bool needFallback = true;
-    HANDLE h1 = CreateFileW(path1W, 0, 0, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    HANDLE h2 = CreateFileW(path2W, 0, 0, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    HANDLE h1 = CreateFileW(path1W, 0, share, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    HANDLE h2 = INVALID_HANDLE_VALUE;
+    if (h1 != INVALID_HANDLE_VALUE) {
+        h2 = CreateFileW(path2W, 0, share, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    }
 
     if (h1 != INVALID_HANDLE_VALUE && h2 != INVALID_HANDLE_VALUE) {
         BY_HANDLE_FILE_INFORMATION fi1, fi2;
@@ -902,8 +906,12 @@ bool IsSame(Str path1, Str path2) {
         }
     }
 
-    CloseHandle(h1);
-    CloseHandle(h2);
+    if (h1 != INVALID_HANDLE_VALUE) {
+        CloseHandle(h1);
+    }
+    if (h2 != INVALID_HANDLE_VALUE) {
+        CloseHandle(h2);
+    }
 
     if (!needFallback) {
         return isSame;
@@ -915,8 +923,11 @@ bool IsSame(Str path1, Str path2) {
 }
 
 bool HasVariableDriveLetter(Str path) {
+    if (len(path) < 2 || path.s[1] != ':') {
+        return false;
+    }
     char root[] = R"(?:\)";
-    root[0] = (char)toupper(path.s[0]);
+    root[0] = (char)toupper((u8)path.s[0]);
     if (root[0] < 'A' || 'Z' < root[0]) {
         return false;
     }
@@ -931,33 +942,37 @@ bool HasVariableDriveLetter(Str path) {
     return false;
 }
 
-// Drive-letter -> is-network cache. Mappings change rarely and
-// IsOnNetworkDrive() runs in front of every cached attribute query, so keep a
-// short TTL rather than querying the drive for each call.
-constexpr u64 kDriveIsNetCacheTtlMs = 60ull * 1000ull;
-static Mutex gDriveIsNetMutex;
-static u64 gDriveIsNetTick[26];
-static bool gDriveIsNet[26];
+// Drive-letter -> GetDriveTypeW cache. Mappings change rarely and
+// IsOnNetworkDrive() / GetNonFixedDriveKey() run in front of every cached
+// attribute query, so keep a short TTL rather than querying the drive each call.
+constexpr u64 kDriveTypeCacheTtlMs = 60ull * 1000ull;
+static Mutex gDriveTypeMutex;
+static u64 gDriveTypeTick[26];
+static UINT gDriveType[26];
 
 // drive is an upper-case letter 'A'..'Z'
-static bool IsNetworkDriveLetter(char drive) {
+static UINT GetCachedDriveType(char drive) {
     int idx = drive - 'A';
     u64 now = GetTickCount64();
     {
-        AutoUnlockMutex lock(&gDriveIsNetMutex);
-        u64 tick = gDriveIsNetTick[idx];
-        if (tick != 0 && (now - tick) <= kDriveIsNetCacheTtlMs) {
-            return gDriveIsNet[idx];
+        AutoUnlockMutex lock(&gDriveTypeMutex);
+        u64 tick = gDriveTypeTick[idx];
+        if (tick != 0 && (now - tick) <= kDriveTypeCacheTtlMs) {
+            return gDriveType[idx];
         }
     }
     WCHAR root[] = LR"(?:\)";
     root[0] = (WCHAR)drive;
     // resolved locally from the mount point, unlike WNetGetConnection
-    bool isNet = GetDriveTypeW(root) == DRIVE_REMOTE;
-    AutoUnlockMutex lock(&gDriveIsNetMutex);
-    gDriveIsNetTick[idx] = now;
-    gDriveIsNet[idx] = isNet;
-    return isNet;
+    UINT type = GetDriveTypeW(root);
+    AutoUnlockMutex lock(&gDriveTypeMutex);
+    gDriveTypeTick[idx] = now;
+    gDriveType[idx] = type;
+    return type;
+}
+
+static bool IsNetworkDriveLetter(char drive) {
+    return GetCachedDriveType(drive) == DRIVE_REMOTE;
 }
 
 // PathIsNetworkPathW() answers this for a drive-letter path by going through
@@ -1215,15 +1230,30 @@ TempStr GetNonVirtualTemp(Str virtualPath) {
         return virtualPath;
     }
 
-    WCHAR realPath[MAX_PATH * 4];
-    DWORD ret = GetFinalPathNameByHandleW(hFile, realPath, dimof(realPath), FILE_NAME_NORMALIZED);
+    WCHAR buf[MAX_PATH * 4];
+    WCHAR* realPath = buf;
+    DWORD ret = GetFinalPathNameByHandleW(hFile, realPath, dimof(buf), FILE_NAME_NORMALIZED);
+    // too small: ret is the size needed, including the NUL
+    if (ret >= dimof(buf)) {
+        DWORD cch = ret;
+        realPath = AllocArrayTemp<WCHAR>((int)cch);
+        ret = realPath ? GetFinalPathNameByHandleW(hFile, realPath, cch, FILE_NAME_NORMALIZED) : 0;
+        if (ret >= cch) {
+            ret = 0;
+        }
+    }
 
     CloseHandle(hFile);
-    if (ret <= 0) {
+    if (ret == 0) {
         return virtualPath;
     }
 
-    TempStr res = ToUtf8Temp(realPath);
+    // \\?\UNC\server\share => \\server\share, \\?\C:\dir => C:\dir
+    TempStr res = ToUtf8Temp(WStr(realPath, (int)ret));
+    Str uncPrefix = StrL("\\\\?\\UNC\\");
+    if (str::StartsWithI(res, uncPrefix)) {
+        return str::JoinTemp(StrL("\\\\"), Str(res.s + len(uncPrefix), len(res) - len(uncPrefix)));
+    }
     str::TrimPrefix(res, StrL("\\\\?\\"));
     return res;
 }
@@ -1233,8 +1263,6 @@ TempStr GetNonVirtualTemp(Str virtualPath) {
 } // namespace path
 
 namespace file {
-
-thread_local CopyProgressCb gFileCopyProgressCb;
 
 Str ReadFile(Str path) {
     return ReadFileWithArena(path, nullptr);
@@ -1321,6 +1349,19 @@ FILE* OpenFILE(Str path) {
     return _wfopen(CWStrTemp(path), L"rb");
 }
 
+bool GetReadStamp(FILE* f, ReadStamp& stamp) {
+    HANDLE h = (HANDLE)_get_osfhandle(_fileno(f));
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(h, &info) || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        return false;
+    }
+    stamp.size = (i64)(((u64)info.nFileSizeHigh << 32) | info.nFileSizeLow);
+    stamp.mtime = FileTimeToU64(info.ftLastWriteTime);
+    stamp.device = info.dwVolumeSerialNumber;
+    stamp.id = ((u64)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+    return stamp.size >= 0;
+}
+
 bool WriteFile(Str path, Str d) {
     const void* data = (const void*)d.s;
     size_t dataLen = (size_t)d.len;
@@ -1347,7 +1388,7 @@ bool WriteFile(Str path, Str d) {
     return true;
 }
 
-FileHandle OpenReadOnly(Str path) {
+static FileHandle OpenReadOnly(Str path) {
     return CreateFileW(CWStrTemp(path), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
                        nullptr);
 }
@@ -1356,10 +1397,6 @@ void Close(FileHandle h) {
     if (h != kInvalidFileHandle && h != nullptr) {
         CloseHandle(h);
     }
-}
-
-bool Flush(FileHandle h) {
-    return FlushFileBuffers(h) != 0;
 }
 
 // Reads up to toRead bytes from the front of the file, zero-filling the rest of
@@ -1645,8 +1682,8 @@ bool SetAttributes(Str path, DWORD attrs) {
 }
 
 bool SetModificationTime(Str path, FILETIME lastMod) {
-    AutoCloseHandle h(
-        CreateFileW(CWStrTemp(path), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr));
+    AutoCloseHandle h(CreateFileW(CWStrTemp(path), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                  OPEN_EXISTING, 0, nullptr));
     if (!h.IsValid()) {
         return false;
     }
@@ -1701,6 +1738,31 @@ bool RenameReplace(Str newPath, Str oldPath) {
     }
     DWORD flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
     return MoveFileExW(CWStrTemp(oldPath), CWStrTemp(newPath), flags) != 0;
+}
+
+bool WriteFileAtomic(Str path, Str data) {
+    if (len(path) == 0) {
+        return false;
+    }
+    TempStr dir = path::GetDirTemp(path);
+    WCHAR tempPathW[MAX_PATH]{};
+    if (!GetTempFileNameW(len(dir) ? CWStrTemp(dir) : L".", L"tmp", 0, tempPathW)) {
+        return false;
+    }
+    Str tempPath = ToUtf8Temp(tempPathW);
+    bool ok = false;
+    {
+        HANDLE h = CreateFileW(tempPathW, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            ok = WriteAll(h, data) && FlushFileBuffers(h);
+            ok = CloseHandle(h) && ok;
+        }
+    }
+    if (ok && RenameReplace(path, tempPath)) {
+        return true;
+    }
+    Delete(tempPath);
+    return false;
 }
 
 bool OverwriteAtomicRetry(Str dst, Str src, int retryCount, int retrySleepMs) {
@@ -1780,6 +1842,17 @@ bool WriteAll(FileHandle h, Str data) {
 
 #endif
 
+bool ReadStampMatchesPath(Str path, const ReadStamp& stamp) {
+    FILE* f = OpenFILE(path);
+    if (!f) {
+        return false;
+    }
+    ReadStamp current;
+    bool matches = GetReadStamp(f, current) && current == stamp;
+    fclose(f);
+    return matches;
+}
+
 } // namespace file
 
 namespace dir {
@@ -1807,7 +1880,7 @@ bool Create(Str dir) {
     if (ok) {
         return true;
     }
-    return ERROR_ALREADY_EXISTS == GetLastError();
+    return ERROR_ALREADY_EXISTS == GetLastError() && Exists(dir);
 }
 
 // Create dir and all missing parents (like mkdir -p). Uses SHCreateDirectoryExW
@@ -1906,8 +1979,6 @@ bool HasWriteAccess(Str dir) {
 
 } // namespace dir
 
-TempStr GetHomeDirTemp();
-
 bool FileSystemEntryExists(Str s) {
     return path::GetType(s) != path::Type::None;
 }
@@ -1925,6 +1996,7 @@ TempStr GetDownloadsDirTemp() {
     return res;
 }
 
+// %USERPROFILE%, as Node / Rust tools resolve ~; the profile folder when unset
 TempStr GetHomeDirTemp() {
     WCHAR buf[MAX_PATH];
     DWORD n = GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH);
@@ -1936,7 +2008,7 @@ TempStr GetHomeDirTemp() {
     WCHAR path[MAX_PATH];
     DWORD driveLen = GetEnvironmentVariableW(L"HOMEDRIVE", drive, MAX_PATH);
     DWORD pathLen = GetEnvironmentVariableW(L"HOMEPATH", path, MAX_PATH);
-    if (driveLen > 0 && pathLen > 0) {
+    if (driveLen > 0 && driveLen < MAX_PATH && pathLen > 0 && pathLen < MAX_PATH) {
         WCHAR combined[MAX_PATH * 2];
         int pos = 0;
         for (DWORD i = 0; i < driveLen && pos < MAX_PATH * 2 - 1; i++) {
@@ -1948,7 +2020,14 @@ TempStr GetHomeDirTemp() {
         combined[pos] = 0;
         return ToUtf8Temp(WStr(combined, pos));
     }
-    return {};
+
+    PWSTR pathW = nullptr;
+    TempStr res;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Profile, 0, nullptr, &pathW)) && pathW) {
+        res = ToUtf8Temp(pathW);
+    }
+    CoTaskMemFree(pathW);
+    return res;
 }
 
 #endif

@@ -215,7 +215,8 @@ static bool ImageFormatAvailable(Str ext) {
 #endif
 }
 
-// ng: gpui cannot write images; Windows keeps orig's PNG + CF_DIBV5 pair.
+// Windows keeps orig's PNG + CF_DIBV5 pair; elsewhere gpui puts a PNG on the
+// clipboard (macOS, X11; not wasm)
 bool ImageEditCopyToClipboard(Pixmap* px) {
     if (!px) {
         return false;
@@ -223,7 +224,17 @@ bool ImageEditCopyToClipboard(Pixmap* px) {
 #if OS_WIN
     return CopyPixmapToClipboard(px, false);
 #else
-    return false;
+    MainWindow* win = len(gWindows) > 0 ? gWindows[0] : nullptr;
+    if (!win || !win->gpuiWin) {
+        return false;
+    }
+    Str png = EncodePngFromPixmap(px);
+    if (len(png) == 0) {
+        return false;
+    }
+    bool ok = gp::ClipboardSetImage(win->gpuiWin, (const u8*)png.s, len(png));
+    str::Free(png);
+    return ok;
 #endif
 }
 
@@ -266,6 +277,10 @@ static void OpenSavedFile(MainWindow* parent, Str path) {
     LoadDocument(win, path);
 }
 
+static bool EscToExit() {
+    return gSettings && gSettings->escToExit;
+}
+
 // fills the hooks above in with SumatraPDF's implementations
 void InitImageEditHost() {
     gImageEditHost.LoadImageFile = LoadImageFile;
@@ -274,5 +289,5 @@ void InitImageEditHost() {
     gImageEditHost.ImageFormatAvailable = ImageFormatAvailable;
     gImageEditHost.OpenSavedFile = OpenSavedFile;
     gImageEditHost.Translate = TranslateStr;
-    gImageEditHost.escToExit = gSettings && gSettings->escToExit;
+    gImageEditHost.EscToExit = EscToExit;
 }

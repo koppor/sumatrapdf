@@ -66,7 +66,6 @@ Gdiplus::Color kColorMsgInstallation(gCol5);
 Gdiplus::Color kColorMsgFailed(gCol1);
 
 HWND gHwndFrame = nullptr;
-__unused static bool gForceCrash = false;
 int gBottomPartDy = 0;
 int gButtonDy = 0;
 
@@ -74,7 +73,7 @@ static Str gMsg;
 static Gdiplus::Color gMsgColor;
 
 void SetMsg(Str msg, Gdiplus::Color color) {
-    gMsg = str::Dup(GetPermArena(), msg);
+    str::ReplaceWithCopy(&gMsg, msg);
     gMsgColor = color;
 }
 

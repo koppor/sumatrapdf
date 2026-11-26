@@ -4,10 +4,9 @@
 // ng: orig's Canvas.cpp, the part that draws and drives a DisplayModel:
 // DrawDocument, the page frame and shadow, the WM_VSCROLL / WM_HSCROLL
 // handlers, the mouse wheel (scroll, page flip, cursor-anchored ctrl+wheel
-// zoom), drag panning, middle-button auto-scroll, and (step 8a) the mouse
-// handling for links and selection. The win32 half (HDC, capture, timers,
-// touch, OLE drag-drop) is gpui here; find and annotations arrive with steps
-// 8b and 13.
+// zoom), drag panning, middle-button auto-scroll, and the mouse handling for
+// links, selection and annotations. The win32 half (HDC, capture, timers,
+// touch, OLE drag-drop) is gpui here.
 
 #include "gui/GpuiBridge.h"
 #include "base/Pixmap.h"
@@ -43,6 +42,7 @@
 #include "ProgressUpdateUI.h"
 #include "TextSearch.h"
 #include "SearchAndDDE.h"
+#include "SearchAndDDECommon.h"
 #include "Toolbar.h"
 #include "SelectTextKeyboard.h"
 #include "SumatraDialogs.h"
@@ -68,6 +68,7 @@
 #include "CanvasCommon.h"
 #include "MainWindowCommon.h"
 #include "SignatureUI.h"
+#include "SignatureUICommon.h"
 
 #include "SumatraLog.h"
 
@@ -596,7 +597,7 @@ static void FillRect(gp::PaintCtx* ctx, Rect rc, Color col) {
 
 // orig has two versions of this behind DRAW_PAGE_SHADOWS; SumatraPDF ships the
 // shadow-less one, which just fills the page rect with the placeholder color
-static void PaintPageFrameAndShadow(gp::PaintCtx* ctx, Rect& bounds, Rect&, bool, Color bgCol) {
+static void PaintPageFrameAndShadow(gp::PaintCtx* ctx, Rect& bounds, Color bgCol) {
     FillRect(ctx, Rect(bounds.x, bounds.y, bounds.dx + 1, bounds.dy + 1), bgCol);
 }
 
@@ -963,8 +964,7 @@ static bool DrawDocument(MainWindow* win, gp::PaintCtx* ctx, Rect rcArea) {
             if (ShowTransparencyGrid()) {
                 PaintCheckerboard(ctx, bounds);
             } else {
-                Rect r = pi->pageOnScreen;
-                PaintPageFrameAndShadow(ctx, bounds, r, win->InPresentation(), colPlaceholder);
+                PaintPageFrameAndShadow(ctx, bounds, colPlaceholder);
             }
         }
 
@@ -1098,7 +1098,10 @@ void CanvasHideScrollbars(MainWindow* win) {
 }
 
 int CanvasScrollPosV(MainWindow* win) {
-    DisplayModel* dm = win ? win->AsFixed() : nullptr;
+    if (!win) {
+        return 0;
+    }
+    DisplayModel* dm = win->AsFixed();
     if (dm && dm->ScrollFollowsRotation()) {
         return dm->ContentScrollPos();
     }
@@ -1493,12 +1496,24 @@ static int WheelPageTurnDelta(MainWindow* win, int delta) {
     return std::max(kWheelDelta, lines * perLine);
 }
 
+static bool WheelMayTurnPage(MainWindow* win);
+
 static void WheelTurnPage(MainWindow* win, int dir) {
+    if (dir == 0) {
+        return;
+    }
+    if (!WheelMayTurnPage(win)) {
+        win->wheelAccumDelta = 0;
+        return;
+    }
     if (dir > 0) {
         win->ctrl->GoToPrevPage();
-    } else if (dir < 0) {
+    } else {
         win->ctrl->GoToNextPage();
     }
+    win->wheelAccumDelta = 0;
+    Ui(win)->wheelPageTurnTime = TimeGet();
+    Ui(win)->wheelDidTurnPage = true;
 }
 
 // this does zooming via mouse wheel (with ctrl or the right mouse button)
@@ -1631,7 +1646,7 @@ static void CanvasOnMouseWheel(MainWindow* win, int delta, bool isCtrl, bool isS
 
     bool hScroll = isShift;
     bool vScroll = !hScroll;
-    bool isCont = !IsContinuous(win->ctrl->GetDisplayMode());
+    bool isCont = IsContinuous(win->ctrl->GetDisplayMode());
 
     // Alt speeds up scrolling but also triggers showing menu
     // this will suppress next menu trigger to avoid accidental triggering of menu
@@ -1663,8 +1678,9 @@ static void CanvasOnMouseWheel(MainWindow* win, int delta, bool isCtrl, bool isS
         return;
     }
 
-    // fit content: flip page on wheel, regardless of scrollbar state
-    if (vScroll && dm && FitContentWheelFlipsPage(dm) && IsSingle(dm->GetDisplayMode())) {
+    // fit content: flip page on wheel, regardless of scrollbar state, in every
+    // non-continuous view
+    if (vScroll && dm && FitContentWheelFlipsPage(dm)) {
         WheelTurnPage(win, WheelPageTurnDir(win, delta, WheelPageTurnDelta(win, delta)));
         return;
     }
@@ -1822,7 +1838,7 @@ static void CanvasOnMouseWheel(MainWindow* win, int delta, bool isCtrl, bool isS
         }
     }
     // in non-continuous mode flip the page if necessary
-    if (!vScroll || !isCont || !gSettings->scrollEdgeTurnsPage) {
+    if (!vScroll || isCont || !gSettings->scrollEdgeTurnsPage) {
         return;
     }
     DocCanvasUI* ui = Ui(win);
@@ -2059,7 +2075,7 @@ static void SetTextOrArrowCursor(MainWindow* win, DisplayModel* dm, Point pt) {
 static int CursorForResizeHandle(ResizeHandle handle);
 
 // orig's OnSetCursorMouseNone: the cursor and the link tooltip while no mouse
-// button is down. The laser-pointer branch is step 14.
+// button is down
 static void OnSetCursorMouseNone(MainWindow* win, Point pt) {
     DisplayModel* dm = win->AsFixed();
     if (!dm) {
@@ -2452,6 +2468,14 @@ static bool StopAnnotationResize(MainWindow* win, bool aborted) {
     win->annotationResizeRerender.Cancel();
     CanvasSetCursor(win, kCurArrow);
 
+    // a rectangle resize writes the annotation on every mouse move: put it back
+    bool wroteRect = !outlineOnly && !IsLineEndpointHandle(handle) && !IsVertexHandle(handle);
+    if (aborted && wroteRect && AnnotationIsLive(annot) && GetRect(annot) != win->annotationOriginalRect) {
+        SetRect(annot, win->annotationOriginalRect);
+        EndPdfEditOperation(win);
+        MainWindowRerender(win);
+        return true;
+    }
     if (aborted || !annot) {
         EndPdfEditOperation(win);
         AppShellInvalidate(win);
@@ -2665,13 +2689,9 @@ static void PaintAnnotationMove(MainWindow* win, gp::PaintCtx* ctx) {
     CanvasDrawRect(ctx, r, kAnnotMarkBlue, 2);
 }
 
-#if OS_WIN
-#endif
-
 // --- left button ------------------------------------------------------------
 
-// orig's OnMouseLeftButtonDown, minus the annotation, form-field, signature,
-// touch and reading-bar branches (steps 12 / 13)
+// orig's OnMouseLeftButtonDown
 // ng: orig's IsTripleClick() compares the time and place of this press with the
 // double-click that selected a word. gpui counts the clicks of a sequence, so
 // the third (fifth, ...) press of one whose double-click selected a word is it
@@ -2952,10 +2972,6 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y) {
     }
 }
 
-// the 3rd click of a triple click: select the whole line (issue #694)
-// https://github.com/sumatrapdfreader/sumatrapdf/issues/5289: CmdToggleInverseSearch
-// turns the double-click inverse search off for a session
-
 // orig's OnMouseLeftButtonDblClk. False when the press was not a double-click
 // action, so the caller can still treat it as an ordinary click.
 static bool OnMouseLeftButtonDblClk(MainWindow* win, int x, int y) {
@@ -3002,6 +3018,7 @@ static bool OnMouseLeftButtonDblClk(MainWindow* win, int x, int y) {
     if (!IsPlacingHighlighterAnnotation(win) && StartFreeTextInPlaceEditAt(win, Point{x, y})) {
         return true;
     }
+    // CmdToggleInverseSearch turns it off for a session (issue #5289)
     if (gSettings->enableTeXEnhancements && !gDisableInteractiveInverseSearch) {
         bool dontSelect = OnInverseSearch(win, x, y);
         if (dontSelect) {
@@ -3719,17 +3736,8 @@ Point CanvasToScreenPt(MainWindow* win, Point pt) {
     float k = CanvasScale(win);
     float wx = (float)win->canvasRc.x + (float)pt.x * k;
     float wy = (float)win->canvasRc.y + (float)pt.y * k;
-#if OS_WIN
-    HWND hwnd = MainWindowHwnd(win);
-    float dipScale = hwnd ? (float)DpiGetForHwnd(hwnd) / 96.f : 1.f;
-    POINT p{(int)(wx * dipScale), (int)(wy * dipScale)};
-    if (hwnd) {
-        ClientToScreen(hwnd, &p);
-    }
-    return Point(p.x, p.y);
-#else
-    return Point((int)wx, (int)wy);
-#endif
+    Rect r = AppShellDipsToScreen(win->gpuiWin, wx, wy, 0, 0);
+    return Point(r.x, r.y);
 }
 
 void DocCanvasView::OnPaint(gp::PaintCtx* ctx, gp::El* e, void* user) {
@@ -4787,6 +4795,14 @@ gp::El* DocCanvasBuild(MainWindow* win, gp::Ctx* cx) {
 
     OverlayScrollbar* sbV = CanvasScrollbar(win, true);
     OverlayScrollbar* sbH = CanvasScrollbar(win, false);
+    // where the search matches are; first, as they show an auto-hidden bar.
+    // Cached, so per frame is cheap.
+    if (sbV) {
+        Vec<float> markers;
+        float current = -1;
+        FindScrollMarkers(win, markers, &current);
+        OverlayScrollbarSetFindMarkers(sbV, markers, current, kFindOtherMatchColor, FindCurrentMatchColor());
+    }
     bool showV = win->scrollV.visible && IsOverlayScrollbarVisible(sbV);
     bool showH = win->scrollH.visible && IsOverlayScrollbarVisible(sbH);
     // orig's OverlayScrollbarUpdatePos: two thick bars leave the corner free

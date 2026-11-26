@@ -2,8 +2,10 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 #include "base/Base.h"
+#include "base/Win.h"
 
 #include "gui/UIModels.h"
+#include "gui/Dpi.h"
 #include "gui/Layout.h"
 #include "gui/PlatformFont.h"
 #include "gui/Gfx.h"
@@ -18,6 +20,25 @@
 
 static bool VirtCtrlRectEq(const Rect& r, int x, int y, int dx, int dy) {
     return r.x == x && r.y == y && r.dx == dx && r.dy == dy;
+}
+
+static void SetWorkerLayoutDpi() {
+    DpiSet(192, 192);
+}
+
+static void LayoutDpiThreadTest() {
+    DpiScope scope(144, 168);
+    {
+        DpiScope nested(120, 120);
+        utassert(DpiGet() == 120);
+    }
+    utassert(DpiGet() == 144);
+    ThreadHandle worker = StartThread(MkFunc0Void(SetWorkerLayoutDpi), StrL("layout-dpi-test"));
+    utassert(JoinThread(&worker, 5000));
+    utassert(DpiGet() == 144);
+    int x = 96, y = 96;
+    DpiScale(x, y);
+    utassert(x == 144 && y == 168);
 }
 
 static void Table_TestGrid() {
@@ -256,10 +277,10 @@ static void TipLinkUnderlines_Test() {
     Vec<Rect> lines;
     TipLinkUnderlines(link, lines);
     utassert(len(lines) == 3);
-    // underline sits 3px above the word's bottom
-    utassert(VirtCtrlRectEq(lines[0], 60, 13, 25, 0));
-    utassert(VirtCtrlRectEq(lines[1], 0, 33, 85, 0));
-    utassert(VirtCtrlRectEq(lines[2], 0, 53, 25, 0));
+    // underline sits 1px above the word's bottom
+    utassert(VirtCtrlRectEq(lines[0], 60, 15, 25, 0));
+    utassert(VirtCtrlRectEq(lines[1], 0, 35, 85, 0));
+    utassert(VirtCtrlRectEq(lines[2], 0, 55, 25, 0));
     delete tip;
 }
 
@@ -280,7 +301,79 @@ static void Slider_HaloFitsTest() {
     delete s;
 }
 
+namespace {
+struct RtlHits {
+    int wheel = 0;
+    int menu = 0;
+};
+} // namespace
+
+static void OnRtlWheel(RtlHits* h, VirtMouseEvent* ev) {
+    h->wheel++;
+    ev->didHandle = true;
+}
+
+static void OnRtlMenu(RtlHits* h, VirtMouseEvent* ev) {
+    h->menu++;
+    ev->didHandle = true;
+}
+
+// wheel and context menu carry screen coordinates; in an RTL window they must
+// hit the control under the cursor, as clicks do, not the mirrored one
+static void RtlScreenCoords_Test() {
+    constexpr int kDx = 200;
+    constexpr int kDy = 100;
+    HWND hwnd = CreateWindowExW(WS_EX_LAYOUTRTL, L"STATIC", nullptr, WS_POPUP, 100, 100, kDx, kDy, nullptr, nullptr,
+                                GetModuleHandleW(nullptr), nullptr);
+    utassert(hwnd != nullptr);
+    if (!hwnd) {
+        return;
+    }
+    Rect rc = HwndClientRect(hwnd);
+
+    auto* box = new HBox();
+    auto* left = new VirtSpacer(50, rc.dy);
+    auto* right = new VirtSpacer(50, rc.dy);
+    left->SetFlag(vwfNoHitTest, false);
+    right->SetFlag(vwfNoHitTest, false);
+    box->AddChild(left);
+    box->AddChild(new Spacer(rc.dx - 100, rc.dy), 1);
+    box->AddChild(right);
+    box->Layout(Tight({rc.dx, rc.dy}));
+    box->SetBounds({0, 0, rc.dx, rc.dy});
+
+    RtlHits hitsLeft;
+    RtlHits hitsRight;
+    left->onMouseWheel = MkFunc1(OnRtlWheel, &hitsLeft);
+    left->onContextMenu = MkFunc1(OnRtlMenu, &hitsLeft);
+    right->onMouseWheel = MkFunc1(OnRtlWheel, &hitsRight);
+    right->onContextMenu = MkFunc1(OnRtlMenu, &hitsRight);
+
+    VirtRoot root(hwnd);
+    root.bounds = {0, 0, rc.dx, rc.dy};
+    Vec<VirtCtrl*> tops;
+    CollectVirtCtrls(box, tops);
+    root.SetTops(tops);
+
+    // the left control as a click sees it: mirrored client x, then on screen
+    Point pt = {10, rc.dy / 2};
+    UnmirrorRtl(hwnd, pt);
+    Point scr = HwndClientToScreen(hwnd, pt);
+    LPARAM lp = MAKELPARAM(scr.x, scr.y);
+    LRESULT res = 0;
+    root.OnMessage(WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA), lp, res);
+    root.OnMessage(WM_CONTEXTMENU, (WPARAM)hwnd, lp, res);
+    utassert(hitsLeft.wheel == 1 && hitsRight.wheel == 0);
+    utassert(hitsLeft.menu == 1 && hitsRight.menu == 0);
+
+    root.SetTops(Vec<VirtCtrl*>());
+    delete box;
+    DestroyWindow(hwnd);
+}
+
 void VirtCtrl_UnitTests() {
+    LayoutDpiThreadTest();
+    RtlScreenCoords_Test();
     Slider_HaloFitsTest();
     TipLinkUnderlines_Test();
     Table_TestGrid();

@@ -6,11 +6,16 @@
 
 namespace gpui {
 struct App;
+struct Ctx;
 struct Window;
 struct MouseMoveEvent;
+namespace component {
+struct PopupMenu;
+}
 } // namespace gpui
 
 struct MainWindow;
+struct MenuModel;
 
 // creates the gpui window, its root view and the MainWindow that owns them
 // hiddenUntilReady: the startup window, shown once it can show page 1
@@ -22,6 +27,9 @@ gpui::App* AppShellGetApp();
 // ng: the theme is installed before the first window opens, so the app has to
 // be known before AppShellCreateWindow()
 void AppShellSetApp(gpui::App*);
+// a system setting changed (orig's WM_SETTINGCHANGE)
+void AppShellSettingChanged();
+gpui::component::PopupMenu* AppShellMenuPopup(gpui::Ctx* cx, MenuModel* model, Str id, bool cues);
 // runs the event loop until the last window closes
 int AppShellRun(gpui::App* app);
 // height of the menu bar row above the canvas, in dips. Zero where the
@@ -34,6 +42,7 @@ bool AppShellNativeMenu();
 void AppShellSyncMenu(MainWindow* win);
 // the model was rebuilt; the next sync of the front window reinstalls it
 void AppShellMenuRebuilt(MainWindow* win);
+void AppShellScheduleMenuRebuild(MainWindow* win);
 
 void AppShellInvalidate(MainWindow* win);
 // one line of gpui frame timings since the last call, for the -dbg-control
@@ -54,6 +63,8 @@ void AppShellSuppressAltMenu(MainWindow* win);
 void AppShellQuit();
 // brings the window to the foreground (orig's MainWindow::Focus())
 void AppShellActivateWindow(MainWindow* win);
+void AppShellNoteActivation(MainWindow* win, bool active);
+void AppShellRaiseAbove(MainWindow* win);
 void AppShellMinimizeWindow(MainWindow* win);
 void AppShellRequestCloseWindow(MainWindow* win);
 bool AppShellIsFrameFocused(MainWindow* win);
@@ -63,8 +74,8 @@ void AppShellClearEatChar(MainWindow* win);
 // caller (CloseWindow)
 void AppShellCloseWindow(MainWindow* win);
 void AppShellDeleteWindow(MainWindow* win);
-// gpui has no "window closed" callback, so the shell's tick notices a window
-// the user closed with the title bar and runs CloseWindow for it
+// gpui's AppOnWindowClosed has one slot, which ToolWindow takes, so the
+// shell's tick notices a window closed from its title bar and runs CloseWindow
 void AppShellReapClosedWindows();
 // the open-file dialog; empty when cancelled
 TempStr AppShellPromptForFileTemp(MainWindow* win);
@@ -117,7 +128,7 @@ Pixmap* AppShellAppIconPixmap(MainWindow* win);
 void AppShellForgetNativeHwnd(MainWindow* win);
 // ng: gpui has no fullscreen window state (see "gpui gaps"). On Windows this
 // is orig's EnterFullScreen / ExitFullScreen on the native frame
-// (src/gui/NativeWindow.cpp); elsewhere WindowSetFullScreen.
+// (src/ng/gui/NativeWindow.cpp); elsewhere WindowSetFullScreen.
 // `restoreMaximized` re-maximizes on the way out (orig: the window was
 // maximized before presentation mode).
 void AppShellSetFullScreen(MainWindow* win, bool fullScreen, bool restoreMaximized);
@@ -126,6 +137,8 @@ void AppShellSetFullScreen(MainWindow* win, bool fullScreen, bool restoreMaximiz
 Rect AppShellWindowScreenRect(MainWindow* win);
 // the canvas (MainWindow::canvasRc) in screen pixels; empty on wasm
 Rect AppShellCanvasScreenRect(MainWindow* win);
+Point AppShellContentOrigin(MainWindow* win);
+Rect AppShellDipsToScreen(gpui::Window* gw, float x, float y, float dx, float dy);
 // moves / sizes the frame to `r` (outer rectangle, screen pixels; empty: leave
 // it) and maximizes it. False on wasm.
 bool AppShellPlaceWindow(MainWindow* win, Rect r, bool maximize);

@@ -5,17 +5,7 @@
 
 class PageRenderer;
 
-enum class PreviewType {
-    Pdf,
-    Xps,
-    DjVu,
-    Epub,
-    Fb2,
-    Mobi,
-    Cbx,
-    Tga,
-    Ofd,
-};
+enum class PreviewType;
 
 class PdfPreview : public IThumbnailProvider,
                    public IInitializeWithStream,
@@ -24,6 +14,8 @@ class PdfPreview : public IThumbnailProvider,
                    public IOleWindow {
   public:
     PdfPreview(AtomicInt* plRefCount, PreviewType type);
+    PdfPreview(const PdfPreview&) = delete;
+    PdfPreview& operator=(const PdfPreview&) = delete;
     ~PdfPreview();
 
     // IUnknown
@@ -38,7 +30,7 @@ class PdfPreview : public IThumbnailProvider,
     }
     IFACEMETHODIMP_(ULONG) AddRef() { return AtomicIntInc(&m_lRef); }
     IFACEMETHODIMP_(ULONG) Release() {
-        long cRef = InterlockedDecrement(&m_lRef);
+        int cRef = AtomicIntDec(&m_lRef);
         if (cRef == 0) {
             delete this;
         }
@@ -58,6 +50,9 @@ class PdfPreview : public IThumbnailProvider,
         // the document can't write over it (issue #1530). We only ever read it
         // once anyway - every engine is built from a memory buffer - so read it
         // here and let go of the file.
+        if (!str::IsNull(m_data) || m_engine) {
+            return HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED);
+        }
         m_data = ReadIStream(pStm);
         return str::IsNull(m_data) ? E_FAIL : S_OK;
     };
@@ -84,7 +79,10 @@ class PdfPreview : public IThumbnailProvider,
     // IPreviewHandler
     IFACEMETHODIMP SetWindow(HWND hwnd, const RECT* prc) {
         if (!hwnd || !prc) {
-            return S_OK;
+            return E_INVALIDARG;
+        }
+        if (!IsWindow(hwnd)) {
+            return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
         }
         m_hwndParent = hwnd;
         return SetRect(prc);
@@ -122,7 +120,7 @@ class PdfPreview : public IThumbnailProvider,
         }
         m_rcParent = ToRect(*prc);
         if (m_hwnd) {
-            UINT flags = SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE;
+            UINT flags = SWP_NOZORDER | SWP_NOACTIVATE;
             int x = m_rcParent.x;
             int y = m_rcParent.y;
             int dx = m_rcParent.dx;
@@ -138,6 +136,11 @@ class PdfPreview : public IThumbnailProvider,
         if (m_hwnd) {
             DestroyWindow(m_hwnd);
             m_hwnd = nullptr;
+        }
+        if (pageNoFont) {
+            DeleteObject(pageNoFont);
+            pageNoFont = nullptr;
+            pageNoFontDpi = 0;
         }
         userZoom = 0;
         panX = 0;
@@ -178,6 +181,8 @@ class PdfPreview : public IThumbnailProvider,
     int panY = 0;
     bool panning = false;
     Point panLast;
+    HFONT pageNoFont = nullptr;
+    int pageNoFontDpi = 0;
 
   protected:
     AtomicInt m_lRef = 1;
@@ -186,7 +191,7 @@ class PdfPreview : public IThumbnailProvider,
     // the file's bytes, owned; freed once the engine has been built from them
     Str m_data;
     EngineBase* m_engine = nullptr;
-    AutoGdiPlusShutdown* m_gdiScope = nullptr;
+    bool m_usesGdiPlus = false;
     // state for IPreviewHandler
     AutoReleaseComPtr<IUnknown> m_site;
     HWND m_hwnd = nullptr;

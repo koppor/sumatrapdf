@@ -41,6 +41,7 @@
 #include "shared/PdfToolsCommon.h"
 #include "SumatraDialogs.h"
 #include "ImageSaveCropResize.h"
+#include "GlobalHotkeys.h"
 #if OS_WASM
 #include "gui/WasmBridge.h"
 #endif
@@ -85,14 +86,7 @@ static Pixmap* RenderRegionPixmap(EngineBase* engine, int rotation, int pageNo, 
     if (px->format != PixmapFormat::Native) {
         return px;
     }
-#if OS_WIN
-    Pixmap* converted = PixmapCopyAs32bppDIB(px);
-    FreePixmap(px);
-    return converted;
-#else
-    FreePixmap(px);
-    return nullptr;
-#endif
+    return PixmapToBgra(px);
 }
 
 // the rectangular selection, or the whole current page when there is none
@@ -288,6 +282,8 @@ void ShowSetScreenshotHotkeyDialog(MainWindow* win) {
     gHotkey.currentHotkey = str::Dup(shown);
     gHotkey.newHotkey = {};
     gHotkey.visible = true;
+    DialogsTrackFrameDialog(
+        IsSetScreenshotHotkeyDialogVisible, [] { return gHotkey.win; }, CloseSetScreenshotHotkeyDialog);
     logf("ShowSetScreenshotHotkeyDialog: current '%s'\n", gHotkey.currentHotkey);
     DlgWindowSpec spec;
     spec.name = "screenshothotkey";
@@ -337,23 +333,20 @@ void SetHotkeyView::OnSet(SetHotkeyView*, gp::Ctx* cx, const gp::ClickEvent*) {
     if (sc) {
         str::ReplaceWithCopy(&sc->key, globalKey);
     } else {
-        sc = new Shortcut();
+        sc = AllocStruct<Shortcut>();
         sc->cmd = str::Dup(StrL("CmdScreenshot"));
         sc->key = str::Dup(globalKey);
         VecAppend(*gSettings->shortcuts, sc);
     }
     ScheduleSaveSettings();
-    // ng: registering the global hotkey with the OS is GlobalHotkeys.cpp, step 14
+    ReRegisterGlobalHotkeys();
     CloseSetScreenshotHotkeyDialog();
     gp::Notify(cx);
 }
 
 void SetHotkeyView::OnRemove(SetHotkeyView*, gp::Ctx* cx, const gp::ClickEvent*) {
     logf("SetHotkeyDoRemove: removing screenshot hotkey\n");
-    Shortcut* sc = FindScreenshotShortcutEntry();
-    if (sc) {
-        VecRemove(*gSettings->shortcuts, sc);
-    }
+    RemoveScreenshotShortcutEntry();
     auto* curr = gFirstCustomCommand;
     while (curr) {
         if (curr->origId == CmdScreenshot) {
@@ -362,6 +355,7 @@ void SetHotkeyView::OnRemove(SetHotkeyView*, gp::Ctx* cx, const gp::ClickEvent*)
         curr = curr->next;
     }
     ScheduleSaveSettings();
+    ReRegisterGlobalHotkeys();
     CloseSetScreenshotHotkeyDialog();
     gp::Notify(cx);
 }

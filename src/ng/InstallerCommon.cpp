@@ -52,7 +52,7 @@ Str gMsg;
 Color gMsgColor = gCol5;
 
 void SetMsg(Str msg, Color color) {
-    gMsg = str::Dup(GetPermArena(), msg);
+    str::ReplaceWithCopy(&gMsg, msg);
     gMsgColor = color;
 }
 
@@ -138,8 +138,6 @@ void ProcessesUsingInstallation(StrVec& names) {
         ok = Process32NextW(snap, &proc);
     }
 }
-
-// clang-format on
 
 // ng repaints on its next frame
 void InstallerRepaintNow() {}

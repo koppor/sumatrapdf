@@ -70,7 +70,7 @@ static bool WriteGoogleLensPage(WindowTab* tab, const u8* png, size_t pngSize) {
         GoogleLensNotify(tab, Tr("Could not create a temporary file for Google Lens."));
         return false;
     }
-    TempStr name = fmt("SumatraPDF-Lens-%d.html", CurrentProcessId());
+    TempStr name = fmt("SumatraPDF-Lens-%llu.html", GetCurrProcessId());
     TempStr htmlPath = path::JoinTemp(dir, name);
     if (!file::WriteFile(htmlPath, ToStr(html))) {
         file::Delete(htmlPath);
@@ -92,25 +92,6 @@ enum class GoogleLensSrc {
     Image
 };
 
-static Pixmap* PixmapForImageElement(EngineBase* engine, IPageElement* imageElement) {
-    RenderedBitmap* bmp = engine->GetImageForPageElement(imageElement);
-    if (!bmp) {
-        return nullptr;
-    }
-#if OS_WIN
-    Pixmap* px = PixmapFromRenderedBitmap(bmp);
-    if (px && px->format == PixmapFormat::Native) {
-        Pixmap* copy = PixmapCopyAs32bppDIB(px);
-        FreePixmap(px);
-        px = copy;
-    }
-    return px;
-#else
-    // ng: a RenderedBitmap is win32-only, so bmp is always null here
-    return nullptr;
-#endif
-}
-
 static void SearchGoogleLensSrc(WindowTab* tab, GoogleLensSrc src, IPageElement* imageElement, int pageNo) {
     if (!tab || !tab->win || !HasPermission(Perm::InternetAccess) || !HasPermission(Perm::CopySelection)) {
         return;
@@ -125,7 +106,7 @@ static void SearchGoogleLensSrc(WindowTab* tab, GoogleLensSrc src, IPageElement*
     bool isImage = imageElement && imageElement->Is(kindPageElementImage);
     if (src == GoogleLensSrc::Image || (src == GoogleLensSrc::Auto && isImage)) {
         if (isImage) {
-            bitmap = PixmapForImageElement(dm->GetEngine(), imageElement);
+            bitmap = PageElementImagePixmap(dm->GetEngine(), imageElement);
         } else if (src == GoogleLensSrc::Image && dm->GetEngine()->kind != kindEngineImage) {
             GoogleLensNotify(tab, Tr("No image under the cursor."));
             return;
@@ -149,18 +130,7 @@ static void SearchGoogleLensSrc(WindowTab* tab, GoogleLensSrc src, IPageElement*
             float zoom = dm->GetZoomReal(pageNo);
             RectF pageRect = dm->GetEngine()->PageMediabox(pageNo);
             RenderPageArgs args(pageNo, zoom, dm->PageRotation(pageNo), &pageRect, RenderTarget::Export);
-            bitmap = dm->GetEngine()->RenderPage(args);
-            if (bitmap && bitmap->format != PixmapFormat::BGRA8) {
-#if OS_WIN
-                Pixmap* converted = PixmapCopyAs32bppDIB(bitmap);
-                FreePixmap(bitmap);
-                bitmap = converted;
-#else
-                // ng: a Native (palette DIB) pixmap can only be read through GDI
-                FreePixmap(bitmap);
-                bitmap = nullptr;
-#endif
-            }
+            bitmap = PixmapToBgra(dm->GetEngine()->RenderPage(args));
         }
     }
     if (!bitmap) {

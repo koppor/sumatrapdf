@@ -404,9 +404,13 @@ enum {
     CmdCloseWindow = 598,
     CmdUploadToServer = 599,
     CmdDeleteFromServer = 600,
-    CmdRefHoverPushToJabRef = 601,
+    CmdExportMarkdown = 601,
+    CmdImagesToPdf = 602,
+    CmdExportAnnotations = 603,
+    CmdLocateFile = 604,
+    CmdRefHoverPushToJabRef = 605,
 
-    CmdLast = 601,
+    CmdLast = 605,
     CmdFirstCustom = CmdLast + 100,
 
     // aliases, at the end to not mess ordering

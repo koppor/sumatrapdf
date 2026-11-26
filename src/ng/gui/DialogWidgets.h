@@ -61,6 +61,8 @@ gpui::component::PopupMenu* TrackPopup(gpui::Ctx* cx, gpui::component::PopupMenu
 bool IsTrackedPopupOpen(gpui::Ctx* cx);
 // for -dbg-control's TestUiState, which has no frame context
 bool IsTrackedPopupOpenInApp(gpui::App* app);
+void AppendPopupMenuBounds(gpui::Ctx* cx, gpui::PopupMenuState* st, Vec<gpui::Bounds>& out);
+void TrackedPopupBounds(gpui::Ctx* cx, Vec<gpui::Bounds>& out);
 // ng: component::ContextMenu opens its popup from its own right-button press.
 // orig's context menus open when the button is released, or from the keyboard,
 // so the wrapped element stops that press (gpui::WindowStopPropagation) and
@@ -86,6 +88,9 @@ bool DismissTrackedPopup(gpui::Ctx* cx);
 // offset and feeds it back. This returns `scrollY` moved just enough to show
 // row `row` of `nRows` rows of `rowDy` in a view `viewDy` tall.
 float DialogScrollToRow(float scrollY, int row, int nRows, float rowDy, float viewDy);
+
+gpui::El* VirtualRows(gpui::Ctx* cx, gpui::Str id, int count, float rowH, float viewH, float scrollY,
+                      gpui::VirtualRowFn row, void* user, const float* sizes = nullptr);
 
 // the height a FlexCol list of `nRows` rows gets between MinH and MaxH, less
 // its border
@@ -186,7 +191,7 @@ gpui::El* DlgIntoEl(gpui::Ctx* cx, gpui::component::Dialog* dlg);
 constexpr float kDlgWinFontPx = 12;
 constexpr float kDlgWinEditDy = 23;
 // the width of `label` (its '&' dropped) in the app font, in dips
-float DlgWinTextDx(gpui::Ctx* cx, Str label);
+float DlgWinTextDx(gpui::Ctx* cx, Str label, float fontPx = kDlgWinFontPx);
 // in place of DlgIntoEl(): `col` is the whole content, laid out by the
 // dialog; the window gets spec.clientDx and the column's height
 gpui::El* DlgWinContent(gpui::Ctx* cx, gpui::El* col);
@@ -240,6 +245,7 @@ float DialogComboListBottom(gpui::Window* win);
 
 // the shell's side
 void DlgAccelBeginFrame(gpui::Window* win);
+void DlgAccelWindowClosed(gpui::Window* win);
 void DlgAccelOnAlt();
 bool DlgAccelOnKey(gpui::Ctx* cx, int vk, bool alt, bool ctrl, bool editFocused);
 
@@ -268,6 +274,12 @@ gpui::El* DlgFilledButton(gpui::Ctx* cx, gpui::Str id, Str label, gpui::Listener
 // a quiet one: muted words that fill on hover
 gpui::El* DlgGhostButton(gpui::Ctx* cx, gpui::Str id, Str label, gpui::Listener onClick, bool disabled = false,
                          float fontPx = kDlgBtnFontPx);
+// orig's edit boxes: Edit (withFrame / withBorder) or an editable DropDown
+enum class EditLook {
+    Frame, // a 1px edge that focus doesn't change
+    Combo, // a 1px edge that turns the highlight color while focused
+};
+gpui::El* EditStyle(gpui::Ctx* cx, gpui::El* field, gpui::InputState* edit, EditLook look, float radius = 0);
 // a bare input over a line in `underline`; the caller sizes the box
 gpui::El* DlgUnderlineInput(gpui::Ctx* cx, gpui::Str id, gpui::InputState* edit, float fontPx, Color underline,
                             bool masked = false, bool disabled = false);
@@ -294,4 +306,5 @@ gpui::El* DialogFooter(gpui::Ctx* cx, gpui::El* extra, gpui::Entity<V> ent, Str 
     return row;
 }
 bool MenuCuesAlways();
+void MenuCuesRefresh();
 TempStr InputTextTemp(gpui::InputState* e);

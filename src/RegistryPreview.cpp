@@ -17,31 +17,42 @@
 #define kRegKeyPreviewHandlers "Software\\Microsoft\\Windows\\CurrentVersion\\PreviewHandlers"
 
 // clang-format off
-static struct {
+static const struct {
+    PreviewType type;
     Str clsid;
     Str ext;
     Str ext2;
-    bool skip = false;
 } gPreviewers[] = {
-    {StrL(kPdfPreviewClsid), StrL(".pdf")},
-    {StrL(kCbxPreviewClsid), StrL(".cbz"), StrL(".cbr")},
-    {StrL(kCbxPreviewClsid), StrL(".cb7"), StrL(".cbt")},
-    {StrL(kTgaPreviewClsid), StrL(".tga")},
-    {StrL(kDjVuPreviewClsid), StrL(".djvu")},
-    {StrL(kXpsPreviewClsid), StrL(".xps"), StrL(".oxps")},
-    {StrL(kEpubPreviewClsid), StrL(".epub")},
+    {PreviewType::Pdf, StrL(kPdfPreviewClsid), StrL(".pdf")},
+    {PreviewType::Cbx, StrL(kCbxPreviewClsid), StrL(".cbz"), StrL(".cbr")},
+    {PreviewType::Cbx, StrL(kCbxPreviewClsid), StrL(".cb7"), StrL(".cbt")},
+    {PreviewType::Tga, StrL(kTgaPreviewClsid), StrL(".tga")},
+    {PreviewType::DjVu, StrL(kDjVuPreviewClsid), StrL(".djvu")},
+    {PreviewType::Xps, StrL(kXpsPreviewClsid), StrL(".xps"), StrL(".oxps")},
+    {PreviewType::Epub, StrL(kEpubPreviewClsid), StrL(".epub")},
     // FictionBook: plain .fb2 and common zip containers (.fb2z, .fbz, .zfb2,
     // .fb2.zip). Multi-dot .fb2.zip needs its own Classes key so Explorer does
     // not treat it as a generic .zip (issue #1677).
-    {StrL(kFb2PreviewClsid), StrL(".fb2"), StrL(".fb2z")},
-    {StrL(kFb2PreviewClsid), StrL(".fbz"), StrL(".zfb2")},
-    {StrL(kFb2PreviewClsid), StrL(".fb2.zip")},
-    {StrL(kMobiPreviewClsid), StrL(".mobi")},
-    {StrL(kOfdPreviewClsid), StrL(".ofd")},
+    {PreviewType::Fb2, StrL(kFb2PreviewClsid), StrL(".fb2"), StrL(".fb2z")},
+    {PreviewType::Fb2, StrL(kFb2PreviewClsid), StrL(".fbz"), StrL(".zfb2")},
+    {PreviewType::Fb2, StrL(kFb2PreviewClsid), StrL(".fb2.zip")},
+    {PreviewType::Mobi, StrL(kMobiPreviewClsid), StrL(".mobi")},
+    {PreviewType::Ofd, StrL(kOfdPreviewClsid), StrL(".ofd")},
 };
 // clang-format on
 
 static_assert(dimof(gPreviewers) * 2 <= 32, "a PreviewHandlers mask has a bit per extension");
+
+bool FindPreviewType(REFCLSID clsid, PreviewType& type) {
+    for (const auto& previewer : gPreviewers) {
+        CLSID registered;
+        if (SUCCEEDED(CLSIDFromString(CWStrTemp(previewer.clsid), &registered)) && IsEqualCLSID(clsid, registered)) {
+            type = previewer.type;
+            return true;
+        }
+    }
+    return false;
+}
 
 // bit of gPreviewers[i].ext is 2*i, of .ext2 2*i+1
 static u32 ExtBit(int previewerIdx, int extNo) {
@@ -110,7 +121,7 @@ bool InstallPreviewDll(Str dllPath, bool allUsers, PreviewHandlers which) {
         u32 bits = ExtBit(i, 0) | ExtBit(i, 1);
         bool withPreview = which.preview & bits;
         bool withThumbnails = which.thumbnails & bits;
-        if (prev.skip || (!withPreview && !withThumbnails)) {
+        if (!withPreview && !withThumbnails) {
             continue;
         }
         Str clsid = prev.clsid;
@@ -181,11 +192,7 @@ bool UninstallPreviewDll() {
     HRESULT hr = S_OK;
 
     TempStr key;
-    for (auto& prev : gPreviewers) {
-        if (prev.skip) {
-            logf("UninstallPreviewDll: skipping '%s'\n", prev.ext);
-            continue;
-        }
+    for (const auto& prev : gPreviewers) {
         Str clsid = prev.clsid;
         Str exts[2] = {prev.ext, prev.ext2};
 
@@ -210,22 +217,6 @@ bool UninstallPreviewDll() {
         logf("UninstallPreviewDll: removed '%s'\n", prev.ext);
     }
     return hr == S_OK ? true : false;
-}
-
-// TODO: is anyone using this functionality?
-void DisablePreviewInstallExts(Str cmdLine) {
-    // allows installing only a subset of available preview handlers
-    if (str::TrimPrefixI(cmdLine, StrL("exts:"))) {
-        TempStr extsList = str::DupTemp(cmdLine);
-        str::ToLowerInPlace(extsList);
-        str::TransCharsInPlace(extsList, StrL(";. :"), StrL(",,,\0"));
-        StrVec exts;
-        Split(&exts, extsList, StrL(","), true);
-        for (auto& p : gPreviewers) {
-            Str extNoDot = Str(p.ext.s + 1, p.ext.len - 1);
-            p.skip = !exts.Contains(extNoDot);
-        }
-    }
 }
 
 // any of our preview pane or thumbnail handlers is registered

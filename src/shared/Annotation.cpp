@@ -23,13 +23,7 @@ extern "C" {
 #include "Translations.h"
 #include "Annotation.h"
 
-// spot checks the definitions are the same
-static_assert((int)AnnotationType::Link == (int)PDF_ANNOT_LINK);
-static_assert((int)AnnotationType::ThreeD == (int)PDF_ANNOT_3D);
-static_assert((int)AnnotationType::Sound == (int)PDF_ANNOT_SOUND);
 static_assert((int)AnnotationType::Unknown == (int)PDF_ANNOT_UNKNOWN);
-static_assert((int)AnnotationType::Projection == (int)PDF_ANNOT_PROJECTION);
-static_assert(AnnotationType::Last == AnnotationType::Projection);
 
 // clang-format off
 static SeqStrings gAnnotationTextIcons = "Comment\0Help\0Insert\0Key\0NewParagraph\0Note\0Paragraph\0";
@@ -39,15 +33,78 @@ SeqStrings AnnotationTextIcons() {
     return gAnnotationTextIcons;
 }
 
-// clang-format off
-// indexed by AnnotationType; unlike AnnotationReadableNameTemp() these are not
-// translated, so they can appear in the annotation filter's ":t=" syntax
-static constexpr SeqStrings gAnnotationTypeNames =
-    "Text\0Link\0FreeText\0Line\0Square\0Circle\0Polygon\0PolyLine\0Highlight\0Underline\0Squiggly\0"
-    "StrikeOut\0Redact\0Stamp\0Caret\0Ink\0Popup\0FileAttachment\0Sound\0Movie\0RichMedia\0Widget\0"
-    "Screen\0PrinterMark\0TrapNet\0Watermark\0ThreeD\0Projection\0";
-// clang-format on
-static_assert(SeqStrCount(gAnnotationTypeNames) == (int)AnnotationType::Last + 1);
+enum AnnotationCapability : u8 {
+    AnnotMove = 1 << 0,
+    AnnotCopy = 1 << 1,
+    AnnotResize = 1 << 2,
+    AnnotInteriorColor = 1 << 3,
+    AnnotBorder = 1 << 4,
+    AnnotColor = 1 << 5,
+    AnnotOpacity = 1 << 6,
+};
+
+struct AnnotationTypeInfo {
+    AnnotationType type;
+    enum pdf_annot_type nativeType;
+    Str name;
+    u8 capabilities;
+};
+
+static constexpr AnnotationTypeInfo kAnnotationTypes[] = {
+    {AnnotationType::Text, PDF_ANNOT_TEXT, StrL("Text"), AnnotMove | AnnotCopy | AnnotColor | AnnotOpacity},
+    {AnnotationType::Link, PDF_ANNOT_LINK, StrL("Link"), 0},
+    {AnnotationType::FreeText, PDF_ANNOT_FREE_TEXT, StrL("FreeText"),
+     AnnotMove | AnnotCopy | AnnotResize | AnnotBorder | AnnotColor | AnnotOpacity},
+    {AnnotationType::Line, PDF_ANNOT_LINE, StrL("Line"),
+     AnnotMove | AnnotCopy | AnnotResize | AnnotInteriorColor | AnnotBorder | AnnotColor | AnnotOpacity},
+    {AnnotationType::Square, PDF_ANNOT_SQUARE, StrL("Square"),
+     AnnotMove | AnnotCopy | AnnotResize | AnnotInteriorColor | AnnotBorder | AnnotColor | AnnotOpacity},
+    {AnnotationType::Circle, PDF_ANNOT_CIRCLE, StrL("Circle"),
+     AnnotMove | AnnotCopy | AnnotResize | AnnotInteriorColor | AnnotBorder | AnnotColor | AnnotOpacity},
+    {AnnotationType::Polygon, PDF_ANNOT_POLYGON, StrL("Polygon"),
+     AnnotMove | AnnotCopy | AnnotResize | AnnotInteriorColor | AnnotBorder | AnnotColor | AnnotOpacity},
+    {AnnotationType::PolyLine, PDF_ANNOT_POLY_LINE, StrL("PolyLine"),
+     AnnotMove | AnnotCopy | AnnotResize | AnnotInteriorColor | AnnotBorder | AnnotColor | AnnotOpacity},
+    {AnnotationType::Highlight, PDF_ANNOT_HIGHLIGHT, StrL("Highlight"), AnnotColor | AnnotOpacity},
+    {AnnotationType::Underline, PDF_ANNOT_UNDERLINE, StrL("Underline"), AnnotColor | AnnotOpacity},
+    {AnnotationType::Squiggly, PDF_ANNOT_SQUIGGLY, StrL("Squiggly"), AnnotColor | AnnotOpacity},
+    {AnnotationType::StrikeOut, PDF_ANNOT_STRIKE_OUT, StrL("StrikeOut"), AnnotColor | AnnotOpacity},
+    {AnnotationType::Redact, PDF_ANNOT_REDACT, StrL("Redact"), AnnotMove | AnnotCopy | AnnotResize | AnnotOpacity},
+    {AnnotationType::Stamp, PDF_ANNOT_STAMP, StrL("Stamp"),
+     AnnotMove | AnnotCopy | AnnotResize | AnnotColor | AnnotOpacity},
+    {AnnotationType::Caret, PDF_ANNOT_CARET, StrL("Caret"), AnnotMove | AnnotCopy | AnnotColor | AnnotOpacity},
+    {AnnotationType::Ink, PDF_ANNOT_INK, StrL("Ink"), AnnotMove | AnnotCopy | AnnotBorder | AnnotColor | AnnotOpacity},
+    {AnnotationType::Popup, PDF_ANNOT_POPUP, StrL("Popup"), AnnotMove | AnnotResize},
+    {AnnotationType::FileAttachment, PDF_ANNOT_FILE_ATTACHMENT, StrL("FileAttachment"),
+     AnnotMove | AnnotColor | AnnotOpacity},
+    {AnnotationType::Sound, PDF_ANNOT_SOUND, StrL("Sound"), AnnotMove | AnnotColor},
+    {AnnotationType::Movie, PDF_ANNOT_MOVIE, StrL("Movie"), AnnotMove | AnnotResize},
+    {AnnotationType::RichMedia, PDF_ANNOT_RICH_MEDIA, StrL("RichMedia"), AnnotMove | AnnotResize},
+    {AnnotationType::Widget, PDF_ANNOT_WIDGET, StrL("Widget"), AnnotMove | AnnotResize},
+    {AnnotationType::Screen, PDF_ANNOT_SCREEN, StrL("Screen"), 0},
+    {AnnotationType::PrinterMark, PDF_ANNOT_PRINTER_MARK, StrL("PrinterMark"), 0},
+    {AnnotationType::TrapNet, PDF_ANNOT_TRAP_NET, StrL("TrapNet"), 0},
+    {AnnotationType::Watermark, PDF_ANNOT_WATERMARK, StrL("Watermark"), 0},
+    {AnnotationType::ThreeD, PDF_ANNOT_3D, StrL("ThreeD"), AnnotMove | AnnotResize},
+    {AnnotationType::Projection, PDF_ANNOT_PROJECTION, StrL("Projection"), 0},
+};
+
+static constexpr bool AnnotationTypesMatch() {
+    for (int i = 0; i < dimofi(kAnnotationTypes); i++) {
+        if ((int)kAnnotationTypes[i].type != i || (int)kAnnotationTypes[i].nativeType != i) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(dimofi(kAnnotationTypes) == (int)AnnotationType::Last + 1);
+static_assert(AnnotationTypesMatch());
+
+static const AnnotationTypeInfo* AnnotationInfo(AnnotationType type) {
+    int idx = (int)type;
+    return idx >= 0 && idx < dimofi(kAnnotationTypes) ? &kAnnotationTypes[idx] : nullptr;
+}
 
 // Matches case- and space-insensitively, so "free text" and "freetext" both
 // name AnnotationType::FreeText. Unknown if there is no such type.
@@ -57,11 +114,9 @@ AnnotationType AnnotationTypeFromName(Str name) {
     if (len(want) == 0) {
         return AnnotationType::Unknown;
     }
-    int idx = 0;
-    SeqStrings names = gAnnotationTypeNames;
-    for (Str item = SeqStrFirst(names); len(item) > 0; item = SeqStrNext(item), idx++) {
-        if (str::EqI(item, want)) {
-            return (AnnotationType)idx;
+    for (const auto& info : kAnnotationTypes) {
+        if (str::EqI(info.name, want)) {
+            return info.type;
         }
     }
     return AnnotationType::Unknown;
@@ -69,10 +124,8 @@ AnnotationType AnnotationTypeFromName(Str name) {
 
 // the untranslated name ("Highlight", "FreeText"), empty for Unknown
 Str AnnotationTypeName(AnnotationType tp) {
-    if ((int)tp < 0 || (int)tp > (int)AnnotationType::Last) {
-        return {};
-    }
-    return SeqStrByIndex(gAnnotationTypeNames, (int)tp);
+    const auto* info = AnnotationInfo(tp);
+    return info ? info->name : Str{};
 }
 
 // Translate an English annotation type label for the UI.
@@ -467,6 +520,7 @@ Vec<RectF> GetQuadPointsAsRect(Annotation* annot) {
     AnnotAccess access(annot);
     fz_try(access.ctx) {
         int n = pdf_annot_quad_point_count(access.ctx, access.annot);
+        VecReserve(res, n);
         for (int i = 0; i < n; i++) {
             fz_quad q = pdf_annot_quad_point(access.ctx, access.annot, i);
             VecAppend(res, ToRectF(fz_rect_from_quad(q)));
@@ -533,8 +587,8 @@ bool ToggleFormButton(Annotation* annot) {
         // BaseCtx(), not a Ctx() clone: toggling regenerates the appearance,
         // which runs the button's format/calculate JS; mupdf executes (and
         // rethrows errors) on _ctx, so the fz_try must be on that context.
-        auto* ctx = e->BaseCtx();
         ScopedRecursiveMutex cs(&e->docLock);
+        auto* ctx = e->BaseCtx(cs);
         fz_try(ctx) {
             int wt = pdf_widget_type(ctx, a);
             int flags = pdf_annot_field_flags(ctx, a);
@@ -638,19 +692,21 @@ static bool SetWidgetValue(Annotation* annot, Str value, Str operation, SetValue
     EngineMupdf* e = annot->engine;
     auto* a = annot->pdfannot;
     bool ok = false;
+    fz_var(ok);
     TempStr valueZ = str::DupTemp(value);
     {
         // BaseCtx(), not a Ctx() clone: regenerating the appearance runs the
         // field's format/calculate JS, which mupdf executes (and rethrows
         // errors) on _ctx -- the fz_try must be on that same context.
-        auto* ctx = e->BaseCtx();
         ScopedRecursiveMutex cs(&e->docLock);
+        auto* ctx = e->BaseCtx(cs);
         fz_try(ctx) {
             ok = setValue(ctx, a, len(valueZ) == 0 ? "" : valueZ.s);
             pdf_update_annot(ctx, a);
             UpdateFormFieldPage(ctx, a); // refresh JS-calculated fields
         }
         fz_catch(ctx) {
+            ok = false;
             fz_report_error(ctx);
             logf("%s(): mupdf calls failed\n", operation);
         }
@@ -675,16 +731,20 @@ void GetWidgetChoiceOptions(Annotation* annot, StrVec& out) {
         return;
     }
     AnnotAccess access(annot);
+    const char** opts = nullptr;
+    fz_var(opts);
     fz_try(access.ctx) {
         int n = pdf_choice_widget_options(access.ctx, access.annot, 0, nullptr);
         if (n > 0) {
-            const char** opts = (const char**)fz_malloc(access.ctx, n * sizeof(char*));
+            opts = (const char**)fz_malloc(access.ctx, n * sizeof(char*));
             pdf_choice_widget_options(access.ctx, access.annot, 0, opts);
             for (int i = 0; i < n; i++) {
                 out.Append(Str(opts[i] ? opts[i] : ""));
             }
-            fz_free(access.ctx, (void*)opts);
         }
+    }
+    fz_always(access.ctx) {
+        fz_free(access.ctx, (void*)opts);
     }
     fz_catch(access.ctx) {
         fz_report_error(access.ctx);
@@ -754,12 +814,12 @@ bool SetContents(Annotation* annot, Str sv) {
     });
 }
 
-void DeleteAnnotation(Annotation* annot) {
+void DeleteAnnotationWithoutUI(Annotation* annot) {
     ReportIf(!annot);
     if (!annot) {
         return;
     }
-    // Caller must have DetachAnnotationFromUI (or have no UI holders).
+    // The application uses DeleteAnnotationFromUI for displayed annotations.
     EngineMupdf* e = annot->engine;
     if (!e) {
         delete annot;
@@ -1216,6 +1276,26 @@ static void ParseCssFontShorthand(Str v, Str& family, int& style) {
     }
 }
 
+// the vertical-align SumatraPDF writes into /DS for a text box's Vertical
+// Alignment, as style bits (our CSS parser doesn't know the property)
+static int FreeTextVAlignFromDs(Str ds) {
+    int i = str::IndexOf(ds, StrL("vertical-align"));
+    if (i < 0) {
+        return 0;
+    }
+    Str v = TrimWS(Str(ds.s + i + 14, len(ds) - i - 14));
+    if (len(v) > 0 && v.s[0] == ':') {
+        v = TrimWS(Str(v.s + 1, len(v) - 1));
+    }
+    if (str::StartsWith(v, StrL("middle"))) {
+        return kFreeTextVMiddle;
+    }
+    if (str::StartsWith(v, StrL("bottom"))) {
+        return kFreeTextVBottom;
+    }
+    return 0;
+}
+
 // The font of a free text: its /DS style if it has one, else its /DA base-14 font.
 static void ReadFreeTextFontLocked(fz_context* ctx, pdf_annot* a, Str& family, int& style) {
     const char* daFont = nullptr;
@@ -1227,7 +1307,9 @@ static void ReadFreeTextFontLocked(fz_context* ctx, pdf_annot* a, Str& family, i
     family = SeqStrByIndex(gBase14FontFamilies, idx >= 0 ? idx : 1);
     style = 0;
 
-    CssPullParser parser(Str(pdf_annot_rich_defaults(ctx, a)));
+    Str ds(pdf_annot_rich_defaults(ctx, a));
+    style |= FreeTextVAlignFromDs(ds);
+    CssPullParser parser(ds);
     for (const CssProperty* prop = parser.NextProperty(); prop; prop = parser.NextProperty()) {
         switch (prop->type) {
             case Css_Font_Family:
@@ -1241,6 +1323,7 @@ static void ReadFreeTextFontLocked(fz_context* ctx, pdf_annot* a, Str& family, i
                 break;
             case Css_Text_Decoration:
                 style |= str::ContainsI(prop->s, StrL("underline")) ? kFreeTextUnderline : 0;
+                style |= str::ContainsI(prop->s, StrL("line-through")) ? kFreeTextStrikeout : 0;
                 break;
             case Css_Font:
                 ParseCssFontShorthand(prop->s, family, style);
@@ -1284,8 +1367,18 @@ static void WriteFreeTextFontLocked(fz_context* ctx, pdf_annot* a, Str family, i
     if (style & kFreeTextItalic) {
         ds.Append(StrL(";font-style:italic"));
     }
-    if (style & kFreeTextUnderline) {
-        ds.Append(StrL(";text-decoration:underline"));
+    if (style & (kFreeTextUnderline | kFreeTextStrikeout)) {
+        bool both = (style & kFreeTextUnderline) && (style & kFreeTextStrikeout);
+        ds.Append(StrL(";text-decoration:"));
+        ds.Append((style & kFreeTextUnderline) ? StrL("underline") : StrL(""));
+        ds.Append(both ? StrL(" ") : StrL(""));
+        ds.Append((style & kFreeTextStrikeout) ? StrL("line-through") : StrL(""));
+    }
+    // mupdf's appearance reads it (pdf-appearance.c rich_valign_offset)
+    if (style & kFreeTextVMiddle) {
+        ds.Append(StrL(";vertical-align:middle"));
+    } else if (style & kFreeTextVBottom) {
+        ds.Append(StrL(";vertical-align:bottom"));
     }
     pdf_set_annot_rich_defaults(ctx, a, CStrTemp(ToStrTemp(ds)));
 }
@@ -1471,6 +1564,7 @@ Vec<PointF> GetVertices(Annotation* annot) {
     AnnotAccess access(annot);
     fz_try(access.ctx) {
         int n = pdf_annot_vertex_count(access.ctx, access.annot);
+        VecReserve(res, n);
         for (int i = 0; i < n; i++) {
             fz_point p = pdf_annot_vertex(access.ctx, access.annot, i);
             VecAppend(res, {p.x, p.y});
@@ -1668,9 +1762,9 @@ void SetOpacity(Annotation* annot, int newOpacity) {
 }
 
 static Str GetUserTemp() {
-    Str u = Str(getenv("USER"));
+    TempStr u = GetEnvVariableTemp(StrL("USER"));
     if (len(u) == 0) {
-        u = Str(getenv("USERNAME"));
+        u = GetEnvVariableTemp(StrL("USERNAME"));
     }
     if (len(u) == 0) {
         return StrL("user");
@@ -1681,7 +1775,7 @@ static Str GetUserTemp() {
 static TempStr GetAnnotationTextIconTemp() {
     TempStr s = str::DupTemp(gSettings->annotations.textIconType);
     // this way user can use "new paragraph" and we'll match "NewParagraph"
-    str::RemoveCharsInPlace(s, StrL(" "));
+    s.len -= str::RemoveCharsInPlace(s, StrL(" "));
     int idx = SeqStrIndexIS(gAnnotationTextIcons, s);
     if (idx < 0) {
         return StrL("Note");
@@ -1689,51 +1783,9 @@ static TempStr GetAnnotationTextIconTemp() {
     return SeqStrByIndex(gAnnotationTextIcons, idx);
 }
 
-enum AnnotationCapability : u8 {
-    AnnotMove = 1 << 0,
-    AnnotCopy = 1 << 1,
-    AnnotResize = 1 << 2,
-    AnnotInteriorColor = 1 << 3,
-    AnnotBorder = 1 << 4,
-    AnnotColor = 1 << 5,
-    AnnotOpacity = 1 << 6,
-};
-
-static const u8 kAnnotationCapabilities[] = {
-    AnnotMove | AnnotCopy | AnnotColor | AnnotOpacity,                                                  // Text
-    0,                                                                                                  // Link
-    AnnotMove | AnnotCopy | AnnotResize | AnnotBorder | AnnotColor | AnnotOpacity,                      // FreeText
-    AnnotMove | AnnotCopy | AnnotResize | AnnotInteriorColor | AnnotBorder | AnnotColor | AnnotOpacity, // Line
-    AnnotMove | AnnotCopy | AnnotResize | AnnotInteriorColor | AnnotBorder | AnnotColor | AnnotOpacity, // Square
-    AnnotMove | AnnotCopy | AnnotResize | AnnotInteriorColor | AnnotBorder | AnnotColor | AnnotOpacity, // Circle
-    AnnotMove | AnnotCopy | AnnotResize | AnnotInteriorColor | AnnotBorder | AnnotColor | AnnotOpacity, // Polygon
-    AnnotMove | AnnotCopy | AnnotResize | AnnotInteriorColor | AnnotBorder | AnnotColor | AnnotOpacity, // PolyLine
-    AnnotColor | AnnotOpacity,                                                                          // Highlight
-    AnnotColor | AnnotOpacity,                                                                          // Underline
-    AnnotColor | AnnotOpacity,                                                                          // Squiggly
-    AnnotColor | AnnotOpacity,                                                                          // StrikeOut
-    AnnotMove | AnnotCopy | AnnotResize | AnnotOpacity,                                                 // Redact
-    AnnotMove | AnnotCopy | AnnotResize | AnnotColor | AnnotOpacity,                                    // Stamp
-    AnnotMove | AnnotCopy | AnnotColor | AnnotOpacity,                                                  // Caret
-    AnnotMove | AnnotCopy | AnnotBorder | AnnotColor | AnnotOpacity,                                    // Ink
-    AnnotMove | AnnotResize,                                                                            // Popup
-    AnnotMove | AnnotColor | AnnotOpacity, // FileAttachment
-    AnnotMove | AnnotColor,                // Sound
-    AnnotMove | AnnotResize,               // Movie
-    AnnotMove | AnnotResize,               // RichMedia
-    AnnotMove | AnnotResize,               // Widget
-    0,                                     // Screen
-    0,                                     // PrinterMark
-    0,                                     // TrapNet
-    0,                                     // Watermark
-    AnnotMove | AnnotResize,               // ThreeD
-    0,                                     // Projection
-};
-static_assert(dimof(kAnnotationCapabilities) == (int)AnnotationType::Last + 1);
-
 static bool HasAnnotationCapability(AnnotationType tp, AnnotationCapability capability) {
-    int idx = (int)tp;
-    return idx >= 0 && idx < dimof(kAnnotationCapabilities) && (kAnnotationCapabilities[idx] & capability) != 0;
+    const auto* info = AnnotationInfo(tp);
+    return info && (info->capabilities & capability) != 0;
 }
 
 bool AnnotationCanBeMoved(AnnotationType tp) {
@@ -1775,6 +1827,9 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
     static const float black[3] = {0, 0, 0};
 
     EngineMupdf* epdf = AsEngineMupdf(engine);
+    if (!epdf || !args) {
+        return nullptr;
+    }
     fz_context* ctx = epdf->Ctx();
     // creating an annotation is a create plus a handful of property changes;
     // Undo should take all of it back in one go
@@ -1785,6 +1840,7 @@ Annotation* EngineMupdfCreateAnnotation(EngineBase* engine, int pageNo, PointF p
         return nullptr;
     }
     pdf_annot* annot = nullptr;
+    fz_var(annot);
     pdf_page* page = nullptr;
     auto typ = args->annotType;
     auto col = args->col;

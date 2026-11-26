@@ -46,6 +46,7 @@ struct CustomCommand;
 bool RunDocColorsFollowThemeCmd(CustomCommand* cmd);
 void ToggleCaption(CustomCommand* cmd);
 void ToggleSidebarAutoHide(CustomCommand* cmd);
+TextWindowOption DocErrorsWindowOption();
 bool showTocByDefault(Str path, EngineBase* engine);
 bool IsEbookFileType(FileType ft);
 DisplayMode DisplayModeForNewDocument(Str path, EngineBase* engine);
@@ -73,7 +74,6 @@ bool AppendFileFilterForDoc(DocController* ctrl, str::Builder& fileFilter);
 bool FilePickerIsSumatraPDF();
 bool IsOpenableNextPrevFile(Str path);
 void CollectHistoryFilesInDir(Str dir, StrVec& out);
-void InsertSortedNatural(StrVec* v, Str s);
 struct PendingNextPrevNav {
     MainWindow* win = nullptr;
     WindowTab* tab = nullptr;
@@ -90,6 +90,7 @@ void ClearPendingNextPrevNav();
 void DeferNextPrevNav(MainWindow* win, WindowTab* tab, bool forward, Str pathToDelete);
 void ReplayPendingNextPrevNav();
 bool IsAtDocumentBottom(MainWindow* win);
+bool GoOnToNextFile(MainWindow* win, int cmdId);
 void OnNextFileHintClosed(NotificationClosedEvent* ev);
 void ToggleMangaMode(MainWindow* win);
 void ToggleFacingStepOne(MainWindow* win);
@@ -105,8 +106,8 @@ int wrapIdx(int idx, int max);
 TempStr GetISO639LangCodeFromLangTemp(Str lang);
 Str EbookLayoutSnapshot();
 void ReloadEbookLayoutDocs();
+void ReloadWebDocLayouts(Str beforeMarkdown, Str beforeHtml);
 TempStr ZoomArgTemp(DocController* ctrl);
-Str HelpThemePref();
 void ManualOnJsNotify(void*, Str method, Str paramsJson);
 TempStr DocURIToLocalManualUrlTemp(Str docURI);
 void TocItemToText(str::Builder& s, TocItem* item, int level);
@@ -117,7 +118,6 @@ void PrintSelectionDeferred(MainWindow* win);
 void ReplaceColor(ParsedColor& col, Str maybeColor);
 
 bool WindowHasDocumentLoading(MainWindow* win);
-TempStr FindCoverImageTemp(Str docPath);
 void TogglePageInfoHelper(MainWindow* win);
 void RenameFileInHistory(Str oldPath, Str newPath);
 extern MeasurementUnit cursorPosUnit;
@@ -145,10 +145,10 @@ void ToggleCursorPositionInDoc(MainWindow* win);
 
 extern Str gNextPrevDir;
 extern StrVec gNextPrevDirCache;
+void StealStrVec(StrVec& dst, StrVec& src);
 extern bool gNextPrevDirReady;
 extern bool gNextPrevDirScanning;
 void ScheduleReloadTab(WindowTab* tab);
-bool AutoReloadFileStillChanging(WindowTab* tab);
 void EnsureNextPrevDirScan(Str filePath);
 StrVec* GetNextPrevFilesReady(Str path);
 
@@ -187,14 +187,12 @@ void NotifyUrlSelectionTruncated(WindowTab* tab);
 void ReopenLastClosedFile(MainWindow* win);
 void RememberClosedWindow(MainWindow* win);
 
-bool SendOpenFileToExistingInstance(HWND targetHwnd, Str fullPath, u32 newWindow);
 bool SendOpenFilesToExistingInstance(HWND targetHwnd, StrVec& paths, u32 newWindow);
 
 // implemented by each app
 void UndoRedoUnavailable(MainWindow* win, bool redo);
 void ApplyWindowPosFlag(const Flags& i);
 void ToolbarModeApplied(MainWindow* win);
-void CreateThumbnailFromFileAsync(FileState* ds, EngineBase* engine);
 
 void CreateThumbnailForFile(MainWindow* win, FileState* ds);
 void DeleteCurrentFileAndOpenNext(MainWindow* win);
@@ -224,11 +222,11 @@ constexpr const char* kSumatraWindowTitle = "SumatraPDF";
 // Cap how many extension links we put in the bar
 constexpr int kMaxDefaultAppLinks = 8;
 
-static Kind kNotifPersistentWarning = "persistentWarning";
-static Kind kNotifDocErrors = "docErrors";
+extern Kind kNotifPersistentWarning;
+extern Kind kNotifDocErrors;
 // Kind used so only one default-app bar is shown at a time
-static Kind kNotifDefaultApp = "defaultApp";
-static Kind kNotifThumbnailProgress = "thumbnailProgress";
+extern Kind kNotifDefaultApp;
+extern Kind kNotifThumbnailProgress;
 int SidebarNativeDx(MainWindow* win);
 void ToggleLineWeights();
 

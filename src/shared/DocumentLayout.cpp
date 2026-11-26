@@ -28,7 +28,18 @@ FacingRow FacingRowAt(int firstPage, int pageCount, bool bookView, const Vec<u8>
 
 // Landscape spreads occupy a full row; book view keeps the first page alone.
 void CollectFacingRows(Vec<FacingRow>& out, int pageCount, bool bookView, const Vec<u8>& spreadFlags) {
-    VecReset(out);
+    VecClear(out);
+    if (pageCount <= 0) {
+        return;
+    }
+
+    int maxRows = pageCount;
+    if (len(spreadFlags) == 0) {
+        int pagesAfterCover = pageCount - (bookView ? 1 : 0);
+        maxRows -= pagesAfterCover / 2;
+    }
+    VecReserve(out, maxRows);
+
     int page = 1;
     while (page <= pageCount) {
         FacingRow row = FacingRowAt(page, pageCount, bookView, spreadFlags);
@@ -156,7 +167,7 @@ static void FinishRelayout(DocumentLayout& layout, int canvasDx, int canvasDy, b
     Rect& viewPort = layout.viewPort;
 
     if (canvasDy < viewPort.dy) {
-        int offY = params.windowMargin.top + ((viewPort.dy - canvasDy) / 2);
+        int offY = (viewPort.dy - canvasDy) / 2;
         for (DocumentLayoutPage& page : layout.pages) {
             if (page.isShown) {
                 page.pos.y += offY;

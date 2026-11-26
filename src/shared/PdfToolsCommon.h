@@ -4,6 +4,7 @@
 // --- shared by PdfToolsCommon.cpp and each app's PdfTools.cpp ---
 
 char* PdfToolPasswordTemp(MainWindow* win, Str srcPath);
+TempStr PdfToolInputTemp(EngineBase* engine, Str srcPath, TempStr* tmpPath);
 bool ParseDeletePages(Str s, int pageCount, Vec<int>& pagesToDelete);
 bool PageRangeOk(Str s, int pageCount, bool isExtract, Vec<int>& pages);
 TempStr PageRangeCountTemp(Str s, int pageCount, bool isExtract);
@@ -21,6 +22,8 @@ constexpr int kToolDlgRowDy = 30;
 constexpr int kToolDlgFilesPadDy = 8;
 constexpr int kToolDlgFootPadDy = 10;
 constexpr int kToolDlgComboDx = 84;
+// Compress PDF's Pictures drop-down: its labels are longer
+constexpr int kCompressQualityDx = 220;
 constexpr int kToolDlgQueryFontPx = 15;
 constexpr int kToolDlgTextFontPx = 13;
 constexpr int kToolDlgMetaFontPx = 12;
@@ -32,6 +35,11 @@ bool KeepOnlyPagesWithAnnotations(EngineBase* engine, Vec<int>& pages);
 TempStr DefaultPdfDestPathTemp(Str srcPath);
 bool ExtractPagesToNewPdf(WindowTab* tab, const Vec<int>& pages, Str destPath);
 bool ConvertImageCollectionToPdf(EngineBase* engine, Str destPath);
+Str ImagesToPdfFilter();
+TempStr ImagesToPdfDestTemp(Str firstImage);
+TempStr MakePdfFromImagesTemp(const StrVec& paths, Str dest);
+TempStr AnnotationsExportDestTemp(Str docPath);
+TempStr ExportAnnotationsTemp(EngineBase* engine, Str docPath, Str dest);
 
 // Add Watermark / Add Page Numbers (and `cli watermark`, `cli number`)
 struct PdfStamp;
@@ -44,6 +52,16 @@ void PageStamps(const Vec<int>& pages, const PdfStamp& tmpl, Str format, int sta
 void PageNumberPositionLabels(StrVec& out);
 void DialogStamps(bool watermark, Str text, const Vec<int>& pages, int positionIdx, Vec<PdfStamp>& out);
 bool StampPdfToFile(EngineBase* engine, const Vec<PdfStamp>& stamps, Str destPath, Str* errOut);
+// Compress PDF's Pictures drop-down (and `cli compress --quality`): Same keeps
+// the pictures, Balanced and Smallest scale them down and save them as JPEG
+enum class PdfCompressQuality {
+    Same,
+    Balanced,
+    Smallest,
+};
+void PdfCompressQualityLabels(StrVec& out);
+bool PdfCompressQualityFromName(Str name, PdfCompressQuality& out);
+void AppendPdfCompressArgs(Vec<char*>& argv, PdfCompressQuality quality);
 constexpr int kConvertPdfToImagesDpi = 150;
 constexpr int kSaveSelectionDefaultDpi = 300;
 float SaveSelectionZoom(EngineBase* engine, float dpi);
@@ -66,7 +84,7 @@ TempStr UniqueImagesTemplateTemp(Str templatePath, const Vec<int>& pages);
 TempStr ExistingImagesTextTemp(int nExisting);
 bool PagesFitDpi(EngineBase* engine, const Vec<int>& pages, int dpi);
 int ConvertPagesToImages(EngineBase* engine, int rotation, Str templatePath, const Vec<int>& pages, int dpi,
-                         Str* firstPathOwnedOut);
+                         Str* firstPathOwnedOut, const Func1<int>& onProgress = {});
 void CollectAllPages(int pageCount, Vec<int>& pages);
 Pixmap* RenderSelectionPixmap(EngineBase* engine, int rotation, int pageNo, RectF rect, float dpi);
 bool WriteSelectionPixmap(Pixmap* px, Str destPath);
@@ -75,7 +93,7 @@ bool WriteSelectionPixmap(Pixmap* px, Str destPath);
 bool SavePixmapAsImageFile(Pixmap* px, Str path);
 void ShowPdfPageRangeDialog(MainWindow* win, bool isExtract);
 
-bool ExtractTextViaEngine(MainWindow* win, Str destPath, Str pages);
+bool ExtractTextViaEngine(WindowTab* tab, Str destPath, Str pages);
 
 struct SaveSelImgWork {
     Pixmap* px = nullptr;
@@ -113,10 +131,66 @@ int EbookPdfFontSizeFromText(Str s);
 
 // rectangular selection → PNG / JPEG / BMP at a chosen DPI, independent of
 // the current zoom (issue #6127)
-static Kind kNotifSaveSelectionAsImage = "notifSaveSelectionAsImage";
+extern Kind kNotifSaveSelectionAsImage;
 
 // entry points of the mupdf command line tools we link in
 extern "C" int pdfbake_main(int argc, char** argv);
 extern "C" int pdfclean_main(int argc, char** argv);
 extern "C" int muconvert_main(int argc, char** argv);
 extern "C" void fz_set_optind(int val);
+
+using PdfToolMain = int (*)(int, char**);
+int RunPdfToolMain(PdfToolMain toolMain, int argc, char** argv);
+
+// what a dialog does once its tool succeeded
+enum class PdfToolDone {
+    LoadDest,
+    ShowDest,
+    // reloads destPath where it's open, else loads it (Merge)
+    ReloadDest,
+};
+
+// how a dialog reports its tool's failure
+enum class PdfToolFail {
+    MessageBox,
+    Notification,
+};
+
+// a mutool command (or, overriding Run(), other work) a tool dialog runs on a thread
+struct PdfToolJob {
+    virtual ~PdfToolJob() = default;
+    virtual int Run();
+    // pages done and to do, for a dialog that shows progress
+    AtomicInt nDone = 0;
+    int nTotal = 0;
+    // called instead of FinishPdfToolJob, for an owner that isn't a tool dialog
+    Func1<PdfToolJob*> onFinish;
+    PdfToolMain toolMain = nullptr;
+    StrVec args;
+    Str tmpPath;   // owned; a copy of the input, deleted after the run
+    Str destPath;  // owned
+    Str logName;   // owned
+    Str failMsg;   // owned
+    Str failTitle; // owned
+    PdfToolDone done = PdfToolDone::LoadDest;
+    PdfToolFail fail = PdfToolFail::MessageBox;
+    int res = -1;
+    // the dialog; the app clears it when the dialog goes away first
+    void* owner = nullptr;
+};
+PdfToolJob* NewPdfToolJob(PdfToolMain toolMain, Str logName, Str destPath, Str failMsg, Str failTitle);
+void SetPdfToolJobArgs(PdfToolJob* job, char** argv, int argc, Str tmpPath);
+void StartPdfToolJob(PdfToolJob* job);
+void FreePdfToolJob(PdfToolJob* job);
+int RunPdfToolJobNow(PdfToolJob* job);
+PdfToolJob* NewStampJob(EngineBase* engine, bool watermark, Str text, const Vec<int>& pages, int posIdx, Str destPath);
+PdfToolJob* NewImagesJob(EngineBase* engine, int rotation, Str templatePath, const Vec<int>& pages, int dpi);
+PdfToolJob* NewEpubToPdfJob(Str srcPath, Str destPath, const EbookPdfPageSize& ps, int fontSize);
+PdfToolJob* NewCajToPdfJob(Str srcPath, Str destPath);
+PdfToolJob* NewConvertToPdfJob(EngineBase* engine, Str destPath);
+struct PdfMergeSource;
+struct PdfMergePage;
+PdfToolJob* NewMergeJob(const Vec<PdfMergeSource>& srcs, const Vec<PdfMergePage>& pages, Str srcCopy, Str destPath);
+// implemented by each app
+void FinishPdfToolJob(PdfToolJob* job);
+void PdfToolJobProgress(PdfToolJob* job);

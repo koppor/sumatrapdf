@@ -41,6 +41,7 @@ struct DviTools {
 
 static DviTools gDviTools;
 static bool gDviToolsInited = false;
+static Mutex gDviToolsLock;
 // points at gDviTools.pdfmx or gDviTools.dvips; not owned
 static Str gDviConvertTool;
 
@@ -108,7 +109,9 @@ static TempStr FindTexExeTemp(Str exeName) {
     return {};
 }
 
+// called from loading threads and the UI thread
 static void InitDviTools() {
+    ScopedMutex scope(&gDviToolsLock);
     if (gDviToolsInited) {
         return;
     }
@@ -210,13 +213,15 @@ static bool RunDviTool(Str exe, const Str* args, int nArgs, Str workDir) {
     for (int i = 0; i < nArgs; i++) {
         argv[i + 1] = (char*)CStrTemp(args[i]);
     }
+    // allocating in the child of a multi-threaded process can deadlock on the heap lock
+    const char* workDirZ = len(workDir) > 0 ? CStrTemp(workDir) : nullptr;
     pid_t pid = fork();
     if (pid < 0) {
         logf("dvi: fork failed: %s\n", exe);
         return false;
     }
     if (pid == 0) {
-        if (len(workDir) > 0 && chdir(CStrTemp(workDir)) != 0) {
+        if (workDirZ && chdir(workDirZ) != 0) {
             _exit(126);
         }
         execv(argv[0], argv);
@@ -445,6 +450,12 @@ static bool WriteDviMeta(Str metaPath, Str src, FILETIME mtime, Str pdfName) {
     return file::WriteFile(metaPath, body);
 }
 
+// per process and thread: other tabs and instances may convert the same file.
+// Keeps the ".pdf.tmp" suffix DeleteStaleDviCache looks for.
+static TempStr DviTmpPathTemp(Str pdfPath) {
+    return fmt("%s.%llu.%llu.pdf.tmp", pdfPath, GetCurrProcessId(), (u64)GetCurrentThreadId());
+}
+
 // <data>/dvi-cache/<md5(path)>.meta records the source path, its mtime, and
 // the PDF file name. A hit bumps the PDF's access time so the week sweep
 // keeps it. Any failure falls through to converting again.
@@ -474,7 +485,7 @@ static TempStr EnsureDviPdf(Str src) {
         return pdfPath;
     }
 
-    TempStr tmpPath = str::JoinTemp(pdfPath, StrL(".tmp"));
+    TempStr tmpPath = DviTmpPathTemp(pdfPath);
     auto t0 = TimeGet();
     if (!ConvertDviToPdf(src, tmpPath)) {
         file::Delete(tmpPath);

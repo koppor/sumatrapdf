@@ -37,7 +37,7 @@ bool ExplorerQuickLookOnKeyDown(MainWindow* win, int key, bool hasModifiers) {
         return false;
     }
     if (key == VK_ESCAPE || key == VK_SPACE) {
-        CloseWindow(win, true, false);
+        CloseWindow(win, true);
         return true;
     }
     if (hasModifiers) {
@@ -137,7 +137,7 @@ void ShowExplorerQuickLook(Str path) {
     if (existing) {
         WindowTab* tab = existing->CurrentTab();
         if (tab && tab->filePath && path::IsSame(tab->filePath, norm)) {
-            CloseWindow(existing, true, false);
+            CloseWindow(existing, true);
             return;
         }
 #ifdef SUMATRA_NG
@@ -207,10 +207,11 @@ bool HandleExplorerQuickLookCopyData(COPYDATASTRUCT* cds) {
     if (!cds || cds->dwData != kCopyDataQuickLook || !cds->lpData || cds->cbData < 1) {
         return false;
     }
-    Str pathZ = Str((char*)cds->lpData, (int)cds->cbData);
-    if (strnlen_s(pathZ.s, (size_t)cds->cbData) >= cds->cbData) {
+    size_t n = strnlen_s((const char*)cds->lpData, (size_t)cds->cbData);
+    if (n >= cds->cbData) {
         return false;
     }
+    Str pathZ = Str((char*)cds->lpData, (int)n);
     auto* d = new QuickLookCopyDataAsync;
     d->path = str::Dup(pathZ);
     uitask::Post(MkFunc0<QuickLookCopyDataAsync>(QuickLookCopyDataAsyncRun, d), "QuickLookCopyData");
@@ -438,23 +439,79 @@ static TempStr GetExplorerSelectedPathTemp() {
     return {};
 }
 
-static void OnQuickLookSpace() {
-    if (!ExplorerForegroundAllowsPreview()) {
-        return;
+// Windows silently removes a low-level hook that misses LowLevelHooksTimeout,
+// so the hook waits for the selection lookup at most this long
+constexpr DWORD kSpaceLookupTimeoutMs = 150;
+
+// Explorer's selection is read (COM calls into Explorer, file sniffing) on a
+// worker thread. gSpaceLookupPath is written by the worker while busy.
+static HANDLE gSpaceLookupRequest = nullptr;
+static HANDLE gSpaceLookupDone = nullptr;
+static LONG gSpaceLookupBusy = 0;
+static Str gSpaceLookupPath;
+// owned by the agent thread: path to preview, set by the hook
+static Str gSpacePreviewPath;
+
+static void SpaceLookupThread() {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    for (;;) {
+        WaitForSingleObject(gSpaceLookupRequest, INFINITE);
+        TempStr path = GetExplorerSelectedPathTemp();
+        if (PathIsSupportedPreview(path)) {
+            gSpaceLookupPath = str::Dup(path);
+        }
+        ResetTempArena();
+        // signal before clearing busy: the hook resets the event once not busy
+        SetEvent(gSpaceLookupDone);
+        InterlockedExchange(&gSpaceLookupBusy, 0);
     }
-    TempStr path = GetExplorerSelectedPathTemp();
-    if (!PathIsSupportedPreview(path)) {
-        return;
-    }
-    RequestQuickLook(path);
 }
 
+static void StartSpaceLookupThread() {
+    gSpaceLookupRequest = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    gSpaceLookupDone = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!gSpaceLookupRequest || !gSpaceLookupDone) {
+        logf("StartSpaceLookupThread: CreateEvent failed\n");
+        return;
+    }
+    RunAsync(MkFunc0Void(SpaceLookupThread), StrL("QuickLookSpaceLookup"));
+}
+
+static void OnQuickLookSpace() {
+    Str path = gSpacePreviewPath;
+    gSpacePreviewPath = {};
+    if (path) {
+        RequestQuickLook(path);
+    }
+    str::Free(path);
+}
+
+// Space passes through when the lookup is slow or a previous one is stuck
+// (e.g. Explorer hangs).
 static bool ShouldStealSpace() {
-    if (!ExplorerForegroundAllowsPreview()) {
+    if (!gSpaceLookupDone || !ExplorerForegroundAllowsPreview()) {
         return false;
     }
-    TempStr path = GetExplorerSelectedPathTemp();
-    return PathIsSupportedPreview(path);
+    if (InterlockedCompareExchange(&gSpaceLookupBusy, 0, 0) != 0) {
+        return false;
+    }
+
+    ResetEvent(gSpaceLookupDone);
+    str::Free(gSpaceLookupPath);
+    gSpaceLookupPath = {};
+    InterlockedExchange(&gSpaceLookupBusy, 1);
+    SetEvent(gSpaceLookupRequest);
+    if (WaitForSingleObject(gSpaceLookupDone, kSpaceLookupTimeoutMs) != WAIT_OBJECT_0) {
+        return false;
+    }
+    if (len(gSpaceLookupPath) == 0) {
+        return false;
+    }
+
+    str::Free(gSpacePreviewPath);
+    gSpacePreviewPath = gSpaceLookupPath;
+    gSpaceLookupPath = {};
+    return true;
 }
 
 static LRESULT CALLBACK QuickLookKeyboardProc(int nCode, WPARAM wp, LPARAM lp) {
@@ -617,6 +674,7 @@ bool RunExplorerQuickLookAgentLoop() {
         SafeCloseHandle(&gQuickLookAgentMutex);
         return false;
     }
+    StartSpaceLookupThread();
     gQuickLookHook = SetWindowsHookExW(WH_KEYBOARD_LL, QuickLookKeyboardProc, wc.hInstance, 0);
     if (!gQuickLookHook) {
         logf("RunExplorerQuickLookAgentLoop: SetWindowsHookEx failed\n");

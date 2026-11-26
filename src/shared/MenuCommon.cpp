@@ -34,7 +34,38 @@
 #include "ReadingAutoScroll.h"
 #include "ReadingBar.h"
 #include "Menu.h"
+#include "MenuDefs.h"
 #include "MenuCommon.h"
+
+bool HideContextMenuEntry(const MenuDef* menu, const MenuDef& item, const AppCommandCtx& ctx) {
+    if (item.submenu == menuDefCreateAnnotUnderCursor) {
+        return !ctx.isCursorOnPage;
+    }
+    if (item.submenu == menuDefCreateAnnotFromSelection) {
+        return !ctx.supportsAnnots || (!ctx.hasTextSelection && !ctx.hasDrawnRectSelection);
+    }
+    int cmdId = item.cmdId;
+    if (menu == menuDefSelection) {
+        if (item.submenu == menuDefTranslateWith || item.submenu == menuDefSearchWith) {
+            return !ctx.hasTextSelection;
+        }
+        if (cmdId == CmdCopySelection) {
+            return !ctx.hasSelection;
+        }
+        bool isRectSel = ctx.hasSelection && !ctx.hasTextSelection;
+        if (!isRectSel) {
+            return cmdId == CmdCopySelectionAsImage || cmdId == CmdSaveSelectionAsImage || cmdId == CmdPrintSelection ||
+                   cmdId == CmdSearchGoogleLens || cmdId == CmdZoomToSelection;
+        }
+    }
+    if (menu == menuDefGoogleLens) {
+        bool onImage = ctx.cursorOnImage || ctx.engineKind == kindEngineImage;
+        return (cmdId == CmdSearchGoogleLens && !ctx.hasSelection) ||
+               (cmdId == CmdSearchGoogleLensPage && !ctx.isCursorOnPage) ||
+               (cmdId == CmdSearchGoogleLensImage && !onImage);
+    }
+    return false;
+}
 
 bool ShowDebugMenu() {
     return gIsDebugBuild || gIsPreReleaseBuild;
@@ -66,9 +97,9 @@ void SetFileHistoryCmdIds(Vec<FileHistoryEntry>& files) {
     }
 }
 
-// s could be in format "file://path.pdf#page=1" or "mailto:foo@bar.com"
+// s could be in format "file:path.pdf" or "mailto:foo@bar.com"
 // We only want the "path.pdf" / "foo@bar.com"
-TempStr CleanupURLForClipbardCopyTemp(Str s) {
+TempStr CleanupURLForClipboardCopyTemp(Str s) {
     Str slice = s;
     str::TrimPrefix(slice, StrL("file:"));
     str::TrimPrefix(slice, StrL("mailto:"));

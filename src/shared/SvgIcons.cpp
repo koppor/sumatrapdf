@@ -80,18 +80,6 @@ const char* gIconLayoutSinglePage =
   <rect x="4" y="4" width="16" height="16" rx="2" />
 </svg>)";
 
-// https://github.com/tabler/tabler-icons/blob/main/icons/outline/chevron-left.svg
-const char* gIconSearchPrev =
-    R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
-  <polyline points="15 6 9 12 15 18" />
-</svg>)";
-
-// https://github.com/tabler/tabler-icons/blob/main/icons/outline/chevron-right.svg
-const char* gIconSearchNext =
-    R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
-  <polyline points="9 6 15 12 9 18" />
-</svg>)";
-
 // https://github.com/tabler/tabler-icons/blob/main/icons/outline/letter-case.svg
 const char* gIconMatchCase =
     R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
@@ -244,12 +232,6 @@ const char* gIconFindAnnotation =
   <line x1="3" y1="6" x2="20" y2="6" />
   <line x1="3" y1="12" x2="8" y2="12" />
   <line x1="3" y1="18" x2="8" y2="18" />
-</svg>)";
-
-// https://github.com/tabler/tabler-icons/blob/main/icons/outline/command.svg
-const char* gIconCommandPalette =
-    R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" stroke-width="1" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M7 9a2 2 0 1 1 2 -2v10a2 2 0 1 1 -2 -2h10a2 2 0 1 1 -2 2v-10a2 2 0 1 1 2 2h-10" />
 </svg>)";
 
 // https://github.com/tabler/tabler-icons/blob/main/icons/outline/chevron-up.svg
@@ -539,6 +521,9 @@ static fz_pixmap* RenderSvgToFzPixmap(fz_context* ctx, Str svgData, int dx, int 
         float svgWidth = 0;
         float svgHeight = 0;
         list = fz_new_display_list_from_svg(ctx, buf, nullptr, nullptr, &svgWidth, &svgHeight);
+        if (svgWidth <= 0.f || svgHeight <= 0.f) {
+            fz_throw(ctx, FZ_ERROR_GENERIC, "empty svg");
+        }
         pixmap = fz_new_pixmap_with_bbox(ctx, fz_device_rgb(ctx), fz_make_irect(0, 0, dx, dy), nullptr, 1);
         fz_clear_pixmap(ctx, pixmap);
         dev = fz_new_draw_device(ctx, fz_scale((float)dx / svgWidth, (float)dy / svgHeight), pixmap);
@@ -626,7 +611,6 @@ struct SvgPixmapCacheEntry {
     int dx = 0;
     int dy = 0;
     Color fg = 0;
-    Color bg = 0;
     Pixmap* pixmap = nullptr; // owned
 
     ~SvgPixmapCacheEntry() {
@@ -637,20 +621,18 @@ struct SvgPixmapCacheEntry {
 
 static SvgPixmapCacheEntry* gSvgPixmapCache = nullptr;
 
-// Render `svg` at dx×dy in fg/bg (theme text/control colors if unset).
+// Render `svg` at dx×dy in fg (theme text color if unset; bg is unused).
 // The Pixmap belongs to the cache and stays valid until the app exits.
 Pixmap* GetCachedPixmapForSvg(Str svg, int dx, int dy, Color fg, Color bg) {
+    (void)bg;
     if (str::IsEmptyOrWhiteSpace(svg) || dx <= 0 || dy <= 0) {
         return nullptr;
     }
     if (fg == kColorUnset) {
         fg = ThemeWindowTextColor();
     }
-    if (bg == kColorUnset) {
-        bg = ThemeControlBackgroundColor();
-    }
     for (SvgPixmapCacheEntry* e = gSvgPixmapCache; e; e = e->next) {
-        if (e->dx == dx && e->dy == dy && e->fg == fg && e->bg == bg && str::Eq(e->svg, svg)) {
+        if (e->dx == dx && e->dy == dy && e->fg == fg && str::Eq(e->svg, svg)) {
             return e->pixmap;
         }
     }
@@ -663,7 +645,6 @@ Pixmap* GetCachedPixmapForSvg(Str svg, int dx, int dy, Color fg, Color bg) {
     e->dx = dx;
     e->dy = dy;
     e->fg = fg;
-    e->bg = bg;
     e->pixmap = px;
     ListInsertFront(&gSvgPixmapCache, e);
     return px;

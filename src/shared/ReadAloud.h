@@ -95,6 +95,8 @@ struct ReadAloudHighlightMap {
 
 void ReadAloudHighlightFree(ReadAloudHighlightMap* map);
 
+TempStr ReadAloudCleanTextTemp(Str text);
+
 bool ReadAloudHighlightBuildFromTextSelection(TextSelection* ts, ReadAloudHighlightMap* map, str::Builder& cleanedOut);
 
 bool ReadAloudGetViewportStart(DisplayModel* dm, int* startPageOut, int* startGlyphOut);
@@ -129,6 +131,8 @@ bool IsReadAloudLowerAscii(char c);
 bool IsReadAloudLineBreak(char c);
 bool IsReadAloudHorizontalSpace(char c);
 bool IsReadAloudCloser(int c);
+bool IsReadAloudSentPunct(int c);
+int ReadAloudAfterSentEnd(Str text, int afterPunct);
 int ReadAloudWordEndUtf8(Str text, int pos);
 bool ReadAloudByteLocHasRect(const ReadAloudByteLoc& loc);
 Rect ReadAloudByteLocToRect(const ReadAloudByteLoc& loc);

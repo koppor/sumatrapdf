@@ -22,6 +22,7 @@
 #include "base/Pixmap.h"
 #include "base/AutoWin.h"
 #include "base/Win.h"
+#include "base/WinDynCalls.h"
 
 // windows.h has DrawText as a macro and d2d1.h declares a DrawText method
 #ifdef DrawText
@@ -52,8 +53,8 @@ static void InitDirect2D() {
     }
     gTriedInit = true;
 
-    HMODULE d2d = LoadLibraryW(L"d2d1.dll");
-    HMODULE dw = LoadLibraryW(L"dwrite.dll");
+    HMODULE d2d = SafeLoadLibrary(StrL("d2d1.dll"));
+    HMODULE dw = SafeLoadLibrary(StrL("dwrite.dll"));
     if (!d2d || !dw) {
         logf("InitDirect2D: d2d1.dll=%p dwrite.dll=%p\n", (const void*)d2d, (const void*)dw);
         return;
@@ -90,7 +91,6 @@ constexpr int kD2DTargetPool = 8;
 
 struct D2DTargetSlot {
     ID2D1DCRenderTarget* target = nullptr;
-    HDC boundHdc = nullptr;
     bool inUse = false;
     int dx = 0;
     int dy = 0;
@@ -134,12 +134,11 @@ static D2DTargetSlot* D2DSlotFor(ID2D1DCRenderTarget* t) {
     return nullptr;
 }
 
-static void D2DNoteBind(ID2D1DCRenderTarget* t, HDC hdc, int dx, int dy) {
+static void D2DNoteBind(ID2D1DCRenderTarget* t, int dx, int dy) {
     D2DTargetSlot* slot = D2DSlotFor(t);
     if (!slot) {
         return;
     }
-    slot->boundHdc = hdc;
     slot->dx = dx;
     slot->dy = dy;
 }
@@ -147,42 +146,44 @@ static void D2DNoteBind(ID2D1DCRenderTarget* t, HDC hdc, int dx, int dy) {
 static ID2D1DCRenderTarget* D2DAcquireDcTarget(int dx, int dy, bool* owned) {
     *owned = true;
     int empty = -1;
-    int wrongSize = -1;
+    int reuse = -1;
     for (int i = 0; i < kD2DTargetPool; i++) {
         if (gD2DSlots[i].inUse) {
             continue;
         }
-        if (gD2DSlots[i].target && gD2DSlots[i].dx == dx && gD2DSlots[i].dy == dy) {
-            gD2DSlots[i].inUse = true;
-            *owned = false;
-            return gD2DSlots[i].target;
-        }
-        if (!gD2DSlots[i].target) {
-            if (empty < 0) {
-                empty = i;
+        if (gD2DSlots[i].target) {
+            if (gD2DSlots[i].dx == dx && gD2DSlots[i].dy == dy) {
+                gD2DSlots[i].inUse = true;
+                *owned = false;
+                return gD2DSlots[i].target;
             }
-        } else if (wrongSize < 0) {
-            wrongSize = i;
+            if (reuse < 0) {
+                reuse = i;
+            }
+        } else if (empty < 0) {
+            empty = i;
         }
+    }
+    if (reuse >= 0) {
+        gD2DSlots[reuse].inUse = true;
+        gD2DSlots[reuse].dx = dx;
+        gD2DSlots[reuse].dy = dy;
+        *owned = false;
+        return gD2DSlots[reuse].target;
     }
 
     ID2D1DCRenderTarget* t = D2DCreateDcTarget();
     if (!t) {
         return nullptr;
     }
-    int slot = empty >= 0 ? empty : wrongSize;
-    if (slot < 0) {
+    if (empty < 0) {
         *owned = true;
         return t;
     }
-    if (gD2DSlots[slot].target) {
-        gD2DSlots[slot].target->Release();
-    }
-    gD2DSlots[slot].target = t;
-    gD2DSlots[slot].boundHdc = nullptr;
-    gD2DSlots[slot].inUse = true;
-    gD2DSlots[slot].dx = dx;
-    gD2DSlots[slot].dy = dy;
+    gD2DSlots[empty].target = t;
+    gD2DSlots[empty].inUse = true;
+    gD2DSlots[empty].dx = dx;
+    gD2DSlots[empty].dy = dy;
     *owned = false;
     return t;
 }
@@ -191,7 +192,6 @@ static void D2DDropSlot(ID2D1DCRenderTarget* t) {
     D2DTargetSlot* slot = D2DSlotFor(t);
     if (slot) {
         slot->target = nullptr;
-        slot->boundHdc = nullptr;
         slot->inUse = false;
     }
     t->Release();
@@ -382,27 +382,22 @@ GfxDirect2D::GfxDirect2D(HDC hdc) {
     if (!t) {
         return;
     }
-    D2DTargetSlot* slot = D2DSlotFor(t);
-    bool sameBind = slot && slot->boundHdc == hdc && slot->dx == sz.dx && slot->dy == sz.dy;
-    if (!sameBind) {
-        HRESULT hr = t->BindDC(hdc, &rc);
-        if (FAILED(hr)) {
-            D2DReleaseDcTarget(t, owned, true);
-            t = D2DCreateDcTarget();
-            owned = true;
-            slot = nullptr;
-            if (!t) {
-                return;
-            }
-            hr = t->BindDC(hdc, &rc);
-            if (FAILED(hr)) {
-                logf("GfxDirect2D: BindDC failed 0x%x\n", (int)hr);
-                t->Release();
-                return;
-            }
+    HRESULT hr = t->BindDC(hdc, &rc);
+    if (FAILED(hr)) {
+        D2DReleaseDcTarget(t, owned, true);
+        t = D2DCreateDcTarget();
+        owned = true;
+        if (!t) {
+            return;
         }
-        D2DNoteBind(t, hdc, sz.dx, sz.dy);
+        hr = t->BindDC(hdc, &rc);
+        if (FAILED(hr)) {
+            logf("GfxDirect2D: BindDC failed 0x%x\n", (int)hr);
+            t->Release();
+            return;
+        }
     }
+    D2DNoteBind(t, sz.dx, sz.dy);
     target = t;
     ownsTarget = owned;
     target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
@@ -418,6 +413,10 @@ GfxDirect2D::~GfxDirect2D() {
     if (dottedStroke) {
         dottedStroke->Release();
         dottedStroke = nullptr;
+    }
+    if (dashedStroke) {
+        dashedStroke->Release();
+        dashedStroke = nullptr;
     }
     if (!target) {
         return;
@@ -471,6 +470,28 @@ void GfxDirect2D::FillRect(const Rect& r, Color col) {
     target->FillRectangle(ToD2DRect(r), br);
 }
 
+static void D2DDrawPathOutline(ID2D1DCRenderTarget* target, ID2D1PathGeometry* path, ID2D1SolidColorBrush* br,
+                               int outlineWidth) {
+    if (!br) {
+        return;
+    }
+    ID2D1PathGeometry* outlined = nullptr;
+    if (FAILED(gD2DFactory->CreatePathGeometry(&outlined)) || !outlined) {
+        target->DrawGeometry(path, br, (float)outlineWidth);
+        return;
+    }
+    ID2D1GeometrySink* outSink = nullptr;
+    if (SUCCEEDED(outlined->Open(&outSink)) && outSink) {
+        HRESULT ohr = path->Outline(nullptr, outSink);
+        HRESULT chr = outSink->Close();
+        outSink->Release();
+        if (SUCCEEDED(ohr) && SUCCEEDED(chr)) {
+            target->DrawGeometry(outlined, br, (float)outlineWidth);
+        }
+    }
+    outlined->Release();
+}
+
 void GfxDirect2D::FillRects(const Rect* rects, int count, Color col, u8 alpha, int outlineWidth) {
     if (!target || ColorSkipsPaint(col) || count <= 0) {
         return;
@@ -508,10 +529,7 @@ void GfxDirect2D::FillRects(const Rect* rects, int count, Color col, u8 alpha, i
             target->FillGeometry(path, br);
         }
         if (outlineWidth > 0) {
-            br = GetBrush(kColBlack, alpha);
-            if (br) {
-                target->DrawGeometry(path, br, (float)outlineWidth);
-            }
+            D2DDrawPathOutline(target, path, GetBrush(kColBlack, alpha), outlineWidth);
         }
     }
     path->Release();
@@ -551,10 +569,7 @@ void GfxDirect2D::FillQuads(const Point* pts, int nQuads, Color col, u8 alpha, i
             target->FillGeometry(path, br);
         }
         if (outlineWidth > 0) {
-            br = GetBrush(kColBlack, alpha);
-            if (br) {
-                target->DrawGeometry(path, br, (float)outlineWidth);
-            }
+            D2DDrawPathOutline(target, path, GetBrush(kColBlack, alpha), outlineWidth);
         }
     }
     path->Release();
@@ -585,16 +600,15 @@ void GfxDirect2D::DrawDashedRect(const Rect& r, Color col) {
     if (!br) {
         return;
     }
-    D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties();
-    props.dashStyle = D2D1_DASH_STYLE_DASH;
-    ID2D1StrokeStyle* stroke = nullptr;
-    gD2DFactory->CreateStrokeStyle(props, nullptr, 0, &stroke);
-    D2D1_RECT_F rf = D2D1::RectF((float)r.x, (float)r.y, (float)r.Right(), (float)r.Bottom());
-    target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-    target->DrawRectangle(rf, br, 1.0f, stroke);
-    if (stroke) {
-        stroke->Release();
+    if (!dashedStroke) {
+        D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties();
+        props.dashStyle = D2D1_DASH_STYLE_DASH;
+        gD2DFactory->CreateStrokeStyle(props, nullptr, 0, &dashedStroke);
     }
+    D2D1_RECT_F rf =
+        D2D1::RectF((float)r.x + 0.5f, (float)r.y + 0.5f, (float)r.Right() - 0.5f, (float)r.Bottom() - 0.5f);
+    target->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+    target->DrawRectangle(rf, br, 1.0f, dashedStroke);
 }
 
 void GfxDirect2D::FillRoundedRect(const Rect& r, int radius, Color fill, Color border) {
@@ -652,6 +666,9 @@ void GfxDirect2D::DrawLineAA(Point p1, Point p2, Color col, float thickness, u8 
     if (col == kColorUnset) {
         col = textColor;
     }
+    if (ColorSkipsPaint(col)) {
+        return;
+    }
     ID2D1SolidColorBrush* br = GetBrush(col, alpha);
     if (!br) {
         return;
@@ -707,6 +724,48 @@ static void SetTextFormatFlags(IDWriteTextFormat* format, IDWriteInlineObject* e
     }
 }
 
+// DirectWrite trimming only supports end-ellipsis, so compact a path in the
+// middle ("dir\...\name") when gfxTextPathEllipsis overflows maxDx.
+static TempStr CompactPathForD2D(Str s, PlatformFont* font, int maxDx) {
+    int lastSep = -1;
+    for (int i = len(s) - 1; i >= 0; i--) {
+        if (s.s[i] == '\\' || s.s[i] == '/') {
+            lastSep = i;
+            break;
+        }
+    }
+    if (lastSep <= 0) {
+        return str::DupTemp(s);
+    }
+    Str tail(s.s + lastSep, len(s) - lastSep);
+    Str ell = StrL("...");
+    int sep = s.s[lastSep];
+    // shrink directory prefix component-by-component, then char-by-char if needed
+    int prefixLen = lastSep;
+    while (prefixLen > 0) {
+        int prevSep = -1;
+        for (int i = prefixLen - 1; i >= 0; i--) {
+            if (s.s[i] == '\\' || s.s[i] == '/') {
+                prevSep = i;
+                break;
+            }
+        }
+        if (prevSep < 0) {
+            break;
+        }
+        prefixLen = prevSep;
+        TempStr cand = fmt("%s%c%s%s", Str(s.s, prefixLen), sep, ell, tail);
+        if (D2DMeasureText(font, cand).dx <= maxDx) {
+            return cand;
+        }
+    }
+    TempStr ellTail = fmt("%s%s", ell, tail);
+    if (D2DMeasureText(font, ellTail).dx <= maxDx) {
+        return ellTail;
+    }
+    return str::DupTemp(s);
+}
+
 void GfxDirect2D::DrawText(Str s, const Rect& r, u32 flags, PlatformFont* font, Color col) {
     if (!target || r.IsEmpty() || len(s) == 0) {
         return;
@@ -718,6 +777,7 @@ void GfxDirect2D::DrawText(Str s, const Rect& r, u32 flags, PlatformFont* font, 
     }
     u32 fl = flags;
     bool wrap = (fl & gfxTextWrap) != 0;
+    TempStr compacted;
     if ((fl & (gfxTextEllipsis | gfxTextPathEllipsis)) && !wrap) {
         // the rect was measured with gdi metrics, which run a little narrower
         // than DirectWrite lays the same string out; without the slack a label
@@ -725,6 +785,9 @@ void GfxDirect2D::DrawText(Str s, const Rect& r, u32 flags, PlatformFont* font, 
         Size sz = MeasureText(s, font);
         if (sz.dx <= r.dx + kTextSlack) {
             fl &= ~(u32)(gfxTextEllipsis | gfxTextPathEllipsis);
+        } else if (fl & gfxTextPathEllipsis) {
+            compacted = CompactPathForD2D(s, font, r.dx);
+            s = compacted;
         }
     }
     SetTextFormatFlags(format, ellipsis, fl);
@@ -804,12 +867,13 @@ static const u8* PixmapAsPremulBgra(Pixmap* px, Vec<u8>& scratch, int* strideOut
         return nullptr;
     }
     int w = src->width, h = src->height;
-    int stride = w * 4;
-    i64 nBytes = (i64)stride * h;
-    if (stride <= 0 || nBytes <= 0 || nBytes > INT_MAX) {
+    i64 stride64 = (i64)w * 4;
+    i64 nBytes = stride64 * h;
+    if (stride64 <= 0 || stride64 > INT_MAX || nBytes <= 0 || nBytes > INT_MAX) {
         FreePixmap(owned);
         return nullptr;
     }
+    int stride = (int)stride64;
     VecReset(scratch);
     u8* dst = VecGrow(scratch, (int)nBytes);
     if (!dst) {
@@ -818,7 +882,7 @@ static const u8* PixmapAsPremulBgra(Pixmap* px, Vec<u8>& scratch, int* strideOut
     }
     int srcBpp = PixmapBytesPerPixel(src->format);
     bool isRgba = src->format == PixmapFormat::RGBA8;
-    bool hasAlpha = src->format != PixmapFormat::BGR8;
+    bool hasAlpha = src->format != PixmapFormat::BGR8 && src->hasAlpha;
     for (int y = 0; y < h; y++) {
         const u8* sp = src->data + ((size_t)y * src->stride);
         u8* dp = dst + ((size_t)y * stride);

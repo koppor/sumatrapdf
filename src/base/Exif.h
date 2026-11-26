@@ -64,14 +64,6 @@ enum class ExifProp : u16 {
     SensitivityType = 0x8830,
 };
 
-enum class ExifValueKind : u8 {
-    Unknown,
-    Bytes,
-    String,
-    Int,
-    Rational,
-};
-
 struct ExifRational {
     i64 num = 0;
     i64 den = 0;
@@ -86,13 +78,13 @@ struct ExifEntry {
 };
 
 struct ExifParser {
-    Str data;
     Str exifBlob;
     u8* ownedExif = nullptr;
     bool isBE = false;
     int tiffBase = 0;
     bool hasJpegThumbnail = false;
     Vec<ExifEntry> entries;
+    Vec<int> parsedIfds; // absolute offsets, to skip IFD cycles
     StrVec dumpLines;
 
     ~ExifParser();

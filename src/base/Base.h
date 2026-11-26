@@ -154,11 +154,12 @@
 #include <ws2def.h>
 #include <unknwn.h>
 #include <shlwapi.h>
+// frees the name for dict::StrToInt; we don't use shlwapi's
+#undef StrToInt
 #include <shlobj.h>
 #include <commctrl.h>
 #include <windowsx.h>
 #include <winsafer.h>
-#include <wininet.h>
 #include <versionhelpers.h>
 #include <tlhelp32.h>
 #include <shellapi.h>
@@ -298,6 +299,8 @@ int AtomicIntInc(AtomicInt* p);
 int AtomicIntDec(AtomicInt* p);
 int AtomicRefCountAdd(AtomicRefCount* v);
 int AtomicRefCountDec(AtomicRefCount* v);
+void* AtomicPtrGet(AtomicPtr* p);
+void AtomicPtrSet(AtomicPtr* p, void* v);
 void* AtomicPtrExchange(AtomicPtr* p, void* v);
 
 #if !OS_WIN
@@ -599,27 +602,17 @@ inline float ClampF(float x, float min, float max) {
     return ClampT(x, min, max);
 }
 
-inline double ClampD(double x, double min, double max) {
-    return ClampT(x, min, max);
-}
-
-// return true if adding n to val overflows. Only valid for n > 0
+// return true if adding n to val overflows. Only valid for n >= 0, val >= 0
 template <typename T>
 inline bool addOverflows(T val, T n) {
-    if (n == 0 || val == 0) {
-        return true;
-    }
     ReportIf(n < 0);
     ReportIf(val < 0);
-    T res = val + n;
-    return val > res;
+    if (n < 0 || val < 0) {
+        return true;
+    }
+    constexpr T maxVal = (T(-1) > T(0)) ? T(-1) : T((u64(1) << (sizeof(T) * 8 - 1)) - 1);
+    return n > maxVal - val;
 }
-
-struct VecStr {
-    int len;
-    int cap;
-    Str* els;
-};
 
 bool MemEq(const void* s1, const void* s2, int n);
 
@@ -746,8 +739,6 @@ inline bool isOfKindHelper(Kind k1, Kind k2) {
 }
 
 #define IsOfKind(o, wantedKind) ((o) && isOfKindHelper((o)->kind, (wantedKind)))
-
-extern Kind kindNone; // unknown kind
 
 // from https://pastebin.com/3YvWQa5c
 // In my testing, in debug build defer { } creates somewhat bloated code
@@ -926,9 +917,13 @@ struct Func1List : Func1<T> {
     }
 
     void Register(Func1List<T>** head) {
-        ReportIf(!head);
+        if (ReportIf(!head)) {
+            return;
+        }
         for (Func1List<T>* p = *head; p; p = p->next) {
-            ReportIf(p == this);
+            if (ReportIf(p == this)) {
+                return;
+            }
         }
         ListInsertFront(head, this);
     }
@@ -1113,6 +1108,14 @@ using ThreadHandle = HANDLE;
 using ThreadId = u64;
 ThreadId GetCurrentThreadId();
 #endif
+u64 GetCurrProcessId();
+
+// an optional checkbox row under a text window's text (ShowTextInWindow)
+struct TextWindowOption {
+    Str label;
+    bool checked = false;
+    void (*onChanged)(bool checked) = nullptr;
+};
 
 // Debug builds record which thread holds a Mutex / RecursiveMutex so code can
 // check a "caller holds X" precondition:
@@ -1121,19 +1124,39 @@ ThreadId GetCurrentThreadId();
 #if IS_DEBUG
 // only the holder writes it; depth > 1 for a re-entered RecursiveMutex
 struct LockOwner {
-    volatile ThreadId thread = 0;
+#if OS_WIN
+    volatile LONG thread = 0;
+#else
+    ThreadId thread = 0;
+#endif
     int depth = 0;
 
     void Enter() {
-        thread = GetCurrentThreadId();
+        ThreadId tid = GetCurrentThreadId();
+#if OS_WIN
+        InterlockedExchange(&thread, (LONG)tid);
+#else
+        __atomic_store_n(&thread, tid, __ATOMIC_RELAXED);
+#endif
         depth++;
     }
     void Leave() {
         if (--depth == 0) {
-            thread = 0;
+#if OS_WIN
+            InterlockedExchange(&thread, 0);
+#else
+            __atomic_store_n(&thread, (ThreadId)0, __ATOMIC_RELAXED);
+#endif
         }
     }
-    bool IsCurrentThread() const { return thread == GetCurrentThreadId(); }
+    bool IsCurrentThread() const {
+        ThreadId tid = GetCurrentThreadId();
+#if OS_WIN
+        return (ThreadId)InterlockedCompareExchange(const_cast<volatile LONG*>(&thread), 0, 0) == tid;
+#else
+        return __atomic_load_n(&thread, __ATOMIC_RELAXED) == tid;
+#endif
+    }
 };
 #define LOCK_OWNER_FIELD LockOwner owner;
 #define LOCK_OWNER_ENTER() owner.Enter()
@@ -1224,7 +1247,7 @@ struct Mutex : NonCopyable {
     pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
     Mutex() = default;
-    ~Mutex() = default;
+    ~Mutex() { pthread_mutex_destroy(&lock); }
 
     LOCK_OWNER_FIELD
 
@@ -1315,15 +1338,18 @@ struct AutoUnlockMutex : NonCopyable {
     ~AutoUnlockMutex() { mutex->Unlock(); }
 };
 
-struct AutoUnlockRecursiveMutex : NonCopyable {
-    RecursiveMutex* mutex;
+class AutoUnlockRecursiveMutex : NonCopyable {
+    RecursiveMutex* const mutex;
 
+  public:
     explicit AutoUnlockRecursiveMutex(RecursiveMutex* mutex) : mutex(mutex) { mutex->Lock(); }
     ~AutoUnlockRecursiveMutex() { mutex->Unlock(); }
+    bool Guards(const RecursiveMutex* m) const { return mutex == m; }
 };
 
 // 0 = metric (A4), 1 = imperial (Letter). ng: orig declares it in Win.h
 int GetMeasurementSystem();
+TempStr GetEnvVariableTemp(Str name);
 
 // physical memory still free and how loaded memory is, 0..100. False when the
 // system does not say; the caller then assumes no pressure.
@@ -1331,6 +1357,7 @@ bool GetPhysMemoryInfo(u64* availPhysOut, int* loadPercentOut, u64* totalPhysOut
 
 void SetThreadName(Str threadName, ThreadId threadId = 0);
 void SleepInMs(int ms);
+bool LocalTime(time_t t, struct tm* out);
 
 // ng: the wasm build has no pthreads (emscripten without -pthread), so
 // StartThread() runs the function inline and returns a handle that joins
@@ -1388,17 +1415,9 @@ using ScopedRecursiveMutex = AutoUnlockRecursiveMutex;
 // 256 (not 128) to leave room in the header for the allocation stats below
 static const u64 kArenaHeaderSize = 256;
 
-typedef u64 ArenaFlags;
-enum : ArenaFlags {
-    ArenaFlagNoChain = 1ull << 0,
-    ArenaFlagLargePages = 1ull << 1,
-};
-
 struct ArenaParams {
-    ArenaFlags flags = 0;
     u64 reserveSize = 0;
     u64 commitSize = 0;
-    void* optionalBackingBuffer = nullptr;
     const char* allocationSiteFile = nullptr;
     int allocationSiteLine = 0;
     const char* name = nullptr;
@@ -1406,15 +1425,18 @@ struct ArenaParams {
 
 struct Arena;
 
-struct ArenaSavepoint {
-    Arena* arena;
-    u64 pos;
+class ArenaSavepoint {
+    Arena* arena = nullptr;
+    u64 pos = 0;
+    u64 resetCount = 0;
+
+    friend ArenaSavepoint GetArenaSavepoint(Arena* arena);
+    friend void RestoreArenaSavepoint(ArenaSavepoint temp);
 };
 
 struct Arena {
     Arena* prev;    // Previous arena in chain
     Arena* current; // Current arena in chain
-    ArenaFlags flags;
     u64 commitChunkSize;
     u64 reserveChunkSize;
     u64 basePos;
@@ -1424,7 +1446,6 @@ struct Arena {
     const char* allocationSiteFile;
     int allocationSiteLine;
     const char* name;
-    bool usesExternalBuffer;
     Mutex lock;
 
     // allocation statistics, updated after every successful allocation
@@ -1434,14 +1455,12 @@ struct Arena {
     u64 peakBytesLifetime;   // largest total size the arena ever reached
     u64 nAllocsSinceReset;   // allocations since the last Reset()
     u64 peakBytesSinceReset; // largest total size reached since the last Reset()
+    u64 resetCount;
 
     void* Alloc(int size);
-    void Free(void* ptr);
     void Reset();
     void* Push(u64 size, u64 align = 8, bool zero = true);
     u64 Pos();
-    void PopTo(u64 pos);
-    void Pop(u64 amt);
 
     Arena() = delete;  // use ArenaNew()
     ~Arena() = delete; // use ArenaDelete()
@@ -1451,7 +1470,6 @@ static_assert(sizeof(Arena) <= kArenaHeaderSize, "Arena header must fit in reser
 
 extern u64 gArenaDefaultReserveSize;
 extern u64 gArenaDefaultCommitSize;
-extern ArenaFlags gArenaDefaultFlags;
 
 ArenaParams ArenaDefaultParams();
 Arena* ArenaNew(const ArenaParams& params = ArenaDefaultParams());
@@ -1461,7 +1479,6 @@ ArenaSavepoint GetArenaSavepoint(Arena* arena);
 void RestoreArenaSavepoint(ArenaSavepoint temp);
 
 // Thread-local temporary arena, reset after each message loop iteration
-extern thread_local Arena* gTempArena;
 Arena* GetTempArena();
 void ResetTempArena();
 void DestroyTempArena();
@@ -1469,16 +1486,13 @@ void DestroyTempArena();
 // RAII scratch scope for an arena (the temp arena unless told otherwise):
 // rewinds it to the entry position on scope exit, so code that allocates
 // scratch in a loop or on a hot path doesn't grow the arena unbounded.
-struct AutoArenaSavepoint {
+class AutoArenaSavepoint : NonCopyable {
     ArenaSavepoint sp;
-    AutoArenaSavepoint(Arena* a = GetTempArena()) { // NOLINT
-        sp = GetArenaSavepoint(a);
-    }
-    AutoArenaSavepoint(AutoArenaSavepoint& other) = delete;
-    AutoArenaSavepoint(AutoArenaSavepoint&& other) = delete;
-    AutoArenaSavepoint(const AutoArenaSavepoint& other) = delete;
-    AutoArenaSavepoint(const AutoArenaSavepoint&& other) = delete;
-    ~AutoArenaSavepoint() { RestoreArenaSavepoint(sp); }
+    bool protectsTemp;
+
+  public:
+    explicit AutoArenaSavepoint(Arena* a = GetTempArena());
+    ~AutoArenaSavepoint();
 };
 
 // Arena for allocations that live for the whole lifetime of the program (i.e.
@@ -1563,7 +1577,7 @@ void VecRemoveAtFastNT(VecNonTemplated* v, int elSize, int idx);
 void VecFreeElementsNT(VecNonTemplated* v);
 void VecClearNT(VecNonTemplated* v, int elSize);
 void* VecTakeNT(VecNonTemplated* v, int elSize);
-void VecCopyFromNT(VecNonTemplated* v, int elSize, int srcLen, const void* srcEls, bool zeroTail);
+void VecCopyFromNT(VecNonTemplated* v, int elSize, int srcLen, const void* srcEls, bool replace);
 
 // The type-erased view of a vec; a cast, not a copy (see the static_asserts
 // after the struct).
@@ -1627,6 +1641,9 @@ bool VecAppend(Vec<T>& v, const VecIdentityT<T>& el);
 // Append every element of other.
 template <typename T>
 bool VecAppendVec(Vec<T>& v, const Vec<T>& other);
+
+template <typename T>
+bool VecTransferAppend(Vec<T>& dst, Vec<T>& src);
 
 // Append count elements from src.
 template <typename T>
@@ -1722,7 +1739,6 @@ struct Vec {
             return *this;
         }
 
-        VecReset(*this);
         VecCopyFromNT(VecNT(*this), (int)sizeof(T), other.len, (const void*)other.els, true);
         return *this;
     }
@@ -1735,8 +1751,9 @@ struct Vec {
     }
 
     T& operator[](int idx) const {
-        ReportIf(idx < 0);
-        ReportIf(idx >= len);
+        if (ReportIf(idx < 0 || idx >= len)) {
+            CrashMe();
+        }
         return els[idx];
     }
 
@@ -1777,7 +1794,7 @@ VecNonTemplated* VecNT(Vec<T>& v) {
 
 //--- storage ----------------------------------------------------------------
 
-// v is a Vec<T> or another vec-shaped struct (VecStr, str::Builder); they all
+// v is a Vec<T> or another vec-shaped struct (str::Builder); they all
 // lead with {len, cap, els}, which the static_asserts hold them to, so the
 // erased view is a cast and this compiles to just the call
 template <typename T>
@@ -1856,6 +1873,9 @@ T* VecData(const Vec<T>& v) {
 // (other.els = v.els), since the sign is what says the block is not the heap's.
 template <typename T, int N>
 inline void VecUseExternalBuffer(Vec<T>& v, T (&buf)[N]) {
+    if (ReportIf(v.els || v.cap || v.len)) {
+        return;
+    }
     v.els = buf;
     v.cap = -N;
     v.len = 0;
@@ -1873,14 +1893,43 @@ bool VecAppendVec(Vec<T>& v, const Vec<T>& other) {
     return VecAppendN(v, other.els, other.len);
 }
 
+// Append src and clear it on success. An empty dst can take owned storage.
+template <typename T>
+bool VecTransferAppend(Vec<T>& dst, Vec<T>& src) {
+    if (&dst == &src || src.len == 0) {
+        return true;
+    }
+    if (dst.len == 0 && src.cap > 0) {
+        VecReset(dst);
+        dst.len = src.len;
+        dst.cap = src.cap;
+        dst.els = VecTake(src);
+        return true;
+    }
+    if (!VecAppendVec(dst, src)) {
+        return false;
+    }
+    VecClear(src);
+    return true;
+}
+
 template <typename T>
 bool VecAppendN(Vec<T>& v, const T* src, int count) {
     if (0 == count) {
         return true;
     }
-    T* dst = VecInsertSpace(v, v.len, count);
+    int oldLen = v.len;
+    uintptr_t srcOffset = (uintptr_t)src - (uintptr_t)v.els;
+    bool aliases = v.els && srcOffset < (size_t)oldLen * sizeof(T);
+    if (ReportIf(count < 0 || !src || (aliases && count > oldLen - (int)(srcOffset / sizeof(T))))) {
+        return false;
+    }
+    T* dst = VecInsertSpace(v, oldLen, count);
     if (!dst) {
         return false;
+    }
+    if (aliases) {
+        src = (const T*)((const char*)v.els + srcOffset);
     }
     memcpy((void*)dst, (const void*)src, (size_t)count * sizeof(T));
     return true;
@@ -1893,11 +1942,12 @@ T* VecAppendBlanks(Vec<T>& v, int count) {
 
 template <typename T>
 bool VecInsertAt(Vec<T>& v, int idx, const VecIdentityT<T>& el) {
+    T copy = el;
     T* p = VecInsertSpace(v, idx, 1);
     if (!p) {
         return false;
     }
-    p[0] = el;
+    p[0] = copy;
     return true;
 }
 
@@ -1973,8 +2023,7 @@ bool VecIsValidIndex(const Vec<T>& v, int idx) {
 
 template <typename T>
 T& VecLast(const Vec<T>& v) {
-    ReportIf(0 == v.len);
-    return v.els[v.len - 1];
+    return v[v.len - 1];
 }
 
 template <typename T>
@@ -2188,19 +2237,16 @@ bool StartsWith(WStr str, WStr prefix);
 bool StartsWithI(WStr str, WStr prefix);
 bool EndsWith(WStr txt, WStr end);
 bool EndsWithI(WStr txt, WStr end);
-WStr ToLowerInPlace(WStr s);
 int BufSet(WStr dst, WStr src);
 int NormalizeWSInPlace(WStr str);
 int RemoveCharsInPlace(WStr str, WStr toRemove);
 int IndexOfChar(WStr s, WCHAR c);
 bool ContainsChar(WStr s, WCHAR c);
 WStr SliceFromChar(WStr str, WCHAR c);
-WStr FindFrom(WStr str, WStr find);
 bool IsWs(WCHAR c);
 bool IsDigit(WCHAR c);
 bool IsNonCharacter(WCHAR c);
 void TransCharsInPlace(WStr& str, WStr oldChars, WStr newChars);
-WStr Replace(WStr s, WStr toReplace, WStr replaceWith);
 
 } // namespace wstr
 
@@ -2278,9 +2324,12 @@ struct BuilderT : Vec<C> {
     // growth allocator; null means the heap. Arena storage is never freed by
     // the Builder (the arena owns it).
     Arena* a = nullptr;
+    bool isExternalBuf = false;
 
     BuilderT() = default;
     explicit BuilderT(Arena* arena) : a(arena) {}
+    BuilderT(const BuilderT&) = delete;
+    BuilderT& operator=(const BuilderT&) = delete;
 
     void Reset(S s = {});
     bool Reserve(int cap);
@@ -2308,7 +2357,6 @@ bool Contains(const Builder& b, Str sub);
 namespace wstr {
 using Builder = BuilderT<WCHAR>;
 void BuilderUseExternalBuffer(Builder& b, WStr buf);
-bool BuilderReserve(Builder& b, int cap);
 } // namespace wstr
 
 int ParseInt(Str s);
@@ -2330,13 +2378,14 @@ WStr ToWStr(const wstr::Builder&);
 TempStr ToStrTemp(const str::Builder&);
 
 wchar_t WCharToLower(wchar_t c);
+bool IsAlNumW(int c);
 int FoldCaseRune(int c);
 bool IsCombiningMark(int c);
 int FoldDiacriticsRune(int c);
 int WStrFindSubstr(WStr str, WStr substr);
 
 // human readable size, e.g. "1.23 GB", "456 KB", "17 B"
-TempStr FormatFileSizeTemp(u64 size);
+TempStr FormatSizeCompactTemp(u64 size);
 
 //--- StrUtf8.h ------------------------------------------------------------------
 
@@ -2630,6 +2679,7 @@ int AppendIfNotExists(StrVec* v, Str s);
 void Sort(StrVec* v, StrLessFunc lessFn = StrLess);
 void SortNoCase(StrVec*);
 void SortNatural(StrVec*);
+void InsertSortedNatural(StrVec*, Str);
 
 int Split(StrVec* v, Str s, Str separator, bool collapse = false, int max = -1);
 Str Join(StrVec* v, Str sep = {});
@@ -2666,7 +2716,7 @@ Str ToUtf8(WStr s, Arena* a = nullptr);
 WStr ToWStr(Str s, Arena* a = nullptr);
 
 template <typename T>
-class AutoFree {
+class AutoFree : NonCopyable {
   public:
     T* ptr = nullptr;
 
@@ -2674,6 +2724,9 @@ class AutoFree {
     explicit AutoFree(T* ptr) : ptr(ptr) {}
     ~AutoFree() { free(ptr); }
     void Set(T* newPtr) {
+        if (ptr == newPtr) {
+            return;
+        }
         free(ptr);
         ptr = newPtr;
     }
@@ -2848,7 +2901,6 @@ constexpr Color MkGray(u8 x) {
 constexpr Color kColWhite = MkRgb(0xff, 0xff, 0xff);
 constexpr Color kColBlack = MkRgb(0, 0, 0);
 constexpr Color kColRed = MkRgb(0xff, 0, 0);
-constexpr Color kColGreen = MkRgb(0, 0xff, 0);
 constexpr Color kColBlue = MkRgb(0, 0, 0xff);
 constexpr Color kColYellow = MkRgb(0xff, 0xff, 0);
 constexpr Color kColGray = MkGray(0xdd);

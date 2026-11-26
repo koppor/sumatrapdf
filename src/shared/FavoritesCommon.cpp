@@ -74,13 +74,13 @@ bool FavTreeModel::IsExpanded(TreeItem ti) {
 }
 
 void FavTreeModel::SetUserData(TreeItem ti, uintptr_t userData) {
-    ReportIf(ti < 0);
+    ReportIf(ti == TreeModel::kNullItem);
     FavTreeItem* treeItem = (FavTreeItem*)ti;
     treeItem->userData = userData;
 }
 
 uintptr_t FavTreeModel::GetUserData(TreeItem ti) {
-    ReportIf(ti < 0);
+    ReportIf(ti == TreeModel::kNullItem);
     FavTreeItem* treeItem = (FavTreeItem*)ti;
     return treeItem->userData;
 }
@@ -519,7 +519,7 @@ void SetSearchStartFavorite(MainWindow* win) {
     }
 
     Str path = tab->filePath;
-    TempStr pageLabel = win->ctrl->GetPageLabeTemp(pageNo);
+    TempStr pageLabel = win->ctrl->GetPageLabelTemp(pageNo);
     TempStr plainLabel = fmt("%d", pageNo);
     bool needsLabel = pageLabel && !str::Eq(plainLabel, pageLabel) && !win->ctrl->HasChapters();
     Str pl = needsLabel ? pageLabel : Str{};
@@ -652,7 +652,7 @@ TempStr FavReadableNameTemp(Favorite* fn) {
 TempStr FavCompactReadableNameTemp(FileState* fav, Favorite* fn, bool isCurrent) {
     TempStr rn = FavReadableNameTemp(fn);
     if (isCurrent) {
-        return fmt("%s : %s", Tr("Current file"), rn);
+        return fmt("%s : %s", Tr("Current File"), rn);
     }
     TempStr fp = path::GetBaseNameTemp(fav->filePath);
     // Keep the favorite's name first in compact menu entries so a long file
@@ -790,15 +790,14 @@ static bool FavMatchesFilter(FileState* fs, Favorite* fn, const StrVec& words) {
     if (len(words) == 0) {
         return true;
     }
-    TempStr baseName = path::GetBaseNameTemp(fs->filePath);
-    TempStr rn = FavReadableNameTemp(fn);
     TempStr compact = FavCompactReadableNameTemp(fs, fn);
-    TempStr hay = fmt("%s : %s", baseName, rn);
-    if (FilterMatches(compact, words) || FilterMatches(hay, words) || FilterMatches(rn, words) ||
-        FilterMatches(baseName, words) || (fn->name && FilterMatches(fn->name, words))) {
+    if (FilterMatches(compact, words)) {
         return true;
     }
-    return false;
+    TempStr baseName = path::GetBaseNameTemp(fs->filePath);
+    TempStr rn = FavReadableNameTemp(fn);
+    TempStr hay = fmt("%s : %s", baseName, rn);
+    return FilterMatches(hay, words);
 }
 
 // filter empty => full tree; multi-word (command palette style): every word must
@@ -1046,7 +1045,7 @@ void AddFavoriteForPage(MainWindow* win, int pageNo) {
         Location loc = ctrl->LocationFromPageNo(pageNo);
         pageLabel = fmt("%d/%d", loc.chapter, loc.page);
     } else {
-        pageLabel = ctrl->GetPageLabeTemp(pageNo);
+        pageLabel = ctrl->GetPageLabelTemp(pageNo);
     }
     AddFavoriteWithLabelAndName(win, pageNo, pageLabel, name);
 }
@@ -1093,12 +1092,12 @@ void RebuildFavMenu(MainWindow* win, MenuRef menu) {
         TempStr delText;
         if (ShowChapterUi(ctrl)) {
             Location loc = ctrl->LocationFromPageNo(pageNo);
-            addText = fmt(Tr("Add chapter %d page %d to favorites").s, loc.chapter, loc.page);
-            delText = fmt(Tr("Remove chapter %d page %d from favorites").s, loc.chapter, loc.page);
+            addText = fmt(Tr("Add Chapter %d Page %d to Favorites...").s, loc.chapter, loc.page);
+            delText = fmt(Tr("Remove Chapter %d Page %d from Favorites").s, loc.chapter, loc.page);
         } else {
-            TempStr label = ctrl->GetPageLabeTemp(pageNo);
-            addText = fmt(Tr("Add page %s to favorites").s, label);
-            delText = fmt(Tr("Remove page %s from favorites").s, label);
+            TempStr label = ctrl->GetPageLabelTemp(pageNo);
+            addText = fmt(Tr("Add Page %s to Favorites...").s, label);
+            delText = fmt(Tr("Remove Page %s from Favorites").s, label);
         }
 
         if (isBookmarked) {

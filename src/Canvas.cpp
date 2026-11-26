@@ -53,6 +53,7 @@
 #include "Menu.h"
 #include "uia/Provider.h"
 #include "SearchAndDDE.h"
+#include "SearchAndDDECommon.h"
 #include "SignatureUICommon.h"
 #include "SignatureUI.h"
 #include "Selection.h"
@@ -1379,6 +1380,14 @@ static bool StopAnnotationResize(MainWindow* win, bool aborted) {
     CanvasSetCapture(win, false);
     SetCanvasCursor(win, IDC_ARROW);
 
+    // a rectangle resize writes the annotation on every mouse move: put it back
+    bool wroteRect = !outlineOnly && !IsLineEndpointHandle(handle) && !IsVertexHandle(handle);
+    if (aborted && wroteRect && AnnotationIsLive(annot) && GetRect(annot) != win->annotationOriginalRect) {
+        SetRect(annot, win->annotationOriginalRect);
+        EndPdfEditOperation(win);
+        MainWindowRerender(win);
+        return true;
+    }
     if (aborted || !annot) {
         EndPdfEditOperation(win);
         ScheduleRepaint(win, 0);
@@ -3658,15 +3667,24 @@ static int WheelPageTurnDelta(MainWindow* win, int delta) {
     return std::max(WHEEL_DELTA, lines * perLine);
 }
 
+static bool WheelMayTurnPage(MainWindow* win);
+static void OnWheelPageTurn(MainWindow* win);
+
 static void WheelTurnPage(MainWindow* win, int dir) {
+    if (dir == 0) {
+        return;
+    }
+    if (!WheelMayTurnPage(win)) {
+        win->wheelAccumDelta = 0;
+        return;
+    }
     if (dir > 0) {
         win->ctrl->GoToPrevPage();
-    } else if (dir < 0) {
+    } else {
         win->ctrl->GoToNextPage();
     }
-    if (dir != 0) {
-        ReadAloudOnUserViewChanged(win);
-    }
+    OnWheelPageTurn(win);
+    ReadAloudOnUserViewChanged(win);
 }
 
 // Fit Content used to turn the mouse wheel into page flipping in every view mode.
@@ -3805,7 +3823,7 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
 
     bool hScroll = (LOWORD(wp) & MK_SHIFT) || IsShiftPressed();
     bool vScroll = !hScroll;
-    bool isCont = !IsContinuous(win->ctrl->GetDisplayMode());
+    bool isCont = IsContinuous(win->ctrl->GetDisplayMode());
 
     // logf("delta: %d, accumDelta: %d, hscroll: %d, continuous: %d, gDeltaPerLine: %d\n", (int)delta,
     // win->wheelAccumDelta,
@@ -3846,8 +3864,9 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
         return 0;
     }
 
-    // fit content: flip page on wheel, regardless of scrollbar state
-    if (vScroll && dm && FitContentWheelFlipsPage(dm) && IsSingle(dm->GetDisplayMode())) {
+    // fit content: flip page on wheel, regardless of scrollbar state (in the
+    // continuous views only if gFitContentWheelFlipsPageInContinuous)
+    if (vScroll && dm && FitContentWheelFlipsPage(dm)) {
         WheelTurnPage(win, WheelPageTurnDir(win, delta, WheelPageTurnDelta(win, delta)));
         return 0;
     }
@@ -4027,7 +4046,7 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
     }
     // in non-continuous mode flip page if necessary (ScrollEdgeTurnsPage off:
     // stay on this page, it is changed by keyboard / toolbar / scrollbar only)
-    if (!vScroll || !isCont || !gSettings->scrollEdgeTurnsPage) {
+    if (!vScroll || isCont || !gSettings->scrollEdgeTurnsPage) {
         return 0;
     }
     bool didScroll = WheelScrollPosOrTarget(win) != prevScrollPos;
@@ -4353,7 +4372,6 @@ constexpr int kSumatraPtPen = 3;
 
 // pointer message flags (in HIWORD of wParam)
 constexpr int kSumatraPointerMessageFlagInContact = 0x0004;
-constexpr int kSumatraPointerMessageFlagFirstButton = 0x0010;
 
 // dynamically loaded pointer API (Windows 8+)
 // Local ABI declarations keep the Windows 7 build target while using Win8 APIs.
@@ -5057,26 +5075,13 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
 
         case kAutoReloadTimerID: {
             KillTimer(hwnd, kAutoReloadTimerID);
-            auto* tab = win->CurrentTab();
-            if (tab && tab->reloadOnFocus) {
-                if (tab->ignoreNextAutoReload) {
-                    // consume the save-triggered watcher event; do not leave
-                    // reloadOnFocus set or a later tab focus would reload
-                    tab->ignoreNextAutoReload = false;
-                    tab->reloadOnFocus = false;
-                } else if (IsThreadInMenuMode() || AutoReloadFileStillChanging(tab)) {
-                    // an open menu's nested loop dispatches this timer while
-                    // OnWindowContextMenu still holds the controller, engine and
-                    // page element it cached: reload once the menu is gone.
-                    // a writer (LaTeX etc.) is still producing the file: reloading
-                    // now shows a half-written document ("cannot find startxref",
-                    // "document has no pages") and costs a second reload once the
-                    // write finishes. Wait for it to go quiet instead.
-                    SetTimer(hwnd, kAutoReloadTimerID, kAutoReloadDelayInMs, nullptr);
-                } else {
-                    // timer-driven: never ask for a password here (#3493)
-                    ReloadDocument(win, true, false);
-                }
+            auto trigger = IsThreadInMenuMode() ? AutoReloadTrigger::TimerInMenu : AutoReloadTrigger::Timer;
+            auto action = DecideAutoReload(win->CurrentTab(), trigger);
+            if (action == AutoReloadAction::Retry) {
+                SetTimer(hwnd, kAutoReloadTimerID, kAutoReloadDelayInMs, nullptr);
+            } else if (action == AutoReloadAction::Reload) {
+                // A timer must never ask for a password (#3493).
+                ReloadDocument(win, true, false);
             }
             break;
         }
@@ -5278,6 +5283,20 @@ void RevokeCanvasDropTarget(HWND hwndCanvas) {
     RevokeDragDrop(hwndCanvas);
 }
 
+// The vertical bar marks where the search matches are. Everything that moves
+// them (a search, the current match, zoom, a page change, another tab) repaints
+// the canvas, so each paint brings them up to date (they're cached).
+static void SyncFindScrollMarkers(MainWindow* win) {
+    if (!win->overlayScrollV) {
+        return;
+    }
+    Vec<float> markers;
+    float current = -1;
+    FindScrollMarkers(win, markers, &current);
+    OverlayScrollbarSetFindMarkers(win->overlayScrollV, markers, current, kFindOtherMatchColor,
+                                   FindCurrentMatchColor());
+}
+
 LRESULT CALLBACK WndProcCanvas(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     DpiScope dpiScope(hwnd);
     // messages that don't require win
@@ -5364,10 +5383,15 @@ LRESULT CALLBACK WndProcCanvas(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return isWheel ? 0 : DefWindowProc(hwnd, msg, wp, lp);
     }
 
-    // reveal/hide the floating overlay toolbar as the mouse approaches the top;
-    // don't consume the message, just observe it
-    if (msg == WM_MOUSEMOVE && win->isToolbarOverlay) {
+    // The caption can take over the pointer before the canvas gets another move.
+    if (win->isToolbarOverlay && (msg == WM_MOUSEMOVE || msg == WM_MOUSELEAVE)) {
+        if (msg == WM_MOUSEMOVE) {
+            TrackMouseLeave(hwnd);
+        }
         UpdateOverlayToolbarForMouse(win);
+    }
+    if (msg == WM_PAINT) {
+        SyncFindScrollMarkers(win);
     }
 
     // messages that require win

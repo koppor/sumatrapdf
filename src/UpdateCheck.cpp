@@ -2,6 +2,7 @@
    License: GPLv3 */
 
 #include "base/Base.h"
+#include <winhttp.h>
 #include "base/UITask.h"
 #include "base/SquareTreeParser.h"
 #include "base/Http.h"
@@ -230,6 +231,11 @@ static void DownloadUpdateFinish(DownloadUpdateAsyncData* data) {
     auto* updateInfo = data->updateInfo;
     data->updateInfo = nullptr;
     RemoveNotificationsForGroup(hwndForNotif, kNotifUpdateCheckInProgress);
+    // the window that asked may have closed during the download: the dialog
+    // would fail and the downloaded installer be deleted
+    if (!IsWindow(updateInfo->hwndParent) && len(gWindows) > 0) {
+        updateInfo->hwndParent = gWindows[0]->hwndFrame;
+    }
     NotifyUserOfUpdate(updateInfo);
     delete updateInfo;
     gUpdateCheckInProgress = false;
@@ -241,7 +247,7 @@ static void UpdateDownloadProgressNotif(UpdateProgressData* data) {
     logf("UpdateDownloadProgressNotif: %s\n", size);
     auto* wnd = GetNotificationForGroup(data->hwndForNotif, kNotifUpdateCheckInProgress);
     if (wnd) {
-        TempStr msg = fmt("Downloading update: %s\n", size);
+        TempStr msg = fmt(Tr("Downloading update: %s").s, size);
         NotificationUpdateMessage(wnd, msg, 0, true);
     } else {
         logf("UpdateDownloadProgressNotif: no wnd\n");
@@ -379,9 +385,13 @@ static bool ShouldDownloadUpdate(UpdateInfo* updateInfo) {
 
 static HRESULT CALLBACK TaskDialogHyperlinkCallback(HWND /*hwnd*/, UINT msg, WPARAM /*wParam*/, LPARAM lParam,
                                                     LONG_PTR /*lpRefData*/) {
-    if (msg == TDN_HYPERLINK_CLICKED) {
-        WCHAR* url = (WCHAR*)lParam;
-        SumatraLaunchBrowser(ToUtf8Temp(url));
+    if (msg != TDN_HYPERLINK_CLICKED) {
+        return S_OK;
+    }
+    // our dialogs only link to our website
+    TempStr url = ToUtf8Temp((WCHAR*)lParam);
+    if (IsTrustedUpdateDlUrl(url)) {
+        SumatraLaunchBrowser(url);
     }
     return S_OK;
 }
@@ -408,7 +418,7 @@ static void NotifySuspiciousUpdate(HWND hwndParent, Str dlURL) {
 Download link should come from <a href="%s">%s</a> but is %s.
 
 Visit <a href="%s">%s</a> to download the latest version.)",
-                       kExpectedDlHost, kExpectedDlHost, dlURL, kExpectedDlHost, kExpectedDlHost);
+                       kExpectedDlHost, kExpectedDlHost, NoLinkMarkupTemp(dlURL), kExpectedDlHost, kExpectedDlHost);
 
     TASKDIALOGCONFIG dialogConfig{};
     DWORD flags =
@@ -495,21 +505,21 @@ static DWORD MaybeStartUpdateDownload(HWND hwndParent, HttpRsp* rsp, UpdateCheck
     }
     if (kind == UpdateInfoFetch::BadStatus) {
         logf("ShowAutoUpdateDialog: http get of '%s' failed with code %d\n", url, (int)rsp->httpStatusCode);
-        return ERROR_INTERNET_INVALID_URL;
+        return ERROR_WINHTTP_INVALID_URL;
     }
     if (kind == UpdateInfoFetch::UnlistedUrl) {
         logf("ShowAutoUpdateDialog: '%s' is not a valid url\n", url);
-        return ERROR_INTERNET_INVALID_URL;
+        return ERROR_WINHTTP_INVALID_URL;
     }
     if (kind == UpdateInfoFetch::EmptyBody) {
         logf("ShowAutoUpdateDialog: empty response from url '%s'\n", url);
-        return ERROR_INTERNET_CONNECTION_ABORTED;
+        return ERROR_WINHTTP_CONNECTION_ERROR;
     }
 
     UpdateInfo* updateInfo = ParseUpdateInfo(ToStr(*data));
     if (!updateInfo) {
         logf("ShowAutoUpdateDialog: ParseUpdateInfo() failed. URL: '%s'\nAuto update data:\n%s\n", url, ToStr(*data));
-        return ERROR_INTERNET_INCORRECT_FORMAT;
+        return ERROR_WINHTTP_INVALID_SERVER_RESPONSE;
     }
     updateInfo->hwndParent = hwndParent;
 

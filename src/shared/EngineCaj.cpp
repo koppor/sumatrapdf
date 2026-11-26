@@ -82,14 +82,11 @@ struct Caj2pdfVer {
 // tests serve their own converter and keep it away from the user's data dir
 static TempStr DebugEnvTemp(const char* name) {
 #if defined(DEBUG)
-    const char* v = getenv(name);
-    if (v) {
-        return str::DupTemp(Str(v));
-    }
+    return GetEnvVariableTemp(Str(name));
 #else
     (void)name;
-#endif
     return {};
+#endif
 }
 
 static TempStr Caj2pdfBaseUrlTemp() {
@@ -318,8 +315,9 @@ static bool RunCaj2pdf(Str exe, Str src, Str dst) {
                           QuoteCmdLineArgTemp(dst));
     HANDLE process = LaunchProcessInDir(cmdLine, {}, CREATE_NO_WINDOW);
     if (!process) {
+        DWORD err = GetLastError(); // before logf, which can change it
         logf("caj2pdf: CreateProcess failed: %s\n", cmdLine);
-        SetCajError(src, CajError::ConverterDidNotRun, GetLastError());
+        SetCajError(src, CajError::ConverterDidNotRun, err);
         return false;
     }
     DWORD wait = WaitForSingleObject(process, kConvertTimeoutMs);

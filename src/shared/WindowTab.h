@@ -89,6 +89,8 @@ struct AIChatTabState {
     int turnId = 0;
 };
 
+constexpr i64 kTabFileSizeUnknown = -2;
+
 /* Data related to a single document loaded into a tab/window */
 /* (none of these depend on MainWindow, so that a WindowTab could
    be moved between windows once this is supported) */
@@ -107,6 +109,7 @@ struct WindowTab {
         HexView,   // filePath's bytes (CmdViewAsHex)
     };
     MainWindow* win = nullptr;
+    u64 lifetimeId = 0;
     DocController* ctrl = nullptr;
     HexView* hex = nullptr;
     u64 loadStartedAt = 0;
@@ -139,6 +142,10 @@ struct WindowTab {
 #endif
     ReadAloudHighlightMap* readAloudHighlight = nullptr;
     Str filePath;
+    // filePath's size for the tab tooltip, looked up once per SetFilePath and
+    // unsaved-state change: -1 unreadable, kTabFileSizeUnknown not yet
+    i64 tooltipFileSize = kTabFileSizeUnknown;
+    bool tooltipFileSizeDirty = false;
     Str displayName;
     // why the load failed, shown under the error message (owned; empty if we
     // couldn't tell). See FileLoadErrorReasonTemp()
@@ -280,3 +287,15 @@ bool IsEpubDoc(WindowTab* tab);
 bool IsMupdfNonPdfDoc(WindowTab* tab);
 bool IsCajDoc(WindowTab* tab);
 TempStr LoadingMessageTemp(WindowTab* tab);
+
+enum class AutoReloadTrigger {
+    TabFocus,
+    Timer,
+    TimerInMenu,
+};
+enum class AutoReloadAction {
+    Nothing,
+    Retry,
+    Reload,
+};
+AutoReloadAction DecideAutoReload(WindowTab* tab, AutoReloadTrigger trigger);

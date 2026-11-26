@@ -250,7 +250,7 @@ static WindowTab* TargetTab() {
     if (!IsMainWindowValidAndNotClosing(gColor.win)) {
         return nullptr;
     }
-    WindowTab* t = FindTabByFilePath(gColor.filePath);
+    WindowTab* t = FindTabByFilePath(gColor.filePath, gColor.win);
     if (!t || t->win != gColor.win) {
         return nullptr;
     }
@@ -381,6 +381,7 @@ static void OpenColorDialog(MainWindow* win, bool reuse) {
     SyncOpacityFromColor();
     UpdateEditFromColor();
     gColor.visible = true;
+    DialogsTrackFrameDialog(IsChangeColorDialogVisible, [] { return gColor.win; }, CloseChangeColorDialog);
     gColor.wantFocus = true;
     if (reuse) {
         ToolWindowActivate(gColorTw);
@@ -849,7 +850,7 @@ void TabColorPicked(TabColorTarget* target, ChangeColorsArgs* args) {
     if (args->colorsChanged) {
         SaveCustomColors(args->colors);
     }
-    WindowTab* tab = FindTabByFilePath(target->filePath);
+    WindowTab* tab = FindTabByFilePath(target->filePath, target->win);
     bool tabValid = IsMainWindowValidAndNotClosing(target->win) && tab && tab->win == target->win && tab->ctrl;
     if (args->didSelect && tabValid) {
         tab->tabColor = args->color;

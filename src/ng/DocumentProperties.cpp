@@ -9,6 +9,7 @@
 #include "gui/GpuiBridge.h"
 #if OS_WIN
 #include "base/Win.h"
+#include "base/WinDynCalls.h"
 #endif
 #include "VirtKeys.h"
 #include "base/File.h"
@@ -47,6 +48,7 @@
 #if OS_WIN
 #include <wincrypt.h>
 #endif
+#include "SumatraDialogs.h"
 #include "DocumentProperties.h"
 #include "DocumentPropertiesCommon.h"
 #include "shared/PdfToolsCommon.h"
@@ -66,6 +68,9 @@ struct PropertiesDlg {
     gp::Bounds oneChar{};
     bool remeasure = false;
     bool eutlUpdating = false;
+    // counts ShowProperties() calls: a font scan finishing late belongs to an
+    // earlier one when its number differs
+    int showNo = 0;
     // orig's window, where the platform can have one (gui/ToolWindow.h);
     // null: a dialog in the frame
     ToolWindow* tw = nullptr;
@@ -106,7 +111,7 @@ void ViewCertDer(HWND parent, Str der) {
         return;
     }
     using Fn = BOOL(WINAPI*)(DWORD, const void*, HWND, LPCWSTR, DWORD, void*);
-    HMODULE dll = LoadLibraryW(L"cryptui.dll");
+    HMODULE dll = SafeLoadLibrary(StrL("cryptui.dll"));
     Fn view = dll ? (Fn)GetProcAddress(dll, "CryptUIDlgViewContext") : nullptr;
     if (view) {
         view(CERT_STORE_CERTIFICATE_CONTEXT, cert, parent, L"Certificate", 0, nullptr);
@@ -260,7 +265,7 @@ void PropertiesView::OnClose(PropertiesView*, gp::Ctx* cx, const gp::ClickEvent*
 static void PropsToolSizeToContent();
 
 void OnGetFontsFinished(GetFontsResult* result) {
-    if (gProps.visible && gProps.win == result->win) {
+    if (gProps.visible && gProps.win == result->win && gProps.showNo == result->showNo) {
         Str marker = Tr("Getting font information...");
         Str props = ToStr(gProps.propsText);
         int pos = str::IndexOf(props, marker);
@@ -292,6 +297,7 @@ void ShowProperties(MainWindow* win, DocController* ctrl) {
     }
 
     gProps.win = win;
+    gProps.showNo++;
     gProps.propsText.Reset();
     DisplayModel* dm = ctrl->AsFixed();
 #if OS_WIN
@@ -333,6 +339,8 @@ void ShowProperties(MainWindow* win, DocController* ctrl) {
     gProps.textEdit->readonly = true;
     gp::InputSetValue(gProps.textEdit, ToGpui(ToStr(gProps.propsText)));
     gProps.visible = true;
+    DialogsTrackFrameDialog(
+        IsPropertiesDialogVisible, [] { return gProps.win; }, [] { DeletePropertiesWindow(gProps.win); });
     gProps.longestLine = {};
     gProps.oneChar = {};
     gProps.remeasure = true;
@@ -343,11 +351,13 @@ void ShowProperties(MainWindow* win, DocController* ctrl) {
     if (!dm || !dm->engine) {
         auto* result = new GetFontsResult;
         result->win = win;
+        result->showNo = gProps.showNo;
         OnGetFontsFinished(result);
         return;
     }
     auto* data = new GetFontsData;
     data->win = win;
+    data->showNo = gProps.showNo;
     data->engine = dm->engine;
     data->engine->AddRef();
     auto fn = MkFunc0<GetFontsData>(GetFontsThread, data);

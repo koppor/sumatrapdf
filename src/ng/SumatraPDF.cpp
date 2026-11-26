@@ -83,6 +83,8 @@
 #include "gui/AppShell.h"
 #include "gui/NativeFileDlg.h"
 #include "gui/NativeCursors.h"
+#include "gui/PlatformFont.h"
+#include "gui/PlatformText.h"
 #include "gui/Sidebar.h"
 #include "gui/WasmBridge.h"
 #include "gui/DocCanvas.h"
@@ -115,6 +117,7 @@
 #include "PdfDarkMode.h"
 #include "PagePosition.h"
 #include "SessionState.h"
+#include "SessionStateCommon.h"
 #include "TabGroupsManage.h"
 #include "gui/TabSwitcher.h"
 #include "gui/BrowserView.h"
@@ -353,6 +356,7 @@ void ApplySettingsToWindowsUi() {
 void ReloadSettingsUpdateWindows(bool showToolbarBefore) {
     // its favorites and file history rows point into the old gSettings
     CommandPaletteOnSettingsReloaded();
+    AddFavoriteOnSettingsReloaded();
     for (MainWindow* win : gWindows) {
         if (gSettings->showToolbar != showToolbarBefore) {
             ShowOrHideToolbar(win);
@@ -383,7 +387,7 @@ static MainWindow* CollectPathsAndCloseWindows(StrVec& paths) {
         if (w->printThread) {
             continue;
         }
-        CloseWindow(w, false, false);
+        CloseWindow(w, false);
     }
     return len(gWindows) > 0 ? gWindows[0] : nullptr;
 }
@@ -438,14 +442,7 @@ void ApplyChangedSettingsAndRelayout(const SettingsApplyState& before) {
             }
         }
     }
-    if (before.markdownUseFixedPageUI != p->markdownUI.useFixedPageUI ||
-        before.markdownPreserveLineBreaks != p->markdownUI.preserveLineBreaks) {
-        for (MainWindow* w : gWindows) {
-            if (w->CurrentTab() && w->CurrentTab()->AsMarkdown()) {
-                ReloadDocument(w, false);
-            }
-        }
-    }
+    ReloadWebDocLayouts(before.markdownLayout, before.htmlLayout);
     bool menubarChanged =
         (before.showMenubar != p->showMenubar) || (before.showMenubarWithTabs != p->showMenubarWithTabs);
     if (menubarChanged) {
@@ -912,10 +909,24 @@ void UpdateWindowTitle(MainWindow* win) {
     AppShellSetTitle(win, title);
 }
 
+static int gMenuBuildCount = 0;
+
+int MenuBuildCount() {
+    return gMenuBuildCount;
+}
+
 void RebuildMenuBar(MainWindow* win) {
+    gMenuBuildCount++;
+    win->menuDirty = false;
     DeleteMenuModel(win->menu);
     win->menu = BuildMenu(win);
     AppShellMenuRebuilt(win);
+}
+
+void RebuildMenuIfDirty(MainWindow* win) {
+    if (win->menuDirty) {
+        RebuildMenuBar(win);
+    }
 }
 
 // Find the first window showing a given file.
@@ -1109,6 +1120,7 @@ Str SumatraPasswordUI::GetPassword(Str filePath, u8* fileDigest, u8 decryptionKe
 // Markdown / HTML fall back to their fixed-page engines the same way (orig's
 // CreateControllerForMarkdown, when SetParentWindow() fails).
 static float EbookLayoutAspectForLoad(MainWindow* win, Str path);
+static float EbookLayoutAspectForView(MainWindow* win, DisplayMode mode, float zoom);
 
 // True while the command-line file loop is loading, so -view / -zoom size
 // that ebook and not a session restored just before it.
@@ -1116,7 +1128,7 @@ static bool gApplyCliViewToEbookLayout = false;
 // another instance owns the saved session, so we don't restore it (#6350)
 static bool gOtherInstanceRunning = false;
 
-static DocController* CreateControllerForFile(MainWindow* win, Str path, PasswordUI* pwdUI) {
+static DocController* CreateControllerForFile(MainWindow* win, Str path, PasswordUI* pwdUI, float ebookAspect) {
     auto timeStart = TimeGet();
     FileType kind = GuessFileTypeFromName(path);
     bool chmInFixedUI = gSettings->chmUI.useFixedPageUI || !BrowserViewAvailable();
@@ -1134,7 +1146,7 @@ static DocController* CreateControllerForFile(MainWindow* win, Str path, Passwor
 
     // A reflow page cannot change size after this. Single Page + Fit Width
     // has to match the window or the fitted page is taller than it (#3472).
-    float prevAspect = EngineMupdfSetEbookLayoutAspect(EbookLayoutAspectForLoad(win, path));
+    float prevAspect = EngineMupdfSetEbookLayoutAspect(ebookAspect);
     EngineBase* engine = CreateEngineFromFile(path, pwdUI, chmInFixedUI);
     EngineMupdfSetEbookLayoutAspect(prevAspect);
     if (!engine) {
@@ -1151,11 +1163,15 @@ static DocController* CreateControllerForFile(MainWindow* win, Str path, Passwor
     int nPages = engine->pageCount;
     auto dur = TimeSinceInMs(timeStart);
     logf("CreateControllerForEngineOrFile: '%s', %d pages, took %.2f ms\n", path, nPages, dur);
-    if (nPages <= 0) {
-        SafeEngineRelease(&engine);
-        return nullptr;
-    }
-    return new DisplayModel(engine, win->cbHandler);
+    return DisplayModel::Create(engine, win->cbHandler);
+}
+
+static DocController* CreateControllerForFile(MainWindow* win, Str path, PasswordUI* pwdUI) {
+    return CreateControllerForFile(win, path, pwdUI, EbookLayoutAspectForLoad(win, path));
+}
+
+static bool IsEbookFitWidth(DisplayMode mode, float zoom) {
+    return mode == DisplayMode::SinglePage && zoom == kZoomFitWidth;
 }
 
 // 0 keeps the fixed A5 page. Only Single Page + Fit Width wants one page
@@ -1186,7 +1202,11 @@ static float EbookLayoutAspectForLoad(MainWindow* win, Str path) {
             zoom = gFlags->startZoom;
         }
     }
-    if (displayMode != DisplayMode::SinglePage || zoom != kZoomFitWidth) {
+    return EbookLayoutAspectForView(win, displayMode, zoom);
+}
+
+static float EbookLayoutAspectForView(MainWindow* win, DisplayMode mode, float zoom) {
+    if (!IsEbookFitWidth(mode, zoom)) {
         return 0;
     }
     Rect rc = AppShellPredictCanvasRc(win, CanvasPredict::DocumentTab);
@@ -1240,28 +1260,14 @@ void AutoReloadTick(MainWindow* win, int elapsedMs) {
     if (!tab || !tab->autoReload.Tick(elapsedMs)) {
         return;
     }
-    if (!tab->reloadOnFocus) {
-        return;
-    }
-    if (tab->ignoreNextAutoReload) {
-        // consume the save-triggered watcher event
-        tab->ignoreNextAutoReload = false;
-        tab->reloadOnFocus = false;
-        return;
-    }
-    // an open menu still holds the page element it was built from. Reload
-    // once it is gone, as orig does while TrackPopupMenu is running.
-    if (win->gpuiWin && IsTrackedPopupOpenInApp(win->gpuiWin->app)) {
+    bool menuOpen = win->gpuiWin && IsTrackedPopupOpenInApp(win->gpuiWin->app);
+    auto trigger = menuOpen ? AutoReloadTrigger::TimerInMenu : AutoReloadTrigger::Timer;
+    auto action = DecideAutoReload(tab, trigger);
+    if (action == AutoReloadAction::Retry) {
         tab->autoReload.Arm(kAutoReloadDelayInMs);
-        return;
+    } else if (action == AutoReloadAction::Reload) {
+        ReloadDocument(win, true);
     }
-    if (AutoReloadFileStillChanging(tab)) {
-        // a writer (LaTeX etc.) is still producing the file; wait for it to go
-        // quiet instead of showing a half-written document
-        tab->autoReload.Arm(kAutoReloadDelayInMs);
-        return;
-    }
-    ReloadDocument(win, true);
 }
 
 static MainWindow* LoadDocumentFinish(MainWindow* win, Str fullPath, DocController* ctrl, LoadPrefs prefs,
@@ -1298,7 +1304,11 @@ void ReloadDocument(MainWindow* win, bool autoRefresh) {
     DocController* ctrl = nullptr;
     if (autoRefresh) {
         SumatraPasswordUI pwdUI;
-        ctrl = CreateControllerForFile(win, fullPath, &pwdUI);
+        float aspect = EbookLayoutAspectForLoad(win, fullPath);
+        if (tab->ctrl && IsEbookFileType(GuessFileTypeFromName(fullPath, true))) {
+            aspect = EbookLayoutAspectForView(win, tab->ctrl->GetDisplayMode(), tab->ctrl->GetZoomVirtual());
+        }
+        ctrl = CreateControllerForFile(win, fullPath, &pwdUI, aspect);
         if (!ctrl) {
             return;
         }
@@ -1336,6 +1346,7 @@ void ReloadDocument(MainWindow* win, bool autoRefresh) {
     }
     // the annotation list was emptied above; fill it from the new engine
     RefreshEditAnnotationsAfterEngineChange(win->CurrentTab());
+    CommandPaletteOnDocumentReloaded(win);
     if (state) {
         SetTabState(win->CurrentTab(), state);
         DeleteTabState(state);
@@ -1352,6 +1363,18 @@ void ReloadDocument(MainWindow* win, bool autoRefresh) {
     }
     // reopening reads the file again: slow on a network / cloud drive
     logf("ReloadDocument: reloaded in %.1f ms\n", TimeSinceInMs(timeStart));
+}
+
+// SetView runs after loading, so crossing the Fit Width layout boundary needs
+// a new ebook pagination. Reuse the quiet reload path to preserve tab state.
+void RefreshEbookLayoutForDde(MainWindow* win, DisplayMode oldMode, float oldZoom) {
+    DisplayModel* dm = win->AsFixed();
+    if (!dm || !IsEbookFileType(GuessFileTypeFromName(dm->GetFilePath(), true))) {
+        return;
+    }
+    if (IsEbookFitWidth(oldMode, oldZoom) != IsEbookFitWidth(dm->GetDisplayMode(), dm->GetZoomVirtual())) {
+        ReloadDocument(win, true);
+    }
 }
 
 // ng: the other half of the asynchronous password prompt. The dialog's answer
@@ -1804,13 +1827,13 @@ static bool FinishOpenLoad(LazyTabLoad* d) {
     WindowTab* tab = d->tab;
     MainWindow* win = tab->win;
     TempStr path = str::DupTemp(tab->filePath);
-    if (!d->engine) {
+    DocController* ctrl = DisplayModel::Create(d->engine, win->cbHandler);
+    d->engine = nullptr;
+    if (!ctrl) {
         // a password dialog shows over the error, which stays if it's cancelled
         tab->loadState = WindowTab::LoadState::Error;
         return LoadDocumentNow(win, path, d->prefs, LoadReuse::CurrentTab) != nullptr;
     }
-    DocController* ctrl = new DisplayModel(d->engine, win->cbHandler);
-    d->engine = nullptr;
     return LoadDocumentFinish(win, path, ctrl, d->prefs, LoadReuse::CurrentTab, d->timeStart) != nullptr;
 }
 
@@ -1890,11 +1913,10 @@ static void LazyTabLoadThread(LazyTabLoad* d) {
     if (d->createEngine && DocumentPathExists(d->path)) {
         SetLoadThreadFileEBookUI(d->fileEBookUI);
         float prevAspect = EngineMupdfSetEbookLayoutAspect(d->ebookLayoutAspect);
-        file::gFileCopyProgressCb = MkFunc1<LazyTabLoad, file::CopyProgress*>(OnLoadCopyProgress, d);
+        auto copyProgress = MkFunc1<LazyTabLoad, file::CopyProgress*>(OnLoadCopyProgress, d);
         // no password prompt off the UI thread: FinishLazyTabLoad's regular
         // load asks for it
-        d->engine = CreateEngineFromFile(d->path, nullptr, d->chmInFixedUI);
-        file::gFileCopyProgressCb = {};
+        d->engine = CreateEngineFromFile(d->path, nullptr, d->chmInFixedUI, copyProgress);
         EngineMupdfSetEbookLayoutAspect(prevAspect);
         SetLoadThreadFileEBookUI(nullptr);
         if (d->engine && d->engine->pageCount <= 0) {
@@ -1984,7 +2006,7 @@ void LoadPendingTab(WindowTab* tab) {
 // load created
 void LoadDocumentWithEngine(MainWindow* win, Str path, EngineBase* engine) {
     auto timeStart = TimeGet();
-    DocController* ctrl = new DisplayModel(engine, win->cbHandler);
+    DocController* ctrl = DisplayModel::Create(engine, win->cbHandler);
     LoadDocumentFinish(win, path, ctrl, LoadPrefs::DontSave, LoadReuse::CurrentTab, timeStart);
 }
 
@@ -2486,6 +2508,7 @@ void DuplicateTabInNewTab(WindowTab* tab) {
 // --- next / prev file in folder ---------------------------------------------
 
 static int gNextPrevDirScanGen = 0;
+static void MaybeShowNextFileScrollHint(MainWindow* win);
 static StrVec gFilesFailedToOpen;
 
 void RemoveFailedFiles(StrVec& files) {
@@ -2511,15 +2534,26 @@ static void FinishNextPrevDirScan(NextPrevDirScan* r) {
         return;
     }
     logf("NextPrevDirScan: %d files in '%s'\n", len(r->files), r->dir);
-    gNextPrevDirCache.Reset();
-    for (Str s : r->files) {
-        gNextPrevDirCache.Append(s);
-    }
+    StealStrVec(gNextPrevDirCache, r->files);
     RemoveFailedFiles(gNextPrevDirCache);
     gNextPrevDirReady = true;
     gNextPrevDirScanning = false;
 
     ReplayPendingNextPrevNav();
+
+    // the going on that started the scan offers the next file now
+    for (MainWindow* w : gWindows) {
+        if (!IsMainWindowValidAndNotClosing(w) || !w->IsDocLoaded()) {
+            continue;
+        }
+        WindowTab* tab = w->CurrentTab();
+        if (!tab || len(tab->filePath) == 0 || !str::EqI(path::GetDirTemp(tab->filePath), gNextPrevDir)) {
+            continue;
+        }
+        if (IsAtDocumentBottom(w)) {
+            MaybeShowNextFileScrollHint(w);
+        }
+    }
 }
 
 static void NextPrevDirScanThread(NextPrevDirScan* req) {
@@ -2932,6 +2966,37 @@ void RerenderTabPage(WindowTab* tab, int pageNo) {
 // If it still matches, our annotation is the most recent copy and Ctrl+V should
 // paste it; if something else copied since, that wins instead.
 static DWORD gAnnotClipboardSeqNo = 0;
+#else
+// Clipboard image at the last annotation copy. A later copy has different
+// bytes; an image that was already there does not.
+static int gAnnotClipImageLen = 0;
+static u64 gAnnotClipImageHash = 0;
+
+// FNV-1a. Distinguishes one clipboard image from the next.
+static u64 HashBytes(const u8* p, int n) {
+    const u64 kFnvOffset = 14695981039346656037ULL;
+    const u64 kFnvPrime = 1099511628211ULL;
+    u64 h = kFnvOffset;
+    for (int i = 0; i < n; i++) {
+        h ^= (u64)p[i];
+        h *= kFnvPrime;
+    }
+    return h;
+}
+
+static void NoteClipboardImageAtAnnotCopy(MainWindow* win) {
+    gAnnotClipImageLen = 0;
+    gAnnotClipImageHash = 0;
+    if (!win || !win->gpuiWin) {
+        return;
+    }
+    gp::ClipboardItem item = gp::ClipboardGetItem(gp::GetTempArena(), win->gpuiWin);
+    if (!item.HasImage()) {
+        return;
+    }
+    gAnnotClipImageLen = item.imageBytesLen;
+    gAnnotClipImageHash = HashBytes(item.imageBytes, item.imageBytesLen);
+}
 #endif
 
 // orig's: snapshot the annotation and put its contents on the OS clipboard.
@@ -2947,21 +3012,34 @@ static bool CopyAnnotationToClipboard(MainWindow* win, Annotation* annot, bool c
     }
 #if OS_WIN
     gAnnotClipboardSeqNo = GetClipboardSequenceNumber();
+#else
+    NoteClipboardImageAtAnnotCopy(win);
 #endif
     return true;
 }
 
 // true if our copied annotation is newer than whatever is on the OS clipboard.
-// ng off Windows has no clipboard counter: an image on the clipboard wins.
-static bool CopiedAnnotationIsFresh(Pixmap* clipboardImage) {
+// An image copied after the annotation wins. One that was already there does not.
+static bool CopiedAnnotationIsFresh(MainWindow* win, Pixmap* clipboardImage) {
     if (!HasCopiedAnnotation()) {
         return false;
     }
 #if OS_WIN
+    (void)win;
     (void)clipboardImage;
     return GetClipboardSequenceNumber() == gAnnotClipboardSeqNo;
 #else
-    return !clipboardImage;
+    if (!clipboardImage) {
+        return true;
+    }
+    if (!win || !win->gpuiWin || gAnnotClipImageLen <= 0) {
+        return false;
+    }
+    gp::ClipboardItem item = gp::ClipboardGetItem(gp::GetTempArena(), win->gpuiWin);
+    if (!item.HasImage() || item.imageBytesLen != gAnnotClipImageLen) {
+        return false;
+    }
+    return HashBytes(item.imageBytes, item.imageBytesLen) == gAnnotClipImageHash;
 #endif
 }
 
@@ -3170,8 +3248,15 @@ static void ShowSaveAnnotationError(ShowErrorData* d, Str err) {
 bool SaveAnnotationsToExistingFile(WindowTab* tab) {
     MainWindow* win = nullptr;
     EngineBase* engine = GetLiveTabEngine(tab, &win);
-    if (!engine || !IsCurrentTab(win, tab)) {
+    if (!engine) {
         return false;
+    }
+    if (!IsCurrentTab(win, tab)) {
+        SelectTabInWindow(tab);
+        engine = GetLiveTabEngine(tab, &win);
+        if (!engine || !IsCurrentTab(win, tab)) {
+            return false;
+        }
     }
     Str path = engine->FilePath();
     tab->ignoreNextAutoReload = true;
@@ -3246,7 +3331,7 @@ static void OnSaveAnnotsPathPicked(SaveAnnotsCtx* ctx, SavePathArgs* args) {
         onDone.Call(false);
         return;
     }
-    if (str::Eq(dstFilePath, srcPath)) {
+    if (path::IsSame(dstFilePath, srcPath)) {
         onDone.Call(SaveAnnotationsToExistingFile(tab));
         return;
     }
@@ -3278,6 +3363,10 @@ static void OnSaveAnnotsPathPicked(SaveAnnotsCtx* ctx, SavePathArgs* args) {
 void SaveAnnotationsToMaybeNewPdfFile(WindowTab* tab, const Func1<bool>& onDone) {
     MainWindow* win = nullptr;
     EngineBase* engine = GetLiveTabEngine(tab, &win);
+    if (engine && !IsCurrentTab(win, tab)) {
+        SelectTabInWindow(tab);
+        engine = GetLiveTabEngine(tab, &win);
+    }
     if (!engine || !IsCurrentTab(win, tab)) {
         onDone.Call(false);
         return;
@@ -3440,17 +3529,11 @@ struct SaveFileAsCtx {
     Str defExt;  // owned
 };
 
-static void OnSaveFileAsPathPicked(SaveFileAsCtx* ctx, SavePathArgs* args) {
-    MainWindow* win = ctx->win;
-    TempStr srcFileName = str::DupTemp(ctx->srcPath);
-    TempStr defExt = str::DupTemp(ctx->defExt);
-    str::Free(ctx->srcPath);
-    str::Free(ctx->defExt);
-    delete ctx;
-
-    TempStr dstFilePath = str::DupTemp(args->path);
+// Apply a chosen Save As path. False when nothing was written.
+static bool SaveLoadedFileTo(MainWindow* win, Str srcFileName, Str defExt, Str dstIn) {
+    TempStr dstFilePath = str::DupTemp(dstIn);
     if (len(dstFilePath) == 0 || !IsMainWindowValidAndNotClosing(win) || !win->IsDocLoaded()) {
-        return;
+        return false;
     }
     DisplayModel* dm = win->AsFixed();
     EngineBase* engine = dm ? dm->GetEngine() : nullptr;
@@ -3477,10 +3560,41 @@ static void OnSaveFileAsPathPicked(SaveFileAsCtx* ctx, SavePathArgs* args) {
         logf("SaveCurrentFileAs(): '%s' doesn't exist after a successful save\n", dstFilePath);
         ok = false;
     }
-    if (!ok) {
-        MessageBoxWarning(win, Tr("Failed to save a file"));
+    return ok;
+}
+
+static void OnSaveFileAsPathPicked(SaveFileAsCtx* ctx, SavePathArgs* args) {
+    MainWindow* win = ctx->win;
+    TempStr srcFileName = str::DupTemp(ctx->srcPath);
+    TempStr defExt = str::DupTemp(ctx->defExt);
+    str::Free(ctx->srcPath);
+    str::Free(ctx->defExt);
+    delete ctx;
+
+    if (len(args->path) == 0 || !IsMainWindowValidAndNotClosing(win) || !win->IsDocLoaded()) {
         return;
     }
+    if (!SaveLoadedFileTo(win, srcFileName, defExt, args->path)) {
+        MessageBoxWarning(win, Tr("Failed to save a file"));
+    }
+}
+
+// -dbg-control TestSaveFileAs: Save As without the dialog
+TempStr SaveFileAsResultTemp(Str dstPath, int* exitCodeOut) {
+    *exitCodeOut = 1;
+    if (len(gWindows) == 0 || !gWindows[0] || !gWindows[0]->IsDocLoaded()) {
+        return StrL("NOTREADY no-document");
+    }
+    MainWindow* win = gWindows[0];
+    Str srcFileName = win->ctrl->GetFilePath();
+    if (len(srcFileName) == 0) {
+        return StrL("FAIL no-path");
+    }
+    if (!SaveLoadedFileTo(win, srcFileName, win->ctrl->GetDefaultFileExt(), dstPath)) {
+        return StrL("FAIL save");
+    }
+    *exitCodeOut = 0;
+    return StrL("OK");
 }
 
 static void SaveCurrentFileAs(MainWindow* win) {
@@ -3814,14 +3928,11 @@ static void DeleteCurrentFile(MainWindow* win) {
 #if OS_WIN
 // the .lnk the shortcut dialog is about to write
 struct LnkShortcutCtx {
-    MainWindow* win = nullptr;
-    Str docPath; // owned
-    Str args;    // owned
-    Str desc;    // owned
+    Str args; // owned
+    Str desc; // owned
 };
 
 static void DeleteLnkShortcutCtx(LnkShortcutCtx* c) {
-    str::Free(c->docPath);
     str::Free(c->args);
     str::Free(c->desc);
     delete c;
@@ -3869,11 +3980,9 @@ static void CreateLnkShortcut(MainWindow* win) {
     } else if (kZoomFitContent == ctrl->GetZoomVirtual()) {
         zoomVirtual = StrL("fitcontent");
     }
-    TempStr label = ctrl->GetPageLabeTemp(ss.page);
+    TempStr label = ctrl->GetPageLabelTemp(ss.page);
 
     auto* c = new LnkShortcutCtx();
-    c->win = win;
-    c->docPath = str::Dup(path);
     c->args = str::Dup(fmt("\"%s\" -page %d -view \"%s\" -zoom %s -scroll %d,%d", path, ss.page, viewMode, zoomVirtual,
                            (int)ss.x, (int)ss.y));
     c->desc = str::Dup(fmt(Tr("Bookmark shortcut to page %s of %s").s, label, path));
@@ -4026,7 +4135,7 @@ static void ContinueCloseWindow(PendingCloseWindow* p) {
     bool quitIfLast = p->quitIfLast;
     win->isClosePending = false;
     delete p;
-    CloseWindow(win, quitIfLast, false);
+    CloseWindow(win, quitIfLast);
 }
 
 // Exit's save prompts are running
@@ -4109,6 +4218,8 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
         // Cancel while win->ctrl still belongs to the closing tab. The toolbar
         // update in cancellation needs CurrentTab and ctrl to agree.
         CancelAnnotationPlacement(win);
+        // as orig: a signature placed after the close would land in another tab
+        CloseSignDocumentDialog(win);
     }
     CloseAnnotationUiForTab(tab);
 
@@ -4134,7 +4245,7 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
 
     int tabCount = win->TabCount();
     if (tabCount == 1 || (tabCount == 0 && quitIfLast)) {
-        CloseWindow(win, quitIfLast, false);
+        CloseWindow(win, quitIfLast);
         return;
     }
     if (win->GetTabIdx(tab) < 0) {
@@ -4150,7 +4261,7 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
     // only the home tab left, and another window is open: this one goes away
     WindowTab* lastTab = (win->TabCount() == 1) ? win->GetTab(0) : nullptr;
     if (lastTab && lastTab->IsAboutTab() && len(gWindows) > 1 && !closedHome) {
-        CloseWindow(win, false, false);
+        CloseWindow(win, false);
         return;
     }
     UpdateWindowTitle(win);
@@ -4170,7 +4281,7 @@ void CloseCurrentTab(MainWindow* win, bool quitIfLast) {
         return;
     }
     if (quitIfLast) {
-        CloseWindow(win, true, false);
+        CloseWindow(win, true);
     }
 }
 
@@ -4238,38 +4349,74 @@ static void OnHomeDeleteTabClosed(MainWindow* win, Str path, bool ok) {
 struct HomeDeleteCtx {
     MainWindow* win;
     Str path; // owned
+    Func1<bool> onDone;
 };
 
 static void OnHomeDeleteDone(HomeDeleteCtx* c, bool ok) {
-    if (ok) {
+    bool deleteFile = ok && IsMainWindowValidAndNotClosing(c->win);
+    if (deleteFile) {
         WindowTab* tab = FindTabByFilePath(c->path);
         if (tab) {
             CloseTab(tab, false);
         }
         OnHomeDeleteTabClosed(c->win, c->path, true);
     }
+    c->onDone.Call(deleteFile);
     str::Free(c->path);
     delete c;
 }
 
 // orig's CmdDeleteFile in the home page's context menu: a file that is gone
 // only leaves the history, one that is there goes to the trash
-void DeleteFileFromHomePage(MainWindow* win, Str path) {
-    if (!CanAccessDisk() || gPluginMode) {
+static void DeleteHomeFile(MainWindow* win, Str path, Func1<bool> onDone) {
+    if (!CanAccessDisk() || gPluginMode || !IsMainWindowValidAndNotClosing(win)) {
+        onDone.Call(false);
         return;
     }
     TempStr owned = str::DupTemp(path);
     if (!file::Exists(owned)) {
         ForgetFileFromFrequentlyRead(win, owned);
+        onDone.Call(true);
         return;
     }
     WindowTab* tab = FindTabByFilePath(owned);
-    auto* c = new HomeDeleteCtx{win, str::Dup(owned)};
+    auto* c = new HomeDeleteCtx{win, str::Dup(owned), onDone};
     if (!tab) {
         OnHomeDeleteDone(c, true);
         return;
     }
     MaybeSaveAnnotations(tab, MkFunc1(OnHomeDeleteDone, c));
+}
+
+void DeleteFileFromHomePage(MainWindow* win, Str path) {
+    DeleteHomeFile(win, path, {});
+}
+
+struct HomeDeleteBatch {
+    MainWindow* win;
+    StrVec paths;
+    int next = 0;
+};
+
+static void DeleteNextHomeFile(HomeDeleteBatch* batch);
+
+static void HomeFileDeleted(HomeDeleteBatch* batch, bool ok) {
+    if (!ok || batch->next == len(batch->paths)) {
+        delete batch;
+        return;
+    }
+    uitask::Post(MkFunc0(DeleteNextHomeFile, batch), "DeleteNextHomeFile");
+}
+
+static void DeleteNextHomeFile(HomeDeleteBatch* batch) {
+    Str path = batch->paths[batch->next++];
+    DeleteHomeFile(batch->win, path, MkFunc1(HomeFileDeleted, batch));
+}
+
+void DeleteFilesFromHomePage(MainWindow* win, const StrVec& paths) {
+    if (!paths.IsEmpty()) {
+        DeleteNextHomeFile(new HomeDeleteBatch{win, paths});
+    }
 }
 
 // ng: orig opens an attachment straight out of memory (a tab with no file
@@ -4323,7 +4470,7 @@ void ShowFileInFolder(MainWindow* win, Str path) {
     OpenPathInDefaultFileManager(path);
 }
 
-void CloseWindow(MainWindow* win, bool quitIfLast, bool) {
+void CloseWindow(MainWindow* win, bool quitIfLast) {
     if (!win || win->isBeingClosed) {
         return;
     }
@@ -4364,8 +4511,10 @@ void CloseWindow(MainWindow* win, bool quitIfLast, bool) {
     // only after it's deleted
     CloseSavePathDialogFor(win);
     DlgWindowsCloseFor(win);
+    DialogsCloseFrameDialogsFor(win);
     VecRemove(gWindows, win);
     AppShellCloseWindow(win);
+    HexViewDelete(win);
     delete win;
     // the closed window is no longer part of the session
     if (!gDontSaveSettings && !lastWindow) {
@@ -4394,7 +4543,7 @@ static void FinishExit() {
 
     Vec<MainWindow*> toClose = gWindows;
     for (MainWindow* win : toClose) {
-        CloseWindow(win, false, false);
+        CloseWindow(win, false);
     }
     AppShellQuit();
 }
@@ -5643,10 +5792,9 @@ static void ShowDebugNotifications(MainWindow* win) {
         NotificationCreateArgs args;
         args.win = win;
         args.groupId = kNotifAdHoc;
-        args.corner = NotifCorner::BottomRight;
-        args.msg = StrL("Progress");
         args.timeoutMs = kNotifNoTimeout;
-        ShowNotification(args);
+        NotificationWnd* wnd = ShowNotification(args);
+        UpdateNotificationProgress(wnd, StrL("Progress"), 50);
     }
 }
 
@@ -5662,6 +5810,29 @@ static void ReadAloudAtPoint(WindowTab* tab, Point pt) {
         TtsStop();
     }
     ReadAloudFromCursorInTab(tab, pt);
+}
+
+// the annotation a context menu command was opened on, while it runs
+static Annotation* gMenuAnnot = nullptr;
+
+// The annotation a command acts on before the selected one, as in orig: the
+// right-clicked one (context menu), the one under the caret in keyboard
+// selection mode (#6579), else the one under the mouse.
+static Annotation* PointerAnnotation(MainWindow* win) {
+    if (gMenuAnnot) {
+        return gMenuAnnot;
+    }
+    Annotation* annot = AnnotationAtCaret(win);
+    return annot ? annot : win->annotationUnderCursor;
+}
+
+// copy / cut: orig's pointer annotation when it can be copied, else the selected one
+static Annotation* CopyTargetAnnotation(MainWindow* win, WindowTab* tab) {
+    Annotation* annot = PointerAnnotation(win);
+    if (annot && AnnotationCanBeCopied(annot->type)) {
+        return annot;
+    }
+    return tab->selectedAnnotation;
 }
 
 void ExecuteCmd(MainWindow* win, int cmdId) {
@@ -5722,6 +5893,10 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
     // a SelectionHandlers entry from the settings file
     if (cmdId == CmdSelectionHandler) {
         RunSelectionHandler(tab, cmd);
+        return;
+    }
+    // going on again while the end-of-document hint offers the next file
+    if (GoOnToNextFile(win, cmdId)) {
         return;
     }
 
@@ -6012,23 +6187,23 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
             break;
 
         case CmdShowAnnotationText:
-            if (tab && win->annotationUnderCursor) {
-                ShowAnnotationTextPopup(win, win->annotationUnderCursor);
+            if (tab && PointerAnnotation(win)) {
+                ShowAnnotationTextPopup(win, PointerAnnotation(win));
             } else if (tab && tab->selectedAnnotation) {
                 StartSelectedAnnotContentsEdit(win);
             }
             break;
 
         case CmdCopyAnnotation:
-            if (tab && tab->selectedAnnotation && HasPermission(Perm::CopySelection)) {
-                CopyAnnotationToClipboard(win, tab->selectedAnnotation, false);
+            if (tab && HasPermission(Perm::CopySelection)) {
+                CopyAnnotationToClipboard(win, CopyTargetAnnotation(win, tab), false);
             }
             break;
 
         case CmdCutAnnotation:
             // The original stays until paste. CutAnnotation only marks it.
-            if (tab && tab->selectedAnnotation && HasPermission(Perm::CopySelection)) {
-                if (CopyAnnotationToClipboard(win, tab->selectedAnnotation, true)) {
+            if (tab && HasPermission(Perm::CopySelection)) {
+                if (CopyAnnotationToClipboard(win, CopyTargetAnnotation(win, tab), true)) {
                     ShowTemporaryNotification(tab->win, Tr("Annotation cut. Paste to move it."));
                 }
             }
@@ -6044,7 +6219,7 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
             // themselves, so it never gets here. orig then prefers a copied
             // annotation while ours is the most recent copy
             Pixmap* image = ImageEditGetClipboard(win);
-            if (win->pdfAnnotationsToolbarEnabled && CopiedAnnotationIsFresh(image)) {
+            if (win->pdfAnnotationsToolbarEnabled && CopiedAnnotationIsFresh(win, image)) {
                 FreePixmap(image);
                 PasteAnnotationInTab(win, tab);
                 break;
@@ -6068,7 +6243,7 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
 
         case CmdEditAnnotationText: {
             // the annotation under the cursor (context menu), else the selected one
-            Annotation* annot = tab ? win->annotationUnderCursor : nullptr;
+            Annotation* annot = tab ? PointerAnnotation(win) : nullptr;
             if (!annot && tab) {
                 annot = tab->selectedAnnotation;
             }
@@ -6087,15 +6262,15 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
         }
 
         case CmdDeleteAnnotation:
-            // A dialog owns the keyboard. Delete removes the selection, or
-            // the annotation under the cursor when nothing is selected.
-            if (DialogsAccelTable(win) != DialogAccels::All) {
+            // A dialog owns the keyboard. As orig: the annotation under the
+            // cursor (or the caret), else the selected one.
+            if (DialogsAccelTable(win) != DialogAccels::All || !tab) {
                 break;
             }
-            if (tab && tab->selectedAnnotation) {
+            if (Annotation* annot = PointerAnnotation(win)) {
+                DeleteAnnotationAndUpdateUI(tab, annot);
+            } else if (tab->selectedAnnotation) {
                 DeleteAnnotationAndUpdateUI(tab, tab->selectedAnnotation);
-            } else if (tab && win->annotationUnderCursor) {
-                DeleteAnnotationAndUpdateUI(tab, win->annotationUnderCursor);
             }
             break;
 
@@ -7406,6 +7581,10 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
             ShowPdfDeletePageDialog(win);
             break;
 
+        case CmdImagesToPdf:
+            MakePdfFromImages(win);
+            break;
+
         case CmdMergePDF:
             ShowMergePdfDialog(win);
             break;
@@ -7434,6 +7613,14 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
             ShowPdfExtractTextDialog(win);
             break;
 
+        case CmdExportMarkdown:
+            ShowExportMarkdownDialog(win);
+            break;
+
+        case CmdExportAnnotations:
+            ExportAnnotations(win);
+            break;
+
         case CmdSaveSelectionAsImage:
             ShowSaveSelectionAsImageDialog(win);
             break;
@@ -7454,7 +7641,8 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
                 // GetErrorsTextTemp is the engine's internal buffer; ShowTextInWindow
                 // copies it before returning, so it must not be kept past this frame.
                 TempStr text = engine->GetErrorsTextTemp();
-                ShowTextInWindow(win, StrL("Errors"), text);
+                TextWindowOption opt = DocErrorsWindowOption();
+                ShowTextInWindow(win, StrL("Errors"), text, &opt);
             }
             break;
         }
@@ -7494,6 +7682,12 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
             break;
 
         // the home page's selected entry
+        case CmdLocateFile:
+            if (win->IsCurrentTabAbout()) {
+                HomePageLocateFile(win, HomePageSelectedFilePathTemp(win));
+            }
+            break;
+
         case CmdUploadToServer:
         case CmdDeleteFromServer: {
             Str path = win->IsCurrentTabAbout() ? HomePageSelectedFilePathTemp(win) : Str{};
@@ -7520,7 +7714,10 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
     if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
-    RebuildMenuBar(win);
+    // a held key repeats a command many times a second (scroll, zoom): the menu
+    // catches up once the commands pause, or as soon as a menu opens
+    win->menuDirty = true;
+    AppShellScheduleMenuRebuild(win);
     AppShellInvalidate(win);
 }
 
@@ -7569,8 +7766,9 @@ void ExecuteCmdAtPoint(MainWindow* win, int cmdId, Point pt) {
     // Delete / Cut / Copy always work on the annotation the menu was opened
     // on, even when the annotation list has a different selection
     DisplayModel* dm = win->AsFixed();
+    Annotation* annot = nullptr;
     if (tab && dm) {
-        Annotation* annot = dm->GetAnnotationAtPos(pt, nullptr);
+        annot = dm->GetAnnotationAtPos(pt, nullptr);
         if (annot) {
             SetSelectedAnnotation(tab, annot);
         } else if (origId == CmdDeleteAnnotation) {
@@ -7580,7 +7778,9 @@ void ExecuteCmdAtPoint(MainWindow* win, int cmdId, Point pt) {
     }
     // paste reads dragPrevPos; a command sent with a point pastes there
     win->dragPrevPos = pt;
+    gMenuAnnot = annot;
     ExecuteCmd(win, cmdId);
+    gMenuAnnot = nullptr;
 }
 
 // --- startup ----------------------------------------------------------------
@@ -8044,6 +8244,9 @@ int GpuiMain(int argc, char** argv) {
     // e.g. reading a cached thumbnail back fails
     ScopedOle ole;
     ScopedGdiPlus gdiPlus(true);
+    defer {
+        PlatformFontDestroy();
+    };
     // the dynamically loaded win32 entry points (dbghelp for the crash handler
     // and the hang detector, the per-monitor DPI calls); orig's WinMain too
     InitDynCalls();
@@ -8077,6 +8280,10 @@ int GpuiMain(int argc, char** argv) {
     // either is set up, not with the settings
     if (len(gFlags->appdataDir) > 0) {
         SetAppDataDir(gFlags->appdataDir);
+        // the test's own stand-in viewer lives here; browsers still stay blocked
+        if (gForTesting) {
+            SetExternalLaunchAllowDir(GetAppDataDirTemp());
+        }
     }
     if (gFlags->startPerfLog) {
         StartPerfLog();
@@ -8336,10 +8543,15 @@ int GpuiMain(int argc, char** argv) {
     bool restoredSession = false;
     bool canRestore = !gFlags->configureRestrictedUse && !gOtherInstanceRunning;
     if (canRestore && (len(gFlags->fileNames) == 0 || SettingsUseTabs())) {
-        restoredSession = RestoreSession(win);
+        MainWindow* startWin = nullptr;
+        restoredSession = RestoreSession(win, &startWin);
         // the session may have opened more windows; the command line goes into
-        // the first one, as orig does
-        win = len(gWindows) > 0 ? gWindows[0] : win;
+        // the one on the launch desktop, else the first, as orig does
+        if (startWin && IsMainWindowValid(startWin)) {
+            win = startWin;
+        } else {
+            win = len(gWindows) > 0 ? gWindows[0] : win;
+        }
     }
     // a DDE [CmdExit] can close every window while the session is restored
     if (len(gWindows) > 0) {

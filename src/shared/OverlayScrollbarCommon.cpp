@@ -80,9 +80,19 @@ int MulDivI(int a, int b, int c) {
 }
 
 int ThumbLen(OverlayScrollbar* sb, int trackLen) {
-    int range = sb->nMax - sb->nMin + 1;
-    int thumbLen = MulDivI(trackLen, (int)sb->nPage, std::max(range, 1));
+    int range = std::max(sb->nMax - sb->nMin + 1, 1);
+#if defined(SUMATRA_NG)
+    // same inputs as the MulDiv path; gpui's minimum is ours, not its 48dip default
+    if (trackLen <= 0) {
+        return DpiScale(kMinThumbSize);
+    }
+    float thumb =
+        gp::ScrollbarThumbSize((float)trackLen, (float)sb->nPage, (float)range, (float)DpiScale(kMinThumbSize));
+    return (int)(thumb + 0.5f);
+#else
+    int thumbLen = MulDivI(trackLen, (int)sb->nPage, range);
     return std::max(thumbLen, DpiScale(kMinThumbSize));
+#endif
 }
 
 // Calculate thumb rect within the track. The offset is clamped to 0 when the
@@ -99,12 +109,18 @@ Rect GetThumbRect(OverlayScrollbar* sb) {
     int thumbLen = ThumbLen(sb, trackLen);
 
     int scrollableTrack = trackLen - thumbLen;
-    int scrollableRange = range - nPage;
     int pos = sb->isDragging ? sb->nTrackPos : sb->nPos;
     int thumbOffset = 0;
+#if defined(SUMATRA_NG)
+    float off = gp::ScrollbarThumbPos((float)trackLen, (float)thumbLen, (float)(pos - sb->nMin), (float)nPage,
+                                      (float)std::max(range, 1));
+    thumbOffset = (int)(off + 0.5f);
+#else
+    int scrollableRange = range - nPage;
     if (scrollableRange > 0) {
         thumbOffset = MulDivI(pos - sb->nMin, scrollableTrack, scrollableRange);
     }
+#endif
     thumbOffset = limitValue(thumbOffset, 0, std::max(0, scrollableTrack));
 
     if (IsVert(sb)) {
@@ -119,8 +135,20 @@ int PosForThumbCenteredAt(OverlayScrollbar* sb, int clickPos) {
     int range = sb->nMax - sb->nMin + 1;
     int trackLen = IsVert(sb) ? track.dy : track.dx;
     int thumbLen = ThumbLen(sb, trackLen);
-    int scrollableTrack = trackLen - thumbLen;
     int scrollableRange = range - (int)sb->nPage;
+#if defined(SUMATRA_NG)
+    int origin = IsVert(sb) ? track.y : track.x;
+    float off = gp::ScrollbarOffsetForTrackPress((float)clickPos, (float)origin, (float)trackLen, (float)thumbLen,
+                                                 (float)sb->nPage, (float)std::max(range, 1));
+    int newPos = sb->nMin + (int)(off + 0.5f);
+    if (scrollableRange > 0) {
+        newPos = limitValue(newPos, sb->nMin, sb->nMin + scrollableRange);
+    } else {
+        newPos = sb->nMin;
+    }
+    return newPos;
+#else
+    int scrollableTrack = trackLen - thumbLen;
     int clickInTrack = clickPos - (IsVert(sb) ? track.y : track.x);
     int thumbOffset = clickInTrack - (thumbLen / 2);
     thumbOffset = limitValue(thumbOffset, 0, std::max(0, scrollableTrack));
@@ -129,6 +157,7 @@ int PosForThumbCenteredAt(OverlayScrollbar* sb, int clickPos) {
         newPos = sb->nMin + MulDivI(thumbOffset, scrollableRange, scrollableTrack);
     }
     return newPos;
+#endif
 }
 
 Rect GetArrowTopRect(OverlayScrollbar* sb) {
@@ -161,7 +190,7 @@ void ShowScrollbarWindow(OverlayScrollbar* sb, bool thick) {
     }
 }
 
-void HideScrollbarWindow(OverlayScrollbar* sb) {
+void HideScrollbarWindow(OverlayScrollbar* sb, HideReason why) {
     // Don't hide while user is dragging the thumb
     if (sb->isDragging) {
         return;
@@ -169,7 +198,80 @@ void HideScrollbarWindow(OverlayScrollbar* sb) {
     if (IsAlwaysThickMode(sb)) {
         return; // never hide in Thick mode
     }
+    // the find markers are what the user looks at: stay, thin
+    if (why == HideReason::Idle && len(sb->findMarkers) > 0) {
+        if (sb->state != State::SmartThin) {
+            SetState(sb, State::SmartThin);
+        }
+        return;
+    }
     SetState(sb, State::SmartInvisible);
+}
+
+// Where the find matches are along a vertical bar: fractions of its range,
+// sorted, and the current one (-1: none), in their colors. Returns true if they
+// changed. A smart bar shows while there are markers.
+bool SetFindMarkers(OverlayScrollbar* sb, const Vec<float>& markers, float current, Color col, Color currentCol) {
+    if (!IsVert(sb)) {
+        return false;
+    }
+    bool same = sb->findMarkerCurrent == current && len(sb->findMarkers) == len(markers) &&
+                sb->findMarkerColor == col && sb->findMarkerCurrentColor == currentCol;
+    for (int i = 0; same && i < len(markers); i++) {
+        same = sb->findMarkers[i] == markers[i];
+    }
+    if (same) {
+        return false;
+    }
+    bool had = len(sb->findMarkers) > 0;
+    sb->findMarkers = markers;
+    sb->findMarkerCurrent = current;
+    sb->findMarkerColor = col;
+    sb->findMarkerCurrentColor = currentCol;
+    bool has = len(markers) > 0;
+    if (has && sb->state == State::SmartInvisible) {
+        ShowScrollbarWindow(sb, false);
+    } else if (had && !has && sb->state == State::SmartThin) {
+        // nothing keeps it up anymore: the usual auto-hide
+        RestartSmartThinAutoHide(sb);
+    }
+    return true;
+}
+
+// the find markers as ticks across the bar (as wide as the thumb), one per
+// pixel row, in client coords. current->dy is 0 when there is no current match.
+void GetFindMarkerRects(OverlayScrollbar* sb, Vec<Rect>& others, Rect* current) {
+    VecReset(others);
+    *current = {};
+    if (!IsVert(sb) || (len(sb->findMarkers) == 0 && sb->findMarkerCurrent < 0)) {
+        return;
+    }
+    Rect rc = ClientRect(sb);
+    Rect track = GetTrackRect(sb);
+    int x = track.x;
+    int dx = track.dx;
+    if (!IsThick(sb)) {
+        // the thin bar is drawn centered in the window
+        dx = std::min(ScaledWidth(sb, false), rc.dx);
+        x = (rc.dx - dx) / 2;
+    }
+    int h = std::max(DpiScale(2), 2);
+    int span = track.dy - h;
+    if (span <= 0) {
+        return;
+    }
+    int lastY = INT_MIN;
+    for (float f : sb->findMarkers) {
+        int y = track.y + (int)(f * (float)span);
+        if (y == lastY) {
+            continue;
+        }
+        lastY = y;
+        VecAppend(others, Rect{x, y, dx, h});
+    }
+    if (sb->findMarkerCurrent >= 0) {
+        *current = {x, track.y + (int)(sb->findMarkerCurrent * (float)span), dx, h};
+    }
 }
 
 // Show the thin smart overlay after scroll activity (mouse wheel, keys, etc.).
@@ -208,6 +310,24 @@ void OverlayScrollbarSetMode(OverlayScrollbar* sb, OverlayScrollbar::Mode mode) 
         // Smart mode: start as thin, will auto-hide
         SetState(sb, State::SmartThin);
     }
+}
+
+// -dbg-control TestLayout: "findMarkers n=3 ticks=3 current=0.420 visible=1
+// at=0.100,0.420,0.900" (at: the first few, fractions of the range)
+TempStr OverlayScrollbarFindMarkersReportTemp(OverlayScrollbar* sb) {
+    constexpr int kMaxReported = 8;
+    if (!sb) {
+        return str::DupTemp(StrL("findMarkers n=0 ticks=0 current=-1 visible=0 at=\n"));
+    }
+    Vec<Rect> ticks;
+    Rect current;
+    GetFindMarkerRects(sb, ticks, &current);
+    str::Builder at;
+    for (int i = 0; i < len(sb->findMarkers) && i < kMaxReported; i++) {
+        at.Append(fmt(i > 0 ? ",%.3f" : "%.3f", (double)sb->findMarkers[i]));
+    }
+    return fmt("findMarkers n=%d ticks=%d current=%.3f visible=%d at=%s\n", len(sb->findMarkers), len(ticks),
+               (double)sb->findMarkerCurrent, IsOverlayScrollbarVisible(sb) ? 1 : 0, ToStrTemp(at));
 }
 
 bool gOverlayScrollbarSuppressThick = false;

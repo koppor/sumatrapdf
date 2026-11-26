@@ -39,6 +39,13 @@ static CachedObject MkObj(uintptr_t id, u64 size, EngineBase* engine) {
     return o;
 }
 
+static bool ReplaceBeforeFree(WindowTab*, CachedObject* o) {
+    UnregisterCachedObject(o->id);
+    CachedObject replacement = MkObj(o->id, o->size, o->engine);
+    DidAllocateCachedObject(&replacement);
+    return true;
+}
+
 static AtomicInt gFindTabCalls;
 
 static WindowTab* CountingFindTab(EngineBase*) {
@@ -112,10 +119,8 @@ static void StaleImagePageTest() {
     CachedObject ignore{};
     utassert(!FindPageObject(engine, 1, &ignore));
     // the allocator may reuse the evicted address for a new page, which is then live
-    if (!IsRegistered(evicted.id)) {
-        utassert(!evicted.canFree(nullptr, &evicted));
-        utassert(!evicted.free(nullptr, &evicted));
-    }
+    utassert(!evicted.canFree(nullptr, &evicted));
+    utassert(!evicted.free(nullptr, &evicted));
 
     CachedObject live{};
     utassert(FindPageObject(engine, 2, &live));
@@ -138,13 +143,13 @@ static void ResetCacheTest() {
 }
 
 void CachedObjects_UnitTests() {
-    int saved = gSaveMemory;
+    int saved = AtomicIntGet(&gSaveMemory);
     ResetCacheTest();
 
     auto* e1 = (EngineBase*)(uintptr_t)0x100;
     auto* e2 = (EngineBase*)(uintptr_t)0x200;
 
-    gSaveMemory = 0;
+    AtomicIntSet(&gSaveMemory, 0);
     CachedObject a = MkObj(1, 1000, e1);
     CachedObject b = MkObj(2, 2000, e1);
     CachedObject c = MkObj(3, 3000, e2);
@@ -167,7 +172,7 @@ void CachedObjects_UnitTests() {
 
     ResetCacheTest();
 
-    gSaveMemory = 100;
+    AtomicIntSet(&gSaveMemory, 100);
     a = MkObj(1, 1000, e1);
     b = MkObj(2, 2000, e1);
     c = MkObj(3, 3000, e2);
@@ -187,7 +192,7 @@ void CachedObjects_UnitTests() {
 
     ResetCacheTest();
 
-    gSaveMemory = 0;
+    AtomicIntSet(&gSaveMemory, 0);
     a = MkObj(4, 100, e1);
     b = MkObj(5, 100, e2);
     DidAllocateCachedObject(&a);
@@ -199,7 +204,7 @@ void CachedObjects_UnitTests() {
     utassert(gCachedObjects[0].id == 5);
 
     ResetCacheTest();
-    gSaveMemory = 0;
+    AtomicIntSet(&gSaveMemory, 0);
     a = MkObj(6, 2048, nullptr);
     a.kind = kindCachedRender;
     a.pageNo = 4;
@@ -221,9 +226,16 @@ void CachedObjects_UnitTests() {
     StaleImagePageTest();
 
     ResetCacheTest();
+    CachedObject reused = MkObj(9, 1000, e1);
+    reused.canFree = ReplaceBeforeFree;
+    DidAllocateCachedObject(&reused);
+    utassert(FreeCachedObjects() == 0);
+    utassert(!gFreed[9] && IsRegistered(9));
+
+    ResetCacheTest();
     if (kHasThreads) {
         TabLookupOffUIThreadTest();
         ResetCacheTest();
     }
-    gSaveMemory = saved;
+    AtomicIntSet(&gSaveMemory, saved);
 }

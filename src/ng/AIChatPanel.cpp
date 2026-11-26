@@ -218,51 +218,14 @@ static void EnsureWebViewReady(MainWindow* win) {
 
 // --- Session combo ---
 
-static void PopulateSessionCombo(MainWindow* win) {
+void AIChatSetSessionItems(MainWindow* win, StrVec& items, int sel) {
     AIChatPanel* p = PanelOf(win);
-    AIChatProvider* provider = CurrentProvider(win);
-    if (!p || !provider) {
+    if (!p) {
         return;
     }
-
-    StrVec items;
-    items.Append(StrL("+ New Session"));
-
-    WindowTab* tab = win->CurrentTab();
-    AIChatTabState* st = GetTabState(tab, win->aiChatProvider);
-    if (!tab || len(tab->filePath) == 0 || !st) {
-        p->sessionSel.SetItems(items, 0);
-        p->sessionSel.SetSel(win->gpuiWin ? win->gpuiWin->app : nullptr, 0);
-        return;
-    }
-
-    TempStr dir = path::GetDirTemp(tab->filePath);
-    Vec<AIChatSessionInfo> sessions;
-    provider->CollectSessions(dir, sessions);
-
-    int selectedIdx = 0;
-    bool foundCurrent = false;
-    for (int i = 0; i < len(sessions); i++) {
-        Str display = sessions[i].display;
-        if (len(display) == 0) {
-            display = StrL("(no description)");
-        }
-        items.Append(ShortenStringUtf8Temp(display, 50));
-        if (st->sessionId && str::Eq(st->sessionId, sessions[i].sessionId)) {
-            selectedIdx = i + 1;
-            foundCurrent = true;
-        }
-    }
-
-    // if current tab has a session but it wasn't found on disk, add it anyway
-    if (st->sessionId && !foundCurrent) {
-        items.Append(StrL("(current session)"));
-        selectedIdx = len(sessions) + 1;
-    }
-
-    p->sessionSel.SetItems(items, selectedIdx);
-    p->sessionSel.SetSel(win->gpuiWin ? win->gpuiWin->app : nullptr, selectedIdx);
-    AIChatFreeSessions(sessions);
+    p->sessionSel.SetItems(items, sel);
+    p->sessionSel.SetSel(win->gpuiWin ? win->gpuiWin->app : nullptr, sel);
+    AppShellInvalidate(win);
 }
 
 static void OnSessionComboChange(MainWindow* win, int sel) {
@@ -287,23 +250,17 @@ static void OnSessionComboChange(MainWindow* win, int sel) {
         return;
     }
 
-    // re-collect sessions to get the ID
-    TempStr dir = path::GetDirTemp(tab->filePath);
-    Vec<AIChatSessionInfo> sessions;
-    provider->CollectSessions(dir, sessions);
-
-    int sessionIdx = sel - 1;
-    if (sessionIdx >= 0 && sessionIdx < len(sessions)) {
-        AIChatLog(provider->logger, StrL("session"), sessions[sessionIdx].sessionId);
-        str::ReplaceWithCopy(&st->sessionId, sessions[sessionIdx].sessionId);
-        st->chatLog.Reset();
-        AIChatResetAPI(st);
-        WebViewClearChat(win);
-        provider->LoadSessionHistory(win, st->sessionId, dir);
-        // LoadSessionHistory writes to the webview which rebuilds chatLog
+    Str sessionId = AIChatSessionIdAt(win, sel);
+    if (len(sessionId) == 0) {
+        return;
     }
-
-    AIChatFreeSessions(sessions);
+    AIChatLog(provider->logger, StrL("session"), sessionId);
+    str::ReplaceWithCopy(&st->sessionId, sessionId);
+    st->chatLog.Reset();
+    AIChatResetAPI(st);
+    WebViewClearChat(win);
+    // LoadSessionHistory writes to the webview which rebuilds chatLog
+    provider->LoadSessionHistory(win, st->sessionId, path::GetDirTemp(tab->filePath));
 }
 
 // --- Settings <-> UI ---
@@ -340,6 +297,33 @@ static void ApplyAIChatSettingsToUI(MainWindow* win) {
     p->optionSel.SetSel(app, optionIdx);
 
     p->flagChecked = provider->GetFlag();
+}
+
+// a provider's model list arrived after its panel was built; keeps the
+// picked model, which is only saved on send
+void AIChatModelsChanged(AIChatProvider* provider) {
+    for (MainWindow* win : gWindows) {
+        AIChatPanel* p = PanelOf(win);
+        if (!p || CurrentProvider(win) != provider) {
+            continue;
+        }
+        TempStr cur = str::DupTemp(p->modelSel.SelText());
+        StrVec models;
+        provider->BuildModelsList(models);
+        StrVec items;
+        for (int i = 0; i < len(models); i++) {
+            items.Append(AIChatModelDisplayNameTemp(models[i], {}));
+        }
+        int idx = AIChatFindModelInList(models, cur);
+        if (idx < 0) {
+            Str model = AIChatResolveModel(models, provider->GetModel(), provider->defaultModel);
+            idx = std::max(AIChatFindModelInList(models, model), 0);
+        }
+        gp::App* app = win->gpuiWin ? win->gpuiWin->app : nullptr;
+        p->modelSel.SetItems(items, idx);
+        p->modelSel.SetSel(app, idx);
+        AppShellInvalidate(win);
+    }
 }
 
 // Read current settings from UI controls and save
@@ -386,7 +370,7 @@ void OnAIChatFinished(MainWindow* win, AIChatProvider* p, AIChatTabState* st, bo
     if (isActiveTab) {
         WebViewFlushBlock(win);
         SetAIChatWorking(win, false);
-        PopulateSessionCombo(win);
+        ScanAIChatSessions(win, AIChatScanMode::Populate);
     }
 }
 
@@ -515,9 +499,9 @@ bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str& outTex
 
     str::Builder raw;
     str::BuilderReserve(raw, 4096);
-    AIChatReadPipeToEnd(launch.hReadPipe, raw);
+    bool exited = AIChatReadUntilExit(launch.hReadPipe, launch.hProcess, 5 * 60 * 1000, raw);
     launch.hReadPipe = nullptr;
-    if (!AIChatWaitForProcess(launch.hProcess, 5 * 60 * 1000)) {
+    if (!exited) {
         AIChatTerminateProcess(launch.hProcess);
         AIChatCloseProcess(&launch.hProcess, false);
         outErr = str::Dup(StrL("chat timed out"));
@@ -783,7 +767,7 @@ void OnAIChatToggle(MainWindow* win, int providerId) {
         SetPanelProvider(win, providerId);
         EnsureWebViewReady(win);
         UpdateAIChatPanelForCurrentTab(win);
-        PopulateSessionCombo(win);
+        ScanAIChatSessions(win, AIChatScanMode::Populate);
         // defer auto-select so the page has time to load
         AIChatPanel* panel = PanelOf(win);
         panel->autoSelect.Arm(kAutoSelectDelayMs);
@@ -829,7 +813,7 @@ void OnAIChatTabChanged(MainWindow* win) {
         return;
     }
 
-    PopulateSessionCombo(win);
+    ScanAIChatSessions(win, AIChatScanMode::Populate);
     WebViewClearChat(win);
 
     AIChatTabState* st = GetTabState(tab, win->aiChatProvider);
@@ -850,6 +834,9 @@ void OnAIChatTabChanged(MainWindow* win) {
         provider->LoadSessionHistory(win, st->sessionId, dir);
     }
 }
+
+// ng: the chat's BrowserView keeps no per-process data dir
+void DeleteAIChatWebViewDataDirs() {}
 
 void DestroyAIChatPanel(MainWindow* win) {
     AIChatPanel* p = PanelOf(win);
@@ -964,8 +951,7 @@ void AIChatTick(MainWindow* win, int elapsedMs) {
     if (!p || !p->autoSelect.Tick(elapsedMs)) {
         return;
     }
-    AutoSelectRecentSession(win);
-    PopulateSessionCombo(win);
+    ScanAIChatSessions(win, AIChatScanMode::AutoSelect);
     AppShellInvalidate(win);
 }
 
@@ -1050,17 +1036,16 @@ gp::El* AIChatPanelBuild(MainWindow* win, gp::Ctx* cx) {
 
     // Enter sends, Shift+Enter inserts a line break; Stop appears while working
     gp::El* inputRow = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->Gap(4);
-    inputRow->Child(gp::Div(cx->a)->Flex1()->MinW(0)->Child(
-        gpc::Textarea::New(cx, GStrL("aichat-input"), p->input)->Rows(3)->Disabled(!enableInput)->IntoEl()));
-    gp::El* buttons = gp::Div(cx->a)->FlexCol()->Gap(4);
+    inputRow->Child(gp::Div(cx->a)->Flex1()->MinW(0)->Child(EditStyle(
+        cx, gpc::Textarea::New(cx, GStrL("aichat-input"), p->input)->Rows(3)->Disabled(!enableInput)->IntoEl(),
+        p->input, EditLook::Frame)));
     if (working) {
+        gp::El* buttons = gp::Div(cx->a)->FlexCol()->Gap(4);
         buttons->Child(gpc::Button::New(cx, GStrL("aichat-stop"))
                            ->Label(ToGpui(Tr("Stop")))
                            ->WithSize(gp::UiSize::Small)
                            ->OnClick(gp::ListenTo(gAIChatView, &AIChatView::OnStop))
                            ->IntoEl());
-    }
-    if (working) {
         inputRow->Child(buttons);
     }
     col->Child(inputRow);

@@ -325,8 +325,16 @@ FILE* OpenFILE(Str path) {
     return fopen(CStrTemp(path), "rb");
 }
 
-FileHandle OpenReadOnly(Str path) {
-    return open(CStrTemp(path), O_RDONLY);
+bool GetReadStamp(FILE* f, ReadStamp& stamp) {
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
+        return false;
+    }
+    stamp.size = st.st_size;
+    stamp.mtime = FileTimeToU64(FileTimeFromTimespec(StatModificationTime(st)));
+    stamp.device = (u64)st.st_dev;
+    stamp.id = (u64)st.st_ino;
+    return true;
 }
 
 // Opens path for reading and writing, creating it when createIfMissing.
@@ -363,14 +371,13 @@ bool WriteAll(FileHandle h, Str data) {
             }
             return false;
         }
+        if (n == 0) {
+            return false;
+        }
         d += n;
         left -= (size_t)n;
     }
     return true;
-}
-
-bool Flush(FileHandle h) {
-    return fsync(h) == 0;
 }
 
 bool Exists(Str path) {
@@ -583,6 +590,25 @@ bool RenameReplace(Str newPath, Str oldPath) {
     return Rename(newPath, oldPath);
 }
 
+bool WriteFileAtomic(Str path, Str data) {
+    if (len(path) == 0) {
+        return false;
+    }
+    TempStr dir = path::GetDirTemp(path);
+    char* tempPath = CStrTemp(path::JoinTemp(len(dir) ? dir : StrL("."), StrL(".tmp.XXXXXX")));
+    int fd = mkstemp(tempPath);
+    if (fd < 0) {
+        return false;
+    }
+    bool ok = WriteAll(fd, data) && fsync(fd) == 0;
+    ok = close(fd) == 0 && ok;
+    if (ok && RenameReplace(path, Str(tempPath))) {
+        return true;
+    }
+    unlink(tempPath);
+    return false;
+}
+
 bool OverwriteAtomicRetry(Str dst, Str src, int retryCount, int retrySleepMs) {
     if (len(dst) == 0 || len(src) == 0) {
         return false;
@@ -619,11 +645,6 @@ bool OverwriteAtomicRetry(Str dst, Str src, int retryCount, int retrySleepMs) {
 }
 
 } // namespace file
-
-int FileTimeDiffInSecs(const FILETIME& ft1, const FILETIME& ft2) {
-    i64 diff = (i64)FileTimeToU64(ft1) - (i64)FileTimeToU64(ft2);
-    return (int)(diff / (i64)kFileTimeTicksPerSec);
-}
 
 namespace dir {
 
@@ -670,8 +691,8 @@ bool CreateAll(Str dir, int* errOut) {
     return false;
 }
 
-// deletes everything inside dir; also removes dir itself when removeDir.
-// a missing dir counts as success, matching the previous RemoveAll behavior.
+// Deletes everything inside dir; also removes dir itself when removeDir.
+// Continues past per-entry errors to match Windows DeleteDirContents.
 static bool RemoveDirContentsZ(const char* dir, bool removeDir) {
     DIR* d = opendir(dir);
     if (!d) {
@@ -679,6 +700,7 @@ static bool RemoveDirContentsZ(const char* dir, bool removeDir) {
     }
     AutoCall closeDir(closedir, d);
 
+    bool ok = true;
     for (;;) {
         errno = 0;
         dirent* ent = readdir(d);
@@ -692,32 +714,39 @@ static bool RemoveDirContentsZ(const char* dir, bool removeDir) {
         TempStr child = path::JoinTemp(Str(dir), Str(ent->d_name));
         struct stat st;
         if (lstat(child.s, &st) != 0) {
-            return false;
+            ok = false;
+            continue;
         }
         if (S_ISDIR(st.st_mode)) {
             if (!RemoveDirContentsZ(child.s, true)) {
-                return false;
+                ok = false;
             }
         } else if (unlink(child.s) != 0) {
-            return false;
+            ok = false;
         }
     }
     if (errno != 0) {
-        return false;
+        ok = false;
     }
     if (!removeDir) {
-        return true;
+        return ok;
     }
-    return rmdir(dir) == 0;
+    return rmdir(dir) == 0 && ok;
 }
 
 bool RemoveAll(Str dir) {
+    if (!Exists(dir)) {
+        return false;
+    }
     return RemoveDirContentsZ(CStrTemp(dir), true);
 }
 
 // Delete everything inside dir but keep dir itself, so code that races with us
 // still finds the directory there (see SaveThumbnail / dir::CreateAll).
 bool Empty(Str dir) {
+    if (!Exists(dir)) {
+        return false;
+    }
     return RemoveDirContentsZ(CStrTemp(dir), false);
 }
 
@@ -737,6 +766,7 @@ bool HasWriteAccess(Str dir) {
 
 } // namespace dir
 
+// $HOME; empty when unset
 TempStr GetHomeDirTemp() {
     const char* home = getenv("HOME");
     if (!home || !home[0]) {
@@ -757,7 +787,8 @@ static TempStr XdgDownloadDirTemp(Str home) {
     for (int i = 0; i < len(lines); i++) {
         Str line = lines[i];
         Str prefix = StrL("XDG_DOWNLOAD_DIR=\"");
-        if (!str::StartsWith(line, prefix) || !str::EndsWith(line, StrL("\""))) {
+        // len check: the closing quote must not be the prefix's opening one
+        if (len(line) <= len(prefix) || !str::StartsWith(line, prefix) || !str::EndsWith(line, StrL("\""))) {
             continue;
         }
         Str val = Str(line.s + len(prefix), len(line) - len(prefix) - 1);

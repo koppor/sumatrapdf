@@ -2,14 +2,22 @@
    License: GPLv3 */
 
 #include "base/Base.h"
+#include "base/Dict.h"
 #include "base/File.h"
 #include "base/GuessFileType.h"
+#include "base/Launch.h"
+#include "base/Pixmap.h"
 #include "base/UITask.h"
+#if OS_WIN
+#include "base/Win.h"
+#endif
 
 #include "gui/UIModels.h"
 
 #include "Settings.h"
+#include "Annotation.h"
 #include "AppSettings.h"
+#include "Commands.h"
 #include "DisplayMode.h"
 #include "DocController.h"
 #include "PagePosition.h"
@@ -23,10 +31,165 @@
 #include "SumatraConfig.h"
 #include "SumatraPDF.h"
 #include "MainWindow.h"
+#include "Notifications.h"
+#include "ServerFiles.h"
+#include "TextSelection.h"
+#include "SumatraPDFCommon.h"
 #include "HomePage.h"
 #include "HomePageCommon.h"
 
 #include "SumatraLog.h"
+
+static int FindHomePath(const StrVec& paths, Str path) {
+#if OS_WIN
+    return paths.FindI(path);
+#else
+    return paths.Find(path);
+#endif
+}
+
+bool HomeSelection::Contains(Str path) const {
+    return FindHomePath(paths, path) >= 0;
+}
+
+void HomeSelection::Toggle(Str path) {
+    explicitSelection = true;
+    int idx = FindHomePath(paths, path);
+    if (idx >= 0) {
+        paths.RemoveAt(idx);
+    } else {
+        paths.AppendNonEmpty(path);
+    }
+}
+
+void HomeSelection::Clear() {
+    paths.Reset();
+    EndDrag();
+    explicitSelection = true;
+}
+
+void HomeSelection::Reset() {
+    Clear();
+    explicitSelection = false;
+}
+
+void HomeSelection::BeginDrag(Point pt, HomeDragMode mode) {
+    if (mode == HomeDragMode::Add) {
+        dragBase = paths;
+    }
+    dragging = true;
+    anchor = pt;
+}
+
+void HomeSelection::UpdateDrag(Point pt, Rect viewport) {
+    explicitSelection = true;
+    paths = dragBase;
+    marquee = Rect::FromXY(pt, anchor).Intersect(viewport);
+}
+
+void HomeSelection::AddDragHit(Str path, Rect bounds) {
+    if (!marquee.Intersect(bounds).IsEmpty() && !Contains(path)) {
+        paths.AppendNonEmpty(path);
+    }
+}
+
+void HomeSelection::EndDrag() {
+    dragging = false;
+    marquee = {};
+    dragBase.Reset();
+}
+
+void HomeSelection::MenuPaths(Str target, const Vec<FileState*>& visible, StrVec& out) const {
+    if (!paths.IsEmpty() && (len(target) == 0 || Contains(target))) {
+        for (FileState* fs : visible) {
+            if (Contains(fs->filePath)) {
+                out.Append(fs->filePath);
+            }
+        }
+        if (!out.IsEmpty()) {
+            return;
+        }
+    }
+    out.AppendNonEmpty(target);
+}
+
+bool HomeFilesAllPinned(const StrVec& paths) {
+    for (Str path : paths) {
+        FileState* fs = FileHistoryFindByPath(path);
+        if (!fs || !fs->isPinned) {
+            return false;
+        }
+    }
+    return !paths.IsEmpty();
+}
+
+static void ToggleHomeFilesPinned(MainWindow* win, const StrVec& paths) {
+    bool pin = !HomeFilesAllPinned(paths);
+    for (Str path : paths) {
+        FileState* fs = FileHistoryFindByPath(path);
+        if (fs) {
+            fs->isPinned = pin;
+        }
+    }
+    ScheduleSaveSettings();
+    win->RedrawAll(true);
+}
+
+static void ShowHomeFilesInFolder(MainWindow* win, const StrVec& paths) {
+    if (paths.IsEmpty() || !CanAccessDisk() || gPluginMode) {
+        return;
+    }
+    if (len(paths) == 1) {
+        ShowFileInFolder(win, paths[0]);
+        return;
+    }
+
+    StrVec dirs;
+    Vec<int> dirIndexes;
+    for (Str path : paths) {
+        TempStr dir = path::GetDirTemp(path::NormalizeTemp(path));
+        int idx = FindHomePath(dirs, dir);
+        if (idx < 0) {
+            idx = len(dirs);
+            dirs.Append(dir);
+        }
+        VecAppend(dirIndexes, idx);
+    }
+    for (int i = 0; i < len(dirs); i++) {
+        StrVec files;
+        for (int j = 0; j < len(paths); j++) {
+            if (dirIndexes[j] == i) {
+                files.Append(paths[j]);
+            }
+        }
+        if (FilePickerIsSumatraPDF() || OS_WASM || len(files) == 1) {
+            ShowFileInFolder(win, files[0]);
+            continue;
+        }
+        OpenFilesInDefaultManager(dirs[i], files);
+    }
+}
+
+bool RunHomeFilesCommand(MainWindow* win, const StrVec& paths, int cmd) {
+    if (len(paths) < 2) {
+        return false;
+    }
+    switch (cmd) {
+        case CmdShowInFolder:
+            ShowHomeFilesInFolder(win, paths);
+            return true;
+        case CmdPinSelectedDocument:
+            ToggleHomeFilesPinned(win, paths);
+            return true;
+        case CmdUploadToServer:
+            RunServerFilesBatch(win, paths, ServerFileAction::Upload);
+            return true;
+        case CmdDeleteFromServer:
+            RunServerFilesBatch(win, paths, ServerFileAction::Delete);
+            return true;
+    }
+    return false;
+}
 
 // Home page state that orig and ng keep the same way: the tip of the day and
 // promo lines, and how many files the page lists.
@@ -98,15 +261,6 @@ void PickAnotherRandomTip() {
     }
 }
 
-TempStr TrimGitTemp(Str s) {
-    if (gitCommidId && str::EndsWith(s, gitCommidId)) {
-        int sLen = len(s);
-        int gitLen = len(gitCommidId);
-        return str::DupTemp(Str(s.s, sLen - gitLen - 7));
-    }
-    return s;
-}
-
 // how many digits of the commit the About box shows
 constexpr int kAboutCommitDigits = 6;
 
@@ -116,9 +270,9 @@ void AboutSourceRow(Str* text, Str* url) {
     static Str gText;
     static Str gUrl;
     if (str::IsNull(gText)) {
-        if (len(gitCommidId) > 0) {
-            gText = str::Dup(Str(gitCommidId.s, std::min(len(gitCommidId), kAboutCommitDigits)));
-            gUrl = str::Dup(fmt("https://github.com/sumatrapdfreader/sumatrapdf/commit/%s", gitCommidId));
+        if (len(gitCommitId) > 0) {
+            gText = str::Dup(Str(gitCommitId.s, std::min(len(gitCommitId), kAboutCommitDigits)));
+            gUrl = str::Dup(fmt("https://github.com/sumatrapdfreader/sumatrapdf/commit/%s", gitCommitId));
         } else {
             gText = str::Dup(StrL("local build"));
             gUrl = str::Dup(StrL("https://github.com/sumatrapdfreader/sumatrapdf"));
@@ -263,8 +417,11 @@ struct HomeFileSizeEntry {
     bool lookingUp = false;
 };
 static Vec<HomeFileSizeEntry> gHomeFileSizes;
+static dict::StrToInt* gHomeFileSizeIdx = nullptr; // path -> index in gHomeFileSizes
 // re-looked up after this, so a file that changed shows its new size
 constexpr u64 kHomeFileSizeTtlMs = 60 * 1000;
+// a local lookup is cheap, but ng redraws every frame and would repeat it per frame
+constexpr u64 kLocalFileSizeTtlMs = 2 * 1000;
 
 struct HomeFileSizeLookup {
     Str path;
@@ -272,12 +429,22 @@ struct HomeFileSizeLookup {
 };
 
 static HomeFileSizeEntry* FindHomeFileSize(Str path) {
-    for (HomeFileSizeEntry& e : gHomeFileSizes) {
-        if (str::Eq(e.path, path)) {
-            return &e;
-        }
+    int idx = -1;
+    if (!gHomeFileSizeIdx || !gHomeFileSizeIdx->Get(path, &idx)) {
+        return nullptr;
     }
-    return nullptr;
+    return &gHomeFileSizes[idx];
+}
+
+static HomeFileSizeEntry* AddHomeFileSize(Str path) {
+    if (!gHomeFileSizeIdx) {
+        gHomeFileSizeIdx = new dict::StrToInt();
+    }
+    gHomeFileSizeIdx->Insert(path, len(gHomeFileSizes));
+    HomeFileSizeEntry* e = VecAppendBlanks(gHomeFileSizes, 1);
+    e->path = str::Dup(path);
+    e->size = kHomeFileSizePending;
+    return e;
 }
 
 static void HomeFileSizeDone(HomeFileSizeLookup* res) {
@@ -314,16 +481,19 @@ static bool SizeLookupMayBlock(Str path) {
 // size of a file the Home page lists: -1 if unknown, kHomeFileSizePending while
 // being looked up
 i64 GetHomeFileSize(Str path) {
-    if (!SizeLookupMayBlock(path)) {
-        return file::GetSize(path);
-    }
     HomeFileSizeEntry* e = FindHomeFileSize(path);
     if (!e) {
-        e = VecAppendBlanks(gHomeFileSizes, 1);
-        e->path = str::Dup(path);
-        e->size = kHomeFileSizePending;
+        e = AddHomeFileSize(path);
     }
-    bool stale = e->size == kHomeFileSizePending || GetTickCount64() - e->lookedUpMs > kHomeFileSizeTtlMs;
+    u64 now = GetTickCount64();
+    if (!SizeLookupMayBlock(path)) {
+        if (e->size == kHomeFileSizePending || now - e->lookedUpMs > kLocalFileSizeTtlMs) {
+            e->size = file::GetSize(path);
+            e->lookedUpMs = now;
+        }
+        return e->size;
+    }
+    bool stale = e->size == kHomeFileSizePending || now - e->lookedUpMs > kHomeFileSizeTtlMs;
     if (stale && !e->lookingUp) {
         e->lookingUp = true;
         auto* res = new HomeFileSizeLookup{str::Dup(path), -1};
@@ -380,15 +550,33 @@ Try [Sumatra File Manager Web](https://web.sumatrafilemanager.com): file manager
 // promotions from the update-check file, shown with the built-in ones
 static Str promoFromServer;
 
+// built-in promos, then the server's except those linking to a built-in's url
+static void CollectPromoLines() {
+    gPromoLines.Reset();
+    CollectTipsFromString(sumatraPromos, &gPromoLines);
+    int nBuiltIn = len(gPromoLines);
+    StrVec server;
+    CollectTipsFromString(promoFromServer, &server);
+    for (Str line : server) {
+        Str url = str::SliceFromChar(line, '(');
+        int end = str::IndexOfChar(url, ')');
+        url = end < 0 ? Str{} : Str(url.s, end + 1);
+        bool dup = false;
+        for (int i = 0; i < nBuiltIn && len(url) > 0; i++) {
+            dup = dup || str::Contains(gPromoLines[i], url);
+        }
+        if (!dup) {
+            gPromoLines.Append(line);
+        }
+    }
+}
+
 void EnsureTipsParsed() {
     if (gTipsParsed) {
         return;
     }
     CollectTipsFromString(sumatraTips, &gTipLines);
-    CollectTipsFromString(sumatraPromos, &gPromoLines);
-    if (len(promoFromServer) > 0) {
-        CollectTipsFromString(promoFromServer, &gPromoLines);
-    }
+    CollectPromoLines();
     gTipsParsed = true;
     PickRandomTipOrPromo();
 }
@@ -409,6 +597,10 @@ void SetPromoString(Str s) {
         return;
     }
     str::ReplaceWithCopy(&promoFromServer, s);
+    // the update check usually ends after the home page parsed its tips
+    if (gTipsParsed) {
+        CollectPromoLines();
+    }
 }
 
 static Str BitnessStr() {

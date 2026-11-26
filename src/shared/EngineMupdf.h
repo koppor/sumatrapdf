@@ -122,7 +122,7 @@ class EngineMupdf : public EngineBase {
 
     Func0 headingTocDoneCb;
 
-    TempStr GetPageLabeTemp(int pageNo) const override;
+    TempStr GetPageLabelTemp(int pageNo) const override;
     int GetPageByLabel(Str label) const override;
 
     fz_context* Ctx() const;
@@ -135,7 +135,12 @@ class EngineMupdf : public EngineBase {
     // fz_try frames live on a clone instead, a JS error rethrows on _ctx with no
     // matching handler and hits mupdf's uncaught-error abort. Safe to use from
     // the UI thread under docLock (nothing else drives _ctx's error stack).
-    fz_context* BaseCtx() const { return _ctx; }
+    fz_context* BaseCtx(const ScopedRecursiveMutex& scope) const {
+        if (ReportIf(!scope.Guards(&docLock))) {
+            CrashMe();
+        }
+        return _ctx;
+    }
 
     // Lock hierarchy (acquire in this order; never go upward):
     //   pagesLock           - protects the pages[] vector / FzPageInfo lookup

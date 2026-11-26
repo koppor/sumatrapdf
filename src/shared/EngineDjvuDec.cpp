@@ -134,6 +134,8 @@ struct DjvuDecPageInfo {
     djvu_page_type pageType = DJVU_PAGE_UNKNOWN;
     Vec<IPageElement*> allElements;
     bool gotElements = false;
+
+    ~DjvuDecPageInfo() { DeleteVecMembers(allElements); }
 };
 
 class EngineDjvuDec : public EngineBase {
@@ -595,7 +597,7 @@ Pixmap* EngineDjvuDec::RenderPage(RenderPageArgs& args) {
     // The decoder applies intrinsic rotation; only user rotation remains.
     int rdx = sdx, rdy = sdy;
     if (userRotation != 0) {
-        if (isBitonal) {
+        if (comp == 1) {
             pixels.Set(RotatePixels<kGrayChannels>(pixels, sdx, sdy, userRotation, rdx, rdy));
         } else {
             pixels.Set(RotatePixels<kBgrChannels>(pixels, sdx, sdy, userRotation, rdx, rdy));
@@ -721,18 +723,16 @@ Vec<IPageElement*> EngineDjvuDec::GetElements(int pageNo) {
         return Vec<IPageElement*>();
     }
     auto* pi = pages[pageNo - 1];
-    if (pi->gotElements) {
-        return pi->allElements;
-    }
+    // gotElements and allElements are only read and written under cacheLock
     ScopedMutex scope(&cacheLock);
     if (pi->gotElements) {
         return pi->allElements;
     }
-    pi->gotElements = true;
     auto& els = pi->allElements;
 
     djvu_page_links* links = djvu_page_get_links(doc, pageNo - 1);
     if (!links) {
+        pi->gotElements = true;
         return els;
     }
     float dpiF = fileDPI / (float)pi->dpi;
@@ -754,6 +754,7 @@ Vec<IPageElement*> EngineDjvuDec::GetElements(int pageNo) {
         }
     }
     djvu_page_links_destroy(ctx, links);
+    pi->gotElements = true;
     return els;
 }
 

@@ -38,6 +38,7 @@ constexpr const char* kReportScrollJs = R"JS((function(){
       wv.postMessage(JSON.stringify({__sumatraNotify:1,method:"scroll",params:JSON.stringify([x,y])}));
     } catch (e) {}
   };
+  window.__sumatraReportScroll = post;
   if (!window.__sumatraScrollHooked) {
     window.__sumatraScrollHooked = true;
     window.addEventListener("scroll", post, true);
@@ -214,7 +215,6 @@ void BrowserDocView::SubclassParent() {
         subclassId = 0;
         return;
     }
-    SetWindowLongPtr(hwndParent, GWLP_USERDATA, (LONG_PTR)this);
 }
 
 void BrowserDocView::UnsubclassParent() {
@@ -222,10 +222,6 @@ void BrowserDocView::UnsubclassParent() {
         return;
     }
     RemoveWindowSubclass(hwndParent, ParentWndProc, subclassId);
-    auto* curr = (BrowserDocView*)GetWindowLongPtr(hwndParent, GWLP_USERDATA);
-    if (curr == this) {
-        SetWindowLongPtr(hwndParent, GWLP_USERDATA, 0);
-    }
     subclassId = 0;
 }
 
@@ -676,7 +672,7 @@ static Str ScrollJsForKey(WPARAM key) {
 // Scrolls and reports the new position at once: the 'scroll' event waits for a
 // rendering frame, which Chromium skips when the view is occluded or busy.
 void BrowserDocView::EvalScroll(Str js) {
-    wv->Eval(fmt("%s;%s", js, Str(kReportScrollJs)));
+    wv->Eval(fmt("%s;if(window.__sumatraReportScroll)window.__sumatraReportScroll();", js));
 }
 
 LRESULT BrowserDocView::SendMsg(UINT msg, WPARAM wp, LPARAM lp) {
@@ -790,12 +786,26 @@ void BrowserViewGoForward(BrowserView* bv) {
     }
 }
 
+bool BrowserDocView::CanGoBack() const {
+    if (backend == Backend::IE && ie) {
+        return ie->canGoBack;
+    }
+    return canGoBack;
+}
+
+bool BrowserDocView::CanGoForward() const {
+    if (backend == Backend::IE && ie) {
+        return ie->canGoForward;
+    }
+    return canGoForward;
+}
+
 bool BrowserViewCanGoBack(BrowserView* bv) {
-    return bv && bv->view->canGoBack;
+    return bv && bv->view->CanGoBack();
 }
 
 bool BrowserViewCanGoForward(BrowserView* bv) {
-    return bv && bv->view->canGoForward;
+    return bv && bv->view->CanGoForward();
 }
 
 void BrowserViewSetZoomPercent(BrowserView* bv, int zoom) {

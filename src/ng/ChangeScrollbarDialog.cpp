@@ -77,10 +77,14 @@ void ShowChangeScrollbarDialog(MainWindow* win) {
     if (!HasPermission(Perm::SavePreferences) || !IsMainWindowValidAndNotClosing(win)) {
         return;
     }
+    // one up for another window would be left behind, empty and modal to it
+    CloseChangeScrollbarDialog();
     gChangeScrollbar.win = win;
     int curr = ScrollbarModeFromPrefs();
     gChangeScrollbar.sel = (curr >= 0 && curr <= kScrollbarHidden) ? curr : -1;
     gChangeScrollbar.visible = true;
+    DialogsTrackFrameDialog(
+        IsChangeScrollbarDialogVisible, [] { return gChangeScrollbar.win; }, CloseChangeScrollbarDialog);
     DlgWindowSpec spec;
     spec.name = "changescrollbar";
     spec.title = ChangeScrollbarDlgTitle;

@@ -1,7 +1,7 @@
 /* Copyright 2022 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
-constexpr const char* kPdfFilterStateStrs = "start\0author\0title\0data\0content\0end\0";
+constexpr const char* kPdfFilterStateStrs = "start\0author\0title\0date\0content\0end\0";
 enum class PdfFilterState {
     Start = 0,
     Author,
@@ -24,7 +24,7 @@ class PdfFilter : public FilterBase {
     VOID CleanUp();
 
     // IPersist
-    IFACEMETHODIMP GetClassID(CLSID* pClassID) { return CLSIDFromString(StrL(kPdfFilterClsid), pClassID); }
+    IFACEMETHODIMP GetClassID(CLSID* pClassID) override { return CLSIDFromString(StrL(kPdfFilterClsid), pClassID); }
 
   private:
     PdfFilterState m_state{PdfFilterState::End};

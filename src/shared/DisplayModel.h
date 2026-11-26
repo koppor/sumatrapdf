@@ -95,7 +95,11 @@ struct Synchronizer;
 enum class HeadingTocStart;
 
 struct DisplayModel : DocController {
+  private:
     DisplayModel(EngineBase* engine, DocControllerCallback* cb);
+
+  public:
+    static DisplayModel* Create(EngineBase* engine, DocControllerCallback* cb);
     DisplayModel(DisplayModel const&) = delete;
     DisplayModel& operator=(DisplayModel const&) = delete;
 
@@ -136,7 +140,7 @@ struct DisplayModel : DocController {
     void CreateThumbnail(Size size, const OnBitmapRendered* saveThumbnail) override;
 
     bool HasPageLabels() const override;
-    TempStr GetPageLabeTemp(int pageNo) const override;
+    TempStr GetPageLabelTemp(int pageNo) const override;
     int GetPageByLabel(Str label) const override;
     int LogicalPageCount() const;
 
@@ -301,7 +305,8 @@ struct DisplayModel : DocController {
     float ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) const;
     SizeF PageSizeAfterRotation(int pageNo, bool fitToContent = false, float contentPad = 0) const;
     bool ShouldTreatLandscapeAsSpread() const;
-    void EnsureSpreadFlags() const;
+    void BuildSpreadFlags();
+    bool HasSpreadFlags() const;
     bool StepsOnePage() const;
     int FirstPageInRow(int pageNo) const;
     int LastPageInRow(int pageNo) const;
@@ -443,10 +448,10 @@ struct DisplayModel : DocController {
 
     /* landscape image pages that occupy a full facing/book row
        (ComicBookUI / ImageUI LandscapeAsSpread; issues #1324, #872) */
-    mutable Vec<u8> spreadFlags;
-    mutable Vec<int> rowFirst;
-    mutable Vec<int> rowLast;
-    mutable bool spreadCacheValid = false;
+    Vec<u8> spreadFlags;
+    Vec<int> rowFirst;
+    Vec<int> rowLast;
+    bool spreadCacheValid = false;
 
     /* when we're in presentation mode, _pres* contains the pre-presentation values */
     bool inPresentation = false;

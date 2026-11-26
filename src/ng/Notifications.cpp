@@ -58,6 +58,11 @@ static void FreeNotification(NotificationWnd* wnd) {
 // doesn't get to; the notification shows once it returns
 void RepaintNotificationNow(NotificationWnd*) {}
 
+// false for null and for a notification that was already removed (and freed)
+static bool IsLiveNotification(NotificationWnd* wnd) {
+    return VecFind(gNotifications, wnd) >= 0;
+}
+
 void RemoveNotification(NotificationWnd* wnd) {
     if (!wnd) {
         return;
@@ -105,6 +110,11 @@ void ExpireNotifications(MainWindow* win, int elapsedMs) {
         }
         CloseNotification(wnd, NotifCloseReason::Timeout);
     }
+}
+
+// the tab a notification is shown for, nullptr if any
+WindowTab* NotificationTab(NotificationWnd* wnd) {
+    return IsLiveNotification(wnd) ? wnd->tab : nullptr;
 }
 
 NotificationWnd* GetNotificationForGroup(MainWindow* win, Kind kind) {
@@ -161,12 +171,40 @@ void RemoveNotificationsForTab(WindowTab* tab) {
     }
 }
 
+int NotificationCountForWindow(MainWindow* win) {
+    int n = 0;
+    for (NotificationWnd* wnd : gNotifications) {
+        if (wnd->win == win) {
+            n++;
+        }
+    }
+    return n;
+}
+
 NotificationWnd* ShowNotification(const NotificationCreateArgs& args) {
     if (!gNotificationsEnabled) {
+        // richMsg is ours to free
+        if (args.richMsg) {
+            TipSpansFree(*args.richMsg);
+            delete args.richMsg;
+        }
         return nullptr;
     }
-    // one notification per group per window, as orig does
-    RemoveNotificationsForGroup(args.win, args.groupId);
+    // one notification per group per window, as orig's NotifsAdd: ad-hoc ones
+    // stack, and a tab's leaves another tab's of the group alone
+    if (args.groupId && args.groupId != kNotifAdHoc) {
+        for (int i = len(gNotifications) - 1; i >= 0; i--) {
+            NotificationWnd* old = gNotifications[i];
+            if (old->win != args.win || old->groupId != args.groupId) {
+                continue;
+            }
+            if (args.tab && old->tab && old->tab != args.tab) {
+                continue;
+            }
+            VecRemoveAt(gNotifications, i);
+            FreeNotification(old);
+        }
+    }
     auto* wnd = new NotificationWnd();
     wnd->win = args.win;
     wnd->tab = args.tab;
@@ -238,7 +276,7 @@ NotificationWnd* ShowPlainWarningNotification(MainWindow* win, Str msg, int time
 }
 
 void NotificationUpdateMessage(NotificationWnd* wnd, Str msg, int timeoutInMS) {
-    if (!wnd) {
+    if (!IsLiveNotification(wnd)) {
         return;
     }
     str::ReplaceWithCopy(&wnd->msg, msg);
@@ -251,17 +289,17 @@ void NotificationUpdateMessage(NotificationWnd* wnd, Str msg, int timeoutInMS) {
 }
 
 bool UpdateNotificationProgress(NotificationWnd* wnd, Str msg, int perc) {
-    if (VecFind(gNotifications, wnd) < 0) {
+    if (!IsLiveNotification(wnd)) {
         return false;
     }
     ReportIf(perc < 0 || perc > 100);
     wnd->progressPerc = limitValue(perc, 0, 100);
-    NotificationUpdateMessage(wnd, msg);
+    NotificationUpdateMessage(wnd, msg, wnd->timeoutMs);
     return true;
 }
 
 TempStr NotificationGetMessageTemp(NotificationWnd* wnd) {
-    return wnd ? str::DupTemp(wnd->msg) : TempStr{};
+    return IsLiveNotification(wnd) ? str::DupTemp(wnd->msg) : TempStr{};
 }
 
 // a warning raised before there is a window to show it in waits here

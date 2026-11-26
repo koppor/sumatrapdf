@@ -3,6 +3,7 @@
 
 #include "base/Base.h"
 #include "base/Win.h"
+#include "base/WinDynCalls.h"
 
 #include <roapi.h>
 #include <windows.media.speechsynthesis.h>
@@ -57,7 +58,7 @@ static Str gTtsVoiceId;
 
 // playback speed multiplier, 1.0 is normal speed
 constexpr float kTtsSpeedMin = 0.5f;
-constexpr float kTtsSpeedMax = 3.0f;
+constexpr float kTtsSpeedMax = 3.5f;
 static float gTtsSpeed = 1.0f;
 
 static HWND gTtsNotifyHwnd = nullptr;
@@ -750,8 +751,8 @@ static bool WinTtsInit() {
     }
     gWinInitFailed = true;
 
-    HMODULE combase = LoadLibraryW(L"combase.dll");
-    HMODULE shcore = LoadLibraryW(L"shcore.dll");
+    HMODULE combase = SafeLoadLibrary(StrL("combase.dll"));
+    HMODULE shcore = SafeLoadLibrary(StrL("shcore.dll"));
     if (!combase || !shcore) {
         return false;
     }
@@ -798,6 +799,10 @@ static bool WinTtsInit() {
     hr = factory->ActivateInstance(&inspectable);
     factory->Release();
     if (FAILED(hr) || !inspectable) {
+        if (gWinVoicesStatic) {
+            gWinVoicesStatic->Release();
+            gWinVoicesStatic = nullptr;
+        }
         return false;
     }
 
@@ -1104,7 +1109,7 @@ static void WinTtsExtractCues(WMSS::ISpeechSynthesisStream* stream, Vec<WinTtsCu
     }
 }
 
-// reads the whole synthesized WAV file into gWinWavData
+// reads the whole synthesized WAV stream into *dataOut
 static bool WinTtsReadStreamBytes(WMSS::ISpeechSynthesisStream* stream, u8** dataOut, DWORD* sizeOut) {
     IStream* istm = nullptr;
     HRESULT hr = pCreateStreamOverRandomAccessStream((IUnknown*)stream, IID_PPV_ARGS(&istm));
@@ -1331,7 +1336,6 @@ static void WinTtsProcessEvents() {
                 gTtsActive = false;
             }
         }
-        return;
     }
 
     // playback finished
@@ -1352,8 +1356,7 @@ static void WinTtsProcessEvents() {
     }
 }
 
-// position (in WCHARs) in the spoken text of the word being played;
-// -1 if playback has not started yet (still synthesizing)
+// ms since playback started, capped at the clip's duration
 static DWORD WinTtsClockMs() {
     if (gWinPlayQpcStart.QuadPart == 0) {
         return 0;
@@ -1371,6 +1374,8 @@ static DWORD WinTtsClockMs() {
     return (DWORD)ms;
 }
 
+// position (in WCHARs) in the spoken text of the word being played;
+// -1 if playback has not started yet (still synthesizing)
 static int WinTtsLastWordPosWide() {
     if (!gWinWaveOut && !gWinVirtualPlay) {
         return -1;
@@ -1519,9 +1524,7 @@ bool TtsQueueUtf8(Str text) {
 
 // One-shot: the queued utterance just became the playing one.
 bool TtsDidStartQueued() {
-    bool v = gTtsQueuedStarted;
-    gTtsQueuedStarted = false;
-    return v;
+    return TtsTakeFlag(&gTtsQueuedStarted);
 }
 
 bool TtsIsSpeaking() {
@@ -1541,6 +1544,9 @@ int TtsGetSpokenPosUtf8() {
             return -1;
         }
         return 0;
+    }
+    if (wpos > gTtsSpokenText.len) {
+        wpos = gTtsSpokenText.len;
     }
     int n = WideCharToMultiByte(CP_UTF8, 0, gTtsSpokenText.s, wpos, nullptr, 0, nullptr, nullptr);
     return n > 0 ? n : -1;

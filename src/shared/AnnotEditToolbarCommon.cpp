@@ -85,12 +85,16 @@ Str KindName(AnnotEditKind kind) {
             return StrL("italic");
         case AnnotEditKind::Underline:
             return StrL("underline");
+        case AnnotEditKind::Strikeout:
+            return StrL("strikeout");
         case AnnotEditKind::TextColor:
             return StrL("textColor");
         case AnnotEditKind::TextSize:
             return StrL("textSize");
         case AnnotEditKind::Alignment:
             return StrL("alignment");
+        case AnnotEditKind::VAlign:
+            return StrL("valign");
         case AnnotEditKind::Icon:
             return StrL("icon");
         case AnnotEditKind::Contents:
@@ -154,6 +158,7 @@ Str ResolvedAnnotIconName(Annotation* annot) {
 // clang-format off
 // in gBase14FontFamilies order
 SeqStrings gBase14ReadableNames = "Courier\0Helvetica\0TimesRoman\0";
+// clang-format on
 
 int StyleBitForKind(AnnotEditKind kind) {
     switch (kind) {
@@ -163,9 +168,25 @@ int StyleBitForKind(AnnotEditKind kind) {
             return kFreeTextItalic;
         case AnnotEditKind::Underline:
             return kFreeTextUnderline;
+        case AnnotEditKind::Strikeout:
+            return kFreeTextStrikeout;
         default:
             return 0;
     }
+}
+
+// a text box's vertical alignment: 0 top, 1 middle, 2 bottom
+int VAlignOfStyle(int style) {
+    if (style & kFreeTextVMiddle) {
+        return 1;
+    }
+    return (style & kFreeTextVBottom) ? 2 : 0;
+}
+
+// the Vertical Alignment chip goes top, middle, bottom, top
+int NextVAlignStyle(int style) {
+    static const int bits[] = {kFreeTextVMiddle, kFreeTextVBottom, 0};
+    return (style & ~kFreeTextVAlignMask) | bits[VAlignOfStyle(style)];
 }
 
 // chips paint after the temp arena resets, so a family they show must outlive it
@@ -200,6 +221,9 @@ static TempStr FontDescriptionTemp(Str family, int style) {
     }
     if (style & kFreeTextUnderline) {
         s.Append(fmt(" %s", Tr("Underline")));
+    }
+    if (style & kFreeTextStrikeout) {
+        s.Append(fmt(" %s", Tr("Strikethrough")));
     }
     return ToStrTemp(s);
 }
@@ -255,22 +279,96 @@ const char* MupdfIconStream(Str name) {
     return icon_star;
 }
 
-bool IsPdfPathOpChar(char c) {
+static bool IsPdfPathOpChar(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '*';
 }
 
-void SkipPdfPathWs(const char*& p) {
+static void SkipPdfPathWs(const char*& p) {
     while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') {
         p++;
     }
 }
 
-// Build an fz_path from a pdf_write_icon_appearance glyph stream (m/l/c/re/h/cm/f).
-float PdfPathPop(float* stk, int& top) {
+static float PdfPathPop(float* stk, int& top) {
     if (top <= 0) {
         return 0;
     }
     return stk[--top];
+}
+
+// Feeds a pdf_write_icon_appearance glyph stream (m/l/c/re/h/cm/f) to sink, points transformed by its cm.
+void ParseMupdfIconPath(MupdfIconPathSink& sink, const char* s) {
+    float stk[32];
+    int top = 0;
+    // the current transform (a b c d e f), as a PDF `cm` leaves it
+    float m[6] = {1, 0, 0, 1, 0, 0};
+    auto xf = [&m](float x, float y) -> PointF { return {x * m[0] + y * m[2] + m[4], x * m[1] + y * m[3] + m[5]}; };
+
+    const char* p = s;
+    for (;;) {
+        SkipPdfPathWs(p);
+        if (*p == 0) {
+            break;
+        }
+        if (*p == '.' || *p == '-' || *p == '+' || (*p >= '0' && *p <= '9')) {
+            char* end = nullptr;
+            float v = strtof(p, &end);
+            if (end == p || top >= dimofi(stk)) {
+                break;
+            }
+            stk[top++] = v;
+            p = end;
+            continue;
+        }
+        if (!IsPdfPathOpChar(*p)) {
+            p++;
+            continue;
+        }
+        const char* op = p;
+        while (IsPdfPathOpChar(*p)) {
+            p++;
+        }
+        int nOp = (int)(p - op);
+        if (nOp == 1 && (op[0] == 'm' || op[0] == 'l') && top >= 2) {
+            float y = PdfPathPop(stk, top);
+            float x = PdfPathPop(stk, top);
+            if (op[0] == 'm') {
+                sink.MoveTo(xf(x, y));
+            } else {
+                sink.LineTo(xf(x, y));
+            }
+        } else if (nOp == 1 && op[0] == 'c' && top >= 6) {
+            float y3 = PdfPathPop(stk, top);
+            float x3 = PdfPathPop(stk, top);
+            float y2 = PdfPathPop(stk, top);
+            float x2 = PdfPathPop(stk, top);
+            float y1 = PdfPathPop(stk, top);
+            float x1 = PdfPathPop(stk, top);
+            sink.CurveTo(xf(x1, y1), xf(x2, y2), xf(x3, y3));
+        } else if (nOp == 2 && op[0] == 'r' && op[1] == 'e' && top >= 4) {
+            float h = PdfPathPop(stk, top);
+            float w = PdfPathPop(stk, top);
+            float y = PdfPathPop(stk, top);
+            float x = PdfPathPop(stk, top);
+            sink.AddRect(xf(x, y), xf(x + w, y), xf(x + w, y + h), xf(x, y + h));
+        } else if (nOp == 1 && op[0] == 'h') {
+            sink.Close();
+        } else if (nOp == 2 && op[0] == 'c' && op[1] == 'm' && top >= 6) {
+            float f = PdfPathPop(stk, top);
+            float e = PdfPathPop(stk, top);
+            float d = PdfPathPop(stk, top);
+            float c = PdfPathPop(stk, top);
+            float b = PdfPathPop(stk, top);
+            float a = PdfPathPop(stk, top);
+            // the new matrix applies first, then the one in force
+            float r[6] = {a * m[0] + b * m[2], a * m[1] + b * m[3],        c * m[0] + d * m[2],
+                          c * m[1] + d * m[3], e * m[0] + f * m[2] + m[4], e * m[1] + f * m[3] + m[5]};
+            memcpy(m, r, sizeof(r));
+        } else {
+            // 'f' and unknown ops: drop the operands, keep the path
+            top = 0;
+        }
+    }
 }
 
 Color BarActiveBg() {
@@ -345,8 +443,7 @@ static PdfColor gColorsValues[] = {
 	0xffffffff, /* white */
 	0xffffff00, /* yellow */
 };
-
-static bool gShowRect = true;
+// clang-format on
 
 static TempStr GetKnownColorNameTemp(PdfColor c) {
     int n = dimofi(gColorsValues);
@@ -493,10 +590,8 @@ void CollectAnnotationHoverRows(Annotation* annot, AnnotationHoverRows& rows) {
     if (popupId >= 0) {
         rows.Add(StrL("popup"), Tr("Popup:"), fmt("%d 0 R", popupId));
     }
-    if (gShowRect) {
-        RectF rect = GetBounds(annot);
-        rows.Add(StrL("rect"), Tr("Rect:"), fmt("%d-%d@%d-%d", (int)rect.dx, (int)rect.dy, (int)rect.x, (int)rect.y));
-    }
+    RectF rect = GetBounds(annot);
+    rows.Add(StrL("rect"), Tr("Rect:"), fmt("%d-%d@%d-%d", (int)rect.dx, (int)rect.dy, (int)rect.x, (int)rect.y));
 }
 
 Color AnnotationHoverBg() {
@@ -609,6 +704,8 @@ TempStr ChipLabelTemp(const AnnotEditItem& item) {
             return str::DupTemp(StrL("I"));
         case AnnotEditKind::Underline:
             return str::DupTemp(StrL("U"));
+        case AnnotEditKind::Strikeout:
+            return str::DupTemp(StrL("S"));
         case AnnotEditKind::Icon:
             return str::DupTemp(item.iconName);
         default:
@@ -707,6 +804,7 @@ void CollectItems(Annotation* annot, Vec<AnnotEditItem>& out) {
         AppendStyleToggle(out, AnnotEditKind::Bold, style, Tr("Bold"));
         AppendStyleToggle(out, AnnotEditKind::Italic, style, Tr("Italic"));
         AppendStyleToggle(out, AnnotEditKind::Underline, style, Tr("Underline"));
+        AppendStyleToggle(out, AnnotEditKind::Strikeout, style, Tr("Strikethrough"));
         {
             AnnotEditItem it;
             it.kind = AnnotEditKind::TextSize;
@@ -719,6 +817,13 @@ void CollectItems(Annotation* annot, Vec<AnnotEditItem>& out) {
             it.kind = AnnotEditKind::Alignment;
             it.number = Quadding(annot);
             it.tooltip = Tr("Text Alignment");
+            VecAppend(out, it);
+        }
+        {
+            AnnotEditItem it;
+            it.kind = AnnotEditKind::VAlign;
+            it.number = VAlignOfStyle(style);
+            it.tooltip = Tr("Vertical Alignment");
             VecAppend(out, it);
         }
     }
@@ -906,8 +1011,7 @@ void DeleteAnnotationAndUpdateUI(WindowTab* tab, Annotation* annot) {
         CancelDrag(win);
     }
 
-    DetachAnnotationFromUI(annot);
-    DeleteAnnotation(annot);
+    DeleteAnnotationFromUI(annot);
     RefreshAnnotationLists(tab);
     SetSelectedAnnotation(tab, keepSelected);
     if (IsMainWindowValidAndNotClosing(tab->win)) {
@@ -950,7 +1054,7 @@ void HideAnnotationTextPopupFor(MainWindow* win, Annotation* annot) {
     }
 }
 
-void DetachAnnotationFromUI(Annotation* annot) {
+void DeleteAnnotationFromUI(Annotation* annot) {
     if (!annot) {
         return;
     }
@@ -976,6 +1080,7 @@ void DetachAnnotationFromUI(Annotation* annot) {
             }
         }
     }
+    DeleteAnnotationWithoutUI(annot);
 }
 
 void RefreshAnnotationLists(WindowTab* tab) {
@@ -995,7 +1100,7 @@ void RefreshEditAnnotationsAfterEngineChange(WindowTab* tab) {
     RefreshAnnotFilterAnnotations(tab->win);
 }
 
-TempStr AnnotEditorLayoutResultTemp(int, int, int* exitCodeOut, int) {
+TempStr AnnotEditorLayoutResultTemp(int* exitCodeOut) {
     str::Builder out;
     auto finish = [&](Str msg, int code) -> TempStr {
         out.Append(msg);
@@ -1023,8 +1128,7 @@ TempStr AnnotEditorLayoutResultTemp(int, int, int* exitCodeOut, int) {
     EngineMupdfGetLoadedAnnotations(tab->GetEngine(), annots);
     int n = len(annots);
     out.Append(fmt("OK n=%d ignoreReload=%d reloadOnFocus=%d resizeRerenderPending=%d", n,
-                   (int)tab->ignoreNextAutoReload, (int)tab->reloadOnFocus,
-                   (int)AnnotResizeRerenderPending(win)));
+                   (int)tab->ignoreNextAutoReload, (int)tab->reloadOnFocus, (int)AnnotResizeRerenderPending(win)));
     Annotation* annot = tab->selectedAnnotation;
     DisplayModel* dm = tab->AsFixed();
     if (annot && dm) {
@@ -1049,8 +1153,11 @@ TempStr AnnotEditorLayoutResultTemp(int, int, int* exitCodeOut, int) {
 // a color from the drop-down of the chip that was clicked last; its alpha is
 // the annotation's opacity, kColorUnset means no color at all
 void ChipColorPicked(AnnotEditToolbarBase* tb, Color col) {
-    WindowTab* tab = tb->tab;
-    Annotation* annot = tab ? tab->selectedAnnotation : nullptr;
+    WindowTab* tab = tb ? tb->tab : nullptr;
+    if (!tab || !IsMainWindowValidAndNotClosing(tab->win) || !VecContains(tab->win->Tabs(), tab)) {
+        return;
+    }
+    Annotation* annot = tab->selectedAnnotation;
     if (!AnnotationIsLive(annot) || annot != tb->annot) {
         return;
     }
@@ -1095,13 +1202,4 @@ void PostedStartContentsEdit(MainWindow* win) {
         return;
     }
     StartSelectedAnnotContentsEdit(win);
-}
-
-// How much committing a free text edit grows its box: only by what the new
-// text needs beyond both the box and what the old text needed. A box that fit
-// its text snugly, smaller than our padded estimate, keeps its size (#6551).
-Size FreeTextGrowth(Size box, Size fitOld, Size fitNew) {
-    int dx = fitNew.dx - std::max(box.dx, fitOld.dx);
-    int dy = fitNew.dy - std::max(box.dy, fitOld.dy);
-    return {std::max(dx, 0), std::max(dy, 0)};
 }

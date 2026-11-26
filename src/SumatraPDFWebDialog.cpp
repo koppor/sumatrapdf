@@ -32,6 +32,7 @@
 #include "SumatraDialogs.h"
 #include "shared/PdfToolsCommon.h"
 #include "shared/SumatraPDFWebCommon.h"
+#include "ServerFiles.h"
 
 struct SumatraPDFWebWnd : WindowBase {
     ~SumatraPDFWebWnd() override = default;
@@ -189,6 +190,7 @@ void SumatraPDFWebWnd::OnForget(VirtMouseEvent*) {
     lastHttpStatus = 0;
     clearListStatus = false;
     ClearFileList();
+    ServerFilesReset();
     SetForgetEnabled(false);
     if (edit) {
         edit->SetText(Str{});
@@ -218,6 +220,7 @@ void SumatraPDFWebWnd::FinishVerify(OnlineVerifyResult* res) {
         if (!same) {
             ClearFileList();
         }
+        ServerFilesReset();
         lastHttpStatus = kHttpStatusOk;
         if (edit) {
             edit->SetText(res->token);
@@ -323,16 +326,19 @@ void SumatraPDFWebWnd::FinishList(OnlineJobResult* res) {
 }
 
 void SumatraPDFWebWnd::FinishUpload(OnlineJobResult* res) {
+    RememberOnlineJobHash(res);
     if (ShowTransportError(res)) {
         UpdateFileButtons();
         return;
     }
     SetStatus(Tr("Uploaded."));
+    ServerFilesReset();
     UpdateFileButtons();
     StartList();
 }
 
 void SumatraPDFWebWnd::FinishDownload(OnlineJobResult* res) {
+    RememberOnlineJobHash(res);
     if (ShowTransportError(res)) {
         UpdateFileButtons();
         return;
@@ -341,8 +347,10 @@ void SumatraPDFWebWnd::FinishDownload(OnlineJobResult* res) {
     if (len(res->cachePath) == 0) {
         return;
     }
+    // the window may have closed during the download: a null window opens a new one
+    MainWindow* target = IsMainWindowValidAndNotClosing(win) ? win : nullptr;
     // Cache path must not become a File / History entry. The tab title is the server name.
-    LoadArgs args(res->cachePath, win);
+    LoadArgs args(res->cachePath, target);
     args.skipHistory = true;
     args.SetDisplayName(res->displayName);
     StartLoadDocument(&args);

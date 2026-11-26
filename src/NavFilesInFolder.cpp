@@ -148,21 +148,22 @@ struct NavFilesInFolderWnd : WindowBase {
 };
 
 static NavFilesInFolderWnd* gNavFilesWnd = nullptr;
+// across windows: a new window at a freed one's address must not take its scans
+static int gNavScanGen = 0;
 static HWND gHwndToActivateOnNavClose = nullptr;
 
 NavFilesInFolderWnd::~NavFilesInFolderWnd() {
-    scanGen++; // in-flight scans must not apply to a destroyed window
     str::Free(currDir);
     str::Free(pendingSelectPath);
 }
 
-static void SafeDeleteNavFilesWnd() {
-    if (!gNavFilesWnd) {
+// deletes the window it was scheduled for, not whatever gNavFilesWnd is by then
+static void SafeDeleteNavFilesWnd(NavFilesInFolderWnd* wnd) {
+    delete wnd;
+    // a replacement window is open: it owns the window to re-activate
+    if (gNavFilesWnd) {
         return;
     }
-    auto* tmp = gNavFilesWnd;
-    gNavFilesWnd = nullptr;
-    delete tmp;
     if (gHwndToActivateOnNavClose) {
         HWND fg = GetForegroundWindow();
         if (!fg || fg == gHwndToActivateOnNavClose) {
@@ -172,12 +173,21 @@ static void SafeDeleteNavFilesWnd() {
     }
 }
 
+// clears gNavFilesWnd now so a second request (onClose then onDestroy) is a no-op
 static void ScheduleDeleteNavFilesWnd() {
     if (!gNavFilesWnd) {
         return;
     }
-    auto fn = MkFunc0Void(SafeDeleteNavFilesWnd);
+    auto fn = MkFunc0<NavFilesInFolderWnd>(SafeDeleteNavFilesWnd, gNavFilesWnd);
+    gNavFilesWnd = nullptr;
     uitask::Post(fn, "SafeDeleteNavFilesWnd");
+}
+
+// a window deleted after its replacement opened must not schedule the replacement
+static void OnNavFilesWndGone(NavFilesInFolderWnd* wnd) {
+    if (wnd == gNavFilesWnd) {
+        ScheduleDeleteNavFilesWnd();
+    }
 }
 
 // Alt-Tab / activation finishes setting focus after WM_ACTIVATE, so set list
@@ -222,75 +232,6 @@ static void ClearNavModel(ListBoxModelNav* m) {
     VecReset(m->entries);
 }
 
-void AppendHomeFileEntry(Vec<NavFileEntry>& out, Str path) {
-    if (!CanOpenFile(path)) {
-        return;
-    }
-    // Quick access keeps listing files after they are deleted
-    WIN32_FILE_ATTRIBUTE_DATA fad{};
-    if (!path::GetCachedAttributesEx(path, &fad)) {
-        return;
-    }
-    NavFileEntry e;
-    e.path = str::Dup(path);
-    e.name = str::Dup(path);
-    e.size = ((i64)fad.nFileSizeHigh << 32) | (i64)fad.nFileSizeLow;
-    VecAppend(out, e);
-}
-
-// Built on a worker thread: listing + filtering + sorting a folder of tens of
-// thousands of files must not freeze the UI (discussion #6014).
-void CollectNavEntriesForDir(Str dir, Vec<NavFileEntry>& out) {
-    if (len(dir) == 0) {
-        CollectHomeEntries(out);
-        return;
-    }
-    // ".." also in a drive root, where it leads to the home view
-    AppendNavParentEntry(out);
-    int firstIdx = 1; // keep ".." at the top when sorting
-
-    DirIter di{dir};
-    di.includeFiles = true;
-    di.includeDirs = true;
-    for (DirIterEntry* de : di) {
-        DWORD attrs = de->fd->dwFileAttributes;
-        if (attrs & FILE_ATTRIBUTE_HIDDEN) {
-            continue;
-        }
-        TempStr leaf = NavLeafNameTemp(de);
-        if (len(leaf) == 0) {
-            continue;
-        }
-        // own path/name before any further temp allocations
-        Str fullPath = str::Dup(de->filePath);
-
-        NavFileEntry e;
-        e.path = fullPath;
-        if (IsDirectory(de)) {
-            e.isDir = true;
-            e.name = str::Join(leaf, StrL("\\"));
-        } else {
-            if (!CanOpenFile(leaf)) {
-                str::Free(fullPath);
-                continue;
-            }
-            e.name = str::Dup(leaf);
-            e.size = GetFileSize(de);
-            // FindFirstFile size is sometimes 0 on network/cloud providers even
-            // when the file has content; attributes are cached for network paths.
-            if (e.size == 0) {
-                WIN32_FILE_ATTRIBUTE_DATA fad{};
-                if (path::GetCachedAttributesEx(fullPath, &fad) && !(fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    e.size = ((i64)fad.nFileSizeHigh << 32) | (i64)fad.nFileSizeLow;
-                }
-            }
-        }
-        VecAppend(out, e);
-    }
-
-    SortNavEntries(out, firstIdx);
-}
-
 static int FindEntryIndex(NavFilesInFolderWnd* wnd, ListBoxModelNav* m, Str selectPath);
 static void SelectAndEnsureVisible(VirtListBox* lb, int idx);
 
@@ -328,13 +269,13 @@ static void FinishNavDirScan(NavDirScanResult* r) {
          (int)uitask::IsMainUIThread());
 
     auto* m = (ListBoxModelNav*)wnd->listBox->model;
-    if (!m) {
-        m = new ListBoxModelNav();
-    }
     wnd->scanInFlight = false;
     // a re-read that found nothing new leaves the list alone: no repaint at all
-    if (r->isRefresh && SameNavEntries(m->all, r->entries)) {
+    if (r->isRefresh && m && SameNavEntries(m->all, r->entries)) {
         return;
+    }
+    if (!m) {
+        m = new ListBoxModelNav();
     }
     int scrollY = wnd->listBox->scrollY;
     StealNavEntries(m->all, r->entries);
@@ -571,7 +512,7 @@ void NavFilesInFolderWnd::SetDir(Str dir, Str selectPath, int selectIdx, NavList
     }
     str::ReplaceWithCopy(&currDir, dir);
     UpdateNavButtons();
-    scanGen++;
+    scanGen = ++gNavScanGen;
     scanInFlight = true;
     str::ReplaceWithCopy(&pendingSelectPath, selectPath);
     pendingSelectIdx = selectIdx;
@@ -697,7 +638,8 @@ void NavFilesInFolderWnd::ExecuteCurrentSelection(bool inNewTab) {
         GoUp();
         return;
     }
-    TempStr path = NavEntryPathTemp(this, e);
+    // own the path: the modal MaybeSaveAnnotations can re-fill the model, which frees the entry
+    TempStr path = str::DupTemp(NavEntryPathTemp(this, e));
     if (e.isDir) {
         Navigate(path);
         return;
@@ -1139,7 +1081,6 @@ bool NavFilesInFolderWnd::Create(MainWindow* mainWin, Str filePath) {
         args.style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
         args.title = Tr("Navigate Files in Folder");
         args.font = GetFont();
-        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
         args.isRtl = IsUIRtl();
         CreateCustom(args);
     }
@@ -1312,8 +1253,8 @@ void ShowNavFilesInFolder(MainWindow* win, Str selectPath, bool skipHistory) {
     auto* wnd = new NavFilesInFolderWnd();
     wnd->skipHistory = skipHistory;
     wnd->closeOnEsc = true;
-    wnd->onClose = MkFunc0Void(ScheduleDeleteNavFilesWnd);
-    wnd->onDestroy = MkFunc0Void(ScheduleDeleteNavFilesWnd);
+    wnd->onClose = MkFunc0<NavFilesInFolderWnd>(OnNavFilesWndGone, wnd);
+    wnd->onDestroy = MkFunc0<NavFilesInFolderWnd>(OnNavFilesWndGone, wnd);
     wnd->onActivate = MkMethod1<NavFilesInFolderWnd, WindowBase::ActivateEvent*, &NavFilesInFolderWnd::OnActivate>(wnd);
     wnd->onFocus = MkMethod1<NavFilesInFolderWnd, WindowBase::FocusEvent*, &NavFilesInFolderWnd::OnFocus>(wnd);
     wnd->onKeyDown = MkMethod1<NavFilesInFolderWnd, KeyEvent*, &NavFilesInFolderWnd::OnKeyDown>(wnd);
@@ -1322,7 +1263,8 @@ void ShowNavFilesInFolder(MainWindow* win, Str selectPath, bool skipHistory) {
     gNavFilesWnd = wnd;
     gHwndToActivateOnNavClose = win->hwndFrame;
     bool ok = wnd->Create(win, filePath);
-    if (!ok) {
+    // unless Esc during Create already scheduled its delete
+    if (!ok && gNavFilesWnd == wnd) {
         gNavFilesWnd = nullptr;
         gHwndToActivateOnNavClose = nullptr;
         delete wnd;

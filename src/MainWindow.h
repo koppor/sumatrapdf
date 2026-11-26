@@ -242,13 +242,13 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     MainWindow(const MainWindow&) = delete;
     MainWindow& operator=(const MainWindow&) = delete;
     ~MainWindow();
+    u64 lifetimeId = 0;
 
     // TODO: error windows currently have
     //       !IsAboutWindow() && !IsDocLoaded()
     //       which doesn't allow distinction between PDF, XPS, etc. errors
     bool IsCurrentTabAbout() const;
     bool IsDocLoaded() const;
-    bool HasDocsLoaded() const;
 
     DisplayModel* AsFixed() const;
     ChmModel* AsChm() const;
@@ -312,7 +312,6 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
 
     // whether the current tab's ToC has been loaded into the tree
     bool tocLoaded = false;
-    // whether the ToC sidebar is currently visible
     // set to temporarily disable UpdateTocSelection
     bool tocKeepSelection = false;
     // Non-owning TOC items that match the current page (same page as best match
@@ -885,6 +884,7 @@ bool IsMainWindowValidAndNotClosing(MainWindow*);
 bool IsCurrentTab(MainWindow* win, WindowTab* tab);
 bool IsWindowTabValid(WindowTab*);
 void PostForWindow(MainWindow*, void (*fn)(MainWindow*), Kind kind);
+void PostForWindow(MainWindow*, u64 lifetimeId, void (*fn)(MainWindow*), Kind kind);
 void PostForTab(WindowTab*, void (*fn)(WindowTab*), Kind kind);
 extern Vec<MainWindow*> gWindows;
 extern bool gShowFrameRate;

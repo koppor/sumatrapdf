@@ -8,8 +8,6 @@
 #include <iconv.h>
 #endif
 
-Kind kindNone = "none";
-
 // if > 1 we won't crash when memory allocation fails
 AtomicInt gAllowAllocFailure = 0;
 
@@ -52,7 +50,10 @@ void* AllocZero(int count, int size) {
 }
 
 bool MemEq(const void* s1, const void* s2, int n) {
-    return 0 == memcmp(s1, s2, n);
+    if (n <= 0) {
+        return true;
+    }
+    return 0 == memcmp(s1, s2, (size_t)n);
 }
 
 int RoundUp(int n, int rounding) {
@@ -111,7 +112,8 @@ u32 MurmurHash2(const void* key, int n) {
     const u8* data = (const u8*)key;
 
     while (n >= 4) {
-        u32 k = *(u32*)data;
+        u32 k;
+        memcpy(&k, data, 4);
 
         k *= m;
         k ^= k >> r;
@@ -359,11 +361,9 @@ Gdiplus::RectF ToGdipRectF(const RectF& r) {
 #endif
 
 int NormalizeRotation(int rotation) {
-    while (rotation < 0) {
+    rotation %= 360;
+    if (rotation < 0) {
         rotation += 360;
-    }
-    while (rotation >= 360) {
-        rotation -= 360;
     }
     if ((rotation % 90) != 0) {
         ReportIf(true);
@@ -382,6 +382,14 @@ int NormalizeRotation(int rotation) {
 #include <sys/syscall.h>
 #endif
 #endif
+
+u64 GetCurrProcessId() {
+#if OS_WIN
+    return (u64)GetCurrentProcessId();
+#else
+    return (u64)getpid();
+#endif
+}
 
 #if OS_WIN
 
@@ -638,7 +646,8 @@ bool WaitThread(ThreadHandle h, int timeoutMs) {
         return false;
     }
 #if OS_WIN
-    return WaitForSingleObject(h, (DWORD)timeoutMs) == WAIT_OBJECT_0;
+    DWORD waitMs = timeoutMs < 0 ? INFINITE : (DWORD)timeoutMs;
+    return WaitForSingleObject(h, waitMs) == WAIT_OBJECT_0;
 #elif OS_WASM
     // it already ran to completion inside StartThread()
     return true;
@@ -657,7 +666,8 @@ bool JoinThread(ThreadHandle* hPtr, int timeoutMs) {
         *hPtr = nullptr;
         return false;
     }
-    DWORD res = WaitForSingleObject(h, (DWORD)timeoutMs);
+    DWORD waitMs = timeoutMs < 0 ? INFINITE : (DWORD)timeoutMs;
+    DWORD res = WaitForSingleObject(h, waitMs);
     SafeCloseThreadHandle(hPtr);
     return res == WAIT_OBJECT_0;
 #else
@@ -700,6 +710,15 @@ void SleepInMs(int ms) {
 #endif
 }
 
+// thread-safe localtime(); false if t can't be converted
+bool LocalTime(time_t t, struct tm* out) {
+#if OS_WIN
+    return localtime_s(out, &t) == 0;
+#else
+    return localtime_r(&t, out) != nullptr;
+#endif
+}
+
 AtomicInt gDangerousThreadCount = 0;
 
 bool AreDangerousThreadsPending() {
@@ -717,7 +736,6 @@ u64 gArenaDefaultReserveSize = 1ull * 1024ull * 1024ull;
 u64 gArenaDefaultReserveSize = 64ull * 1024ull * 1024ull;
 #endif
 u64 gArenaDefaultCommitSize = 64ull * 1024ull;
-ArenaFlags gArenaDefaultFlags = 0;
 
 static u64 ArenaAlignPow2(u64 value, u64 align) {
     if (align <= 1) {
@@ -744,10 +762,8 @@ static u64 ArenaClampBot(u64 minValue, u64 value) {
 }
 
 u64 ArenaPageSize();
-u64 ArenaLargePageSize();
-bool ArenaCommit(void* base, u64 size, bool largePages);
+bool ArenaCommit(void* base, u64 size);
 void* ArenaReserve(u64 size);
-void* ArenaReserveAndCommit(u64 size, bool largePages);
 void ArenaReleaseMemory(void* base, u64 size);
 
 static void ArenaRelease(Arena* arena) {
@@ -775,7 +791,7 @@ static void* ArenaPushLocked(Arena* arena, u64 size, u64 align, bool zero) {
         sizeToZero = ArenaMin(current->committed, posPost) - posPre;
     }
 
-    if (current->reserved < posPost && !(arena->flags & ArenaFlagNoChain)) {
+    if (current->reserved < posPost) {
         // from the head, not from `current`: a block made to hold one
         // oversized allocation carries that allocation's size as its chunk
         // size, and it stays `current` afterwards. Taking the next block's
@@ -783,13 +799,16 @@ static void* ArenaPushLocked(Arena* arena, u64 size, u64 align, bool zero) {
         // commit - the whole of it for the next small push.
         u64 reserveChunkSize = arena->reserveChunkSize;
         u64 commitChunkSize = arena->commitChunkSize;
-        if (size + kArenaHeaderSize > reserveChunkSize) {
-            reserveChunkSize = ArenaAlignPow2(size + kArenaHeaderSize, ArenaMax(align, ArenaPageSize()));
+        u64 headerAligned = ArenaAlignPow2(kArenaHeaderSize, align);
+        if (size > UINT64_MAX - headerAligned) {
+            return nullptr;
+        }
+        if (size + headerAligned > reserveChunkSize) {
+            reserveChunkSize = ArenaAlignPow2(size + headerAligned, ArenaMax(align, ArenaPageSize()));
             commitChunkSize = reserveChunkSize;
         }
 
         ArenaParams newParams = {};
-        newParams.flags = current->flags;
         newParams.reserveSize = reserveChunkSize;
         newParams.commitSize = commitChunkSize;
         newParams.allocationSiteFile = current->allocationSiteFile;
@@ -811,15 +830,11 @@ static void* ArenaPushLocked(Arena* arena, u64 size, u64 align, bool zero) {
     }
 
     if (current->committed < posPost) {
-        if (current->flags & ArenaFlagLargePages) {
-            return nullptr;
-        }
-
         u64 commitEnd = ArenaAlignPow2(posPost, current->commitChunkSize);
         u64 commitClamped = ArenaClampTop(commitEnd, current->reserved);
         u64 commitSize = commitClamped - current->committed;
         void* commitPtr = (char*)current + current->committed;
-        if (!ArenaCommit(commitPtr, commitSize, false)) {
+        if (!ArenaCommit(commitPtr, commitSize)) {
             return nullptr;
         }
         current->committed = commitClamped;
@@ -848,7 +863,6 @@ static void* ArenaPushLocked(Arena* arena, u64 size, u64 align, bool zero) {
 
 ArenaParams ArenaDefaultParams() {
     ArenaParams params = {};
-    params.flags = gArenaDefaultFlags;
     params.reserveSize = gArenaDefaultReserveSize;
     params.commitSize = gArenaDefaultCommitSize;
     return params;
@@ -863,38 +877,15 @@ Arena* ArenaNew(const ArenaParams& srcParams) {
         params.commitSize = gArenaDefaultCommitSize;
     }
 
-    bool useLargePages = (params.flags & ArenaFlagLargePages) != 0;
-    const u64 pageSize = useLargePages ? ArenaLargePageSize() : ArenaPageSize();
+    const u64 pageSize = ArenaPageSize();
     u64 reserveSize = ArenaAlignPow2(ArenaMax(params.reserveSize, kArenaHeaderSize), pageSize);
     u64 commitSize = ArenaAlignPow2(ArenaMax(params.commitSize, kArenaHeaderSize), pageSize);
     commitSize = ArenaClampTop(commitSize, reserveSize);
 
-    void* base = params.optionalBackingBuffer;
-    bool usesExternalBuffer = (base != nullptr);
-    ArenaFlags actualFlags = params.flags;
-
-    if (!usesExternalBuffer) {
-        if (useLargePages) {
-            base = ArenaReserveAndCommit(reserveSize, true);
-            if (base) {
-                commitSize = reserveSize;
-            } else {
-                actualFlags &= ~ArenaFlagLargePages;
-                useLargePages = false;
-                reserveSize = ArenaAlignPow2(reserveSize, ArenaPageSize());
-                commitSize = ArenaAlignPow2(commitSize, ArenaPageSize());
-            }
-        }
-
-        if (!base) {
-            base = ArenaReserve(reserveSize);
-            if (base && !ArenaCommit(base, commitSize, false)) {
-                ArenaReleaseMemory(base, reserveSize);
-                base = nullptr;
-            }
-        }
-    } else {
-        commitSize = reserveSize;
+    void* base = ArenaReserve(reserveSize);
+    if (base && !ArenaCommit(base, commitSize)) {
+        ArenaReleaseMemory(base, reserveSize);
+        base = nullptr;
     }
 
     if (!base) {
@@ -905,8 +896,7 @@ Arena* ArenaNew(const ArenaParams& srcParams) {
     Arena* arena = (Arena*)base;
     arena->prev = nullptr;
     arena->current = arena;
-    arena->flags = actualFlags;
-    arena->commitChunkSize = useLargePages ? reserveSize : commitSize;
+    arena->commitChunkSize = commitSize;
     arena->reserveChunkSize = reserveSize;
     arena->basePos = 0;
     arena->pos = kArenaHeaderSize;
@@ -915,7 +905,7 @@ Arena* ArenaNew(const ArenaParams& srcParams) {
     arena->allocationSiteFile = params.allocationSiteFile;
     arena->allocationSiteLine = params.allocationSiteLine;
     arena->name = params.name;
-    arena->usesExternalBuffer = usesExternalBuffer;
+    new (&arena->lock) Mutex();
     arena->nAllocsLifetime = 0;
     arena->peakBytesLifetime = 0;
     arena->nAllocsSinceReset = 0;
@@ -928,12 +918,11 @@ void ArenaDelete(Arena* arena) {
         return;
     }
 
+    arena->lock.~Mutex();
     Arena* node = arena->current;
     while (node) {
         Arena* prev = node->prev;
-        if (!node->usesExternalBuffer) {
-            ArenaRelease(node);
-        }
+        ArenaRelease(node);
         node = prev;
     }
 }
@@ -957,13 +946,12 @@ u64 Arena::Pos() {
 static void ArenaPopToLocked(Arena* arena, u64 pos) {
     u64 bigPos = ArenaClampBot(kArenaHeaderSize, pos);
     Arena* current = arena->current;
+    if (bigPos > current->basePos + current->pos) {
+        return;
+    }
     while (current && current->basePos >= bigPos) {
         Arena* prev = current->prev;
-        if (!current->usesExternalBuffer) {
-            ArenaRelease(current);
-        } else {
-            current->pos = kArenaHeaderSize;
-        }
+        ArenaRelease(current);
         current = prev;
     }
 
@@ -977,33 +965,23 @@ static void ArenaPopToLocked(Arena* arena, u64 pos) {
     current->pos = newPos;
 }
 
-void Arena::PopTo(u64 pos) {
-    if (!this) {
-        return;
-    }
-
-    ScopedMutex cs(&lock);
-    ArenaPopToLocked(this, pos);
-}
-
-void Arena::Pop(u64 amt) {
-    if (!this) {
-        return;
-    }
-    ScopedMutex cs(&lock);
-    u64 posOld = current->basePos + current->pos;
-    u64 posNew = (amt < posOld) ? (posOld - amt) : 0;
-    ArenaPopToLocked(this, posNew);
-}
-
 ArenaSavepoint GetArenaSavepoint(Arena* arena) {
-    ArenaSavepoint temp = {arena, arena ? arena->Pos() : 0};
+    ArenaSavepoint temp;
+    if (arena) {
+        ScopedMutex lock(&arena->lock);
+        temp.arena = arena;
+        temp.pos = arena->current->basePos + arena->current->pos;
+        temp.resetCount = arena->resetCount;
+    }
     return temp;
 }
 
 void RestoreArenaSavepoint(ArenaSavepoint temp) {
     if (temp.arena) {
-        temp.arena->PopTo(temp.pos);
+        ScopedMutex lock(&temp.arena->lock);
+        if (temp.resetCount == temp.arena->resetCount) {
+            ArenaPopToLocked(temp.arena, temp.pos);
+        }
     }
 }
 
@@ -1020,6 +998,7 @@ void Arena::Reset() {
     }
     ScopedMutex cs(&lock);
     ArenaPopToLocked(this, 0);
+    resetCount++;
     nAllocsSinceReset = 0;
     peakBytesSinceReset = 0;
 }
@@ -1112,7 +1091,22 @@ void* MemDup(Arena* arena, const void* mem, size_t size, size_t extraBytes) {
     return newMem;
 }
 
-thread_local Arena* gTempArena = nullptr;
+static thread_local Arena* gTempArena = nullptr;
+static thread_local int gTempArenaScopes = 0;
+
+AutoArenaSavepoint::AutoArenaSavepoint(Arena* arena)
+    : sp(GetArenaSavepoint(arena)), protectsTemp(arena && arena == gTempArena) {
+    if (protectsTemp) {
+        gTempArenaScopes++;
+    }
+}
+
+AutoArenaSavepoint::~AutoArenaSavepoint() {
+    RestoreArenaSavepoint(sp);
+    if (protectsTemp) {
+        gTempArenaScopes--;
+    }
+}
 
 Arena* GetTempArena() {
     if (!gTempArena) {
@@ -1122,28 +1116,38 @@ Arena* GetTempArena() {
 }
 
 void ResetTempArena() {
-    if (gTempArena) {
+    if (gTempArena && gTempArenaScopes == 0) {
         gTempArena->Reset();
     }
 }
 
 void DestroyTempArena() {
+    if (gTempArenaScopes != 0) {
+        return;
+    }
     ArenaDelete(gTempArena);
     gTempArena = nullptr;
 }
 
 Arena* gPermArena = nullptr;
+static Mutex gPermArenaMutex;
 
 Arena* GetPermArena() {
+    Arena* a = (Arena*)AtomicPtrGet((AtomicPtr*)&gPermArena);
+    if (a) {
+        return a;
+    }
+    ScopedMutex lock(&gPermArenaMutex);
     if (!gPermArena) {
-        gPermArena = ArenaNew();
+        AtomicPtrSet((AtomicPtr*)&gPermArena, ArenaNew());
     }
     return gPermArena;
 }
 
 void DestroyPermArena() {
-    ArenaDelete(gPermArena);
-    gPermArena = nullptr;
+    ScopedMutex lock(&gPermArenaMutex);
+    Arena* a = (Arena*)AtomicPtrExchange((AtomicPtr*)&gPermArena, nullptr);
+    ArenaDelete(a);
 }
 
 void* AllocTemp(int size, u64 align) {
@@ -1214,7 +1218,8 @@ static int VecNextCap(int cap, int wanted, int elSize) {
         int floorCap = elSize == 1 ? 8 : elSize <= 1024 ? 4 : 1;
         return std::max(floorCap, wanted);
     }
-    return std::max(cap * 2, wanted);
+    int doubled = cap > INT_MAX / 2 ? INT_MAX : cap * 2;
+    return std::max(doubled, wanted);
 }
 
 // The bodies below take the element type erased in a VecNonTemplated, so they
@@ -1369,20 +1374,20 @@ NO_INLINE void* VecTakeNT(VecNonTemplated* v, int elSize) {
     return els;
 }
 
-// Vec only holds POD, so copying is a reserve plus a memcpy. zeroTail is for
-// operator=, which zeroes the capacity past the new length.
-NO_INLINE void VecCopyFromNT(VecNonTemplated* v, int elSize, int srcLen, const void* srcEls, bool zeroTail) {
-    VecReserveNT(nullptr, v, elSize, srcLen);
-    v->len = srcLen;
-    if (srcLen > 0 && srcEls && v->els) {
-        memcpy(v->els, srcEls, (size_t)srcLen * (size_t)elSize);
+// Assignment builds the replacement before releasing the old storage.
+NO_INLINE void VecCopyFromNT(VecNonTemplated* v, int elSize, int srcLen, const void* srcEls, bool replace) {
+    VecNonTemplated replacement{};
+    VecNonTemplated* dst = replace ? &replacement : v;
+    if (!VecReserveNT(nullptr, dst, elSize, srcLen)) {
+        return;
     }
-    if (zeroTail && v->els) {
-        int curCap = v->cap < 0 ? -v->cap : v->cap;
-        if (curCap > srcLen) {
-            char* tail = (char*)v->els + ((size_t)srcLen * (size_t)elSize);
-            memset(tail, 0, (size_t)(curCap - srcLen) * (size_t)elSize);
-        }
+    dst->len = srcLen;
+    if (srcLen > 0 && srcEls) {
+        memcpy(dst->els, srcEls, (size_t)srcLen * (size_t)elSize);
+    }
+    if (replace) {
+        VecFreeElementsNT(v);
+        *v = replacement;
     }
 }
 
@@ -1395,7 +1400,7 @@ void LogArenaStats(Str what, Arena* a) {
     u64 nAllocs = a->nAllocsLifetime;
     u64 peakBytes = a->peakBytesLifetime;
     logf("%s lifetime: %s allocations, peak %s bytes (%s)\n", what, str::FormatNumWithThousandSepTemp((i64)nAllocs),
-         str::FormatNumWithThousandSepTemp((i64)peakBytes), FormatFileSizeTemp(peakBytes));
+         str::FormatNumWithThousandSepTemp((i64)peakBytes), FormatSizeCompactTemp(peakBytes));
 }
 
 //--- Str.cpp ----------------------------------------------------------------
@@ -1470,16 +1475,12 @@ template <typename S>
 static void TransCharsInPlaceT(S& s, S oldChars, S newChars) {
     int nDiff = len(oldChars) - len(newChars);
     ReportIf(nDiff < 0);
-    int nChanged = 0;
     for (int i = 0; i < s.len; i++) {
         int idx = IndexOfCharT(oldChars, s.s[i]);
         if (idx >= 0) {
-            s.s[i] = newChars.s[idx];
-            nChanged++;
+            // oldChars past the end of newChars map to NUL
+            s.s[i] = idx < len(newChars) ? newChars.s[idx] : 0;
         }
-    }
-    if (nChanged * nDiff > 0) {
-        s.s[s.len] = 0;
     }
 }
 
@@ -1494,7 +1495,9 @@ static int RemoveCharsInPlaceT(S s, S toRemove) {
             s.s[dst++] = s.s[src];
         }
     }
-    s.s[dst] = 0;
+    if (dst < s.len) {
+        s.s[dst] = 0;
+    }
     return s.len - dst;
 }
 
@@ -1520,7 +1523,9 @@ static int NormalizeWSInPlaceT(S s, bool (*isWs)(C)) {
     if (dst > 0 && isWs(s.s[dst - 1])) {
         dst--;
     }
-    s.s[dst] = 0;
+    if (dst < s.len) {
+        s.s[dst] = 0;
+    }
     return s.len - dst;
 }
 
@@ -1673,6 +1678,15 @@ wchar_t WCharToLower(wchar_t c) {
 #endif
 }
 
+// a Unicode letter or digit: IsCharAlphaNumericW on Windows, iswalnum elsewhere
+bool IsAlNumW(int c) {
+#if OS_WIN
+    return IsCharAlphaNumericW((WCHAR)c) != 0;
+#else
+    return iswalnum((wint_t)c) != 0;
+#endif
+}
+
 // locale-independent lowercase of a codepoint for case-insensitive matching
 int FoldCaseRune(int c) {
     // CharLowerW maps İ (U+0130) to 'i' only under Turkish locale (issue #5597)
@@ -1814,16 +1828,16 @@ int FoldDiacriticsRune(int c) {
 static void FoldCaseWInPlace(WStr s) {
 #if OS_WIN
     CharLowerBuffW(s.s, (DWORD)s.len);
-#else
-    for (int i = 0; i < s.len; i++) {
-        s.s[i] = WCharToLower(s.s[i]);
-    }
-#endif
     for (int i = 0; i < s.len; i++) {
         if (s.s[i] == 0x0130) {
             s.s[i] = L'i';
         }
     }
+#else
+    for (int i = 0; i < s.len; i++) {
+        s.s[i] = s.s[i] == 0x0130 ? L'i' : WCharToLower(s.s[i]);
+    }
+#endif
 }
 
 static int Utf8ByteOffsetForWCharOffset(Str s, int wcharOff) {
@@ -1918,42 +1932,30 @@ void StrNodeListPop(StrNodeList* list) {
 
 namespace str {
 
-// length up to the first NUL within len: a Str may span more than its C string
-static int CStrLen(Str s) {
-    int n = 0;
-    while (s.s && n < s.len && s.s[n]) {
-        n++;
-    }
-    return n;
-}
-
 // return true if s1 == s2, case sensitive
 bool Eq(Str s1, Str s2) {
-    if (s1.s == s2.s) {
+    if (s1.s == s2.s && s1.len == s2.len) {
         return true;
     }
-    int n = CStrLen(s1);
-    return n == CStrLen(s2) && (n == 0 || MemEq(s1.s, s2.s, n));
+    int n = len(s1);
+    return n == len(s2) && (n == 0 || MemEq(s1.s, s2.s, n));
 }
 
 // return true if s1 == s2, case insensitive
 bool EqI(Str s1, Str s2) {
-    if (s1.s == s2.s) {
-        return true;
-    }
     if (s1.len != s2.len) {
         return false;
+    }
+    if (s1.s == s2.s) {
+        return true;
     }
     return len(s1) == 0 || (s1.s && s2.s && 0 == _strnicmp(s1.s, s2.s, (size_t)s1.len));
 }
 
 // compares two strings ignoring case and whitespace
 bool EqIS(Str s1, Str s2) {
-    if (s1.s == s2.s) {
+    if (s1.s == s2.s && s1.len == s2.len) {
         return true;
-    }
-    if (len(s1) == 0 || len(s2) == 0) {
-        return false;
     }
 
     int i1 = 0;
@@ -1968,7 +1970,7 @@ bool EqIS(Str s1, Str s2) {
         if (i1 >= s1.len || i2 >= s2.len) {
             break;
         }
-        if (tolower(s1.s[i1]) != tolower(s2.s[i2])) {
+        if (tolower((u8)s1.s[i1]) != tolower((u8)s2.s[i2])) {
             return false;
         }
         i1++;
@@ -1984,30 +1986,30 @@ bool EqIS(Str s1, Str s2) {
 }
 
 bool EqN(Str s1, Str s2, int n) {
-    if (s1.s == s2.s) {
-        return true;
-    }
-    if (len(s1) == 0 || len(s2) == 0 || n == 0) {
+    if (n <= 0) {
         return n == 0;
     }
     if (s1.len < n || s2.len < n) {
         return false;
+    }
+    if (s1.s == s2.s) {
+        return true;
     }
     return MemEq(s1.s, s2.s, n);
 }
 
 bool EqNI(Str s1, Str s2, int n) {
-    if (s1.s == s2.s) {
-        return true;
-    }
-    if (len(s1) == 0 || len(s2) == 0 || n == 0) {
+    if (n <= 0) {
         return n == 0;
     }
     if (s1.len < n || s2.len < n) {
         return false;
     }
+    if (s1.s == s2.s) {
+        return true;
+    }
     for (int i = 0; i < n; i++) {
-        if (tolower(s1.s[i]) != tolower(s2.s[i])) {
+        if (tolower((u8)s1.s[i]) != tolower((u8)s2.s[i])) {
             return false;
         }
     }
@@ -2090,7 +2092,7 @@ int IndexOfI(Str s, Str toFind) {
     if (toFind.len <= 0) {
         return -1;
     }
-    char first = (char)tolower(toFind.s[0]);
+    char first = (char)tolower((u8)toFind.s[0]);
     if (!first) {
         return -1;
     }
@@ -2109,7 +2111,7 @@ int IndexOfI(Str s, Str toFind) {
     }
     if (asciiNeedle) {
         for (int off = 0; off < s.len && s.s[off]; off++) {
-            char c = (char)tolower(s.s[off]);
+            char c = (char)tolower((u8)s.s[off]);
             if (c == first && str::StartsWithI(Str(s.s + off, s.len - off), toFind)) {
                 return off;
             }
@@ -2126,8 +2128,7 @@ int IndexOfI(Str s, Str toFind) {
     // palette filtering every item) don't grow the arena unbounded.
     AutoArenaSavepoint scratch;
 
-    TempWStr ws = ToWStrTemp(s); // unfolded, used to map the match back to bytes
-    TempWStr wsLo = str::DupTemp(ws);
+    TempWStr wsLo = ToWStrTemp(s);
     TempWStr wfLo = ToWStrTemp(toFind);
     FoldCaseWInPlace(wsLo);
     FoldCaseWInPlace(wfLo);
@@ -2163,18 +2164,31 @@ Str Join(Arena* a, Str s1, Str s2, Str s3, Str s4, Str s5) {
     int s5Len = len(s5);
     int n = s1Len + s2Len + s3Len + s4Len + s5Len + 1;
     char* res = (char*)Alloc(a, n);
+    if (!res) {
+        return {};
+    }
 
     char* s = res;
-    memcpy(s, s1.s, s1Len);
-    s += s1Len;
-    memcpy(s, s2.s, s2Len);
-    s += s2Len;
-    memcpy(s, s3.s, s3Len);
-    s += s3Len;
-    memcpy(s, s4.s, s4Len);
-    s += s4Len;
-    memcpy(s, s5.s, s5Len);
-    s += s5Len;
+    if (s1Len > 0) {
+        memcpy(s, s1.s, (size_t)s1Len);
+        s += s1Len;
+    }
+    if (s2Len > 0) {
+        memcpy(s, s2.s, (size_t)s2Len);
+        s += s2Len;
+    }
+    if (s3Len > 0) {
+        memcpy(s, s3.s, (size_t)s3Len);
+        s += s3Len;
+    }
+    if (s4Len > 0) {
+        memcpy(s, s4.s, (size_t)s4Len);
+        s += s4Len;
+    }
+    if (s5Len > 0) {
+        memcpy(s, s5.s, (size_t)s5Len);
+        s += s5Len;
+    }
     *s = 0;
 
     return Str(res, n - 1);
@@ -2220,14 +2234,25 @@ namespace wstr {
 /* Concatenate 2 strings. Any string can be nullptr.
    Caller needs to free() memory. */
 WStr Join(Arena* a, WStr s1, WStr s2, WStr s3) {
-    int s1Len = s1.len, s2Len = s2.len, s3Len = s3.len;
+    int s1Len = len(s1);
+    int s2Len = len(s2);
+    int s3Len = len(s3);
     int n = s1Len + s2Len + s3Len + 1;
     WCHAR* res = (WCHAR*)Alloc(a, n * sizeofi(WCHAR));
-    memcpy(res, s1.s, (size_t)s1Len * sizeof(WCHAR));
-    memcpy(res + s1Len, s2.s, (size_t)s2Len * sizeof(WCHAR));
-    memcpy(res + s1Len + s2Len, s3.s, (size_t)s3Len * sizeof(WCHAR));
+    if (!res) {
+        return {};
+    }
+    if (s1Len > 0) {
+        memcpy(res, s1.s, (size_t)s1Len * sizeof(WCHAR));
+    }
+    if (s2Len > 0) {
+        memcpy(res + s1Len, s2.s, (size_t)s2Len * sizeof(WCHAR));
+    }
+    if (s3Len > 0) {
+        memcpy(res + s1Len + s2Len, s3.s, (size_t)s3Len * sizeof(WCHAR));
+    }
     res[s1Len + s2Len + s3Len] = '\0';
-    return WStr(res);
+    return WStr(res, n - 1);
 }
 
 WStr Join(WStr s1, WStr s2, WStr s3) {
@@ -2329,7 +2354,9 @@ bool Cut(Str s, Str sep, Str* before, Str* after) {
 
 // like Cut() but splits on the first occurrence of a single char
 bool CutChar(Str s, char c, Str* before, Str* after) {
-    return Cut(s, Str(&c, 1), before, after);
+    // CutChar routes directly through IndexOfChar
+    int idx = IndexOfChar(s, c);
+    return CutAtIdx(s, idx, 1, before, after);
 }
 
 // like CutChar() but splits on the last occurrence of a single char
@@ -2392,7 +2419,8 @@ int TrimWSInPlace(Str& s, TrimOpt opt) {
     }
     int trimmed = start + (s.len - end);
     if (start != 0) {
-        memmove(s.s, s.s + start, (size_t)(end - start) + 1);
+        memmove(s.s, s.s + start, (size_t)(end - start));
+        s.s[end - start] = 0;
     }
     s.len = end - start;
     return trimmed;
@@ -2952,7 +2980,9 @@ int SeqStrIndexIS(SeqStrings strs, Str toFind) {
 // Given an index in the "array" of sequentially laid out strings,
 // returns a strings at that index.
 TempStr SeqStrByIndex(SeqStrings strs, int idx) {
-    ReportIf(idx < 0);
+    if (ReportIf(idx < 0)) {
+        return {};
+    }
     Str s = SeqStrFirst(strs);
     while (idx > 0 && len(s) > 0) {
         s = SeqStrNext(s);
@@ -2983,14 +3013,14 @@ static SeqStrings gMimeTypes =
 // detected from the file's data) is given, imgExt's type wins over the ext's.
 TempStr MimeTypeFromExtTemp(Str ext, Str imgExt) {
     int idx = SeqStrIndexIS(gMimeTypes, ext);
-    if (idx < 0) {
+    if (idx < 0 || (idx & 1) != 0) {
         return {};
     }
     Str mime = SeqStrByIndex(gMimeTypes, idx + 1);
     // trust an image's actual data over its extension
     if (imgExt && str::StartsWith(mime, StrL("image/"))) {
         int j = SeqStrIndex(gMimeTypes, imgExt);
-        if (j >= 0) {
+        if (j >= 0 && (j & 1) == 0) {
             return SeqStrByIndex(gMimeTypes, j + 1);
         }
     }
@@ -3098,13 +3128,6 @@ TempStr SeqStrNumStrByNumber(SeqStrNum strs, i64 num) {
 // kPadding is number of characters needed for terminating character
 static constexpr int kPadding = 1;
 
-// storage that isn't a heap block of ours: a lent buffer, an arena block, or
-// nothing at all
-template <typename C>
-static bool IsNotOurHeapBlock(const BuilderT<C>& b) {
-    return !b.els || b.cap < 0;
-}
-
 // Vec allocates one element past the capacity and zeroes what it isn't using,
 // so there is always room for the NUL. Writing it after every change keeps it
 // right for lent buffers too, which nobody zeroes.
@@ -3120,9 +3143,13 @@ static void Terminate(BuilderT<C>& b) {
 // buffer does.
 template <typename C>
 static C* BuilderEnsureCap(BuilderT<C>& b, int needed) {
+    C* oldEls = b.els;
     C* els = VecReserve(b.a, b, needed);
     if (!els) {
         return nullptr;
+    }
+    if (els != oldEls) {
+        b.isExternalBuf = false;
     }
     if (b.a && b.cap > 0) {
         b.cap = -b.cap;
@@ -3145,12 +3172,16 @@ void BuilderT<C>::UseExternalBuffer(S buf) {
         this->els = buf.s;
         // one char of the caller's buffer is held back for the NUL
         this->cap = -(buf.len - kPadding);
+        this->isExternalBuf = true;
         this->els[0] = 0;
     }
 }
 
 template <typename C>
 bool BuilderT<C>::Reserve(int cap) {
+    if (cap <= 0) {
+        return true;
+    }
     if (!BuilderEnsureCap(*this, cap)) {
         return false;
     }
@@ -3222,7 +3253,7 @@ typename BuilderT<C>::S BuilderT<C>::TakeStr() {
         Reset();
         return S{};
     }
-    if (IsNotOurHeapBlock(*this)) {
+    if (this->isExternalBuf) {
         res = (C*)MemDup(a, res, (size_t)(n + kPadding) * sizeof(C));
     } else {
         // hand the block (heap or arena) to the caller and start over
@@ -3280,51 +3311,47 @@ bool Eq(WStr s1, WStr s2) {
 }
 
 bool EqNI(WStr s1, WStr s2, int n) {
-    if (s1.s == s2.s) {
-        return true;
-    }
-    if (len(s1) == 0 || len(s2) == 0) {
+    if (n <= 0) {
         return n == 0;
-    }
-    if (n == 0) {
-        return true;
     }
     if (s1.len < n || s2.len < n) {
         return false;
     }
-    WCHAR* a = AllocArrayTemp<WCHAR>(n);
-    WCHAR* b = AllocArrayTemp<WCHAR>(n);
-    if (!a || !b) {
-        return false;
+    if (s1.s == s2.s) {
+        return true;
     }
-    memcpy(a, s1.s, (size_t)n * sizeof(WCHAR));
-    memcpy(b, s2.s, (size_t)n * sizeof(WCHAR));
-    WStr wa(a, n);
-    WStr wb(b, n);
-    FoldCaseWInPlace(wa);
-    FoldCaseWInPlace(wb);
-    return EqN(wa, wb, n);
+    for (int i = 0; i < n; i++) {
+        WCHAR c1 = s1.s[i];
+        WCHAR c2 = s2.s[i];
+        if (c1 != c2 && FoldCaseRune(c1) != FoldCaseRune(c2)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // return true if s1 == s2, case insensitive
 bool EqI(WStr s1, WStr s2) {
-    if (s1.s == s2.s) {
-        return true;
-    }
     if (s1.len != s2.len) {
         return false;
+    }
+    if (s1.s == s2.s) {
+        return true;
     }
     return len(s1) == 0 || (s1.s && s2.s && EqNI(s1, s2, s1.len));
 }
 
 bool EqN(WStr s1, WStr s2, int n) {
+    if (n <= 0) {
+        return n == 0;
+    }
+    if (s1.len < n || s2.len < n) {
+        return false;
+    }
     if (s1.s == s2.s) {
         return true;
     }
-    if (len(s1) == 0 || len(s2) == 0) {
-        return false;
-    }
-    return 0 == wcsncmp(s1.s, s2.s, (size_t)n);
+    return MemEq(s1.s, s2.s, n * (int)sizeof(WCHAR));
 }
 
 bool StartsWith(WStr str, WStr prefix) {
@@ -3339,28 +3366,16 @@ bool StartsWith(WStr str, WStr prefix) {
 
 /* return true if 'str' starts with 'txt', NOT case-sensitive */
 bool StartsWithI(WStr str, WStr prefix) {
-    if (str.s == prefix.s) {
-        return true;
-    }
     if (len(prefix) == 0) {
         return true;
     }
     if (len(str) == 0 || prefix.len > str.len) {
         return false;
     }
+    if (str.s == prefix.s) {
+        return true;
+    }
     return EqNI(str, prefix, prefix.len);
-}
-
-WStr FindFrom(WStr str, WStr find) {
-    if (len(str) == 0 || len(find) == 0 || find.len > str.len) {
-        return {};
-    }
-    for (int i = 0; i <= str.len - find.len; i++) {
-        if (0 == wcsncmp(str.s + i, find.s, (size_t)find.len)) {
-            return WStr(str.s + i, str.len - i);
-        }
-    }
-    return {};
 }
 
 } // namespace wstr
@@ -3374,41 +3389,6 @@ Str ToUpperInPlace(Str s) {
 }
 
 } // namespace str
-namespace wstr {
-
-WStr ToLowerInPlace(WStr s) {
-    for (int i = 0; i < s.len; i++) {
-        s.s[i] = towlower(s.s[i]);
-    }
-    return s;
-}
-
-// free() the result via str::Free(s) or str::FreePtr(&s)
-WStr Replace(WStr s, WStr toReplace, WStr replaceWith) {
-    if (len(s) == 0 || len(toReplace) == 0 || len(replaceWith) == 0) {
-        return {};
-    }
-
-    wstr::Builder result;
-    result.Reserve(s.len);
-    int findLen = toReplace.len;
-    int start = 0;
-    while (start < s.len) {
-        WStr rest(s.s + start, s.len - start);
-        WStr match = wstr::FindFrom(rest, toReplace);
-        if (len(match) == 0) {
-            result.Append(WStr(s.s + start, s.len - start));
-            break;
-        }
-        int matchOff = (int)(match.s - s.s);
-        result.Append(WStr(s.s + start, matchOff - start));
-        result.Append(replaceWith);
-        start = matchOff + findLen;
-    }
-    return result.TakeStr();
-}
-
-} // namespace wstr
 namespace str {
 
 // Bounded null-terminated copy into a fixed buffer (replaces lstrcpyn / strcpy_s /
@@ -3511,16 +3491,16 @@ int ParseInt(Str s) {
     if (negative) {
         off = 1;
     }
-    int value = 0;
-    int overflowCheck = negative ? 1 : 0;
+    // return 0 on overflow; INT_MIN is representable
+    i64 limit = negative ? -(i64)INT_MIN : INT_MAX;
+    i64 value = 0;
     for (; off < s.len && str::IsDigit(s.s[off]); off++) {
         value = (value * 10) + (s.s[off] - '0');
-        // return 0 on overflow
-        if (value - overflowCheck < 0) {
+        if (value > limit) {
             return 0;
         }
     }
-    return negative ? -value : value;
+    return (int)(negative ? -value : value);
 }
 
 i64 ParseInt64(Str s) {
@@ -3532,11 +3512,17 @@ i64 ParseInt64(Str s) {
     if (negative) {
         off = 1;
     }
-    i64 value = 0;
+    // return 0 on overflow; INT64_MIN is representable
+    u64 limit = negative ? (u64)INT64_MAX + 1 : (u64)INT64_MAX;
+    u64 value = 0;
     for (; off < s.len && str::IsDigit(s.s[off]); off++) {
-        value = (value * 10) + (s.s[off] - '0');
+        u64 digit = (u64)(s.s[off] - '0');
+        if (value > (limit - digit) / 10) {
+            return 0;
+        }
+        value = (value * 10) + digit;
     }
-    return negative ? -value : value;
+    return negative ? (i64)(0 - value) : (i64)value;
 }
 
 // the only valid chars are 0-9, . and newlines.
@@ -3596,7 +3582,7 @@ int CompareProgramVersion(Str ver1, Str ver2) {
         unsigned int v1 = ExtractNextNumber(ver1, off1);
         unsigned int v2 = ExtractNextNumber(ver2, off2);
         if (v1 != v2) {
-            return (int)v1 - (int)v2;
+            return v1 < v2 ? -1 : 1;
         }
     }
     return 0;
@@ -3703,7 +3689,7 @@ TempStr ReplaceTemp(Str s, Str toReplace, Str replaceWith) {
         lenDiff = replLen - findLen;
     }
     // heuristic: allow 6 replacements without reallocating
-    str::Builder result;
+    str::Builder result(GetTempArena());
     result.Reserve(s.len + 1 + (lenDiff * 6));
     bool ok;
     while (idx >= 0) {
@@ -3722,20 +3708,26 @@ TempStr ReplaceTemp(Str s, Str toReplace, Str replaceWith) {
     if (!ok) {
         return {};
     }
-    return ToStrTemp(result);
+    return result.TakeStr();
 }
 
 TempStr ReplaceNoCaseTemp(Str s, Str toReplace, Str replaceWith) {
-    int n = toReplace.len;
-    int idx = str::IndexOfI(s, toReplace);
+    int n = len(toReplace);
+    int idx = n > 0 ? str::IndexOfI(s, toReplace) : -1;
     if (idx < 0) {
         return s;
     }
-    char* pos = s.s + idx;
-    if (!MemEq(pos, toReplace.s, n)) {
-        toReplace = str::DupTemp(Str(pos, n));
+    // each match is found separately: "${SELECTION} ${selection}" differ in case
+    str::Builder result(GetTempArena());
+    Str curr = s;
+    while (idx >= 0 && idx <= len(curr) - n) {
+        result.Append(Str(curr.s, idx));
+        result.Append(replaceWith);
+        curr = Str(curr.s + idx + n, curr.len - idx - n);
+        idx = str::IndexOfI(curr, toReplace);
     }
-    return str::ReplaceTemp(s, toReplace, replaceWith);
+    result.Append(curr);
+    return result.TakeStr();
 }
 } // namespace str
 
@@ -3795,7 +3787,7 @@ int WStrFindSubstr(WStr str, WStr substr) {
 }
 
 // Format size in human readable form (e.g., "1.23 GB", "456 KB")
-TempStr FormatFileSizeTemp(u64 size) {
+TempStr FormatSizeCompactTemp(u64 size) {
     // clang-format off
 static const struct {
     u64 divisor;
@@ -4023,8 +4015,28 @@ int utf8StrLen(const u8* s) {
 
 // --- end of Unicode, Inc. utf8 code
 
+// runes in s, -1 if it isn't valid UTF-8; utf8StrLen within len
+static int Utf8RuneCountChecked(Str s) {
+    const u8* p = (const u8*)s.s;
+    const u8* end = p + len(s);
+    int n = 0;
+    while (p < end) {
+        int k = utf8RuneLen(p);
+        if (k > end - p || !isLegalUTF8(p, k)) {
+            return -1;
+        }
+        p += k;
+        n++;
+    }
+    return n;
+}
+
 void str::AppendBase64(str::Builder& out, const u8* data, size_t size) {
     static constexpr char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t encodedLen = ((size + 2) / 3) * 4;
+    if (encodedLen > 0 && encodedLen <= (size_t)(INT_MAX - out.len)) {
+        out.Reserve(out.len + (int)encodedLen);
+    }
     for (size_t i = 0; i < size; i += 3) {
         u32 value = (u32)data[i] << 16;
         if (i + 1 < size) {
@@ -4070,7 +4082,9 @@ int Utf8CodepointStartByte(Str s, int byteIdx) {
     if (byteIdx <= 0) {
         return 0;
     }
-    byteIdx = std::min(byteIdx, len(s));
+    if (byteIdx >= len(s)) {
+        return len(s);
+    }
     while (byteIdx > 0 && Utf8IsContinuationByte(s.s[byteIdx])) {
         byteIdx--;
     }
@@ -4239,18 +4253,22 @@ static TempStr ShortenStringTemp(Str s, int maxLen) {
     if (sLen <= maxLen) {
         return s;
     }
-    char* ret = AllocArrayTemp<char>(maxLen + 2);
+    if (maxLen < 4) {
+        return StrL("...");
+    }
+    // the "..." in the middle needs a few characters on each side
     const int half = maxLen / 2;
+    char* ret = AllocArrayTemp<char>((2 * half) + 1);
     for (int i = 0; i < half; i++) {
         ret[i] = s.s[i];
         ret[i + half] = s.s[sLen - half + i];
     }
     ret[half - 2] = ret[half - 1] = ret[half] = '.';
-    return Str(ret, maxLen + 2);
+    return Str(ret, 2 * half);
 }
 
 TempStr ShortenStringUtf8Temp(Str s, int maxRunes) {
-    int nRunes = utf8StrLen((u8*)s.s);
+    int nRunes = Utf8RuneCountChecked(s);
     if (nRunes < 0) {
         int sLen = len(s);
         if (sLen <= maxRunes) {
@@ -4259,7 +4277,9 @@ TempStr ShortenStringUtf8Temp(Str s, int maxRunes) {
         int keep = maxRunes - 3;
         keep = std::max(keep, 0);
         char* ret = AllocArrayTemp<char>(keep + 4);
-        memcpy(ret, s.s, keep);
+        if (keep > 0) {
+            memcpy(ret, s.s, (size_t)keep);
+        }
         ret[keep] = '.';
         ret[keep + 1] = '.';
         ret[keep + 2] = '.';
@@ -4271,7 +4291,7 @@ TempStr ShortenStringUtf8Temp(Str s, int maxRunes) {
     }
     int keep = maxRunes - 3;
     keep = std::max(keep, 0);
-    char* ret = AllocArrayTemp<char>((maxRunes * 4) + 1);
+    char* ret = AllocArrayTemp<char>((keep * 4) + 4);
     int src = 0;
     int tmp = 0;
     int n;
@@ -4290,12 +4310,15 @@ TempStr ShortenStringUtf8Temp(Str s, int maxRunes) {
 }
 
 TempStr ShortenStringUtf8InTheMiddleTemp(Str s, int maxRunes) {
-    int nRunes = utf8StrLen((u8*)s.s);
+    int nRunes = Utf8RuneCountChecked(s);
     if (nRunes < 0) {
         return ShortenStringTemp(s, maxRunes);
     }
     if (nRunes <= maxRunes) {
         return s;
+    }
+    if (maxRunes <= 3) {
+        return StrL("...");
     }
     int toRemove = (nRunes - maxRunes) + 3;
     int removeStartingAt = (nRunes / 2) - (toRemove / 2);
@@ -4356,6 +4379,14 @@ static int WStrCodepointAt(WStr s, int& idx) {
     }
     return c;
 }
+
+// like MultiByteToWideChar(CP_UTF8): an invalid byte becomes U+FFFD
+static int Utf8CodepointForWide(Str s, int& byteIdx) {
+    int n = 0;
+    int c = Utf8CodepointAtByte(s, byteIdx, &n);
+    byteIdx += n > 0 ? n : 1;
+    return n == 1 && c >= 0x80 ? 0xfffd : c;
+}
 #endif
 
 Str ToUtf8(Arena* arena, WStr wide) {
@@ -4398,13 +4429,13 @@ WStr ToWStrTemp(Str s) {
 #else
     int wideLen = 0;
     for (int byteIdx = 0; byteIdx < s.len;) {
-        int c = Utf8CodepointNext(s, byteIdx);
+        int c = Utf8CodepointForWide(s, byteIdx);
         wideLen += c >= 0x10000 && sizeof(WCHAR) == 2 ? 2 : 1;
     }
     wchar_t* wide = (wchar_t*)AllocTemp((wideLen + 1) * sizeof(wchar_t));
     int dst = 0;
     for (int byteIdx = 0; byteIdx < s.len;) {
-        int c = Utf8CodepointNext(s, byteIdx);
+        int c = Utf8CodepointForWide(s, byteIdx);
         if constexpr (sizeof(WCHAR) == 2) {
             if (c >= 0x10000) {
                 c -= 0x10000;
@@ -4503,7 +4534,6 @@ struct Fmt {
     Inst instructions[32]{}; // 32 should be big enough for everybody
     int nInst = 0;
 
-    int currArgNo = 0;
     int currPercArgNo = 0;
     str::Builder res;
 
@@ -4644,8 +4674,8 @@ static const struct {
     const char* mod;
     int bits;
 } kLenMods[] = {
-    {"I64", 64}, {"I32", 32}, {"ll", 64}, {"hh", 32}, {"l", 32}, {"h", 32},
-    {"L", 32},   {"w", 32},   {"z", 64},  {"j", 64},  {"t", 64}, {"I", 64},
+    {"I64", 64}, {"I32", 32}, {"ll", 64}, {"hh", 32}, {"l", (int)sizeof(long) * 8}, {"h", 32},
+    {"L", 32},   {"w", 32},   {"z", 64},  {"j", 64},  {"t", 64},                    {"I", 64},
 };
     // clang-format on
     int bits = 32;
@@ -4712,7 +4742,6 @@ static bool ParseFormat(Fmt& o, Str fmtStr) {
     o.format = fmtStr;
     o.nInst = 0;
     o.currPercArgNo = 0;
-    o.currArgNo = 0;
     o.res.Reset();
 
     // parse formatting string, until a %$c, %{} or %{$n}
@@ -4883,7 +4912,6 @@ static bool evalPercInst(Fmt& fmt, const Inst& inst, const FmtArg& arg) {
         fbuf[k++] = fmt.format.s[inst.fwpOff + j];
     }
     char conv = inst.conv;
-    i64 ival = argToI64(arg);
     bool ok = true;
     switch (conv) {
         case 'd':
@@ -4892,6 +4920,7 @@ static bool evalPercInst(Fmt& fmt, const Inst& inst, const FmtArg& arg) {
         case 'o':
         case 'x':
         case 'X': {
+            i64 ival = argToI64(arg);
             bool isSigned = conv == 'd' || conv == 'i';
             bool is64 = inst.intBits == 64;
             if (is64) {
@@ -4910,7 +4939,7 @@ static bool evalPercInst(Fmt& fmt, const Inst& inst, const FmtArg& arg) {
         case 'c':
             fbuf[k++] = 'c';
             fbuf[k] = 0;
-            ok = appendConv(fmt, fbuf, (int)ival);
+            ok = appendConv(fmt, fbuf, (int)argToI64(arg));
             break;
         case 'f':
         case 'F':
@@ -4927,7 +4956,7 @@ static bool evalPercInst(Fmt& fmt, const Inst& inst, const FmtArg& arg) {
         } break;
         case 'p': {
             // flags/width are uncommon (and platform-specific) for %p; emit plain
-            const void* pv = (arg.t == FmtArg::Kind::Ptr) ? arg.ptr : (const void*)(intptr_t)ival;
+            const void* pv = (arg.t == FmtArg::Kind::Ptr) ? arg.ptr : (const void*)(intptr_t)argToI64(arg);
             ok = appendConv(fmt, "%p", pv);
         } break;
         default:
@@ -5043,12 +5072,14 @@ static TempStr ExtractUntilTemp(Str& s, char c) {
     return res;
 }
 
-static bool ParseULongAt(Str& s, int base, unsigned long* val) {
+static bool ParseULongAt(Str& s, int base, unsigned long* val, bool skipWs = true) {
     if (s.len <= 0) {
         return false;
     }
     unsigned long v = 0;
-    str::TrimWs(s);
+    if (skipWs) {
+        str::TrimWs(s);
+    }
     int i = 0;
     if (base == 16 && i + 1 < s.len && s.s[i] == '0' && (s.s[i + 1] == 'x' || s.s[i + 1] == 'X')) {
         i += 2;
@@ -5091,10 +5122,10 @@ static bool ParseLongAt(Str& s, int base, long* val) {
         Eat(rest, 1);
     }
     unsigned long uv = 0;
-    if (!ParseULongAt(rest, base, &uv)) {
+    if (!ParseULongAt(rest, base, &uv, false)) {
         return false;
     }
-    *val = neg ? -(long)uv : (long)uv;
+    *val = neg ? (long)(0UL - uv) : (long)uv;
     s = rest;
     return true;
 }
@@ -5114,13 +5145,14 @@ static bool ParseDoubleAt(Str& s, double* val) {
 }
 
 static int ParseLimitedNumber(Str& s, int formatOff, Str format, const ParseArg& valueOut) {
-    unsigned int width;
+    unsigned int width = 0;
     char f2[] = "% ";
     Str formatAt = Str(format.s + formatOff, format.len - formatOff);
     Str endF = Parse(formatAt, "%u%c", &width, &f2[1]);
-    if (!str::IsNull(endF) && str::ContainsChar(StrL("udx"), f2[1]) && width <= (unsigned)s.len) {
-        char limited[16]; // 32-bit integers are at most 11 characters long
-        str::BufSet(Str(limited, std::min((int)width + 1, dimofi(limited))), Str(s.s, (int)width));
+    char limited[16]; // 32-bit integers are at most 11 characters long
+    if (!str::IsNull(endF) && str::ContainsChar(StrL("udx"), f2[1]) && width > 0 && width < (unsigned)dimofi(limited) &&
+        width <= (unsigned)s.len) {
+        str::BufSet(Str(limited, (int)width + 1), Str(s.s, (int)width));
         Str end = ParseArgs(Str(limited), f2, &valueOut, 1);
         if (!str::IsNull(end) && !end.s[0]) {
             Eat(s, (int)width);
@@ -5177,41 +5209,38 @@ Str ParseArgs(Str str, const char* fmt, const ParseArg* args, int nArgs) {
         int lenBefore = s.len;
         if ('u' == spec) {
             unsigned long v = 0;
-            if (!ParseULongAt(s, 10, &v)) {
+            if (!ParseULongAt(s, 10, &v) || ReportIf(argIdx >= nArgs)) {
                 return {};
             }
-            ReportIf(argIdx >= nArgs);
             *(unsigned int*)args[argIdx++].ptr = (unsigned int)v;
         } else if ('d' == spec) {
             long v = 0;
-            if (!ParseLongAt(s, 10, &v)) {
+            if (!ParseLongAt(s, 10, &v) || ReportIf(argIdx >= nArgs)) {
                 return {};
             }
-            ReportIf(argIdx >= nArgs);
             *(int*)args[argIdx++].ptr = (int)v;
         } else if ('x' == spec) {
             unsigned long v = 0;
-            if (!ParseULongAt(s, 16, &v)) {
+            if (!ParseULongAt(s, 16, &v) || ReportIf(argIdx >= nArgs)) {
                 return {};
             }
-            ReportIf(argIdx >= nArgs);
             *(unsigned int*)args[argIdx++].ptr = (unsigned int)v;
         } else if ('f' == spec || 'g' == spec) {
             double v = 0;
-            if (!ParseDoubleAt(s, &v)) {
+            if (!ParseDoubleAt(s, &v) || ReportIf(argIdx >= nArgs)) {
                 return {};
             }
-            ReportIf(argIdx >= nArgs);
             *(float*)args[argIdx++].ptr = (float)v;
         } else if ('c' == spec) {
-            if (s.len <= 0) {
+            if (s.len <= 0 || ReportIf(argIdx >= nArgs)) {
                 return {};
             }
-            ReportIf(argIdx >= nArgs);
             *(char*)args[argIdx++].ptr = s.s[0];
             Eat(s, 1);
         } else if ('s' == spec || 'S' == spec) {
-            ReportIf(argIdx >= nArgs);
+            if (ReportIf(argIdx >= nArgs)) {
+                return {};
+            }
             const ParseArg& arg = args[argIdx++];
             TempStr val;
             if (fi + 1 < format.len) {
@@ -5285,12 +5314,17 @@ TempStr FormatNumWithThousandSepTemp(i64 num, LCID locale) {
     (void)locale;
     TempStr thousandSep = StrL(",");
 #endif
-    TempStr buf = str::FormatTemp("%d", num);
+    // the digits of |num|; a '-' goes in front of the first group
+    bool negative = num < 0;
+    TempStr buf = str::FormatTemp("%llu", negative ? (u64)0 - (u64)num : (u64)num);
 
     // i64 with thousand seps is well under 48 bytes (e.g. "9,223,372,036,854,775,807").
     char resScratch[48]{};
     str::Builder res;
     res.UseExternalBuffer(Str(resScratch, sizeofi(resScratch)));
+    if (negative) {
+        res.AppendChar('-');
+    }
     int i = 3 - (buf.len % 3);
     for (int src = 0; src < buf.len; src++) {
         res.AppendChar(buf.s[src]);
@@ -5307,25 +5341,25 @@ TempStr FormatNumWithThousandSepTemp(i64 num, LCID locale) {
 // Caller needs to free the result.
 TempStr FormatFloatWithThousandSepTemp(double number, LCID locale, bool stripTrailingZero) {
     i64 num = (i64)llround(number * 100);
+    bool neg = num < 0;
+    u64 absNum = neg ? (u64)0 - (u64)num : (u64)num;
 
-    TempStr tmp = FormatNumWithThousandSepTemp(num / 100, locale);
+    TempStr tmp = FormatNumWithThousandSepTemp((i64)(absNum / 100), locale);
+    if (neg) {
+        tmp = str::JoinTemp(StrL("-"), tmp);
+    }
 #if OS_WIN
     WCHAR decimalW[4] = {};
     if (!GetLocaleInfoW(locale, LOCALE_SDECIMAL, decimalW, dimof(decimalW))) {
         decimalW[0] = '.';
         decimalW[1] = 0;
     }
-    char decimal[4];
-    int i = 0;
-    for (WCHAR c : decimalW) {
-        decimal[i++] = (char)c;
-    }
-
+    TempStr decimal = ToUtf8Temp(WStr(decimalW));
 #else
-    char decimal[4] = {'.', 0};
+    TempStr decimal = StrL(".");
 #endif
     // add between one and two decimals after the point
-    TempStr buf = str::FormatTemp("%s%s%02d", tmp, Str(decimal), num % 100);
+    TempStr buf = str::FormatTemp("%s%s%02d", tmp, decimal, (int)(absNum % 100));
     if (stripTrailingZero && str::EndsWith(buf, StrL("0"))) {
         buf.s[buf.len - 1] = '\0';
         buf.len--;
@@ -5857,7 +5891,7 @@ static Str SetOrInsertAt(StrVec* v, int idx, Str s, PageOpResult (StrVecPage::*o
         if (!str::IsNull(s)) {
             s = str::DupTemp(s);
         }
-        CompactPages(v, RoundUp(s.len + 1, 2048));
+        CompactPages(v, RoundUp(s.len + 1 + cbIndexSize(v->dataSize), 2048));
         res = (v->first->*op)(idx, s);
         ReportIf(res.noSpace);
     }
@@ -6124,6 +6158,28 @@ void SortNoCase(StrVec* v) {
 
 void SortNatural(StrVec* v) {
     Sort(v, StrLessNatural);
+}
+
+// Insert s into naturally sorted v unless already there; cheaper than a full SortNatural.
+void InsertSortedNatural(StrVec* v, Str s) {
+    int lo = 0;
+    int hi = len(*v);
+    while (lo < hi) {
+        int mid = lo + ((hi - lo) / 2);
+        if (StrLessNatural(v->At(mid), s)) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    // an existing copy is in the run of naturally-equal strings at lo (e.g. "A.pdf", "a.pdf")
+    for (int i = lo; i < len(*v) && !StrLessNatural(s, v->At(i)); i++) {
+        if (str::Eq(v->At(i), s)) {
+            return;
+        }
+    }
+    v->InsertAt(lo, s);
 }
 
 static bool reachedMax(int nAdded, int max) {
@@ -6474,19 +6530,19 @@ TempStr Utf16ToUtf8Temp(Str bytes, ByteOrder order) {
 // as it can
 // caller has to free() it
 TempStr UnknownToUtf8Temp(Str s) {
-    if (s.len < 3) {
+    if (len(s) == 0) {
         return str::DupTemp(s);
     }
 
-    if (str::TrimPrefix(s, Str(kUtf8Bom))) {
+    if (str::TrimPrefix(s, StrL(kUtf8Bom))) {
         return str::DupTemp(s);
     }
 
-    if (str::TrimPrefix(s, Str(kUtf16Bom))) {
+    if (str::TrimPrefix(s, StrL(kUtf16Bom))) {
         return Utf16ToUtf8Temp(s, ByteOrder::LittleEndian);
     }
 
-    if (str::TrimPrefix(s, Str(kUtf16BeBom))) {
+    if (str::TrimPrefix(s, StrL(kUtf16BeBom))) {
         return Utf16ToUtf8Temp(s, ByteOrder::BigEndian);
     }
 
@@ -6857,7 +6913,7 @@ DWORD PremultiplyPixel(Color c, u8 alpha) {
     r = (u8)((r * alpha) / 255);
     g = (u8)((g * alpha) / 255);
     b = (u8)((b * alpha) / 255);
-    return (alpha << 24) | (r << 16) | (g << 8) | b;
+    return ((DWORD)alpha << 24) | (r << 16) | (g << 8) | b;
 }
 
 /* In debug mode, VS 2010 instrumentations complains about GetRValue() etc.
@@ -6926,6 +6982,14 @@ int AtomicIntDec(AtomicInt* p) {
 }
 
 // stores v and returns what was there before
+void* AtomicPtrGet(AtomicPtr* p) {
+    return InterlockedCompareExchangePointer(p, nullptr, nullptr);
+}
+
+void AtomicPtrSet(AtomicPtr* p, void* v) {
+    InterlockedExchangePointer(p, v);
+}
+
 void* AtomicPtrExchange(AtomicPtr* p, void* v) {
     return InterlockedExchangePointer(p, v);
 }
@@ -6966,9 +7030,6 @@ bool str::BuilderReserve(Builder& b, int cap) {
 
 void wstr::BuilderUseExternalBuffer(Builder& b, WStr buf) {
     b.UseExternalBuffer(buf);
-}
-bool wstr::BuilderReserve(Builder& b, int cap) {
-    return b.Reserve(cap);
 }
 
 namespace str {

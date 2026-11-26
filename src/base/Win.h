@@ -168,7 +168,7 @@ void TreeViewExpandRecursively(HWND hTree, HTREEITEM hItem, uint flag, bool subt
 
 int MsgBox(HWND, Str text, Str caption, UINT flags);
 void MsgBoxWarning(HWND hwnd, Str msg, Str title = Str());
-HWND ShowTextInWindow(Str title, Str text, HWND* hwndPtr = nullptr);
+HWND ShowTextInWindow(Str title, Str text, HWND* hwndPtr = nullptr, const TextWindowOption* option = nullptr);
 void ShowTextInWindowDialog(Str title, Str text);
 
 //--- GDI: draw / measure
@@ -214,7 +214,6 @@ struct RenderedBitmap {
 };
 
 HBITMAP CreateMemoryBitmap(Size size, HANDLE* hDataMapping = nullptr);
-bool BlitHBITMAP(HBITMAP hbmp, HDC hdc, Rect target);
 
 inline bool IsPrinterDC(HDC hdc) {
     int tech = GetDeviceCaps(hdc, TECHNOLOGY);
@@ -253,14 +252,6 @@ class DeferWinPosHelper {
     void MoveWindowNoCopyBits(HWND hWnd, Rect r);
 };
 
-//--- DC state
-
-struct SavedDCState {
-    HWND hwnd;
-    HDC hdc;
-    HFONT oldFont;
-};
-
 //--- clipboard
 
 bool OpenClipboardForUpdate();
@@ -285,6 +276,8 @@ bool IsShiftPressed();
 bool IsAltPressed();
 void SetTestSaveFileName(Str path);
 bool TakeTestSaveFileName(OPENFILENAMEW* ofn);
+void SetTestOpenFileNames(Str paths);
+bool TakeTestOpenFileNames(StrVec& out);
 bool IsCtrlPressed();
 bool IsRightButtonPressed();
 int ReleaseThreadKeyState();
@@ -338,7 +331,6 @@ TempStr CpuFeaturesTemp();
 
 //--- environment / errors / paths
 
-TempStr GetEnvVariableTemp(Str name);
 TempStr GetLastErrorStrTemp(DWORD& err);
 void LogLastError(DWORD err = 0);
 Str GetLastErrorAsStr(Arena* arena);
@@ -362,6 +354,7 @@ extern bool gBlockExternalLaunch;
 // how many were blocked, for a test to check
 extern int gExternalLaunchesBlocked;
 bool ExternalLaunchBlocked(Str what);
+void SetExternalLaunchAllowDir(Str dir);
 bool LaunchFileShell(Str path, Str params = Str(), Str verb = Str(), bool hidden = false);
 bool LaunchBrowser(Str url);
 void OpenPathInDefaultFileManager(Str path);
@@ -438,7 +431,6 @@ LARGE_INTEGER TimeNow();
 //--- misc
 
 TempStr GetDefaultPrinterNameTemp();
-LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // IUnknown::Release() for a COM object with an AtomicInt refCount: calls `del` at 0
 // (a lambda, so the object's private destructor stays reachable)

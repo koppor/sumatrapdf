@@ -94,6 +94,8 @@ static const i32 gNoDocWhitelist[] = {
     CmdSumatraPDFWeb,
     CmdUploadToServer,
     CmdDeleteFromServer,
+    CmdImagesToPdf,
+    CmdLocateFile,
     0,
 };
 
@@ -102,6 +104,8 @@ static const i32 gNoDocWhitelist[] = {
 // showing "not supported" (docs/wasm-browser-plan.md).
 static const i32 gHiddenOnWasm[] = {
     CmdRunPDFScript,
+    CmdLocateFile,
+    CmdImagesToPdf,
     // a browser tab can't be minimized
     CmdMinimizeWindow,
     // a browser tab has one canvas, so one window
@@ -274,6 +278,8 @@ static const i32 removeIfNoCopyPerms[] = {
 
 static const i32 removeIfNoDiskAccessPerm[] = {
     CmdRunPDFScript,
+    CmdLocateFile,
+    CmdImagesToPdf,
     CmdNewWindow,
     CmdOpenFile,
     CmdOpenFileNoHistory,
@@ -463,6 +469,34 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     if (cmdId <= CmdFirst) {
         return CommandVisibility::Hide;
     }
+
+    // sumatrapdfrestrict.ini wins over every rule below (e.g. the no-document whitelist)
+    if (!HasPermission(Perm::InternetAccess) && CmdIdInList(cmdId, removeIfNoInternetPerms)) {
+        return CommandVisibility::Hide;
+    }
+    if (!HasPermission(Perm::FullscreenAccess) && CmdIdInList(cmdId, removeIfNoFullscreenPerms)) {
+        return CommandVisibility::Hide;
+    }
+    if (!HasPermission(Perm::SavePreferences) && CmdIdInList(cmdId, removeIfNoPrefsPerms)) {
+        return CommandVisibility::Hide;
+    }
+    if (!HasPermission(Perm::PrinterAccess) && (cmdId == CmdPrint || cmdId == CmdPrintSelection)) {
+        return CommandVisibility::Hide;
+    }
+    if (!CanAccessDisk()) {
+        if (CmdIdInList(cmdId, removeIfNoDiskAccessPerm)) {
+            return CommandVisibility::Hide;
+        }
+        if (CmdIdInList(cmdId, removeIfAnnotsNotSupported)) {
+            return CommandVisibility::Hide;
+        }
+        if (IsOpenWithKnownExternalViewerCmd(cmdId)) {
+            return CommandVisibility::Hide;
+        }
+    }
+    if (!HasPermission(Perm::CopySelection) && CmdIdInList(cmdId, removeIfNoCopyPerms)) {
+        return CommandVisibility::Hide;
+    }
     if (cmdId == CmdDebugToggleDpiOverride && !ctx.debugDpiOverrideAvailable) {
         return CommandVisibility::Hide;
     }
@@ -585,7 +619,7 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return ctx.tabInGroup ? CommandVisibility::Show : CommandVisibility::Hide;
     }
     if (CmdReopenLastClosedFile == cmdId) {
-        return RecentlyCloseDocumentsCount() > 0 ? CommandVisibility::Show : CommandVisibility::Hide;
+        return RecentlyClosedDocumentsCount() > 0 ? CommandVisibility::Show : CommandVisibility::Hide;
     }
     if (cmdId == CmdTabGroupSave || origCmdId == CmdTabGroupSave) {
         if (surface == CommandSurface::Palette) {
@@ -621,9 +655,8 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return MapForSurface(CommandVisibility::Disable, surface);
     }
 
-    // The whitelist returns before the permission lists. This command is on
-    // that list, so the internet and prefs checks have to happen here.
-    if (cmdId == CmdSumatraPDFWeb && (!HasPermission(Perm::InternetAccess) || !HasPermission(Perm::SavePreferences))) {
+    // on the whitelist too, so checked before it
+    if ((cmdId == CmdCheckUpdate) && gIsStoreBuild) {
         return CommandVisibility::Hide;
     }
 
@@ -797,6 +830,23 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         }
     }
 
+    // a PDF's annotations as Markdown or CSV; wasm has no files to write them to
+    if (cmdId == CmdExportAnnotations && (OS_WASM || !ctx.isPdf || !ctx.supportsAnnots)) {
+        return CommandVisibility::Hide;
+    }
+
+    // the Markdown export of `cli markdown`; wasm has no files to write it to
+    if (cmdId == CmdExportMarkdown) {
+#if OS_WASM
+        return CommandVisibility::Hide;
+#else
+        bool canExtract = ctx.engineKind == kindEngineMupdf || ctx.engineKind == kindEngineDjVu;
+        if (!canExtract || ctx.isImageCollection) {
+            return CommandVisibility::Hide;
+        }
+#endif
+    }
+
     bool isTextSelectCmd = cmdId == CmdSelectTextViaKeyboard || cmdId == CmdToggleTextSelecting ||
                            cmdId == CmdExtendSelectionCharLeft || cmdId == CmdExtendSelectionCharRight ||
                            cmdId == CmdExtendSelectionWordLeft || cmdId == CmdExtendSelectionWordRight;
@@ -949,39 +999,9 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return CommandVisibility::Disable;
     }
 
-    if ((cmdId == CmdCheckUpdate) && gIsStoreBuild) {
-        return CommandVisibility::Hide;
-    }
-
-    if (!HasPermission(Perm::InternetAccess) && CmdIdInList(cmdId, removeIfNoInternetPerms)) {
-        return CommandVisibility::Hide;
-    }
-    if (!HasPermission(Perm::FullscreenAccess) && CmdIdInList(cmdId, removeIfNoFullscreenPerms)) {
-        return CommandVisibility::Hide;
-    }
-    if (!HasPermission(Perm::SavePreferences) && CmdIdInList(cmdId, removeIfNoPrefsPerms)) {
-        return CommandVisibility::Hide;
-    }
-    if (!HasPermission(Perm::PrinterAccess) && (cmdId == CmdPrint || cmdId == CmdPrintSelection)) {
-        return CommandVisibility::Hide;
-    }
     // orig's MenuUpdatePrintItem also relabels the row "&Print... (denied)"
     if (!ctx.allowsPrinting && cmdId == CmdPrint) {
-        return CommandVisibility::Disable;
-    }
-    if (!CanAccessDisk()) {
-        if (CmdIdInList(cmdId, removeIfNoDiskAccessPerm)) {
-            return CommandVisibility::Hide;
-        }
-        if (CmdIdInList(cmdId, removeIfAnnotsNotSupported)) {
-            return CommandVisibility::Hide;
-        }
-        if (IsOpenWithKnownExternalViewerCmd(cmdId)) {
-            return CommandVisibility::Hide;
-        }
-    }
-    if (!HasPermission(Perm::CopySelection) && CmdIdInList(cmdId, removeIfNoCopyPerms)) {
-        return CommandVisibility::Hide;
+        return MapForSurface(CommandVisibility::Disable, surface);
     }
 
     if (!ctx.cursorOnLinkTarget && cmdId == CmdCopyLinkTarget) {
@@ -998,7 +1018,7 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         if (!isRect) {
             return CommandVisibility::Hide;
         }
-        return ctx.allowsPrinting ? CommandVisibility::Show : CommandVisibility::Disable;
+        return ctx.allowsPrinting ? CommandVisibility::Show : MapForSurface(CommandVisibility::Disable, surface);
     }
     if (cmdId == CmdCopySelectionAsImage || cmdId == CmdSaveSelectionAsImage) {
         bool isRect = ctx.hasSelection && !ctx.hasTextSelection;

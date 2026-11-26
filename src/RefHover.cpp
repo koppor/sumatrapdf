@@ -179,8 +179,16 @@ void RefHoverHandlePopupClick(RefHoverState* s, IPageDestination* dest) {
     if (!s || !dest || !s->ctrl) {
         return;
     }
+    // dest belongs to hitEngine, which hiding releases
+    EngineBase* engine = s->hitEngine;
+    if (engine) {
+        engine->AddRef();
+    }
     RefHoverHide(s, s->hwndCanvas);
     s->ctrl->HandleLink(dest, s->linkHandler);
+    if (engine) {
+        engine->Release();
+    }
 }
 
 // ---- JabRef push --------------------------------------------------------

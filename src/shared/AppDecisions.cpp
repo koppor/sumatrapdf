@@ -26,17 +26,17 @@ struct OpenDdeArgs {
 // CrashMe, goes to the UI thread. Quit is reported; the app decides whether
 // a failed write still stops the listener.
 ControlFrameAction ControlFrameActionFor(u16 cmd) {
-    if (cmd == (u16)ControlFrameCmd::WaitRenderIdle) {
+    if (cmd == (u16)ControlCmd::WaitRenderIdle) {
         return ControlFrameAction::WaitRenderIdle;
     }
-    if (cmd == (u16)ControlFrameCmd::WaitSessionRestored) {
+    if (cmd == (u16)ControlCmd::WaitSessionRestored) {
         return ControlFrameAction::WaitSessionRestored;
     }
     return ControlFrameAction::RunOnUi;
 }
 
 bool ControlCmdEndsListener(u16 cmd) {
-    return cmd == (u16)ControlFrameCmd::Quit;
+    return cmd == (u16)ControlCmd::Quit;
 }
 
 // [Open("path")] or [Open("path",new,focus,refresh[,inTab])].
@@ -128,8 +128,7 @@ UpdateCheckChoice DecideUpdateCheck(const UpdateCheckFacts& f) {
     }
 
     constexpr int kSecondsInDay = 60 * 60 * 24;
-    constexpr int kSecondsInWeek = 7 * 60 * 60 * 24;
-    int secsBetweenChecks = f.isPreRelease ? kSecondsInWeek : kSecondsInDay;
+    int secsBetweenChecks = kSecondsInDay;
     bool checkUpdate = f.secsSinceLast > secsBetweenChecks;
     logf("CheckForUpdate: %s auto check, %d secs since the last one, %d secs between checks\n",
          checkUpdate ? StrL("doing") : StrL("skipping"), f.secsSinceLast, secsBetweenChecks);
@@ -141,6 +140,13 @@ bool ShouldOfferProgramUpdate(Str latestVer, Str myVer, bool isStoreBuild) {
         return false;
     }
     return CompareProgramVersion(latestVer, myVer) > 0;
+}
+
+// server-supplied text shown in a task dialog with hyperlinks: "<a href=...>" must not become a link
+TempStr NoLinkMarkupTemp(Str s) {
+    TempStr res = str::DupTemp(s);
+    str::TransCharsInPlace(res, StrL("<>"), StrL("__"));
+    return res;
 }
 
 UpdateInfoFetch ClassifyUpdateInfoFetch(Str url, int error, int httpStatus, int bodyLen, const Str* allowed,
