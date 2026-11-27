@@ -62,7 +62,7 @@ void TooltipRemoveAll(HWND hwnd) {
 }
 
 static TempStr TooltipGetTextTemp(HWND hwnd, HWND owner, int id) {
-    WCHAR buf[512];
+    WCHAR buf[512] = {};
     TOOLINFOW ti = {};
     ti.cbSize = sizeof(ti);
     ti.hwnd = owner;
@@ -237,10 +237,6 @@ HWND Tooltip::Create(const CreateArgs& args) {
 Size Tooltip::GetIdealSize() {
     // not used as this is top-level window
     return {100, 32};
-}
-
-void Tooltip::SetMaxWidth(int dx) {
-    SendMessageW(hwnd, TTM_SETMAXTIPWIDTH, 0, dx);
 }
 
 int Tooltip::Add(Str s, const Rect& rc, bool multiline) {

@@ -189,6 +189,9 @@
     <ClInclude Include="..\src\SumatraPDF.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\ToolPipe.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\Toolbar.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -633,6 +636,9 @@
     <ClInclude Include="..\src\shared\ServerFiles.h">
       <Filter>src\shared</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\shared\SessionStateCommon.h">
+      <Filter>src\shared</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\shared\ShortcutParse.h">
       <Filter>src\shared</Filter>
     </ClInclude>
@@ -730,6 +736,9 @@
       <Filter>src\shared\gui</Filter>
     </ClInclude>
     <ClInclude Include="..\src\shared\gui\PlatformText.h">
+      <Filter>src\shared\gui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\shared\gui\TabColors.h">
       <Filter>src\shared\gui</Filter>
     </ClInclude>
     <ClInclude Include="..\src\shared\gui\UIModels.h">
@@ -1070,6 +1079,9 @@
     <ClCompile Include="..\src\base\tests\Dict_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\base\tests\Exif_ut.cpp">
+      <Filter>src\base\tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\base\tests\FileWatcher_posix_ut.cpp">
       <Filter>src\base\tests</Filter>
     </ClCompile>
@@ -1124,9 +1136,6 @@
     <ClCompile Include="..\src\gui\Layout.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\gui\PasswordDialog.cpp">
-      <Filter>src\gui</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\gui\UiPlatform.cpp">
       <Filter>src\gui</Filter>
     </ClCompile>
@@ -1173,9 +1182,6 @@
       <Filter>src\gui\win</Filter>
     </ClCompile>
     <ClCompile Include="..\src\gui\win\Tooltip.cpp">
-      <Filter>src\gui\win</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\gui\win\Trackbar.cpp">
       <Filter>src\gui\win</Filter>
     </ClCompile>
     <ClCompile Include="..\src\gui\win\TreeView.cpp">
@@ -1595,6 +1601,9 @@
     <ClCompile Include="..\src\shared\ServerFiles.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\shared\SessionStateCommon.cpp">
+      <Filter>src\shared</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\shared\ShortcutParse.cpp">
       <Filter>src\shared</Filter>
     </ClCompile>
@@ -1701,6 +1710,9 @@
       <Filter>src\shared\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\tests\MobiDoc_ut.cpp">
+      <Filter>src\shared\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\shared\tests\Ofd_ut.cpp">
       <Filter>src\shared\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\src\shared\tests\PagePosition_ut.cpp">

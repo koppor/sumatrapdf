@@ -79,13 +79,17 @@ static WStr GetDefaultChmFontName() {
     return GetDefaultFontName();
 }
 
-static float GetDefaultFontSize() {
+static float DpiAdjustedFontSize(float size) {
     // fonts are scaled at higher DPI settings,
     // undo this here for (mostly) consistent results
+    return size * 96.0f / (float)DpiGetForHwnd(nullptr);
+}
+
+static float GetDefaultFontSize() {
     if (gDefaultFontSize == 0) {
         gDefaultFontSize = 10;
     }
-    return gDefaultFontSize * 96.0f / (float)DpiGetForHwnd(nullptr);
+    return DpiAdjustedFontSize(gDefaultFontSize);
 }
 
 void SetDefaultEbookFont(Str name, float size) {
@@ -621,7 +625,9 @@ PageText EngineEbook::ExtractPageText(int pageNo) {
         VecAppendBlanks(coords, len(lineSep));
     }
     int nCodepoints = Utf8CodepointCount(ToStr(content));
-    ReportIf(len(coords) != nCodepoints);
+    if (ReportIf(len(coords) != nCodepoints)) {
+        return {};
+    }
 
     PageText res;
     res.nCodepoints = nCodepoints;
@@ -769,7 +775,7 @@ IPageDestination* EngineEbook::GetNamedDest(Str name) {
     DrawInstr* baseAnchor = nullptr;
     int basePageNo = 0;
     if (hash && hash.s > name.s) {
-        int base_len = (int)(hash.s - name.s - 1);
+        int base_len = (int)(hash.s - name.s);
         for (int i = 0; i < len(baseAnchors); i++) {
             DrawInstr* anchor = baseAnchors[i];
             if (anchor && base_len == anchor->str.len && str::EqNI(name, anchor->str, base_len)) {
@@ -1650,7 +1656,7 @@ class ChmDataCache {
     Vec<ImageData> images;
 
   public:
-    ChmDataCache(ChmFile* doc, Str html) : doc(doc), html(html.s) {}
+    ChmDataCache(ChmFile* doc, Str html) : doc(doc), html(html) {}
 
     ~ChmDataCache() {
         FreeImages(images);
@@ -2035,7 +2041,12 @@ bool EngineHtml::Load(Str fileName) {
     }
 
     HtmlFormatterArgs args;
-    InitFormatterArgs(args, doc->htmlData, GetDefaultFontName());
+    WebDocStyle style = GetWebDocStyle(FileType::HTML);
+    Str fontName = style.fontName;
+    InitFormatterArgs(args, doc->htmlData, fontName ? ToWStrTemp(fontName) : WStrL(L"Georgia"));
+    args.overrideFontName = len(fontName) > 0;
+    args.fontSize = DpiAdjustedFontSize(style.fontSize > 0 ? style.fontSize : 8.f);
+    args.lineHeight = style.lineSpacing;
     if (!SetFormattedPages(HtmlFileFormatter(&args, doc).FormatAllPages(false))) {
         return false;
     }

@@ -114,7 +114,8 @@ static void PositionDialog(HWND hwnd, HWND hwndRelative) {
 
 void ChangeThemeWnd::PreviewDocumentColors() {
     UpdateDocumentColors();
-    if (win && win->AsFixed()) {
+    // the dialog outlives the window it was opened from
+    if (IsMainWindowValidAndNotClosing(win) && win->AsFixed()) {
         MainWindowRerender(win);
     }
 }
@@ -246,7 +247,6 @@ bool ChangeThemeWnd::Create(MainWindow* mainWin) {
         args.font = fontText;
         args.isRtl = isRtl;
         args.bgColor = ThemeWindowControlBackgroundColor();
-        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
         CreateCustom(args);
     }
     if (!hwnd) {

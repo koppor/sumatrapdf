@@ -47,11 +47,13 @@
 #include "gui/TabsUI.h"
 #include "gui/DocCanvas.h"
 #include "AnnotPlacement.h"
+#include "AnnotEditToolbar.h"
 #include "MeasurementToolbar.h"
 #include "LinkFollow.h"
 #include "SelectTextKeyboard.h"
 
 #include "SessionState.h"
+#include "SessionStateCommon.h"
 #include "AIChatCommon.h"
 #include "AIChatPanel.h"
 #include "HomePage.h"
@@ -164,6 +166,12 @@ void LoadModelIntoTab(WindowTab* tab) {
         StopKeyboardLinkFollowing(win);
         StopSelectTextWithKeyboard(win);
         CancelAnnotationPlacement(win);
+        // as orig's CloseDocumentInCurrentTab: keep typed contents, and don't
+        // let a signature placed in the outgoing document land in this one
+        if (IsEditingAnnotContents(win)) {
+            EndAnnotContentsEdit(true);
+        }
+        CloseSignDocumentDialog(win);
         if (win->mouseAction != MouseAction::None || win->annotationBeingDragged || win->annotationBeingResized) {
             CanvasCancelDrag(win);
         }

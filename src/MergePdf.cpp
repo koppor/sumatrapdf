@@ -256,6 +256,8 @@ struct MergePdfWnd : WindowBase {
     PlatformFont* fontText = nullptr;
     PlatformFont* fontMeta = nullptr;
     bool tornDown = false;
+    // the save running on a thread, if any
+    PdfToolJob* job = nullptr;
 
     ~MergePdfWnd() override;
 
@@ -263,7 +265,9 @@ struct MergePdfWnd : WindowBase {
     MergeSource* AddSource(Str path, EngineBase* engine);
     bool AddPdf(Str path, int at);
     void UpdateUI();
+    PdfToolJob* NewSaveJob(Str destPath);
     bool SaveTo(Str destPath);
+    void StartSave(Str destPath);
     void AfterSave(Str path);
     void Paste();
 
@@ -1228,7 +1232,7 @@ void MergeGrid::ShowContextMenu() {
 // those far from them
 void MergeGrid::StartRendering() {
     int n = len(items);
-    if (sources->job.IsRunning() || n == 0 || ViewportDy() <= 0) {
+    if (!sources || sources->job.IsRunning() || n == 0 || ViewportDy() <= 0) {
         return;
     }
     int firstVisible = FirstVisibleIdx();
@@ -1435,12 +1439,28 @@ static void TeardownMergeWnd(MergePdfWnd* w) {
     KillTimer(w->hwnd, kAutoScrollTimerId);
     MergeSources* sources = w->sources;
     sources->grid = nullptr;
-    w->grid->sources = nullptr;
-    w->grid->wnd = nullptr;
+    // the window outlives the sources: until it's deleted it can still be
+    // painted or laid out (SetActiveWindow() below pumps messages when an IME
+    // is active), so nothing in it may point to them
+    MergeGrid* grid = w->grid;
+    grid->EndPress();
+    VecReset(grid->items);
+    VecReset(grid->clip);
+    grid->rowsModel->rows = 0;
+    grid->hoverIdx = -1;
+    grid->focusIdx = 0;
+    grid->anchorIdx = 0;
+    grid->sources = nullptr;
+    grid->wnd = nullptr;
+    w->sources = nullptr;
     if (sources->job.Detach()) {
         DeleteMergeSources(sources);
     }
-    w->sources = nullptr;
+    // a save still running finishes without the dialog
+    if (w->job) {
+        w->job->owner = nullptr;
+        w->job = nullptr;
+    }
     if (gMergeWnd == w) {
         gMergeWnd = nullptr;
     }
@@ -1519,7 +1539,7 @@ TempStr MergePdfWnd::InfoTemp() {
 // dx, so every file is named (issue #6397). Relative to the legend
 void MergePdfWnd::LegendRects(int dx, Vec<Rect>& out) {
     VecReset(out);
-    if (len(sources->all) < 2) {
+    if (!sources || len(sources->all) < 2) {
         return;
     }
     int gap = fontMeta->averageCharWidth;
@@ -1603,7 +1623,7 @@ void MergePdfWnd::UpdateUI() {
     int nSelRemoved = grid->SelectedRemovedCount();
     SetDlgButtonEnabled(btnRemove, DlgButtonStyle::Ghost, nSel > nSelRemoved);
     SetDlgButtonEnabled(btnRestore, DlgButtonStyle::Ghost, nSelRemoved > 0);
-    bool canSave = nPages > nRemoved;
+    bool canSave = nPages > nRemoved && !job;
     SetDlgButtonEnabled(btnSave, DlgButtonStyle::Outline, canSave);
     SetDlgButtonEnabled(btnSaveAs, DlgButtonStyle::Filled, canSave);
     info->Invalidate();
@@ -1883,9 +1903,9 @@ void MergePdfWnd::OnRestore(VirtMouseEvent*) {
     grid->SetRemoved(false);
 }
 
-// Writes the pages not removed to destPath, which may be one of the sources:
-// the result goes to a temp file first
-bool MergePdfWnd::SaveTo(Str destPath) {
+// The merge of the pages not removed into destPath, which may be one of the
+// sources; nullptr if there's nothing to save
+PdfToolJob* MergePdfWnd::NewSaveJob(Str destPath) {
     Vec<PdfMergePage> pages;
     for (MergeItem& it : grid->items) {
         if (!it.removed) {
@@ -1893,7 +1913,7 @@ bool MergePdfWnd::SaveTo(Str destPath) {
         }
     }
     if (len(pages) == 0) {
-        return false;
+        return nullptr;
     }
     Vec<PdfMergeSource> srcs;
     for (MergeSource* src : sources->all) {
@@ -1905,30 +1925,64 @@ bool MergePdfWnd::SaveTo(Str destPath) {
     if (EngineHasUnsavedAnnotations(docEngine)) {
         srcCopy = GetTempFilePathTemp(StrL("merge"));
         if (len(srcCopy) == 0 || !EngineMupdfSaveCopy(docEngine, srcCopy)) {
-            return false;
+            return nullptr;
         }
-        srcs[0].path = srcCopy;
     }
-    TempStr tmpPath = GetTempFilePathTemp(StrL("merge"));
-    bool ok = len(tmpPath) > 0 && EngineMupdfMergePdfs(srcs, pages, tmpPath);
-    if (ok) {
-        WindowTab* tab = FindTabByFilePath(destPath);
-        if (tab) {
-            // it's reloaded below; the file watcher needn't
-            tab->ignoreNextAutoReload = true;
-        }
-        Str data = file::ReadFile(tmpPath);
-        ok = len(data) > 0 && file::WriteFile(destPath, data);
-        str::Free(data);
+    WindowTab* tab = FindTabByFilePath(destPath);
+    if (tab) {
+        // it's reloaded after; the file watcher needn't
+        tab->ignoreNextAutoReload = true;
     }
-    if (len(tmpPath) > 0) {
-        file::Delete(tmpPath);
+    return NewMergeJob(srcs, pages, srcCopy, destPath);
+}
+
+// the write failed: the next change of the file is a real one
+static void UnignoreReload(Str path) {
+    WindowTab* tab = FindTabByFilePath(path);
+    if (tab) {
+        tab->ignoreNextAutoReload = false;
     }
-    if (len(srcCopy) > 0) {
-        file::Delete(srcCopy);
+}
+
+// saves now, for tests
+bool MergePdfWnd::SaveTo(Str destPath) {
+    PdfToolJob* j = NewSaveJob(destPath);
+    bool ok = j && RunPdfToolJobNow(j) == 0;
+    if (!ok) {
+        UnignoreReload(destPath);
     }
-    logf("MergePdfWnd::SaveTo: %d pages from %d files to '%s', ok: %d\n", len(pages), len(srcs), destPath, (int)ok);
     return ok;
+}
+
+static void FinishMergeSave(PdfToolJob* j) {
+    if (j->res != 0) {
+        UnignoreReload(j->destPath);
+    }
+    auto* w = (MergePdfWnd*)j->owner;
+    if (!w) {
+        return;
+    }
+    w->job = nullptr;
+    w->UpdateUI();
+    if (j->res != 0) {
+        MessageBoxWarning(w->hwnd, j->failMsg, j->failTitle);
+        return;
+    }
+    w->AfterSave(j->destPath);
+}
+
+// Save and Save As stay disabled until FinishMergeSave
+void MergePdfWnd::StartSave(Str destPath) {
+    PdfToolJob* j = NewSaveJob(destPath);
+    if (!j) {
+        MessageBoxWarning(hwnd, fmt(Tr("Couldn't save '%s'").s, destPath), Tr("Merge PDF"));
+        return;
+    }
+    job = j;
+    j->owner = this;
+    j->onFinish = MkFunc1Void(FinishMergeSave);
+    UpdateUI();
+    StartPdfToolJob(j);
 }
 
 // closes the dialog and shows the saved file: reloaded where it's open, else in a new tab
@@ -1952,14 +2006,15 @@ void MergePdfWnd::AfterSave(Str path) {
 }
 
 void MergePdfWnd::OnSave(VirtMouseEvent*) {
-    if (!SaveTo(docPath)) {
-        MessageBoxWarning(hwnd, fmt(Tr("Couldn't save '%s'").s, docPath), Tr("Merge PDF"));
-        return;
+    if (!job) {
+        StartSave(docPath);
     }
-    AfterSave(docPath);
 }
 
 void MergePdfWnd::OnSaveAs(VirtMouseEvent*) {
+    if (job) {
+        return;
+    }
     WCHAR dstFileName[MAX_PATH + 1]{};
     wstr::BufSet(WStr(dstFileName, MAX_PATH), ToWStrTemp(MakeUniqueFilePathTemp(docPath)));
     OPENFILENAME ofn{};
@@ -1973,12 +2028,7 @@ void MergePdfWnd::OnSaveAs(VirtMouseEvent*) {
     if (!(TakeTestSaveFileName(&ofn) || GetSaveFileNameW(&ofn)) || tornDown) {
         return;
     }
-    TempStr path = ToUtf8Temp(dstFileName);
-    if (!SaveTo(path)) {
-        MessageBoxWarning(hwnd, fmt(Tr("Couldn't save '%s'").s, path), Tr("Merge PDF"));
-        return;
-    }
-    AfterSave(path);
+    StartSave(ToUtf8Temp(dstFileName));
 }
 
 void MergePdfWnd::OnCancel(VirtMouseEvent*) {
@@ -2026,7 +2076,6 @@ bool MergePdfWnd::Create(MainWindow* w, WindowTab* tab) {
     cargs.style = WS_OVERLAPPEDWINDOW;
     cargs.visible = false;
     cargs.isRtl = IsUIRtl();
-    cargs.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
     cargs.bgColor = colBg;
     CreateCustom(cargs);
     if (!hwnd) {
@@ -2165,8 +2214,8 @@ static void ReleaseCtrlKey() {
 // (arg: 0-based items like "0,2", n: in front of that item), "remove" /
 // "restore" (arg: items), "rotate" (arg: items, n: degrees), "copy" / "cut"
 // (arg: items), "paste" (arg: items, the paste goes after the last), "save" /
-// "saveas" (arg: the path), "ctrla" (presses Ctrl+A), "close" or "" (report
-// only). Reports the items as src:page[@rotation] (r: removed, s: selected),
+// "saveas" (arg: the path), "ctrla" (presses Ctrl+A), "close", "closepaint"
+// (tests/merge-close-paint.ts) or "" (report only). Reports the items as src:page[@rotation] (r: removed, s: selected),
 // the status text (info="...") and,
 // for clicking, the dialog's hwnd and each visible thumbnail and its corner
 // button in client coords. Used by tests/issue-6070.ts.
@@ -2236,6 +2285,17 @@ TempStr MergePdfResultTemp(Str action, Str arg, int n, int* exitCodeOut) {
         return finish(0, res);
     } else if (str::Eq(action, StrL("close"))) {
         w->Close();
+        return finish(0, str::DupTemp(StrL("OK closed")));
+    } else if (str::Eq(action, StrL("closepaint"))) {
+        // closes with a paint and a layout between the teardown and the
+        // window's end, as when SetActiveWindow() pumps messages there
+        HWND hwnd = w->hwnd;
+        TeardownMergeWnd(w);
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        Rect rc = HwndWindowRect(hwnd);
+        SetWindowPos(hwnd, nullptr, 0, 0, rc.dx + 40, rc.dy, SWP_NOMOVE | SWP_NOZORDER);
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        DestroyWindow(hwnd);
         return finish(0, str::DupTemp(StrL("OK closed")));
     } else if (str::Eq(action, StrL("ctrla"))) {
         // Ctrl+A through the message loop (and its accelerators), Ctrl held

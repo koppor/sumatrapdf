@@ -538,6 +538,10 @@ TempStr GoToFindMatchResultTemp(Str word, Str typed, int* exitCodeOut) {
     bool hasResult = len(ts->result) > 0;
 
     bool matchOk = (curPage == pageNo) && (curStart == startGlyph) && (curEnd == endGlyph) && str::Eq(matched, word);
+    // Layout can finish during the jump and restore the old scroll.
+    if (matchOk && hasResult && !visible) {
+        return fail(StrL("NOTREADY no-layout"));
+    }
     bool ok = matchOk && visible && hasResult;
     if (ok) {
         out.Append(fmt("OK match=%s page=%d visible=1 highlighted=1\n", matched, pageNo));
@@ -1504,6 +1508,7 @@ TempStr PageRenderColorsResultTemp(Str path, int* exitCodeOut, int pageNo, int z
     }
     if (!engine) {
         engine = CreateEngineFromFile(path, nullptr, false);
+        ownEngine = true;
     }
     if (!engine) {
         return fail(fmt("ERROR engine-create-failed path=%s\n", path));

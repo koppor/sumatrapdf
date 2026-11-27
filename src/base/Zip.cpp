@@ -14,18 +14,9 @@ extern "C" {
 
 /***** ZipCreator *****/
 
-ZipCreator::ZipCreator(Str zipFilePath) : bytesWritten(0), fileCount(0) {
-    this->zipFilePath = str::Dup(zipFilePath);
-    zipOut = &zipData;
-}
-
 ZipCreator::ZipCreator(str::Builder& zipOut) : bytesWritten(0), fileCount(0) {
     zipOut.Reset();
     this->zipOut = &zipOut;
-}
-
-ZipCreator::~ZipCreator() {
-    str::Free(zipFilePath);
 }
 
 bool ZipCreator::WriteData(const void* data, size_t size) {
@@ -80,7 +71,7 @@ static u32 FileTimeToDosDateTime(FILETIME ft) {
     }
     time_t seconds = (time_t)((ticks - kFileTimeUnixEpoch) / kFileTimeTicksPerSec);
     struct tm local{};
-    if (!localtime_r(&seconds, &local)) {
+    if (!LocalTime(seconds, &local)) {
         return 0;
     }
     int year = local.tm_year + 1900;
@@ -109,21 +100,22 @@ bool ZipCreator::AddFileData(Str name, Str data, u32 dosdate) {
         return false;
     }
 
+    AutoArenaSavepoint sp;
     u16 method = Z_DEFLATED;
-    char* compressed = nullptr;
+    const char* payload = data.s;
     uLongf compressedSize = 0;
-    if (size > 0) {
-        compressed = AllocArrayTemp<char>(size);
+    if (size > 0 && !storeOnly) {
+        char* compressed = AllocArrayTemp<char>(size);
         if (!compressed) {
             return false;
         }
-        compressedSize = storeOnly ? 0 : zip_compress(compressed, (u32)size, data.s, (u32)size);
+        compressedSize = zip_compress(compressed, (u32)size, data.s, (u32)size);
+        if (compressedSize > 0) {
+            payload = compressed;
+        }
     }
     if (!compressedSize) {
         method = 0; // Store
-        if (size > 0) {
-            memcpy(compressed, data.s, size);
-        }
         compressedSize = (u32)size;
     }
 
@@ -150,7 +142,7 @@ bool ZipCreator::AddFileData(Str name, Str data, u32 dosdate) {
     Str localHeader = ToStr(local.d);
     bool ok = WriteData(localHeader.s, kHdrSize);
     ok = ok && WriteData(name.s, namelen);
-    ok = ok && WriteData(compressed, compressedSize);
+    ok = ok && WriteData(payload, compressedSize);
 
     constexpr int kCentralSize = 46;
     ByteWriterLE central(kCentralSize);
@@ -247,9 +239,6 @@ bool ZipCreator::Finish() {
 
     bool ok = WriteData(ToStr(centraldir).s, len(centraldir));
     ok = ok && WriteData(ToStr(eocd.d).s, kDirSize);
-    if (ok && zipFilePath) {
-        ok = file::WriteFile(zipFilePath, ToStr(*zipOut));
-    }
     return ok;
 }
 
@@ -284,12 +273,15 @@ Str Ungzip(const Str& d, int maxSize) {
     u8* dataCompr = (u8*)d.s;
     // aggressive growth for uncompressed buffer because I use this
     // for .syntex files and they compress really well
+    if (maxSize > INT_MAX - 2) {
+        maxSize = INT_MAX - 2;
+    }
     int lenUncr = (int)std::min((i64)maxSize, (i64)n * 2);
 
     bool done = false;
     int res;
 
-    z_stream strm;
+    z_stream strm{};
     strm.next_in = (Bytef*)dataCompr;
     strm.avail_in = (uInt)n;
     strm.total_out = 0;

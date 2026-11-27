@@ -704,12 +704,19 @@ static gp::El* DlgWindowFitTo(DlgWindowEntry* e, gp::Ctx* cx, gp::El* col, float
     return gp::Div(cx->a)->FlexCol()->SizeFull()->Child(col);
 }
 
-float DlgWinTextDx(gp::Ctx* cx, Str label) {
-    DlgWindowEntry* e = DlgWindowEntryOf(cx->win);
-    int dpi = std::max(e ? AppShellWindowDpi(e->win) : 96, 96);
+float DlgWinTextDx(gp::Ctx* cx, Str label, float fontPx) {
     TempStr noAmp = str::ReplaceTemp(label, StrL("&"), StrL(""));
+    if (cx && cx->win && cx->win->paint.pa && len(noAmp) > 0 && fontPx > 0) {
+        return gp::MeasureText(&cx->win->paint, ToGpui(noAmp), fontPx, 0).w;
+    }
+    DlgWindowEntry* e = cx ? DlgWindowEntryOf(cx->win) : nullptr;
+    int dpi = std::max(e ? AppShellWindowDpi(e->win) : 96, 96);
     int dx = PlatformFontMeasureText(GetDefaultGuiFont(), noAmp).dx;
-    return (float)dx * 96.f / (float)dpi;
+    float dips = (float)dx * 96.f / (float)dpi;
+    if (fontPx > 0 && kDlgWinFontPx > 0) {
+        dips *= fontPx / kDlgWinFontPx;
+    }
+    return dips;
 }
 
 gp::El* DlgWinContent(gp::Ctx* cx, gp::El* col) {
@@ -827,8 +834,13 @@ gp::El* DialogsBuild(MainWindow* win, gp::Ctx* cx) {
     return MsgBoxBuild(win, cx);
 }
 
+static bool DialogKeysElsewhere(MainWindow* win);
+
 // orig's dialogs with a list let Up / Down drive it from anywhere in the dialog
-bool DialogsOnArrowKey(MainWindow*, int dir, bool editFocused) {
+bool DialogsOnArrowKey(MainWindow* win, int dir, bool editFocused) {
+    if (DialogKeysElsewhere(win)) {
+        return false;
+    }
     if (ConfigureRestrictedUseMoveSelection(dir)) {
         return true;
     }
@@ -882,7 +894,34 @@ void DialogsCloseFrameDialogsFor(MainWindow* win) {
     }
 }
 
+// Every dialog drawn in a frame is up in another window: orig's dialogs are
+// modal only to their owner, so win keeps its keys. Dialogs that don't track
+// their owner keep every window's keys.
+static bool DialogKeysElsewhere(MainWindow* win) {
+    if (IsSimpleBrowserWindowVisible() || IsAIChatNotInstalledDialogVisible() || IsSavePathDialogVisible()) {
+        return false;
+    }
+    bool elsewhere = false;
+    for (FrameDialog& d : gFrameDialogs) {
+        if (!d.isFrameVisible()) {
+            continue;
+        }
+        if (d.owner() == win) {
+            return false;
+        }
+        elsewhere = true;
+    }
+    return elsewhere;
+}
+
+static bool MsgBoxUpIn(MainWindow* win) {
+    return IsMsgBoxVisible() && gMsgBox.win == win;
+}
+
 DialogAccels DialogsAccelTable(MainWindow* win) {
+    if (DialogKeysElsewhere(win)) {
+        return DialogAccels::All;
+    }
     // Only the properties window and its children use the edit table
     if (IsPropertiesDialogVisible()) {
         return DialogAccels::Edit;
@@ -899,14 +938,16 @@ DialogAccels DialogsAccelTable(MainWindow* win) {
                IsConfigureRestrictedUseDialogVisible() || IsPageGridDialogVisible() || IsKeyboardHelpVisible() ||
                IsUnsavedAnnotationsDialogVisible() || IsSavePathDialogVisible() || IsRenameStripGroupDialogVisible() ||
                IsCaj2pdfDownloadDialogVisible();
-    (void)win;
     return any ? DialogAccels::None : DialogAccels::All;
 }
 
 bool DialogsOnKeyDown(MainWindow* win, int vk, bool ctrl, bool shift, bool alt) {
+    if (DialogKeysElsewhere(win)) {
+        return false;
+    }
     bool noMods = !ctrl && !shift && !alt;
     // win32's message box: &Yes / &No answer to their letters
-    if (IsMsgBoxVisible()) {
+    if (MsgBoxUpIn(win)) {
         int kind = MsgBoxButtonKind();
         bool isYesNo = kind == (int)MbYesNo || kind == (int)MbYesNoCancel;
         if (isYesNo && !ctrl && (vk == 'Y' || vk == 'N')) {
@@ -955,8 +996,11 @@ bool DialogsOnKeyDown(MainWindow* win, int vk, bool ctrl, bool shift, bool alt) 
 }
 
 // Enter outside a text field: orig's default button
-bool DialogsOnEnter(MainWindow*) {
-    if (IsMsgBoxVisible()) {
+bool DialogsOnEnter(MainWindow* win) {
+    if (DialogKeysElsewhere(win)) {
+        return false;
+    }
+    if (MsgBoxUpIn(win)) {
         AcceptMsgBox();
         return true;
     }
@@ -1236,7 +1280,10 @@ gp::El* UnsavedAnnotationsDialogBuild(MainWindow* win, gp::Ctx* cx) {
 
 // orig gives every dialog closeOnEsc; the message box answers Cancel
 bool DialogsOnEscape(MainWindow* win) {
-    if (IsMsgBoxVisible()) {
+    if (DialogKeysElsewhere(win)) {
+        return false;
+    }
+    if (MsgBoxUpIn(win)) {
         CancelMsgBox();
         return true;
     }
@@ -1402,7 +1449,7 @@ gp::El* DlgFieldLabel(gp::Ctx* cx, Str s, float dx) {
 
 // the app font is the labels' family, a size smaller
 float DlgFieldLabelDx(gp::Ctx* cx, Str s) {
-    return DlgWinTextDx(cx, s) * kToolDlgTextFontPx / kDlgWinFontPx;
+    return DlgWinTextDx(cx, s, (float)kToolDlgTextFontPx);
 }
 
 gp::El* DlgSectionHeader(gp::Ctx* cx, Str s) {
@@ -1656,7 +1703,7 @@ static DLGTEMPLATE* BuildPrintAdvancedTemplate() {
     t.U16(0);
     t.U16(0);
     t.U16(292);
-    t.U16(207);
+    t.U16(223);
     t.U16(0); // no menu
     t.U16(0); // default dialog class
     t.Sz(L"Advanced");
@@ -1680,6 +1727,8 @@ static DLGTEMPLATE* BuildPrintAdvancedTemplate() {
     t.Item(check, 7, 172, 278, 10, IDC_PRINT_AUTO_ROTATE, kAtomButton);
     t.Item(SS_LEFT, 7, 188, 72, 9, IDC_PRINT_ROTATE_LABEL, kAtomStatic);
     t.Item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 82, 186, 90, 60, IDC_PRINT_ROTATE, kAtomComboBox);
+    t.Item(SS_LEFT, 7, 204, 72, 9, IDC_PRINT_ORIENTATION_LABEL, kAtomStatic);
+    t.Item(CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 82, 202, 90, 60, IDC_PRINT_ORIENTATION, kAtomComboBox);
 
     u16 cdit = (u16)t.nItems;
     memcpy(t.buf + cditPos, &cdit, sizeof(cdit));

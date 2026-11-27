@@ -9,6 +9,9 @@ struct FileArgs;
 struct AnnotCreateArgs;
 struct PropValue;
 struct djvu_text_zone;
+namespace file {
+struct CopyProgress;
+}
 
 bool IsEngineDjVuSupportedFileType(FileType kind);
 EngineBase* CreateEngineDjvuDecFromFile(Str path);
@@ -31,6 +34,16 @@ EngineBase* CreateEngineHtmlFromFile(Str fileName);
 
 void SetDefaultEbookFont(Str name, float size);
 void SetDefaultChmFont(Str name);
+struct WebDocStyle {
+    Str fontName;
+    float fontSize = 0;
+    float lineSpacing = 0;
+    int maxContentWidth = 0;
+    bool preserveLineBreaks = false;
+};
+void SetWebDocStyles(WebDocStyle markdown, WebDocStyle html);
+WebDocStyle GetWebDocStyle(FileType kind);
+TempStr WebDocMetricsCssTemp(const WebDocStyle&, float fontSizePt);
 // Reject characters that would break out of a quoted CSS font-family value.
 inline bool IsSafeEbookFontName(Str name) {
     if (len(name) == 0) {
@@ -384,11 +397,12 @@ Str EngineMupdfLoadEmbedded(EngineBase*, PageDestination*);
 TempStr EngineMupdfGetPdfInfo(Str path, Str password);
 TempStr EngineMupdfGetPdfOutline(Str path);
 int EngineMupdfEbookToPdf(Str srcPath, Str dstPath, float pageDx, float pageDy, float fontSize);
-#if !OS_WIN
 struct Pixmap;
 struct IPageElement;
+#if !OS_WIN
 Pixmap* EngineMupdfPageImagePixmap(EngineBase*, IPageElement*);
 #endif
+Pixmap* PageElementImagePixmap(EngineBase*, IPageElement*);
 
 bool IsEnginePsAvailable();
 bool IsEnginePsSupportedFileType(FileType);
@@ -419,7 +433,8 @@ void DeleteStaleCajCache();
 
 bool IsSupportedFileType(FileType kind, bool enableEngineEbooks);
 
-EngineBase* CreateEngineFromFile(Str filePath, PasswordUI* pwdUI, bool enableChmEngine);
+EngineBase* CreateEngineFromFile(Str filePath, PasswordUI* pwdUI, bool enableChmEngine,
+                                 Func1<file::CopyProgress*> copyProgress = {});
 EngineBase* CreateEngineFromData(Str data, Str nameHint, PasswordUI* pwdUI);
 
 bool IsOpenCachePath(Str path);

@@ -59,6 +59,7 @@
 #include "Notifications.h"
 #include "AIChatCommon.h"
 #include "SumatraDialogs.h"
+#include "TabGroupsManage.h"
 #include "PageGridDialogCommon.h"
 #include "AnnotEditToolbar.h"
 #include "AnnotFilterToolbar.h"
@@ -104,9 +105,7 @@ static TempStr DpiResultTemp(Str action, int* exitCodeOut) {
     };
 
     if (str::Eq(action, StrL("hidden"))) {
-        int prevX = dpiX;
-        int prevY = dpiY;
-        DpiSet(240, 240);
+        DpiScope dpiScope(240, 240);
         WindowBase w;
         CreateCustomArgs args;
         args.visible = false;
@@ -116,7 +115,6 @@ static TempStr DpiResultTemp(Str action, int* exitCodeOut) {
         int windowDpi = w.GetDpi();
         int fontDy = FontHeight(GetDefaultGuiFont());
         w.Destroy();
-        DpiSet(prevX, prevY);
         out.Append(fmt("layout=%d window=%d font=%d\n", layoutDpi, windowDpi, fontDy));
         return finish(layoutDpi == 240 && windowDpi == 240 && fontDy >= 24 ? 0 : 1);
     }
@@ -126,7 +124,7 @@ static TempStr DpiResultTemp(Str action, int* exitCodeOut) {
     if (str::StartsWith(action, StrL("override "))) {
         int pct = 0;
         str::Parse(Str(action.s + 9, len(action) - 9), "%d", &pct);
-        gDpiOverride = pct;
+        SetDpiOverride(pct);
         out.Append(fmt("override=%d\n", pct));
         return finish(0);
     }
@@ -185,7 +183,7 @@ void AddFavoriteSilent(MainWindow* win, int pageNo) {
             return;
         }
     }
-    TempStr pageLabel = win->ctrl->GetPageLabeTemp(pageNo);
+    TempStr pageLabel = win->ctrl->GetPageLabelTemp(pageNo);
     TempStr plainLabel = fmt("%d", pageNo);
     bool needsLabel = pageLabel && !str::Eq(plainLabel, pageLabel) && !win->ctrl->HasChapters();
     Str pl = needsLabel ? pageLabel : Str{};
@@ -331,6 +329,7 @@ static TempStr LayoutInfoResultTemp(Str action, int* exitCodeOut) {
         sbRc = {tl.x, tl.y, wr.dx, wr.dy};
     }
     AppendLayoutRect(out, StrL("overlayScrollV"), sbV && HwndIsVisible(sbV), sbRc);
+    out.Append(OverlayScrollbarFindMarkersReportTemp(win->overlayScrollV));
 
     AppendLayoutTree(out, StrL("chrome"), win->chromeLayout);
     AppendLayoutTree(out, StrL("frameLayout"), win->frameLayout);
@@ -556,210 +555,6 @@ static TempStr MarkupAnnotsResultTemp(Str action, int x, int y, int* exitCodeOut
     out.Append(AnnotationPlacementStateTemp(gWindows[0]));
     return finish({}, 0);
 }
-
-enum class ControlCmd : u16 {
-    Ping = 1,
-    Quit = 2,
-    TestSynctex = 10,
-    TestSearch = 11,
-    TestDest = 12,
-    TestNamedDest = 13,
-    TestChm = 14,
-    TestSelectionTranslate = 15,
-    TestTripleClickLineSelect = 16,
-    TestContextMenuSelection = 17,
-    TestGoToFindMatch = 18,
-    // IDs 19-21 unused (reserved on the -dbg-control wire protocol; do not renumber).
-    // Assign new test commands starting at 23.
-    TestInverseSearch = 22,
-    TestImageResizeArrowKey = 23,
-    TestFindResultPageColumnClip = 24,
-    TestScrollToLink = 26,
-    TestPageInfoOverlay = 28,
-    TestGetToc = 29,
-    TestPageLinks = 30,
-    TestWindowStateDuringLoad = 31,
-    TestTocNavigate = 32,
-    TestMarkdownTocNavigate = 33,
-    TestFavoriteNav = 34,
-    TestToolbarButtons = 35,
-    TestKeyboardLinkFollow = 36,
-    TestFindResultsOrder = 37,
-    TestClickClearsSelection = 38,
-    TestRectSelectionDrag = 39,
-    TestSelectTextKeyboard = 40,
-    TestAIChat = 41,
-    TestAIChatReplay = 42,
-    TestMarkdownFollowLink = 43,
-    TestHomeListRows = 44,
-    TestPageComments = 45,
-    TestAdvSettingsRows = 46,
-    TestDestZoomNav = 47,
-    TestAnnotEditorLayout = 48,
-    TestDisplayMode = 49,
-    TestSidebarLayout = 50,
-    TestCadEnhanceColors = 51,
-    TestFindPageRange = 52,
-    TestDocumentFontList = 53,
-    WaitRenderIdle = 54,
-    SetNotificationsEnabled = 55,
-    TestHomeSelection = 56,
-    TestImageRenderEdges = 57,
-    TestInsertImage = 58,
-    TestRenderPageColors = 59,
-    TestListSigningCerts = 60,
-    TestSignDocument = 61,
-    TestGetPolicies = 62,
-    TestPageBoxes = 63,
-    TestDocumentSignatures = 64,
-    TestCommandPalette = 65,
-    TestFindHistory = 66,
-    TestImageResizeEdges = 67,
-    TestLinkDestHighlight = 68,
-    TestConvertToImages = 69,
-    TestLayout = 70,
-    TestDpi = 71,
-    TestSelectionVars = 72,
-    TestSelectionToolbar = 73,
-    TestMarkupAnnots = 74,
-    TestCmykImageSave = 75,
-    TestFindWindowContents = 77,
-    TestFindUiState = 78,
-    TestRenderViewPrint = 79,
-    TestReadAloudPlaybackBar = 80,
-    TestRotatedTextMouseDrag = 81,
-    TestChapterInfo = 82,
-    TestGoToLocation = 83,
-    TestTocSidebarNav = 84,
-    TestSelectionSurvivesRenumber = 85,
-    TestConvertToPdf = 86,
-    TestInvokeCommand = 87,
-    TestCurrentTab = 88,
-    TestCommandVisibility = 89,
-    TestExtractPages = 90,
-    TestAnnotFilter = 91,
-    TestCanvasFlags = 92,
-    CrashMe = 93,
-    TestDocumentProperties = 94,
-    TestHiddenTabGoToPage = 95,
-    TestSaveSelectionAsImage = 96,
-    TestReadingAutoScroll = 97,
-    TestReadingBar = 98,
-    TestSeedTextSelection = 99,
-    TestTtsEngineCrash = 100,
-    StopPerfLog = 102,
-    WaitSessionRestored = 103,
-    TestNavFiles = 104,
-    TestSaveFileAs = 105,
-    TestImageOrientation = 106,
-    TestTtsPumpOnSpeak = 107,
-    TestRenderSelections = 108,
-    TestToggleFormButton = 109,
-    ResolveUnsavedChanges = 110,
-    TestRefHover = 111,
-    TestPageInfo = 112,
-    TestSidebarThumbnails = 113,
-    TestFrameNcStrips = 114,
-    TestMergePdf = 115,
-    TestWheelWhileClosing = 116,
-    TestQuitProcess = 130,
-    TestRenameFile = 131,
-    TestChapterLayoutHold = 133,
-    // the path the next Save As takes, without its dialog
-    TestSaveFileName = 134,
-    // places the signature being placed at a canvas point (pixels), as a click does
-    TestPlaceSignature = 135,
-    // Run PDF Script's drawn buttons: examples, pick <idx>, add, remove, run
-    TestPdfScript = 136,
-    // visible virtual controls (kind, name, text, client rect), or the one under a point
-    TestVirtTree = 137,
-    // [brightness, contrast] applied to the current file as the Brightness /
-    // Contrast dialog's OK does; returns the current values
-    TestPageAdjust = 138,
-    // urls the current markdown document's browser view was served
-    TestMarkdownServed = 139,
-    // the current document: from a temporary folder?, its notification, its path
-    TestTemporaryFile = 140,
-    // [x, y] frame client point the auto-hide sidebar takes as the cursor; x < 0 clears
-    TestSidebarCursor = 141,
-    // [destPath, pageSizeIdx, fontSize]: Convert EPUB to PDF without its dialog
-    TestConvertEpubToPdf = 142,
-    // [path, pageNo]: image element rects of a page
-    TestPageImages = 143,
-    // the first window's page and scroll position
-    TestScrollState = 144,
-    TestDrawRectSelection = 145,
-    TestEutlUpdate = 146,
-    TestFetchRevocation = 147,
-    // [action]: the state of the signature bar, panel, marks and dialog
-    TestSignatureStatus = 148,
-    // the first window's tab widths, one "dx=<n> text=<title>" line per tab
-    TestTabWidths = 149,
-    // [url, dir]: Open from URL as the dialog's Download starts it
-    TestOpenFromUrl = 150,
-    // [srcWin, tabIdx, dstWin]: move a tab as a drag does (-1 = new window);
-    // tabIdx < 0 only lists every window's tabs
-    TestMigrateTab = 151,
-    // [action]: "toggle <row>" or "show", then the Layers view's rows
-    TestLayers = 152,
-    // [word]: drag-select it from edge to edge, then the selected text
-    TestSelectWordEdges = 153,
-    // the word count notification's text
-    TestWordCount = 154,
-    // the page info tip's text
-    TestPageInfoText = 155,
-    // the page info bar: where it is, the canvas, its text
-    TestPageInfoBar = 156,
-    // the Show Selected Text notification's text
-    TestSelectedText = 157,
-    // the bookmarks tree's visible rows and their heights
-    TestTocRows = 158,
-    // [action, pageNo, x, y, ...]: drives the Measure tool
-    TestMeasurement = 159,
-    // [action, pageNo, imageIdx, path]: replace / edit an image embedded in the PDF
-    TestImageReplace = 160,
-    // 161, 162, 170, 172: ng only (TestPerfStats, TestOverlayState, TestCaptureWindow,
-    // TestWindows); tests/lint-control-ids.ts checks ids mean the same command
-    // in both apps and tests/control.ts
-    // [timeoutMs]: blocks until the home page painted after startup
-    WaitHomePainted = 163,
-    // [idx]: select tab idx; idx < 0 only reports the current tab and count
-    TestSelectTab = 164,
-    // [definition]: does "CmdToggleX on" parse, and the command's on/off state
-    TestToggleCmd = 165,
-    // page 1 pixels a Clone() of the current document renders differently
-    TestCloneRender = 166,
-    // does the document have load errors, does the Errors notification show
-    TestDocErrors = 167,
-    // [pageNo, idx, value]: pick value in the idx-th combo / list box
-    TestSetFormChoice = 168,
-    // [action, a, b, c]: "drop" from to groupPos, "move" dir, "select" idx, or
-    // "" for the state; answers with the strip groups and tabs (StripGroupsStateTemp)
-    TestStripGroups = 169,
-    // the home page's context menu of the selected entry (else the first), in
-    // ng's TestMainMenu row format
-    TestContextMenuAt = 127,
-    // 170 is ng's TestCaptureWindow
-    // [ms]: every document open waits this long first, like a sleeping drive
-    TestLoadDelay = 171,
-    // [path, value]: sets a setting the way the palette's "= settings" rows do
-    TestSetSetting = 173,
-    // [action, word]: touch selection probe (TouchSelResultTemp)
-    TestTouchSel = 174,
-    // ["status"] or ["hooks", stallMs, delayMs, pathMatch, relistMs]: the
-    // content hashes of history files (ContentHashStatusTemp), or the test hooks
-    // of the hashing and of re-listing SumatraPDF Web files
-    TestContentHash = 175,
-    // [paths, a line each]: the files the next multi-file Open takes, without its dialog
-    TestOpenFileNames = 176,
-    // the next "Unsaved changes" prompt fails as if TaskDialogIndirect had
-    TestFailSavePrompt = 177,
-};
-
-static_assert((u16)ControlCmd::Quit == (u16)ControlFrameCmd::Quit);
-static_assert((u16)ControlCmd::WaitRenderIdle == (u16)ControlFrameCmd::WaitRenderIdle);
-static_assert((u16)ControlCmd::CrashMe == (u16)ControlFrameCmd::CrashMe);
-static_assert((u16)ControlCmd::WaitSessionRestored == (u16)ControlFrameCmd::WaitSessionRestored);
 
 bool ParseArg(PacketReader& r, ControlArg** argOut) {
     u16 typeRaw = 0;
@@ -1982,6 +1777,20 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestTabGroups: {
+            int exitCode = 0;
+            Str res = TabGroupsTestTemp(StringArg(req, 0), &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
+        case ControlCmd::TestAIChatSessions: {
+            int exitCode = 0;
+            Str res = AIChatSessionsTestTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestFailSavePrompt: {
             gTestFailSavePrompt = true;
             AppendTestResult(req, 0, StrL("OK"));
@@ -2282,7 +2091,9 @@ static void ExecuteControlRequest(ControlRequest* req) {
                 AppendTestResult(req, 2, StrL("NOTREADY no-window"));
                 break;
             }
-            AppendTestResult(req, 0, HomeContextMenuRowsTemp(win));
+            Str name = StringArg(req, 2);
+            int invoke = name ? GetCommandIdByName(name) : 0;
+            AppendTestResult(req, 0, HomeContextMenuRowsTemp(win, invoke));
             break;
         }
 

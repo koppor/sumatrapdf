@@ -292,6 +292,10 @@ static void AppendPrinterStatus(str::Builder& out, DWORD status) {
     }
 }
 
+// DC_BINNAMES / DC_PAPERNAMES slot sizes, in WCHARs
+constexpr int kBinNameLen = 24;
+constexpr int kPaperNameLen = 64;
+
 static void AppendDeviceCapabilities(str::Builder& out, const WCHAR* nameW, const WCHAR* portW) {
     // paper bins
     DWORD bins = DeviceCapabilitiesW(nameW, portW, DC_BINS, nullptr, nullptr);
@@ -305,12 +309,14 @@ static void AppendDeviceCapabilities(str::Builder& out, const WCHAR* nameW, cons
         DeviceCapabilitiesW(nameW, portW, DC_BINS, (WCHAR*)binValues, nullptr);
         // drivers can report a different number of names: missing ones stay empty
         int nBinNames = (binNames == (DWORD)-1) ? 0 : (int)binNames;
-        WCHAR* binNameValues = AllocArrayTemp<WCHAR>(24 * std::max((int)bins, nBinNames));
+        WCHAR* binNameValues = AllocArrayTemp<WCHAR>(kBinNameLen * std::max((int)bins, nBinNames));
         if (nBinNames > 0) {
             DeviceCapabilitiesW(nameW, portW, DC_BINNAMES, binNameValues, nullptr);
         }
         for (DWORD j = 0; j < bins; j++) {
-            TempStr s = ToUtf8Temp(WStr(binNameValues + (24 * (size_t)j)));
+            // a name that fills its slot has no NUL
+            WCHAR* name = binNameValues + (kBinNameLen * (size_t)j);
+            TempStr s = ToUtf8Temp(WStr(name, (int)wcsnlen(name, kBinNameLen)));
             out.Append(fmt("  bin %d: '%s' (%d)\n", (int)j, s, binValues[j]));
         }
     }
@@ -321,9 +327,8 @@ static void AppendDeviceCapabilities(str::Builder& out, const WCHAR* nameW, cons
     if (papers > 0 && papers != (DWORD)-1) {
         WORD* paperValues = AllocArrayTemp<WORD>((int)papers);
         DeviceCapabilitiesW(nameW, portW, DC_PAPERS, (WCHAR*)paperValues, nullptr);
-        // paper names are 64 WCHARs each
         int nPaperNames = (paperNames == (DWORD)-1) ? 0 : (int)paperNames;
-        WCHAR* paperNameValues = AllocArrayTemp<WCHAR>(64 * std::max((int)papers, nPaperNames));
+        WCHAR* paperNameValues = AllocArrayTemp<WCHAR>(kPaperNameLen * std::max((int)papers, nPaperNames));
         if (nPaperNames > 0) {
             DeviceCapabilitiesW(nameW, portW, DC_PAPERNAMES, paperNameValues, nullptr);
         }
@@ -332,7 +337,8 @@ static void AppendDeviceCapabilities(str::Builder& out, const WCHAR* nameW, cons
         DeviceCapabilitiesW(nameW, portW, DC_PAPERSIZE, (WCHAR*)paperSizes, nullptr);
         out.Append(StrL("  paper sizes:\n"));
         for (DWORD j = 0; j < papers; j++) {
-            TempStr s = ToUtf8Temp(WStr(paperNameValues + (64 * (size_t)j)));
+            WCHAR* name = paperNameValues + (kPaperNameLen * (size_t)j);
+            TempStr s = ToUtf8Temp(WStr(name, (int)wcsnlen(name, kPaperNameLen)));
             POINT sz = paperSizes[j];
             out.Append(fmt("    '%s' (id %d, %.1f x %.1f mm)\n", s, paperValues[j], sz.x / 10.0, sz.y / 10.0));
         }
@@ -408,7 +414,9 @@ static void AppendDeviceCapabilities(str::Builder& out, const WCHAR* nameW, cons
         DeviceCapabilitiesW(nameW, portW, DC_MEDIATYPES, (WCHAR*)mediaValues, nullptr);
         out.Append(StrL("  media types:\n"));
         for (DWORD j = 0; j < nMedia; j++) {
-            TempStr s = ToUtf8Temp(WStr(mediaNames + (64 * (size_t)j)));
+            const WCHAR* entry = mediaNames + (64 * (size_t)j);
+            int entryLen = (int)wcsnlen(entry, 64);
+            TempStr s = ToUtf8Temp(WStr(entry, entryLen));
             out.Append(fmt("    '%s' (%d)\n", s, (int)mediaValues[j]));
         }
     }
@@ -578,9 +586,8 @@ Printer* NewPrinter(Str printerName) {
             goto Exit;
         }
         printer->nPaperSizes = (int)n;
-        int paperNameSize = 64;
         printer->papers = AllocArray<WORD>((int)n);
-        WCHAR* paperNamesSeq = AllocArrayTemp<WCHAR>((paperNameSize * (int)n) + 1);
+        WCHAR* paperNamesSeq = AllocArrayTemp<WCHAR>((kPaperNameLen * (int)n) + 1);
         printer->paperSizes = AllocArray<POINT>((int)n);
 
         DeviceCapabilitiesW(printerNameW, nullptr, DC_PAPERS, (WCHAR*)printer->papers, nullptr);
@@ -588,7 +595,8 @@ Printer* NewPrinter(Str printerName) {
         DeviceCapabilitiesW(printerNameW, nullptr, DC_PAPERSIZE, (WCHAR*)printer->paperSizes, nullptr);
 
         for (int i = 0; i < (int)n; i++) {
-            TempStr name = ToUtf8Temp(WStr(paperNamesSeq + ((size_t)i * paperNameSize)));
+            WCHAR* nameW = paperNamesSeq + ((size_t)i * kPaperNameLen);
+            TempStr name = ToUtf8Temp(WStr(nameW, (int)wcsnlen(nameW, kPaperNameLen)));
             printer->paperNames.Append(name);
         }
     }
@@ -604,13 +612,13 @@ Printer* NewPrinter(Str printerName) {
         printer->nBins = (int)n;
         // it's ok for nBins to be 0, it means there's only one, default bin
         if (n > 0) {
-            int binNameSize = 24;
             printer->bins = AllocArray<WORD>((int)n);
-            WCHAR* binNamesSeq = AllocArrayTemp<WCHAR>((binNameSize * (int)n) + 1);
+            WCHAR* binNamesSeq = AllocArrayTemp<WCHAR>((kBinNameLen * (int)n) + 1);
             DeviceCapabilitiesW(printerNameW, nullptr, DC_BINS, (WCHAR*)printer->bins, nullptr);
             DeviceCapabilitiesW(printerNameW, nullptr, DC_BINNAMES, binNamesSeq, nullptr);
             for (int i = 0; i < (int)n; i++) {
-                TempStr name = ToUtf8Temp(WStr(binNamesSeq + ((size_t)i * binNameSize)));
+                WCHAR* nameW = binNamesSeq + ((size_t)i * kBinNameLen);
+                TempStr name = ToUtf8Temp(WStr(nameW, (int)wcsnlen(nameW, kBinNameLen)));
                 printer->binNames.Append(name);
             }
         }
@@ -1223,6 +1231,7 @@ static void UpdatePrintProgress(UpdatePrintProgressData* d) {
 
 class PrintThreadData {
   public:
+    Mutex wndLock;
     NotificationWnd* wnd = nullptr;
     AbortCookieManager cookie;
     // set on the UI thread, read by the print thread
@@ -1238,10 +1247,15 @@ class PrintThreadData {
     void RemovePrintNotification() {
         AtomicBoolSet(&isCanceled, true);
         cookie.Abort();
-        if (this->wnd && IsMainWindowValid(win)) {
-            RemoveNotification(this->wnd);
+        NotificationWnd* notif = nullptr;
+        {
+            ScopedMutex scope(&wndLock);
+            notif = this->wnd;
+            this->wnd = nullptr;
         }
-        this->wnd = nullptr;
+        if (notif && IsMainWindowValid(win)) {
+            RemoveNotification(notif);
+        }
     }
 
     PrintThreadData(MainWindow* win, PrintData* data) {
@@ -1267,8 +1281,16 @@ class PrintThreadData {
     }
 
     void UpdateProgress(int current, int total) {
+        NotificationWnd* notif = nullptr;
+        {
+            ScopedMutex scope(&wndLock);
+            notif = wnd;
+        }
+        if (!notif) {
+            return;
+        }
         auto* data = new UpdatePrintProgressData;
-        data->wnd = wnd;
+        data->wnd = notif;
         data->current = current;
         data->total = total;
         auto fn = MkFunc0<UpdatePrintProgressData>(UpdatePrintProgress, data);
@@ -1480,6 +1502,15 @@ static INT_PTR CALLBACK Sheet_Print_Advanced_Proc(HWND hDlg, UINT msg, WPARAM wp
                 int rotIdx = (data->extraRotation / 90) % 4;
                 CbSetCurrentSelection(hwndCb, rotIdx);
             }
+            // Auto: the printer's orientation; the others force it (#6589)
+            HwndSetDlgItemText(hDlg, IDC_PRINT_ORIENTATION_LABEL, Tr("Orientation:"));
+            {
+                HWND hwndCb = GetDlgItem(hDlg, IDC_PRINT_ORIENTATION);
+                CbAddString(hwndCb, Tr("Automatic"));
+                CbAddString(hwndCb, Tr("Portrait"));
+                CbAddString(hwndCb, Tr("Landscape"));
+                CbSetCurrentSelection(hwndCb, (int)data->rotation);
+            }
 
             {
                 int rangeId = IDC_PRINT_RANGE_ALL;
@@ -1536,6 +1567,14 @@ static INT_PTR CALLBACK Sheet_Print_Advanced_Proc(HWND hDlg, UINT msg, WPARAM wp
                 data->autoRotate = IsDlgButtonChecked(hDlg, IDC_PRINT_AUTO_ROTATE) != 0;
                 int rotIdx = (int)SendDlgItemMessage(hDlg, IDC_PRINT_ROTATE, CB_GETCURSEL, 0, 0);
                 data->extraRotation = rotIdx > 0 ? rotIdx * 90 : 0;
+                int orientIdx = (int)SendDlgItemMessage(hDlg, IDC_PRINT_ORIENTATION, CB_GETCURSEL, 0, 0);
+                if (orientIdx == (int)PrintRotationAdv::Portrait) {
+                    data->rotation = PrintRotationAdv::Portrait;
+                } else if (orientIdx == (int)PrintRotationAdv::Landscape) {
+                    data->rotation = PrintRotationAdv::Landscape;
+                } else {
+                    data->rotation = PrintRotationAdv::Auto;
+                }
                 return TRUE;
             }
             break;
@@ -1557,6 +1596,7 @@ static INT_PTR CALLBACK Sheet_Print_Advanced_Proc(HWND hDlg, UINT msg, WPARAM wp
                     EnableWindow(hApplyButton, TRUE);
                 } break;
                 case IDC_PRINT_ROTATE:
+                case IDC_PRINT_ORIENTATION:
                     if (HIWORD(wp) == CBN_SELCHANGE) {
                         EnableWindow(GetDlgItem(GetParent(hDlg), ID_APPLY_NOW), TRUE);
                     }
@@ -1855,6 +1895,15 @@ static void PrintCurrentFileCont(MainWindow* win, bool waitForCompletion, bool s
         defaultScaleAdv = advanced.scale;
     }
 
+    // a forced orientation goes to the printer too, as -print-settings
+    // portrait/landscape does; after the settings are remembered above, so the
+    // next dialog starts from the printer's own (#6589)
+    if (devMode && advanced.rotation != PrintRotationAdv::Auto) {
+        bool portrait = advanced.rotation == PrintRotationAdv::Portrait;
+        devMode->dmOrientation = portrait ? DMORIENT_PORTRAIT : DMORIENT_LANDSCAPE;
+        devMode->dmFields |= DM_ORIENTATION;
+    }
+
     if (devMode && advanced.paperSourceByPageSize) {
         // let the printer pick the input tray whose paper matches the document's
         // page size, independent of the page-scaling option (issue #349). Applied
@@ -1910,6 +1959,7 @@ static void PrintCurrentFileCont(MainWindow* win, bool waitForCompletion, bool s
 
     sel = printSelection ? win->CurrentTab()->selectionOnPage : nullptr;
     pd = new PrintData(pinnedEngine, printer, ranges, advanced, rotation, sel);
+    printer = nullptr;
     pd->mirror = dm->GetMirror();
     SafeEngineRelease(&pinnedEngine);
 
@@ -1921,6 +1971,7 @@ static void PrintCurrentFileCont(MainWindow* win, bool waitForCompletion, bool s
     }
 
 Exit:
+    delete printer;
     SafeEngineRelease(&pinnedEngine);
     free(ppr);
     GlobalFree(pdex.hDevNames);
@@ -2021,11 +2072,11 @@ static short GetPaperByName(Printer* printer, Str wantedName) {
 
     // alternatively allow indicating the paper directly by number
     uint paperId = 0;
-    if (!str::IsNull(str::Parse(wantedName, "%u%$", &paperId))) {
+    if (!str::IsNull(str::Parse(wanted, "%u%$", &paperId))) {
         return (short)paperId;
     }
 
-    short standard = GetStandardPaperByName(wantedName);
+    short standard = GetStandardPaperByName(wanted);
     if (standard != 0) {
         return standard;
     }

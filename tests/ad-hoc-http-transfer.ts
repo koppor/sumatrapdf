@@ -40,6 +40,60 @@ function startServer() {
         });
         return new Response(body, { headers: { "content-length": String(kBigSize) } });
       }
+      if (url.pathname === "/truncated") {
+        // promises more than it sends, then drops the connection
+        const body = new ReadableStream({
+          start(ctl) {
+            ctl.enqueue(new Uint8Array(1000).fill(66));
+          },
+          async pull(ctl) {
+            // let the status line and first chunk go out first
+            await Bun.sleep(300);
+            ctl.error(new Error("truncated"));
+          },
+        });
+        return new Response(body, { headers: { "content-length": "100000" } });
+      }
+      if (url.pathname === "/public") {
+        // no auth: what HttpGet / HttpGetToFile fetch
+        return new Response(new Uint8Array(kFileSize).fill(67));
+      }
+      if (url.pathname === "/public-redirect") {
+        return new Response("moved", { status: 302, headers: { location: "/public" } });
+      }
+      if (url.pathname === "/stream" && req.method === "POST") {
+        // a streamed reply in three pieces (HttpPostStream)
+        const enc = new TextEncoder();
+        const parts = ["a", "b", "c"];
+        const body = new ReadableStream({
+          async pull(ctl) {
+            const part = parts.shift();
+            if (part === undefined) {
+              ctl.close();
+              return;
+            }
+            await Bun.sleep(50);
+            ctl.enqueue(enc.encode(part));
+          },
+        });
+        return new Response(body);
+      }
+      if (url.pathname === "/slowstream" && req.method === "POST") {
+        // one piece, then nothing for a long time: only a cancel ends it early
+        let sentFirst = false;
+        const body = new ReadableStream({
+          async pull(ctl) {
+            if (!sentFirst) {
+              sentFirst = true;
+              ctl.enqueue(new TextEncoder().encode("x"));
+              return;
+            }
+            await Bun.sleep(20000);
+            ctl.close();
+          },
+        });
+        return new Response(body);
+      }
       if (auth !== "Bearer tk-123") {
         return new Response("unauthorized", { status: 401 });
       }

@@ -44,7 +44,7 @@ static int asn1_read_len(const unsigned char* p, size_t n, size_t max_bytes, siz
         }
         *hdr = 2 + ln;
     }
-    if (*hdr + *body > n) {
+    if (*body > n - *hdr) {
         return -1;
     }
     return 0;
@@ -162,6 +162,10 @@ static const char* gle_name(DWORD err) {
 }
 
 static void warn_gle(fz_context* ctx, const char* where, DWORD err) {
+    // pkcs7_windows_check_certificate has no context
+    if (!ctx) {
+        return;
+    }
     const char* name = gle_name(err);
     if (name) {
         fz_warn(ctx, "pkcs7-windows %s: %s (0x%08lX)", where, name, err);
@@ -407,20 +411,6 @@ pdf_pkcs7_verifier* pkcs7_windows_new_verifier(fz_context* ctx) {
     vf->check_digest = windows_check_digest;
     vf->get_signatory = windows_get_signatory;
     return vf;
-}
-
-// ---- flat convenience wrappers (mirror the openssl helper surface) -------
-
-pdf_signature_error pkcs7_windows_check_certificate(char* sig, size_t sig_len) {
-    return windows_check_certificate(NULL, NULL, (unsigned char*)sig, sig_len);
-}
-
-pdf_signature_error pkcs7_windows_check_digest(fz_context* ctx, fz_stream* stm, char* sig, size_t sig_len) {
-    return windows_check_digest(ctx, NULL, stm, (unsigned char*)sig, sig_len);
-}
-
-pdf_pkcs7_distinguished_name* pkcs7_windows_distinguished_name(fz_context* ctx, char* sig, size_t sig_len) {
-    return windows_get_signatory(ctx, NULL, (unsigned char*)sig, sig_len);
 }
 
 // ---- signing -------------------------------------------------------------
@@ -872,7 +862,9 @@ static char* oid_to_dotted(fz_context* ctx, const unsigned char* p, size_t n) {
     if (n < 1) {
         return NULL;
     }
-    used = (size_t)snprintf(buf, sizeof(buf), "%u.%u", p[0] / 40, p[0] % 40);
+    unsigned int arc0 = p[0] >= 80 ? 2 : p[0] / 40;
+    unsigned int arc1 = p[0] >= 80 ? p[0] - 80 : p[0] % 40;
+    used = (size_t)snprintf(buf, sizeof(buf), "%u.%u", arc0, arc1);
     v = 0;
     for (i = 1; i < n && used + 12 < sizeof(buf); i++) {
         v = (v << 7) | (p[i] & 0x7F);
@@ -933,8 +925,16 @@ static void parse_tstinfo(fz_context* ctx, const unsigned char* p, size_t n, pkc
         memcpy(tmp, q + hdr, body);
         tmp[body] = 0;
         ZeroMemory(&st, sizeof(st));
-        if (sscanf(tmp, "%4hu%2hu%2hu%2hu%2hu%2hu", &st.wYear, &st.wMonth, &st.wDay, &st.wHour, &st.wMinute,
-                   &st.wSecond) >= 4) {
+        int parsed = 0;
+        if (q[0] == 0x17) {
+            parsed = sscanf(tmp, "%2hu%2hu%2hu%2hu%2hu%2hu", &st.wYear, &st.wMonth, &st.wDay, &st.wHour, &st.wMinute,
+                            &st.wSecond);
+            st.wYear = st.wYear < 50 ? (WORD)(2000 + st.wYear) : (WORD)(1900 + st.wYear);
+        } else {
+            parsed = sscanf(tmp, "%4hu%2hu%2hu%2hu%2hu%2hu", &st.wYear, &st.wMonth, &st.wDay, &st.wHour, &st.wMinute,
+                            &st.wSecond);
+        }
+        if (parsed >= 4) {
             if (SystemTimeToFileTime(&st, &ft)) {
                 ts->gen_time_unix = filetime_to_unix(&ft);
             }
@@ -1106,7 +1106,6 @@ struct pkcs7_windows_rev_data {
     int n_ocsp;
     unsigned char* ocsp[PKCS7_MAX_OCSP];
     DWORD ocsp_len[PKCS7_MAX_OCSP];
-    fz_context* ctx;
 };
 
 pkcs7_windows_rev_data* pkcs7_windows_rev_new(void) {
@@ -1272,7 +1271,7 @@ static int ocsp_signature_ok(const unsigned char* basic, size_t basic_len, POCSP
     p = basic + hdr;
     left = body;
     for (i = 0; i < 3; i++) {
-        if (left < 2 || asn1_len(p + signed_len, left - signed_len, &h2, &b2) != 0) {
+        if (signed_len >= left || left - signed_len < 2 || asn1_len(p + signed_len, left - signed_len, &h2, &b2) != 0) {
             return 0;
         }
         signed_len += h2 + b2;
@@ -1326,6 +1325,9 @@ static int ocsp_signature_ok(const unsigned char* basic, size_t basic_len, POCSP
 static int ocsp_id_matches(const OCSP_CERT_ID* id, PCCERT_CONTEXT cert) {
     BYTE digest[64];
     DWORD cb = sizeof(digest);
+    if (!id->HashAlgorithm.pszObjId) {
+        return 0;
+    }
     LPCWSTR alg = cng_hash_name(id->HashAlgorithm.pszObjId);
     if (!alg || !CertCompareIntegerBlob((PCRYPT_INTEGER_BLOB)&id->SerialNumber, &cert->pCertInfo->SerialNumber)) {
         return 0;

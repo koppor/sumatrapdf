@@ -170,8 +170,6 @@ int FileTypeIndexOf(const FileType* types, int nTypes, FileType ft) {
 }
 
 #define FILE_SIGS(V)                                      \
-    V(0, "Rar!\x1A\x07\x00", FileType::Rar)               \
-    V(0, "Rar!\x1A\x07\x01\x00", FileType::Rar)           \
     V(0, "7z\xBC\xAF\x27\x1C", FileType::SevenZ)          \
     V(0, "PK\x03\x04", FileType::Zip)                     \
     V(0, "ITOLITLS", FileType::Lit)                       \
@@ -338,6 +336,10 @@ static bool HasJxlSignature(Str d) {
 // detect file type based on file content
 static FileType DetectFileTypeFromData(Str d) {
     // TODO: sniff .fb2 content
+    if (HasRarSignature(d)) {
+        return FileType::Rar;
+    }
+
     u8* data = (u8*)d.s;
     int dataLen = d.len;
     int n = dimofi(gFileSigs);
@@ -421,7 +423,7 @@ static void ParsePng(ByteReader r, FileTypeInfo& res) {
         } else if (MemEq(type, "IEND", 4)) {
             break;
         }
-        if (chunkLen > (u32)r.len) {
+        if (idx > r.len - 12 || chunkLen > (u32)(r.len - idx - 12)) {
             break;
         }
         idx += 12 + (int)chunkLen; // length + type + data + crc
@@ -543,9 +545,11 @@ static void ParseJpeg(ByteReader r, FileTypeInfo* res, int* orientationOut) {
             if (res) {
                 JpegSizeFromExif(r, idx + 8, *res);
             }
-            if (orientationOut) {
+            if (orientationOut && *orientationOut == 0) {
                 *orientationOut = ExifOrientationFromTiff(r, idx + 8);
-                return;
+                if (!res) {
+                    return;
+                }
             }
         }
         idx += segLen;
@@ -762,7 +766,7 @@ static void ParseBmp(ByteReader r, FileTypeInfo& res) {
     }
     res.imageDx = (int)r.UInt32LE(off + 18);
     int dy = (int)r.UInt32LE(off + 22);
-    res.imageDy = dy >= 0 ? dy : -dy; // negative height means a top-down bitmap
+    res.imageDy = dy == INT_MIN ? 0 : (dy >= 0 ? dy : -dy); // negative height means a top-down bitmap
 }
 
 static void ParseTga(ByteReader r, FileTypeInfo& res) {
@@ -802,11 +806,11 @@ static void ParseWebp(ByteReader r, FileTypeInfo& res) {
             AppendImageSize(res, nFrames, cap, w, h);
             nFrames++;
         }
-        u32 advance = size + (size & 1); // chunks are padded to even size
-        if (advance >= (u32)r.len) {
+        u32 pad = size & 1;
+        if (size > (u32)(r.len - payload) || pad > (u32)(r.len - payload) - size) {
             break;
         }
-        idx = payload + (int)advance;
+        idx = payload + (int)(size + pad);
     }
     if (nFrames > 0) {
         res.nImages = nFrames;
@@ -1081,7 +1085,7 @@ FileTypeInfo GuessFileInfoFromData(Str d) {
             break;
         case FileType::Jpeg:
             res.nImages = 1;
-            ParseJpeg(r, &res, nullptr);
+            ParseJpeg(r, &res, &res.orientation);
             break;
         case FileType::Gif:
             ParseGif(r, res);
@@ -1117,9 +1121,7 @@ FileTypeInfo GuessFileInfoFromData(Str d) {
         default:
             break;
     }
-    if (res.ft == FileType::Jpeg) {
-        ParseJpeg(r, nullptr, &res.orientation);
-    } else if (res.ft == FileType::Webp) {
+    if (res.ft == FileType::Webp) {
         res.orientation = WebpExifOrientation(d);
     }
     if (res.nImages != 1) {
@@ -1155,9 +1157,7 @@ void FreeFileTypeInfo(FileTypeInfo* fti) {
 }
 
 FileType GuessFileTypeFromData(Str d) {
-    FileTypeInfo fti = GuessFileInfoFromData(d);
-    FreeFileTypeInfo(&fti);
-    return fti.ft;
+    return DetectFileTypeFromData(d);
 }
 
 // parse an embedded-PDF path of the form "c:/foo.pdf:${pdfStreamNo}"
@@ -1239,48 +1239,22 @@ FileType GuessFileTypeFromName(Str path, bool notDir) {
     return FileType::Unknown;
 }
 
-// clang-format off
-static const FileType gImageTypes[] = {
-    FileType::Png,
-    FileType::Jpeg,
-    FileType::Jpeg,
-    FileType::Gif,
-    FileType::Bmp,
-    FileType::Tiff,
-    FileType::Tiff,
-    FileType::Tga,
-    FileType::Jxr,
-    FileType::Webp,
-    FileType::Jp2,
-    FileType::Heic,
-    FileType::Avif,
-    FileType::Ico
+static const struct {
+    FileType type;
+    Str ext;
+} gImageFormats[] = {
+    {FileType::Png, StrL(".png")},   {FileType::Jpeg, StrL(".jpg")},  {FileType::Gif, StrL(".gif")},
+    {FileType::Bmp, StrL(".bmp")},   {FileType::Tiff, StrL(".tif")},  {FileType::Tga, StrL(".tga")},
+    {FileType::Jxr, StrL(".jxr")},   {FileType::Webp, StrL(".webp")}, {FileType::Jp2, StrL(".jp2")},
+    {FileType::Heic, StrL(".heic")}, {FileType::Avif, StrL(".avif")}, {FileType::Jxl, StrL(".jxl")},
+    {FileType::Ico, StrL(".ico")},
 };
 
-static constexpr SeqStrings gImageFormatExts =
-    ".png\0"
-    ".jpg\0"
-    ".jpeg\0"
-    ".gif\0"
-    ".bmp\0"
-    ".tif\0"
-    ".tiff\0"
-    ".tga\0"
-    ".jxr\0"
-    ".webp\0"
-    ".jp2\0"
-    ".heic\0"
-    ".avif\0"
-    ".ico\0"
-    "\0";
-// clang-format on
-// GfxFileExtFromTypeTemp() maps an index in one to the same index in the other
-static_assert(SeqStrCount(gImageFormatExts) == dimof(gImageTypes));
-
 TempStr GfxFileExtFromTypeTemp(FileType ft) {
-    int idx = FileTypeIndexOf(gImageTypes, dimofi(gImageTypes), ft);
-    if (idx >= 0) {
-        return SeqStrByIndex(gImageFormatExts, idx);
+    for (const auto& format : gImageFormats) {
+        if (format.type == ft) {
+            return format.ext;
+        }
     }
     return {};
 }
@@ -1381,8 +1355,7 @@ FileType GuessFileTypeFromFile(Str path) {
     if (res != FileType::Zip) {
         return res;
     }
-    ArchiveExtractProgressCb emptyCb;
-    Archive* archive = OpenArchiveFromFile(path, /*eagerLoad=*/false, emptyCb);
+    Archive* archive = OpenArchiveFromFile(path, /*eagerLoad=*/false);
     if (!archive) {
         return res;
     }
@@ -1403,25 +1376,21 @@ FileType GuessFileTypeFromZipData(Str data) {
 }
 
 static FileType GuessArchiveType(Archive* archive) {
-    FileType res = FileType::Zip;
     if (IsXpsArchive(archive)) {
-        res = FileType::Xps;
         FileType office = OfficeArchiveType(archive);
-        if (office != FileType::Unknown) {
-            res = office;
-        }
+        return office != FileType::Unknown ? office : FileType::Xps;
     }
     if (IsEpubArchive(archive)) {
-        res = FileType::Epub;
+        return FileType::Epub;
     }
     if (IsFb2Archive(archive)) {
-        res = FileType::Fb2z;
+        return FileType::Fb2z;
     }
     // an encrypted OFD has only Encryptions.xml in the clear
     if (archive->GetFileId(StrL("OFD.xml")) >= 0 || archive->GetFileId(StrL("Encryptions.xml")) >= 0) {
-        res = FileType::Ofd;
+        return FileType::Ofd;
     }
-    return res;
+    return FileType::Zip;
 }
 
 FileType GuessFileType(Str path, bool sniff) {

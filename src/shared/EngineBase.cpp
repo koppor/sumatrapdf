@@ -148,6 +148,11 @@ static bool ParseJsQuotedString(const char*& p, const char* end, str::Builder& b
 // popUpMenu('A', ['Sub', 'B', 'C']) => A(0) Sub(0) B(1) C(1)
 static void ParseJsMenuEntries(const char*& p, const char* end, char close, int level, StrVec& items,
                                Vec<int>& levels) {
+    constexpr int kMaxJsMenuDepth = 32;
+    if (level > kMaxJsMenuDepth) {
+        p = end;
+        return;
+    }
     while (p < end) {
         SkipJsWs(p, end);
         if (p >= end) {
@@ -701,7 +706,7 @@ static TempStr CleanupTreeViewControlStringTemp(Str s) {
     TempWStr ws = ToWStrTemp(s);
     // soft hyphen (U+00AD): an invisible line-break hint, but rendered as a
     // visible hyphen by some fonts
-    wstr::RemoveCharsInPlace(ws, L"\x00ad");
+    ws.len -= wstr::RemoveCharsInPlace(ws, L"\x00ad");
     // control chars (incl. embedded newlines/tabs) and the Unicode line and
     // paragraph separators render as boxes in a single-line label
     for (int i = 0; i < ws.len; i++) {
@@ -711,7 +716,7 @@ static TempStr CleanupTreeViewControlStringTemp(Str s) {
         }
     }
     // collapse the runs of whitespace we just introduced (and trim)
-    wstr::NormalizeWSInPlace(ws);
+    ws.len -= wstr::NormalizeWSInPlace(ws);
     return ToUtf8Temp(ws);
 }
 
@@ -777,7 +782,7 @@ TocItem* TocItem::ChildAt(int n) {
         return currChild;
     }
     auto* node = child;
-    while (n > 0) {
+    while (n > 0 && node) {
         n--;
         node = node->next;
     }
@@ -1387,7 +1392,7 @@ static Str ReturnPageText(const PageText& pt, int* lenOut, Rect** coordsOut, Qua
         *quadsOut = pt.quads;
     }
     // str::Builder-backed buffers reserve a NUL slot at .len
-    if (pt.text.s && len(pt.text) >= 0) {
+    if (pt.text.s && len(pt.text) >= 0 && pt.text.s[len(pt.text)] != 0) {
         pt.text.s[len(pt.text)] = 0;
     }
     return pt.text;
@@ -1536,7 +1541,7 @@ int EngineBase::LogicalPageCount() {
 
 // returns a label to be displayed instead of the page number
 // caller must free() the result
-TempStr EngineBase::GetPageLabeTemp(int pageNo) const {
+TempStr EngineBase::GetPageLabelTemp(int pageNo) const {
     return fmt("%d", pageNo);
 }
 
@@ -1716,8 +1721,8 @@ Location EnginePdfProxy::ResolveDest(IPageDestination* dest) {
     return pdfEngine->ResolveDest(dest);
 }
 
-TempStr EnginePdfProxy::GetPageLabeTemp(int pageNo) const {
-    return pdfEngine->GetPageLabeTemp(pageNo);
+TempStr EnginePdfProxy::GetPageLabelTemp(int pageNo) const {
+    return pdfEngine->GetPageLabelTemp(pageNo);
 }
 
 int EnginePdfProxy::GetPageByLabel(Str label) const {

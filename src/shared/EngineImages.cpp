@@ -133,9 +133,11 @@ class EngineImages : public EngineBase {
     }
 
     RecursiveMutex cacheLock;
+    Mutex mediaboxLock;
     Vec<ImagePage*> pageCache;
     Vec<ImagePageInfo*> pageInfos;
     Str sourceData;
+    virtual Str GetSourceData() const { return sourceData; }
 
     // root mupdf context. Each thread that calls into mupdf gets its own
     // cloned context via Ctx() -- mupdf's per-context setjmp/error stack
@@ -439,14 +441,21 @@ static Size ImageSizeFromDataPortable(Str data, bool partial = false) {
 }
 
 RectF EngineImages::PageMediabox(int pageNo) {
-    ReportIf((pageNo < 1) || (pageNo > pageCount));
-    int n = pageNo - 1;
-    ImagePageInfo* pi = pageInfos[n];
+    if (ReportIf(pageNo < 1 || pageNo > len(pageInfos))) {
+        return {};
+    }
+    ImagePageInfo* pi = pageInfos[pageNo - 1];
+    {
+        ScopedMutex scope(&mediaboxLock);
+        if (pi->state == PageInfoState::Known) {
+            return pi->mediabox;
+        }
+    }
+
+    // Loading can take the image cache lock. Keep that outside publication.
+    RectF mediabox = LoadMediabox(pageNo);
+    ScopedMutex scope(&mediaboxLock);
     if (pi->state == PageInfoState::Unknown) {
-        RectF mediabox = LoadMediabox(pageNo);
-        // store the box before flipping state: CopyMediaboxesFrom reads these
-        // from a clone being created on a render thread, and must never see
-        // Known paired with an unwritten mediabox
         pi->mediabox = mediabox;
         pi->state = PageInfoState::Known;
     }
@@ -458,6 +467,7 @@ void EngineImages::CopyMediaboxesFrom(EngineImages* src) {
         // different documents: the file changed on disk between the two opens
         return;
     }
+    ScopedMutex scope(&src->mediaboxLock);
     for (int i = 0; i < pageCount; i++) {
         ImagePageInfo* from = src->pageInfos[i];
         if (from->state != PageInfoState::Known) {
@@ -883,8 +893,8 @@ Pixmap* EngineImages::RenderPage(RenderPageArgs& args) {
                 Pixmap* result = PixmapFromGdiplus(dstBmp);
                 delete dstBmp;
                 delete srcBmp;
-                DropPage(page, false);
                 if (result) {
+                    DropPage(page, false);
                     // PixmapFromGdiplus reads back as straight (not premultiplied) ARGB
                     result->premultiplied = false;
                     result->hasAlpha = srcHasAlpha;
@@ -1030,7 +1040,7 @@ Str EngineImages::GetFileData() {
     if (path) {
         return file::ReadFile(path);
     }
-    return str::Dup(sourceData);
+    return str::Dup(GetSourceData());
 }
 
 i64 EngineImages::GetImageByteSize(int pageNo) {
@@ -1042,7 +1052,7 @@ i64 EngineImages::GetImageByteSize(int pageNo) {
 }
 
 bool EngineImages::SaveFileAs(Str dstPath) {
-    return SaveFileOrData(FilePath(), sourceData, dstPath);
+    return SaveFileOrData(FilePath(), GetSourceData(), dstPath);
 }
 
 enum class ImagePageTrim {
@@ -1069,7 +1079,8 @@ static bool TrimImagePage(CachedObject* o, ImagePageTrim action) {
         eng->cacheLock.Unlock();
     };
 
-    if (!VecContains(eng->pageCache, page) || page->loading || AtomicIntGet(&page->refs) > 1) {
+    if (!VecContains(eng->pageCache, page) || !IsCurrentCachedObject(o) || page->loading ||
+        AtomicIntGet(&page->refs) > 1) {
         return false;
     }
     if (!page->ownPixmap || !page->pixmap) {
@@ -1459,6 +1470,7 @@ bool EngineImage::FinishLoading(Size fallbackSize) {
         fileDPI = p0->xres;
     }
 
+    VecReserve(pageInfos, std::max(1, len(frames)));
     auto* pi = new ImagePageInfo();
     int w = p0 ? p0->width : fallbackSize.dx;
     int h = p0 ? p0->height : fallbackSize.dy;
@@ -2003,7 +2015,7 @@ class EngineImageDir : public EngineImages {
 
     TempStr GetPropertyTemp(DocProp /*prop*/) override { return {}; }
 
-    TempStr GetPageLabeTemp(int pageNo) const override;
+    TempStr GetPageLabelTemp(int pageNo) const override;
     int GetPageByLabel(Str label) const override;
 
     TocTree* GetToc() override;
@@ -2044,6 +2056,7 @@ static bool LoadImageDir(EngineImageDir* e, Str dir) {
 
     SortNatural(&e->pageFileNames);
 
+    VecReserve(e->pageInfos, nFiles);
     for (int i = 0; i < nFiles; i++) {
         ImagePageInfo* pi = new ImagePageInfo();
         VecAppend(e->pageInfos, pi);
@@ -2062,9 +2075,9 @@ static bool LoadImageDir(EngineImageDir* e, Str dir) {
     return true;
 }
 
-TempStr EngineImageDir::GetPageLabeTemp(int pageNo) const {
+TempStr EngineImageDir::GetPageLabelTemp(int pageNo) const {
     if (pageNo < 1 || pageCount < pageNo) {
-        return EngineBase::GetPageLabeTemp(pageNo);
+        return EngineBase::GetPageLabelTemp(pageNo);
     }
 
     Str path = pageFileNames[pageNo - 1];
@@ -2107,14 +2120,16 @@ TocTree* EngineImageDir::GetToc() {
     if (tocTree) {
         return tocTree;
     }
-    TempStr label = GetPageLabeTemp(1);
+    TempStr label = GetPageLabelTemp(1);
     TocItem* root = newImageDirTocItem(arena, nullptr, label, 1);
     root->id = 1;
+    TocItem* tail = root;
     for (int i = 2; i <= PageCount(); i++) {
-        label = GetPageLabeTemp(i);
-        TocItem* item = newImageDirTocItem(arena, root, label, i);
+        label = GetPageLabelTemp(i);
+        TocItem* item = newImageDirTocItem(arena, nullptr, label, i);
         item->id = i;
-        root->AddSiblingAtEnd(item);
+        tail->next = item;
+        tail = item;
     }
     auto* realRoot = AllocTocItem(arena, {}, 0);
     realRoot->child = root;
@@ -2246,7 +2261,7 @@ void ComicInfoParser::AddBookmark(int imageIdx, Str title) {
         return;
     }
     VecAppend(bookmarkImageIdx, imageIdx);
-    bookmarkTitles.Append(str::Dup(title));
+    bookmarkTitles.Append(title);
 }
 
 static void ComicInfoVisitNode(ComicInfoParser* cip, const GumboNode* root) {
@@ -2351,7 +2366,7 @@ class EngineCbx : public EngineImages {
     i64 GetImageByteSize(int pageNo) override;
 
     bool LoadFromFile(Str fileName);
-    bool LoadFromData(Str data);
+    Str GetSourceData() const override { return cbxArchive ? cbxArchive->GetCompressedData() : Str{}; }
     bool FinishLoading();
     void PrefetchPageAfter(int pageNo);
 
@@ -2386,8 +2401,9 @@ EngineCbx::~EngineCbx() {
 EngineBase* EngineCbx::Clone() {
     EngineBase* clone = nullptr;
     Str path = FilePath();
-    if (sourceData) {
-        clone = CreateFromData(sourceData);
+    Str data = GetSourceData();
+    if (data) {
+        clone = CreateFromData(data);
         if (!clone) {
             log(StrL("EngineCbx::Clone() failed: CreateFromData() failed\n"));
         }
@@ -2400,9 +2416,9 @@ EngineBase* EngineCbx::Clone() {
     } else {
         logf("EngineCbx::Clone() failed: no stream or file path\n");
     }
-    if (clone) {
-        // a mediabox costs an archive open + partial extract here, so hand the
-        // clone the ones we have instead of making it load them all again
+    if (clone && data) {
+        // A file reopened by path can contain different pages even when the
+        // page count matches. Only reuse boxes from the same in-memory data.
         ((EngineImages*)clone)->CopyMediaboxesFrom(this);
     }
     return clone;
@@ -2413,15 +2429,6 @@ bool EngineCbx::LoadFromFile(Str file) {
         return false;
     }
     SetFilePath(file);
-    return FinishLoading();
-}
-
-bool EngineCbx::LoadFromData(Str data) {
-    if (len(data) == 0) {
-        return false;
-    }
-    sourceData = str::Dup(data);
-
     return FinishLoading();
 }
 
@@ -2472,13 +2479,16 @@ static int SplitArchivePath(Str path, Str* parts, int maxParts) {
     return n;
 }
 
-static void TocAppendChild(TocItem* parent, TocItem* child) {
-    child->parent = parent;
-    if (!parent->child) {
-        parent->child = child;
-        return;
-    }
-    parent->child->AddSiblingAtEnd(child);
+struct CbxTocFolder {
+    TocItem* item;
+    TocItem** nextChild;
+    Str name;
+};
+
+static void TocAppendChild(CbxTocFolder& parent, TocItem* child) {
+    child->parent = parent.item;
+    *parent.nextChild = child;
+    parent.nextChild = &child->next;
 }
 
 // Folder-aware ToC from archive member paths (issue #5317). A directory
@@ -2516,8 +2526,9 @@ static TocItem* BuildCbxFolderToc(Arena* arena, const Vec<Archive::FileInfo*>& f
     }
 
     auto* realRoot = AllocTocItem(arena, {}, 0);
-    Vec<TocItem*> stack;
-    Vec<Str> stackNames;
+    CbxTocFolder stack[kMaxArchivePathParts];
+    stack[0] = {realRoot, &realRoot->child, {}};
+    int depth = 0;
     int idCounter = 0;
 
     for (int i = 0; i < nFiles; i++) {
@@ -2528,26 +2539,22 @@ static TocItem* BuildCbxFolderToc(Arena* arena, const Vec<Archive::FileInfo*>& f
         }
         int nDir = n - 1;
         int match = 0;
-        while (match < len(stack) && (common + match) < nDir && str::Eq(stackNames[match], parts[common + match])) {
+        while (match < depth && common + match < nDir && str::Eq(stack[match + 1].name, parts[common + match])) {
             match++;
         }
-        VecRemoveAtN(stack, match, len(stack) - match);
-        VecRemoveAtN(stackNames, match, len(stackNames) - match);
+        depth = match;
 
         for (int k = common + match; k < nDir; k++) {
-            TocItem* parent = len(stack) == 0 ? realRoot : VecLast(stack);
             TocItem* folder = AllocTocItem(arena, parts[k], i + 1);
             folder->isOpenDefault = true;
             folder->id = ++idCounter;
-            TocAppendChild(parent, folder);
-            VecAppend(stack, folder);
-            VecAppend(stackNames, parts[k]);
+            TocAppendChild(stack[depth], folder);
+            stack[++depth] = {folder, &folder->child, parts[k]};
         }
 
-        TocItem* parent = len(stack) == 0 ? realRoot : VecLast(stack);
         TocItem* leaf = AllocTocItem(arena, parts[n - 1], i + 1);
         leaf->id = ++idCounter;
-        TocAppendChild(parent, leaf);
+        TocAppendChild(stack[depth], leaf);
     }
 
     if (!realRoot->child) {
@@ -2649,6 +2656,7 @@ bool EngineCbx::FinishLoading() {
 
     std::sort(pageFiles.begin(), pageFiles.end(), cmpArchFileInfoByName);
 
+    VecReserve(pageInfos, nFiles);
     for (int i = 0; i < nFiles; i++) {
         auto* pi = new ImagePageInfo();
         VecAppend(pageInfos, pi);
@@ -2879,7 +2887,6 @@ fz_image* EngineCbx::LoadFzImageForPage(fz_context* ctx, int pageNo) {
 
 Pixmap* EngineCbx::LoadPixmapForPage(int pageNo, bool& deleteAfterUse) {
     auto timeStart = TimeGet();
-    defer{};
     Str img = GetImageData(pageNo);
     if (len(img) == 0) {
         logf("EngineCbx::LoadPixmapForPage(page: %d) failed\n", pageNo);
@@ -2923,7 +2930,12 @@ RectF EngineCbx::LoadMediabox(int pageNo) {
         logf("EngineCbx::LoadMediabox: empty media box from header for page: %d\n", pageNo);
     }
 
-    ImagePage* page = GetPage(pageNo, kMaxImagePageCache == len(pageCache));
+    bool cacheFull = false;
+    {
+        ScopedRecursiveMutex scope(&cacheLock);
+        cacheFull = kMaxImagePageCache == len(pageCache);
+    }
+    ImagePage* page = GetPage(pageNo, cacheFull);
     if (page) {
         int w = 0, h = 0;
         if (page->img) {
@@ -2958,11 +2970,6 @@ RectF EngineCbx::LoadMediabox(int pageNo) {
 EngineBase* EngineCbx::CreateFromFile(Str path, Str password, Archive::Format* formatOut, bool* isEncryptedOut,
                                       FileType hintType, Str realPath) {
     auto timeStart = TimeGet();
-    // we sniff the type from content first because the
-    // files can be mis-named e.g. .cbr archive with .cbz ext
-    // we only need the archive format (zip/rar/7z), not the sub-type
-    // (epub/xps/fb2z), so use the Str overload to avoid
-    // opening a full archive just for type detection
     Archive* archive = new Archive();
     archive->password = str::Dup(password);
 
@@ -2973,7 +2980,11 @@ EngineBase* EngineCbx::CreateFromFile(Str path, Str password, Archive::Format* f
 
     // The compressed file size does not bound the memory needed to expand it.
     // Load individual pages on demand instead.
-    if (!archive->Open(openPath, /*eagerLoad=*/false, hintType, gArchiveProgressCb)) {
+    auto hint = Archive::RarHint::Detect;
+    if (hintType != FileType::Unknown) {
+        hint = hintType == FileType::Rar ? Archive::RarHint::Rar : Archive::RarHint::Other;
+    }
+    if (!archive->Open(openPath, /*eagerLoad=*/false, hint)) {
         delete archive;
         return nullptr;
     }
@@ -3005,7 +3016,7 @@ EngineBase* EngineCbx::CreateFromData(Str data) {
         return nullptr;
     }
     EngineCbx* engine = new EngineCbx(archive);
-    if (engine->LoadFromData(data)) {
+    if (engine->FinishLoading()) {
         return engine;
     }
     SafeEngineRelease(&engine);

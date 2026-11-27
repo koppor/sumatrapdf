@@ -92,6 +92,22 @@ static void PushOnlineName(Vec<OnlineListedFile>& out, OnlineNameAcc& cur) {
     cur = {};
 }
 
+static bool ParseOnlineSize(Str s, i64& out) {
+    if (len(s) == 0) {
+        return false;
+    }
+    i64 n = 0;
+    for (int i = 0; i < len(s); i++) {
+        int digit = s.s[i] - '0';
+        if (digit < 0 || digit > 9 || n > (INT64_MAX - digit) / 10) {
+            return false;
+        }
+        n = n * 10 + digit;
+    }
+    out = n;
+    return true;
+}
+
 // {"files":[{"name":"...","size":N,"sha1":"<hex>","uploadedAt":ms}]} - name bytes
 // are copied; the parser reuses its buffer.
 bool ParseOnlineFiles(Str body, Vec<OnlineListedFile>& out) {
@@ -117,8 +133,12 @@ bool ParseOnlineFiles(Str body, Vec<OnlineListedFile>& out) {
             str::Free(cur.name);
             cur.name = str::Dup(v.value);
             cur.haveName = true;
-        } else if (isSize && v.type == json::Type::Number) {
-            cur.size = ParseInt64(v.value);
+        } else if (isSize) {
+            if (v.type != json::Type::Number || !ParseOnlineSize(v.value, cur.size)) {
+                str::Free(cur.name);
+                FreeOnlineFiles(out);
+                return false;
+            }
             cur.haveSize = true;
         } else if (isSha1 && v.type == json::Type::String) {
             cur.hasSha1 = len(v.value) == 40 && str::HexToMem(v.value, Str((char*)cur.sha1, sizeof(cur.sha1)));
@@ -328,6 +348,10 @@ static void VerifyThread(OnlineVerifyReq* req) {
     res->token = str::Dup(req->token);
     res->onDone = req->onDone;
     res->urlRejected = !UrlAllowed(req->url);
+    if (res->urlRejected) {
+        uitask::Post(MkFunc0(VerifyDone, res), "OnlineKeyVerified");
+        return;
+    }
     HttpRsp rsp;
     HttpGetWithHeaders(req->url, AuthHeaderTemp(req->token), &rsp);
     res->status = rsp.httpStatusCode;
@@ -369,47 +393,59 @@ static void JobDone(OnlineJobResult* res) {
     res->onDone.Call(res);
 }
 
+static Str ReadOnlineFile(Str path, file::ReadStamp& stamp) {
+    FILE* f = file::OpenFILE(path);
+    if (!f) {
+        return {};
+    }
+    AutoCall closeFile(fclose, f);
+    if (!file::GetReadStamp(f, stamp) || stamp.size > kOnlineMaxBytes) {
+        return {};
+    }
+    int n = (int)stamp.size;
+    char* data = AllocArray<char>(n + 1);
+    if (!data) {
+        return {};
+    }
+    file::ReadStamp after;
+    if (fread(data, 1, n, f) != (size_t)n || !file::GetReadStamp(f, after) || after != stamp ||
+        !file::ReadStampMatchesPath(path, stamp)) {
+        free(data);
+        return {};
+    }
+    return Str(data, n);
+}
+
 // Content the server already has (another name, another device) isn't sent
 // again: ask it to name that content. 404: it doesn't have it. A server from
 // before sha1 links refuses the empty body. Either way, upload; the server
 // checks the content against sha1.
 static void UploadJob(OnlineJobReq* req, OnlineJobResult* res, Str hdr) {
-    i64 sz = file::GetSize(req->filePath);
-    u64 mtime = FileTimeToU64(file::GetModificationTime(req->filePath));
-    if (sz < 0 || sz > kOnlineMaxBytes) {
-        res->tooBig = sz > kOnlineMaxBytes;
+    file::ReadStamp stamp;
+    Str body = ReadOnlineFile(req->filePath, stamp);
+    if (!body.s) {
+        res->tooBig = stamp.size > kOnlineMaxBytes;
         res->error = res->tooBig ? kErrFileTooLarge : kErrReadFault;
         return;
     }
-    Str body = file::ReadFile(req->filePath);
-    if ((i64)len(body) > kOnlineMaxBytes) {
+    defer {
         str::Free(body);
-        res->tooBig = true;
-        res->error = kErrFileTooLarge;
-        return;
-    }
-    if ((i64)len(body) != sz) {
-        str::Free(body);
-        res->error = kErrReadFault;
-        return;
-    }
+        res->hashed = file::ReadStampMatchesPath(req->filePath, stamp);
+    };
     u8 digest[20];
     CalcSHA1Digest(body, digest);
     memcpy(res->sha1, digest, sizeof(digest));
-    res->hashed = true;
-    res->hashedSize = sz;
-    res->hashedMtime = mtime;
+    res->hashedSize = stamp.size;
+    res->hashedMtime = stamp.mtime;
     TempStr url = fmt("%s&sha1=%s", req->url, str::MemToHexTemp(Str((const char*)digest, dimofi(digest))));
     HttpRsp linkRsp;
     HttpPostUrlNoRedirect(url, StrL("application/octet-stream"), hdr, Str{}, &linkRsp);
     if (linkRsp.httpStatusCode == kHttpStatusOk || linkRsp.httpStatusCode == kHttpStatusUnauthorized) {
-        str::Free(body);
         NoteHttp(res, linkRsp);
         return;
     }
     HttpRsp rsp;
     HttpPostUrlNoRedirect(url, StrL("application/octet-stream"), hdr, body, &rsp);
-    str::Free(body);
     NoteHttp(res, rsp);
 }
 
@@ -418,14 +454,15 @@ static void HashDownload(Str path, OnlineJobResult* res) {
     if (OS_WASM) {
         return;
     }
-    Str data = file::ReadFile(path);
+    file::ReadStamp stamp;
+    Str data = ReadOnlineFile(path, stamp);
     if (!data.s) {
         return;
     }
     CalcSHA1Digest(data, res->sha1);
-    res->hashed = true;
-    res->hashedSize = len(data);
-    res->hashedMtime = FileTimeToU64(file::GetModificationTime(path));
+    res->hashed = file::ReadStampMatchesPath(path, stamp);
+    res->hashedSize = stamp.size;
+    res->hashedMtime = stamp.mtime;
     str::Free(data);
 }
 
@@ -461,7 +498,7 @@ static void JobThread(OnlineJobReq* req) {
         HttpDownloadWithHeaders(req->url, hdr, req->destPath, &rsp);
         NoteHttp(res, rsp);
         res->tooBig = rsp.error == kErrFileTooLarge;
-        if (rsp.httpStatusCode == kHttpStatusOk) {
+        if (rsp.httpStatusCode == kHttpStatusOk && rsp.error == 0) {
             HashDownload(req->destPath, res);
         }
     } else {

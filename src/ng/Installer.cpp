@@ -38,7 +38,12 @@ struct InstallerWnd;
 
 static InstallerWnd* gWnd = nullptr;
 static bool gInstallStarted = false; // a bit of a hack
-static bool gInstallFailed = false;
+enum class InstallResult {
+    Failed,
+    Complete
+};
+// Read after gInstallFinished is set, or immediately after a silent install.
+static InstallResult gInstallResult = InstallResult::Failed;
 static volatile LONG gInstallFinished = 0;
 
 // the three steps a static-exe install takes: copy the exe, write the registry
@@ -55,7 +60,8 @@ struct InstallerWnd {
     bool showOptions = false;
     bool installing = false;
     bool finished = false;
-    int currProgress = 0;
+    // InstallerThread advances it, the window's frames read it
+    AtomicInt currProgress = 0;
     ThreadHandle hThread = nullptr;
     // tests/installer-desktop-shortcut.ts reads these. The window has no
     // Button children, so the probe hwnd carries the same rows.
@@ -69,7 +75,7 @@ static void ProgressStep() {
         // when extracting with -x we don't create window
         return;
     }
-    gWnd->currProgress++;
+    AtomicIntInc(&gWnd->currProgress);
 }
 
 // ng: orig unpacks the lzsa payload here; a static exe only has itself
@@ -97,9 +103,7 @@ bool ExtractInstallerFiles(Str dir) {
 }
 
 static void InstallerThread(Flags* cli) {
-    bool ok;
-
-    gInstallFailed = true;
+    gInstallResult = InstallResult::Failed;
 
     TempStr installedExePath = path::JoinTemp(cli->installDir, Str(kExeName));
     auto allUsers = cli->allUsers;
@@ -111,40 +115,25 @@ static void InstallerThread(Flags* cli) {
         goto Exit;
     }
 
-    // for cleaner upgrades, remove registry entries and shortcuts from previous installations
-    // doing it unconditionally, because deleting non-existing things doesn't hurt
-    if (gPrevInstall.allUsers) {
-        RemoveInstallRegistryKeys(HKEY_LOCAL_MACHINE);
-        RemoveUninstallerRegistryInfo(HKEY_LOCAL_MACHINE);
+    {
+        auto shortcut = cli->noDesktopShortcut ? DesktopShortcut::Omit : DesktopShortcut::Create;
+        InstallRegResult result = InstallRegistryInfo(key, cli->installDir, shortcut);
+        if (result != InstallRegResult::Complete) {
+            NotifyFailed(InstallRegError(result));
+            goto Exit;
+        }
     }
-    RemoveInstallRegistryKeys(HKEY_CURRENT_USER);
-    RemoveUninstallerRegistryInfo(HKEY_CURRENT_USER);
+
+    RemovePreviousInstallRegistry(key, gPrevInstall.allUsers);
     RemoveAppShortcuts();
 
     CopySettingsFile();
 
     CreateAppShortcuts(allUsers, !cli->noDesktopShortcut, installedExePath);
 
-    // consider installation a success from here on
-    // (still warn, if we've failed to create the uninstaller, though)
-    gInstallFailed = false;
-
-    ok = WriteUninstallerRegistryInfo(key, allUsers, cli->installDir);
-    if (!ok) {
-        NotifyFailed(Tr("Failed to write the uninstallation information to the registry"));
-    }
-
-    // remembered for the next upgrade (GetPreviousInstallInfo)
-    LoggedWriteRegDWORD(key, GetRegPathUninstTemp(StrL(kAppName)), StrL(kRegDesktopShortcut),
-                        cli->noDesktopShortcut ? 0 : 1);
-
-    ok = WriteExtendedFileExtensionInfo(key, installedExePath);
-    if (!ok) {
-        NotifyFailed(Tr("Failed to write the extended file extension information to the registry"));
-    }
-
     AddInstallDirToPath(allUsers, cli->installDir);
 
+    gInstallResult = InstallResult::Complete;
     ProgressStep();
     log(StrL("Installer thread finished\n"));
 Exit:
@@ -175,7 +164,7 @@ static Str InstallDirFromUiTemp() {
 static void StartInstallation(InstallerWnd* wnd) {
     gInstallStarted = true;
     wnd->installing = true;
-    wnd->currProgress = 0;
+    AtomicIntSet(&wnd->currProgress, 0);
     // first one to show progress quickly
     ProgressStep();
     wnd->showOptions = false;
@@ -225,7 +214,13 @@ static void OnButtonInstall(InstallerWnd* wnd) {
     logf("OnButtonInstall: needsElevation=%d elevated=%d allUsers=%d dir='%s'\n", (int)needsElevation,
          (int)IsProcessRunningElevated(), (int)cli->allUsers, cli->installDir);
     if (needsElevation && !IsProcessRunningElevated()) {
-        RestartElevatedForAllUsers(cli);
+        // UAC declined or failed: stay, so another folder can be picked
+        if (RestartElevatedForAllUsers(cli) != 0) {
+            SetMsg(Tr("Administrator access is required."), kColorMsgFailed);
+            MessageBeep(MB_ICONEXCLAMATION);
+            InstallerRepaintNow();
+            return;
+        }
         ScheduleDeleteTempInstaller();
         ::ExitProcess(0);
     }
@@ -274,14 +269,13 @@ static void OnButtonBrowse(InstallerWnd* wnd) {
 }
 
 static void OnInstallationFinished(InstallerWnd* wnd, Flags* cli) {
-    logf("OnInstallationFinished: cli->fastInstall: %d gInstallFailed: %d\n", (int)cli->fastInstall,
-         (int)gInstallFailed);
+    logf("OnInstallationFinished: cli->fastInstall: %d result: %d\n", (int)cli->fastInstall, (int)gInstallResult);
 
     SafeCloseThreadHandle(&wnd->hThread);
     wnd->installing = false;
     wnd->finished = true;
 
-    if (gInstallFailed) {
+    if (gInstallResult != InstallResult::Complete) {
         gMsgError = gFirstError;
         SetMsg(Tr("Installation could not be completed."), kColorMsgFailed);
         return;
@@ -463,20 +457,9 @@ static LRESULT CALLBACK InstallerSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
-static BOOL CALLBACK FindInstallerHwnd(HWND hwnd, LPARAM lp) {
-    WCHAR cls[64]{};
-    GetClassNameW(hwnd, cls, dimof(cls));
-    if (!wstr::EqI(WStr(cls), WStrL(L"GpuiSystemMonitor"))) {
-        return TRUE;
-    }
-    *(HWND*)lp = hwnd;
-    return FALSE;
-}
-
-static void InstallerAttachProbe() {
-    HWND hwnd = nullptr;
-    EnumThreadWindows(GetCurrentThreadId(), FindInstallerHwnd, (LPARAM)&hwnd);
-    if (!hwnd) {
+static void InstallerAttachProbe(gp::Window* win) {
+    HWND hwnd = (HWND)gp::PlatWindowHandle(win);
+    if (!hwnd || !IsWindow(hwnd)) {
         return;
     }
     gInstallerHwnd = hwnd;
@@ -580,11 +563,13 @@ gp::El* InstallerView::Render(InstallerView*, gp::Ctx* cx) {
                         ->Font(13)
                         ->Fg(ToGpui(kColBlack)));
         gp::El* dirRow = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->ItemsCenter()->Gap(6);
-        dirRow->Child(
-            gp::Div(cx->a)->Flex1()->MinW(0)->Child(gpc::Input::New(cx, GStrL("inst-dir"), wnd->editInstallationDir)
-                                                        ->WithSize(gp::UiSize::Small)
-                                                        ->W(gp::kFill)
-                                                        ->IntoEl()));
+        gp::El* dirField = gpc::Input::New(cx, GStrL("inst-dir"), wnd->editInstallationDir)
+                               ->WithSize(gp::UiSize::Small)
+                               ->W(gp::kFill)
+                               ->IntoEl();
+        // The installer runs before the reader theme is initialized.
+        dirField->Border(1, gp::ThemeNow(cx->app).inputBorder)->Radius(0)->FocusRing(false);
+        dirRow->Child(gp::Div(cx->a)->Flex1()->MinW(0)->Child(dirField));
         dirRow->Child(DlgAccelEl(cx, gpc::Button::New(cx, GStrL("inst-browse"))->WithSize(gp::UiSize::Small),
                                  StrL("&..."), gp::ListenTo(gInstallerView, &InstallerView::OnBrowse)));
         opts->Child(dirRow);
@@ -604,11 +589,15 @@ gp::El* InstallerView::Render(InstallerView*, gp::Ctx* cx) {
 
     gp::El* bottom = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->ItemsCenter()->Gap(8)->Pad(margin);
     if (wnd->installing) {
-        float pct = 100.f * (float)wnd->currProgress / (float)kInstallationSteps;
+        float pct = 100.f * (float)AtomicIntGet(&wnd->currProgress) / (float)kInstallationSteps;
         bottom->Child(gpc::Progress::New(cx)->Value(pct)->W((float)GetInstallerWinDx() / 2)->IntoEl());
     } else if (!wnd->finished) {
         //[ ACCESSKEY_ALTERNATIVE // ideally, the same access key is used for both
-        Str optsLabel = wnd->showOptions ? Tr("Hide &Options") : Tr("&Options");
+        Str optsLabel = Tr("&Options");
+        if (wnd->showOptions) {
+            //| ACCESSKEY_ALTERNATIVE
+            optsLabel = Tr("Hide &Options");
+        }
         //] ACCESSKEY_ALTERNATIVE
         bottom->Child(DlgAccelEl(cx, gpc::Button::New(cx, GStrL("inst-options"))->WithSize(gp::UiSize::Small),
                                  optsLabel, gp::ListenTo(gInstallerView, &InstallerView::OnOptions))
@@ -616,7 +605,7 @@ gp::El* InstallerView::Render(InstallerView*, gp::Ctx* cx) {
     }
     bottom->Child(gp::Div(cx->a)->Flex1());
     if (wnd->finished) {
-        if (!gInstallFailed && !gCliNew.fastInstall) {
+        if (gInstallResult != InstallResult::Failed && !gCliNew.fastInstall) {
             bottom->Child(gpc::Button::New(cx, GStrL("inst-start"))
                               ->Label(ToGpui(Tr("Start SumatraPDF")))
                               ->Primary()
@@ -669,7 +658,7 @@ static bool CreateInstallerWindow(Flags* cli) {
         return false;
     }
     gp::WindowSetInterval(gWnd->win, 33, gp::ListenTo(gInstallerView, &InstallerView::OnTick));
-    InstallerAttachProbe();
+    InstallerAttachProbe(gWnd->win);
     if (gInstallerHwnd) {
         DpiSetFromHwnd(gInstallerHwnd);
         DpiScale(dx, dy);
@@ -763,7 +752,6 @@ int RunInstaller(Flags* cli) {
     if (gCli->silent) {
         gInstallStarted = true;
         InstallerThread(&gCliNew);
-        ret = gInstallFailed ? 1 : 0;
     } else {
         log(StrL("Before CreateInstallerWindow()\n"));
         if (!CreateInstallerWindow(&gCliNew)) {
@@ -774,10 +762,14 @@ int RunInstaller(Flags* cli) {
         logf("AppRun() returned %d\n", ret);
     }
 
+    if (ret == 0 && gInstallStarted &&
+        (InterlockedCompareExchange(&gInstallFinished, 0, 0) == 0 || gInstallResult != InstallResult::Complete)) {
+        ret = 1;
+    }
     log(StrL("Installer finished\n"));
     if (installerLogPath && gInstallStarted) {
         RunNonElevated(installerLogPath);
-    } else if (!gCli->silent && (ret != 0 || gInstallFailed)) {
+    } else if (!gCli->silent && ret != 0) {
         // if installation failed, save log to file and show it
         installerLogPath = GetInstallerLogPath();
         bool ok = WriteCurrentLogToFile(installerLogPath);

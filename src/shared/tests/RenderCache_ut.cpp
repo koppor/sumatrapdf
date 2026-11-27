@@ -13,6 +13,7 @@
 #include "EngineAll.h"
 #include "DisplayModel.h"
 #include "RenderCache.h"
+#include "CachedObjects.h"
 
 struct RequestLockProbe {
     RecursiveMutex* mutex = nullptr;
@@ -107,7 +108,7 @@ bool RenderCache_UnitTestFullOfOneVisiblePage() {
     }
 
     NoopDocCb cb;
-    auto* dm = new DisplayModel(engine, &cb);
+    auto* dm = DisplayModel::Create(engine, &cb);
     dm->SetInitialViewSettings(DisplayMode::Continuous, 1, {400, 300}, 96);
     dm->Relayout(1600, 0);
 
@@ -171,7 +172,7 @@ bool RenderCache_UnitTestFullOfOldZoom() {
     }
 
     NoopDocCb cb;
-    auto* dm = new DisplayModel(engine, &cb);
+    auto* dm = DisplayModel::Create(engine, &cb);
     dm->SetInitialViewSettings(DisplayMode::Continuous, 1, {400, 300}, 96);
     // the whole page is visible, so every tile of the old zoom is on screen
     dm->Relayout(25, 0);
@@ -212,6 +213,73 @@ bool RenderCache_UnitTestFullOfOldZoom() {
     return ok;
 }
 
+static int gAbortedRenders = 0;
+
+static void CountAbortedRender(PageRenderRequest* req) {
+    if (req->abort) {
+        gAbortedRenders++;
+    }
+}
+
+static bool IsCachedObjectRegistered(uintptr_t id) {
+    for (auto& o : gCachedObjects) {
+        if (o.id == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// dropping every tile must unregister them (else the cache total stays
+// inflated) and abort queued requests through their callback
+bool RenderCache_UnitTestReduceTileSize() {
+    Settings* prevSettings = gSettings;
+    if (!gSettings) {
+        gSettings = NewSettings({});
+    }
+    EngineBase* engine = CreateEngineMupdfFromData(Str(kOnePagePdf), StrL("one-page.pdf"), nullptr);
+    if (!engine) {
+        return false;
+    }
+
+    NoopDocCb cb;
+    auto* dm = DisplayModel::Create(engine, &cb);
+    dm->SetInitialViewSettings(DisplayMode::Continuous, 1, {400, 300}, 96);
+    dm->Relayout(25, 0);
+
+    bool ok = false;
+    {
+        RenderCache cache;
+        cache.maxRenderThreads = 0;
+        cache.maxTileSize = {400, 400};
+        PageRenderRequest req;
+        req.dm = dm;
+        req.pageNo = 1;
+        req.zoom = dm->GetRenderZoom(1);
+        req.darkModeEpoch = cache.darkModeEpoch;
+        req.tile = TilePosition(0, 0, 0);
+        cache.Add(req, AllocPixmap(4, 4));
+        uintptr_t id = (uintptr_t)cache.cache[0];
+
+        cache.requests[0] = req;
+        cache.requests[0].renderFinishedCb = MkFunc1Void(CountAbortedRender);
+        cache.requestCount = 1;
+        gAbortedRenders = 0;
+
+        bool reduced = cache.ReduceTileSize();
+        ok = reduced && cache.cacheCount == 0 && !IsCachedObjectRegistered(id) && gAbortedRenders == 1;
+        cache.AbortRendering(dm);
+        cache.FreeForDisplayModel(dm);
+    }
+
+    delete dm;
+    if (!prevSettings) {
+        DeleteSettings(gSettings);
+        gSettings = nullptr;
+    }
+    return ok;
+}
+
 static DocController* gDestroyedCtrl = nullptr;
 
 static void NoteCtrlDestroyed(DocController* ctrl) {
@@ -230,7 +298,7 @@ bool DocController_UnitTestDestroyHook() {
         return false;
     }
     NoopDocCb cb;
-    DocController* ctrl = new DisplayModel(engine, &cb);
+    DocController* ctrl = DisplayModel::Create(engine, &cb);
     Func1<DocController*> prev = gOnDocControllerDestroyed;
     gOnDocControllerDestroyed = MkFunc1Void(NoteCtrlDestroyed);
     gDestroyedCtrl = nullptr;
@@ -256,7 +324,7 @@ bool DisplayModel_UnitTestZoomFallback() {
         return false;
     }
     NoopDocCb cb;
-    auto* dm = new DisplayModel(engine, &cb);
+    auto* dm = DisplayModel::Create(engine, &cb);
     dm->SetInitialViewSettings(DisplayMode::Continuous, 1, {400, 300}, 96);
     dm->zoomVirtual = 100;
     dm->zoomReal = 0;
@@ -286,7 +354,7 @@ bool DisplayModel_UnitTestFreePanFirstPage() {
         return false;
     }
     NoopDocCb cb;
-    auto* dm = new DisplayModel(engine, &cb);
+    auto* dm = DisplayModel::Create(engine, &cb);
     dm->SetInitialViewSettings(DisplayMode::Continuous, 1, {400, 300}, 96);
     dm->Relayout(200, 0);
     dm->SetFreePan(true);

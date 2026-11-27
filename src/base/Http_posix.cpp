@@ -5,16 +5,14 @@
 
 #if defined(GPUI_HAVE_CURL) && GPUI_HAVE_CURL
 #include <curl/curl.h>
-#else
-#include <sys/wait.h>
 #endif
 
 #include "base/File.h"
 #include "base/Http.h"
 
-// ng: was Http_mac.cpp. Linux and macOS link libcurl; wasm keeps the command
-// fallback (a no-op in practice). The portable half of the API is in Http.cpp,
-// outside its OS_WIN block.
+// ng: was Http_mac.cpp. Linux and macOS link libcurl; wasm uses XHR for the
+// web API calls and stubs the rest. The portable half of the API is in
+// Http.cpp, outside its OS_WIN block.
 
 static constexpr DWORD kHttpErrorSuccess = 0;
 static constexpr DWORD kHttpErrorFailure = 1;
@@ -131,14 +129,15 @@ bool HttpGet(Str urlA, HttpRsp* rspOut) {
 
 bool HttpGetToFile(Str urlA, Str destFilePath, const Func1<HttpProgress*>& cbProgress, i64 maxSize) {
     logf("HttpGetToFile: url: '%s', file: '%s'\n", urlA, destFilePath);
-    FILE* file = fopen(CStrTemp(destFilePath), "wb");
+    TempStr partPath = str::JoinTemp(destFilePath, StrL(".part"));
+    FILE* file = fopen(CStrTemp(partPath), "wb");
     if (!file) {
         return false;
     }
     CURL* curl = curl_easy_init();
     if (!curl) {
         fclose(file);
-        file::Delete(destFilePath);
+        file::Delete(partPath);
         return false;
     }
 
@@ -151,8 +150,11 @@ bool HttpGetToFile(Str urlA, Str destFilePath, const Func1<HttpProgress*>& cbPro
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
     curl_easy_cleanup(curl);
     bool ok = fclose(file) == 0 && code == CURLE_OK && status == 200;
+    if (ok) {
+        ok = file::RenameReplace(destFilePath, partPath);
+    }
     if (!ok) {
-        file::Delete(destFilePath);
+        file::Delete(partPath);
     }
     return ok;
 }
@@ -296,9 +298,9 @@ static bool InMemoryRequest(const char* what, HttpMethod method, Str url, Str co
     CURLcode code = curl_easy_perform(curl);
     NoteStatus(curl, rspOut);
     DWORD sc = rspOut->httpStatusCode;
-    // a received response is not a transport error
-    rspOut->error = sc != kHttpNoStatus ? kHttpErrorSuccess : (DWORD)code;
-    bool ok = isPost ? (sc >= 200 && sc < 300) : sc == kHttpOk200;
+    // a transfer cut short after the status line is a failure
+    rspOut->error = (DWORD)code;
+    bool ok = code == CURLE_OK && (isPost ? (sc >= 200 && sc < 300) : sc == kHttpOk200);
     logf("%s: url: '%s' status: %d\n", Str(what), url, (int)sc);
     curl_slist_free_all(list);
     curl_easy_cleanup(curl);
@@ -356,7 +358,7 @@ bool HttpDownloadWithHeaders(Str url, Str extraHeaders, Str destPath, HttpRsp* r
     NoteStatus(curl, rspOut);
     DWORD sc = rspOut->httpStatusCode;
     bool ok = code == CURLE_OK && sc == kHttpOk200;
-    if (code != CURLE_OK && sc == kHttpNoStatus) {
+    if (code != CURLE_OK) {
         rspOut->error = (DWORD)code;
     }
     if (pf.tooBig || code == CURLE_FILESIZE_EXCEEDED) {
@@ -469,10 +471,11 @@ static bool WasmRequest(const char* what, Str method, Str url, Str contentType, 
     }
     int sc = WasmXhr(method.s, len(method), url.s, len(url), contentType.s, len(contentType), body.s, len(body));
     int n = WasmXhrTextLen();
-    if (n > 0 && n <= kHttpMemBodyCap) {
-        char* buf = AllocArrayTemp<char>(n + 1);
-        WasmXhrTake(buf, n + 1);
-        rspOut->data.Append(Str(buf, n));
+    if (n > 0) {
+        int copy = std::min(n, kHttpMemBodyCap);
+        char* buf = AllocArrayTemp<char>(copy + 1);
+        WasmXhrTake(buf, copy + 1);
+        rspOut->data.Append(Str(buf, copy));
     }
     logf("%s: url: '%s' status: %d\n", Str(what), url, sc);
     if (sc <= 0) {
@@ -541,192 +544,16 @@ bool HttpDownloadWithHeaders(Str, Str, Str, HttpRsp* rspOut) {
 }
 #endif
 
-static void AppendShellQuoted(str::Builder* cmd, Str s) {
-    cmd->AppendChar('\'');
-    for (int i = 0; i < s.len; i++) {
-        char c = s.s[i];
-        if (c == '\'') {
-            cmd->Append(StrL("'\\''"));
-        } else {
-            cmd->AppendChar(c);
-        }
-    }
-    cmd->AppendChar('\'');
+bool HttpGet(Str, HttpRsp* rspOut) {
+    return NotSupported(rspOut);
 }
 
-static bool RunShellCommand(Str command) {
-    int res = system(CStrTemp(command));
-    if (res < 0) {
-        return false;
-    }
-    return WIFEXITED(res) && WEXITSTATUS(res) == 0;
+bool HttpGetToFile(Str, Str, const Func1<HttpProgress*>&, i64) {
+    return false;
 }
 
-static TempStr NewTempFilePathTemp(Str prefix) {
-    TempStr path = GetTempFilePathTemp(prefix);
-    if (path) {
-        file::Delete(path);
-    }
-    return path;
-}
-
-static int ReadHttpStatusCode(Str statusPath) {
-    Str status = file::ReadFile(statusPath);
-    if (len(status) == 0) {
-        return 0;
-    }
-    return ParseInt(status);
-}
-
-static bool AppendCurlBase(str::Builder* cmd, Str outPath, Str statusPath) {
-    (void)statusPath;
-    bool ok = cmd->Append(StrL("curl --location --silent --show-error --user-agent 'SumatraPdfHTTP' --output "));
-    AppendShellQuoted(cmd, outPath);
-    ok = ok && cmd->Append(StrL(" --write-out '%{http_code}' "));
-    ok = ok && cmd->Append(StrL(" --max-time 30 "));
-    ok = ok && cmd->Append(StrL(" "));
-    return ok;
-}
-
-static void AppendStatusRedirect(str::Builder* cmd, Str statusPath) {
-    cmd->Append(StrL(" > "));
-    AppendShellQuoted(cmd, statusPath);
-}
-
-static void AppendHeaders(str::Builder* cmd, str::Builder* headers) {
-    if (!headers || len(*headers) == 0) {
-        return;
-    }
-
-    Str h = ToStr(*headers);
-    int start = 0;
-    for (int i = 0; i <= h.len; i++) {
-        if (i < h.len && h.s[i] != '\n' && h.s[i] != '\r') {
-            continue;
-        }
-        if (i > start) {
-            cmd->Append(StrL(" --header "));
-            AppendShellQuoted(cmd, Str(h.s + start, i - start));
-        }
-        if (i < h.len && h.s[i] == '\r' && i + 1 < h.len && h.s[i + 1] == '\n') {
-            i++;
-        }
-        start = i + 1;
-    }
-}
-
-bool HttpGet(Str urlA, HttpRsp* rspOut) {
-    logf("HttpGet: url: '%s'\n", urlA);
-    rspOut->data.Reset();
-    rspOut->error = kHttpErrorSuccess;
-    rspOut->httpStatusCode = 0;
-
-    TempStr bodyPath = NewTempFilePathTemp(StrL("sumatra-http-body-"));
-    TempStr statusPath = NewTempFilePathTemp(StrL("sumatra-http-status-"));
-    if (len(bodyPath) == 0 || len(statusPath) == 0) {
-        rspOut->error = kHttpErrorFailure;
-        return false;
-    }
-
-    str::Builder cmd;
-    str::BuilderReserve(cmd, 1024);
-    bool ok = AppendCurlBase(&cmd, bodyPath, statusPath);
-    AppendShellQuoted(&cmd, urlA);
-    AppendStatusRedirect(&cmd, statusPath);
-    ok = ok && RunShellCommand(ToStr(cmd));
-    rspOut->httpStatusCode = (DWORD)ReadHttpStatusCode(statusPath);
-    if (ok) {
-        Str body = file::ReadFile(bodyPath);
-        if (body) {
-            ok = rspOut->data.Append(body);
-        }
-    }
-    if (!ok) {
-        rspOut->error = kHttpErrorFailure;
-    }
-    file::Delete(bodyPath);
-    file::Delete(statusPath);
-    return IsHttpRspOk(rspOut);
-}
-
-bool HttpGetToFile(Str urlA, Str destFilePath, const Func1<HttpProgress*>& cbProgress, i64 maxSize) {
-    logf("HttpGetToFile: url: '%s', file: '%s'\n", urlA, destFilePath);
-    TempStr statusPath = NewTempFilePathTemp(StrL("sumatra-http-status-"));
-    if (len(statusPath) == 0) {
-        return false;
-    }
-
-    str::Builder cmd;
-    str::BuilderReserve(cmd, 1024);
-    bool ok = AppendCurlBase(&cmd, destFilePath, statusPath);
-    if (maxSize >= 0) {
-        cmd.Append(fmt(" --max-filesize %lld ", maxSize));
-    }
-    AppendShellQuoted(&cmd, urlA);
-    AppendStatusRedirect(&cmd, statusPath);
-    ok = ok && RunShellCommand(ToStr(cmd));
-    int statusCode = ReadHttpStatusCode(statusPath);
-    ok = ok && statusCode == 200;
-    if (ok) {
-        HttpProgress progress{};
-        progress.nDownloaded = file::GetSize(destFilePath);
-        cbProgress.Call(&progress);
-    } else {
-        file::Delete(destFilePath);
-    }
-    file::Delete(statusPath);
-    return ok;
-}
-
-// POST body to url with an explicit Content-Type and optional extra headers.
-// Blocking; rspOut carries the status code and the response body.
-bool HttpPostUrl(Str url, Str contentType, Str extraHeaders, Str body, HttpRsp* rspOut) {
-    rspOut->data.Reset();
-    rspOut->error = kHttpErrorSuccess;
-    rspOut->httpStatusCode = 0;
-
-    TempStr bodyPath = NewTempFilePathTemp(StrL("sumatra-http-post-body-"));
-    TempStr outPath = NewTempFilePathTemp(StrL("sumatra-http-post-out-"));
-    TempStr statusPath = NewTempFilePathTemp(StrL("sumatra-http-status-"));
-    if (len(bodyPath) == 0 || len(outPath) == 0 || len(statusPath) == 0) {
-        rspOut->error = kHttpErrorFailure;
-        return false;
-    }
-
-    bool ok = file::WriteFile(bodyPath, body ? body : Str());
-    if (ok) {
-        str::Builder cmd;
-        str::BuilderReserve(cmd, 1024);
-        ok = AppendCurlBase(&cmd, outPath, statusPath);
-        cmd.Append(StrL(" --request POST "));
-        if (len(contentType) > 0) {
-            cmd.Append(StrL(" --header "));
-            AppendShellQuoted(&cmd, str::JoinTemp(StrL("Content-Type: "), contentType));
-        }
-        str::Builder headers;
-        headers.Append(HttpNormalizeHeadersTemp(extraHeaders));
-        AppendHeaders(&cmd, &headers);
-        cmd.Append(StrL(" --data-binary @"));
-        AppendShellQuoted(&cmd, bodyPath);
-        cmd.Append(StrL(" "));
-        AppendShellQuoted(&cmd, url);
-        AppendStatusRedirect(&cmd, statusPath);
-        ok = ok && RunShellCommand(ToStr(cmd));
-    }
-    rspOut->httpStatusCode = (DWORD)ReadHttpStatusCode(statusPath);
-    if (ok) {
-        Str out = file::ReadFile(outPath);
-        if (out) {
-            ok = rspOut->data.Append(out);
-        }
-    }
-    if (!ok) {
-        rspOut->error = kHttpErrorFailure;
-    }
-    file::Delete(bodyPath);
-    file::Delete(outPath);
-    file::Delete(statusPath);
-    return IsHttpRspOk(rspOut);
+bool HttpPostUrl(Str, Str, Str, Str, HttpRsp* rspOut) {
+    return NotSupported(rspOut);
 }
 
 #endif
@@ -803,7 +630,8 @@ bool HttpPostStream(Str url, Str headers, Str body, HttpStreamSink* sink, HttpSt
     curl_slist* list = AppendHeaders(nullptr, headers);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.s);
+    // a null POSTFIELDS makes curl read the body from stdin
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.s ? body.s : "");
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)len(body));
     HttpStreamState state{curl, sink};
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteStream);

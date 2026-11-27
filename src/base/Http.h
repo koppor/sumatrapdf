@@ -17,6 +17,8 @@ struct HttpProgress {
 
 bool IsHttpRspOk(const HttpRsp*);
 
+bool HttpPost(Str server, int port, Str url, str::Builder* headers, str::Builder* data, str::Builder* outResp = nullptr,
+              DWORD* outStatusCode = nullptr);
 bool HttpGet(Str url, HttpRsp* rspOut);
 bool HttpGetToFile(Str url, Str destFilePath, const Func1<HttpProgress*>& cbProgress, i64 maxSize = -1);
 
@@ -48,13 +50,18 @@ struct HttpStreamSink {
 };
 
 struct HttpStreamCancel {
+    HttpStreamCancel();
+    ~HttpStreamCancel();
+    HttpStreamCancel(const HttpStreamCancel&) = delete;
+    HttpStreamCancel& operator=(const HttpStreamCancel&) = delete;
     void Cancel();
     bool IsCanceled();
 
   private:
     AtomicBool canceled = 0;
 #if OS_WIN
-    AtomicPtr request = nullptr;
+    // signaled by Cancel(); HttpPostStream waits on it next to its request
+    void* event = nullptr;
     friend bool HttpPostStream(Str, Str, Str, HttpStreamSink*, HttpStreamCancel*);
 #endif
 };

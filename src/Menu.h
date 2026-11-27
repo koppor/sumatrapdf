@@ -4,12 +4,7 @@
 struct AppCommandCtx;
 using BuildMenuCtx = AppCommandCtx;
 
-struct MenuDef {
-    Str title;
-    UINT_PTR idOrSubmenu = 0;
-};
-
-#define kMenuSeparator "-----"
+struct MenuDef;
 
 HMENU BuildMenuFromDef(MenuDef* menuDefs, HMENU menu, BuildMenuCtx* ctx);
 void RemoveBadMenuSeparators(HMENU menu);
@@ -17,7 +12,7 @@ HMENU BuildMenu(MainWindow* win);
 void OnWindowContextMenu(MainWindow* win, int x, int y);
 void OnAboutContextMenu(MainWindow* win, int x, int y);
 HMENU BuildHomeContextMenu(MainWindow* win, Str path);
-TempStr HomeContextMenuRowsTemp(MainWindow* win);
+TempStr HomeContextMenuRowsTemp(MainWindow* win, int invoke = 0);
 bool CommandUsesContextMenuPoint(int cmdId);
 void ForgetFileFromFrequentlyRead(MainWindow* win, Str filePath);
 int CmdIdFromVirtualZoom(float virtualZoom);

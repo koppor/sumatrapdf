@@ -1,6 +1,7 @@
 // CmdToggleLineWeights, discussion #6567: with line weights off,
 // every stroke is drawn one pixel wide on screen, like Acrobat's View >
-// Display > Line Weights. Exported (and printed) pages keep the real widths.
+// Display > Line Weights: on the pixel grid, so a horizontal line is one solid
+// row, not two half-gray ones. Exported (and printed) pages keep the real widths.
 //
 // Run: bun tests/issue-6567.ts [--no-build]
 
@@ -17,8 +18,8 @@ const THICK_MIN = LINE_DX * LINE_WIDTH * 0.8;
 // a hairline is a pixel or two tall
 const THIN_MAX = LINE_DX * 3;
 
-function buildPdf(): Buffer {
-  const stream = `0 g 0 G ${LINE_WIDTH} w 20 100 m ${20 + LINE_DX} 100 l S`;
+function buildPdf(y = 100): Buffer {
+  const stream = `0 g 0 G ${LINE_WIDTH} w 20 ${y} m ${20 + LINE_DX} ${y} l S`;
   const objs = [
     "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
     "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
@@ -43,8 +44,8 @@ function buildPdf(): Buffer {
 const VIEW = 1;
 const EXPORT = 0;
 
-async function darkPixels(client: ControlClient, pdf: string, target: number): Promise<number> {
-  const res = await client.request(ControlCommand.TestRenderPageColors, [pdf, 1, 100, target]);
+async function darkPixels(client: ControlClient, pdf: string, target: number, zoom = 100): Promise<number> {
+  const res = await client.request(ControlCommand.TestRenderPageColors, [pdf, 1, zoom, target]);
   const raw = String(res[1] ?? "");
   const m = /nonwhite=(\d+)/.exec(raw);
   if (res[0] !== 0 || !m) {
@@ -76,6 +77,34 @@ export async function testit(): Promise<void> {
 
     await client.request(ControlCommand.TestInvokeCommand, ["CmdToggleLineWeights"]);
     await waitView(client, pdf, (n) => n > 0 && n <= THIN_MAX, "line weights off: line should be a hairline");
+    // zoomed in 4x: length scales 4x, thickness must stay ~1px (not 4px)
+    const zoomedZoom = 400;
+    const zoomedThinMax = LINE_DX * (zoomedZoom / 100) * 2.5;
+    const zoomed = await darkPixels(client, pdf, VIEW, zoomedZoom);
+    if (zoomed <= 0 || zoomed > zoomedThinMax) {
+      throw new Error(
+        `issue-6567: line weights off at ${zoomedZoom}% must stay 1px thick (<= ${zoomedThinMax}), got ${zoomed} dark pixels`,
+      );
+    }
+    // wherever the line falls between pixels, and at any zoom, it's one solid row
+    let i = 0;
+    for (const y of [100, 100.25, 100.5, 100.75]) {
+      const offPdf = tmpPath(`issue-6567-${++i}.pdf`);
+      writeFileSync(offPdf, buildPdf(y));
+      for (const zoom of [100, 150, 400]) {
+        const res = await client.request(ControlCommand.TestRenderPageColors, [offPdf, 1, zoom, VIEW]);
+        const raw = String(res[1] ?? "");
+        const box = /box=(\d+),(\d+),(\d+),(\d+)/.exec(raw);
+        const gray = Number(/gray=(\d+)/.exec(raw)?.[1] ?? -1);
+        const rows = box ? Number(box[4]) - Number(box[2]) : -1;
+        if (rows !== 1 || gray !== 0) {
+          throw new Error(
+            `issue-6567: hairline at y=${y} zoom=${zoom}% is ${rows} rows, ${gray} gray pixels: ${raw.trim()}`,
+          );
+        }
+      }
+    }
+
     const exported = await darkPixels(client, pdf, EXPORT);
     if (exported < THICK_MIN) {
       throw new Error(`issue-6567: export must keep the line width, got ${exported} dark pixels`);

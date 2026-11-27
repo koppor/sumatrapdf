@@ -568,7 +568,7 @@ const fixedPageUI: Field[] = [
   struct(
     "PageGrid",
     pageGrid,
-    "measurement grid overlay (View > Page Grid). Spacing, slant and style are saved; showing the grid is session-only. Drag a grid line while Configure Page Grid is open, or Alt+drag, to resize cells with equal width and height",
+    "measurement grid overlay (View > Show > Page Grid). Spacing, slant and style are saved; showing the grid is session-only. Drag a grid line while Configure Page Grid is open, or Alt+drag, to resize cells with equal width and height",
   ).ver("3.7"),
 ];
 
@@ -677,6 +677,15 @@ const chmUI: Field[] = [
 ];
 
 const markdownUI: Field[] = [
+  field("MaxContentWidth", Int, 0, "maximum browser reading width in CSS pixels; 0 uses the default (980)").ver("3.7"),
+  field("FontName", Str, "", "font family for Markdown prose").emptyMeans("the viewer default").ver("3.7"),
+  field("FontSize", Float, 0, "base text size in points; 0 keeps the viewer or document default").ver("3.7"),
+  field(
+    "LineSpacing",
+    Float,
+    0,
+    "prose line-height multiplier from 0.5 to 5; 0 keeps the viewer or document default",
+  ).ver("3.7"),
   field(
     "UseFixedPageUI",
     Bool,
@@ -687,11 +696,19 @@ const markdownUI: Field[] = [
     "PreserveLineBreaks",
     Bool,
     false,
-    "if true, preserve source line breaks in the Markdown browser view; false uses standard Markdown paragraph wrapping",
+    "if true, preserve source line breaks in Markdown; false uses standard Markdown paragraph wrapping",
   ).ver("3.7"),
 ];
 
 const htmlUI: Field[] = [
+  field("FontName", Str, "", "font family for HTML prose").emptyMeans("the viewer default").ver("3.7"),
+  field("FontSize", Float, 0, "base text size in points; 0 keeps the viewer or document default").ver("3.7"),
+  field(
+    "LineSpacing",
+    Float,
+    0,
+    "prose line-height multiplier from 0.5 to 5; 0 keeps the viewer or document default",
+  ).ver("3.7"),
   field(
     "UseFixedPageUI",
     Bool,
@@ -1208,7 +1225,9 @@ const fileState: Field[] = [
     null,
     "hex encoded MD5 fingerprint of the file content (32 chars) followed by the " +
       "crypt key (64 chars); only applies to PDF documents",
-  ).doc("data required to open a password protected document without having to " + "ask for the password again"),
+  )
+    .secret()
+    .doc("data required to open a password protected document without having to " + "ask for the password again"),
   structPtr(
     "EBookUI",
     "FileEBookUI",
@@ -1491,7 +1510,7 @@ const globalPrefs: Field[] = [
     "EnableTeXEnhancements",
     Bool,
     false,
-    "if true, show the SyncTeX inverse search command line in Settings -> Options, so a " +
+    "if true, show the SyncTeX inverse search command line in Settings -> Settings..., so a " +
       "double-click in the document can jump to the matching line in a LaTeX editor",
   ),
   field("EscToExit", Bool, false, "if true, Esc key closes SumatraPDF"),
@@ -1930,6 +1949,9 @@ const globalPrefs: Field[] = [
     "if true, a PDF without an outline gets a table of contents built from numbered headings in its text (Generate Table Of Contents command does it on demand)",
   ).ver("3.7"),
   field("ShowStartPage", Bool, true, "if true, show a list of frequently read documents when no document is loaded"),
+  field("DisableCrashReports", Bool, false, "keep crash reports local and disable automatic diagnostic uploads").ver(
+    "3.7",
+  ),
   field(
     "SidebarDx",
     Int,
@@ -1995,10 +2017,10 @@ const globalPrefs: Field[] = [
   ).ver("3.7"),
   field(
     "FlashFindMatch",
-    Bool,
-    true,
-    "if true, Find Next / Find Previous blinks a ring around the found text a few times, " +
-      "so it's easy to spot on a busy page. The color matches ForwardSearch",
+    Int,
+    1,
+    "how many times Find Next / Find Previous blinks a ring around the found text, " +
+      "so it's easy to spot on a busy page; 0 turns it off. The color matches ForwardSearch",
   ).ver("3.7"),
   field(
     "CitationHoverDelay",
@@ -2397,6 +2419,7 @@ const globalPrefs: Field[] = [
 
   comment("You're not expected to change those manually"),
   compactArray("DefaultPasswords", Str, null, "passwords to try when opening a password protected document")
+    .secret()
     .ver("2.4")
     .doc(
       "a whitespace separated list of passwords to try when opening a password protected document " +
@@ -2468,6 +2491,7 @@ const globalPrefs: Field[] = [
     null,
     "API key for SumatraPDF Web. Set from File / Link SumatraPDF Web. Do not share the settings file.",
   )
+    .secret()
     .internal()
     .ver("3.7")
     .omitFromDocs(),
@@ -2620,6 +2644,7 @@ const globalPrefsLayout = [
   "ShowTocPageNumbers",
   "TocWrapText",
   "ShowStartPage",
+  "DisableCrashReports",
   "ScrollbarInSinglePage",
   "SmoothScroll",
   "PaddingAfterLastPage",

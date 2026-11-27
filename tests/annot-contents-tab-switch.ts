@@ -1,6 +1,5 @@
-// Clicking away from the Contents edit box is "done", the same as Ctrl+Enter:
-// the text is kept and the annotation stays selected. It used to throw the
-// typing away and deselect.
+// Text typed in the Contents edit box survives a tab switch: the box is
+// committed before it goes away, as a click away would (round 5 review C14).
 
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -9,7 +8,6 @@ import { cmdId, pollUntil, runStandalone, tmpPath, USE_NG, makeBlankPdf } from "
 import { findTopWindow, getControlText, packCoords, sendMessage, WM_COMMAND } from "./winapi.ts";
 import {
   clickAt,
-  findCanvas,
   findChildByClass,
   killAndWait,
   launchControlled,
@@ -17,7 +15,7 @@ import {
   typeIntoInput,
 } from "./win-automation.ts";
 
-const TEXT = "kept-on-click-away";
+const TEXT = "kept-on-tab-switch";
 const TOOLBAR_CLASS = "SumatraAnnotEditToolbar";
 
 type Rect = { x: number; y: number; dx: number; dy: number };
@@ -34,30 +32,34 @@ async function toolbarDump(client: ControlClient): Promise<string> {
   const raw = String(res[1] ?? "");
   const m = /annotEditToolbar .*/.exec(raw);
   if (res[0] !== 0 || !m) {
-    throw new Error(`annot-contents-click-away: could not read toolbar state\n${raw}`);
+    throw new Error(`annot-contents-tab-switch: could not read toolbar state\n${raw}`);
   }
   return m[0]!;
 }
 
-// the selected annotation's contents, or null when nothing is selected
-async function selectedContents(client: ControlClient): Promise<string | null> {
-  const res = await client.request(ControlCommand.TestAnnotEditorLayout, [0, 0]);
-  const raw = String(res[1] ?? "").trim();
-  if (res[0] !== 0) {
-    throw new Error(`annot-contents-click-away: could not read annotation state: ${raw}`);
+// how many of the current document's annotations match `text`, through the
+// annotation list's filter, which also searches the contents. The tab switch
+// drops the selection, so the selected annotation can't be asked.
+async function annotsMatching(client: ControlClient, text: string): Promise<number> {
+  const res = await client.request(ControlCommand.TestAnnotFilter, ["set", text]);
+  const raw = String(res[1] ?? "");
+  const m = / nVisible=(\d+)/.exec(raw);
+  if (res[0] !== 0 || !m) {
+    throw new Error(`annot-contents-tab-switch: could not read the annotation list: ${raw}`);
   }
-  const m = / contents=(.*)$/.exec(raw);
-  return m ? m[1]! : null;
+  return Number(m[1]);
 }
 
 export async function testit(): Promise<void> {
-  const dir = tmpPath("annot-contents-click-away");
+  const dir = tmpPath("annot-contents-tab-switch");
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   const pdf = join(dir, "blank.pdf");
+  const other = join(dir, "other.pdf");
   const appdata = join(dir, "appdata");
   mkdirSync(appdata, { recursive: true });
   writeFileSync(pdf, makeBlankPdf(), "latin1");
+  writeFileSync(other, makeBlankPdf(), "latin1");
   writeFileSync(
     join(appdata, "SumatraPDF-settings.txt"),
     "UiLanguage = en\nRestoreSession = false\nShowStartPage = false\nCheckForUpdates = false\n",
@@ -70,12 +72,12 @@ export async function testit(): Promise<void> {
     "single page",
     "-zoom",
     "fit page",
+    other,
     pdf,
   ]);
   try {
     await client.waitForRenderIdle();
     await client.setNotificationsEnabled(false);
-    const canvas = findCanvas(frame);
     sendCommandSync(frame, cmdId("CmdToggleEditPDF"));
 
     // a text (sticky note) annotation: its Contents chip opens the edit box on
@@ -90,14 +92,14 @@ export async function testit(): Promise<void> {
         async () => toolbarDump(client),
         (s) => parseRect(chipRe.exec(s)).dx > 0,
         {
-          error: (s) => `annot-contents-click-away: no contents chip: ${s}`,
+          error: (s) => `annot-contents-tab-switch: no contents chip: ${s}`,
         },
       );
     }
     const placed = parseRect(/ placed=(-?\d+),(-?\d+),(\d+),(\d+)/.exec(dump));
     const contentsChip = parseRect(chipRe.exec(dump));
     if (contentsChip.dx === 0) {
-      throw new Error(`annot-contents-click-away: no contents chip: ${dump}`);
+      throw new Error(`annot-contents-tab-switch: no contents chip: ${dump}`);
     }
 
     let typed = "";
@@ -112,33 +114,33 @@ export async function testit(): Promise<void> {
         0,
       ]);
       if (res[0] !== 0 || !String(res[1] ?? "").startsWith("OK")) {
-        throw new Error(`annot-contents-click-away: contents click failed: ${String(res[1] ?? "")}`);
+        throw new Error(`annot-contents-tab-switch: contents click failed: ${String(res[1] ?? "")}`);
       }
       await pollUntil(
         async () => toolbarDump(client),
         (s) => / editing=1/.test(s),
         {
-          error: (s) => `annot-contents-click-away: contents editor did not open: ${s}`,
+          error: (s) => `annot-contents-tab-switch: contents editor did not open: ${s}`,
         },
       );
       await pollUntil(
         async () => String((await client.request(ControlCommand.TestUiState, []))[1] ?? ""),
         (s) => /edit=1/.test(s),
-        { error: "annot-contents-click-away: contents edit did not take focus" },
+        { error: "annot-contents-tab-switch: contents edit did not take focus" },
       );
       for (const ch of TEXT) {
         await client.request(ControlCommand.TestInput, ["char", ch.charCodeAt(0), 0, 0, 0]);
       }
       const state = await pollUntil(
         async () => String((await client.request(ControlCommand.TestUiState, []))[1] ?? ""),
-        (s) => /editText='[^']*kept-on-click-away/.test(s),
-        { error: (s) => `annot-contents-click-away: edit box holds "${s}", want "${TEXT}"` },
+        (s) => /editText='[^']*kept-on-tab-switch/.test(s),
+        { error: (s) => `annot-contents-tab-switch: edit box holds "${s}", want "${TEXT}"` },
       );
       typed = /editText='([^']*)'/.exec(state)?.[1] ?? "";
     } else {
       const tbHwnd = findTopWindow(proc.pid!, TOOLBAR_CLASS);
       if (!tbHwnd) {
-        throw new Error("annot-contents-click-away: property row window not found");
+        throw new Error("annot-contents-tab-switch: property row window not found");
       }
 
       await clickAt(
@@ -149,12 +151,12 @@ export async function testit(): Promise<void> {
       );
       dump = await toolbarDump(client);
       if (!/ editing=1/.test(dump)) {
-        throw new Error(`annot-contents-click-away: contents editor did not open: ${dump}`);
+        throw new Error(`annot-contents-tab-switch: contents editor did not open: ${dump}`);
       }
 
       const edit = findChildByClass(tbHwnd, "Edit");
       if (!edit) {
-        throw new Error("annot-contents-click-away: contents edit box not found");
+        throw new Error("annot-contents-tab-switch: contents edit box not found");
       }
       await typeIntoInput(edit, TEXT, false);
 
@@ -163,35 +165,28 @@ export async function testit(): Promise<void> {
       typed = getControlText(edit);
     }
     if (!typed.includes(TEXT)) {
-      throw new Error(`annot-contents-click-away: edit box holds "${typed}", want "${TEXT}"`);
+      throw new Error(`annot-contents-tab-switch: edit box holds "${typed}", want "${TEXT}"`);
     }
 
-    // click the page well away from the annotation. ng's frame is the canvas,
-    // so a canvas-relative point can land inside the open editor.
-    if (USE_NG) {
-      const box = parseRect(/ placed=(-?\d+),(-?\d+),(\d+),(\d+)/.exec(await toolbarDump(client)));
-      const x = box.x > 80 ? 24 : box.x + box.dx + 24;
-      const y = box.y + Math.floor(box.dy / 2);
-      await client.request(ControlCommand.TestInput, ["click", x, y, 0, 0]);
-    } else {
-      await clickAt(canvas, 420, 620, 0);
-    }
+    // switch away while the box is open, then back
+    sendCommandSync(frame, cmdId("CmdPrevTab"));
+    await client.waitForRenderIdle();
+    sendCommandSync(frame, cmdId("CmdNextTab"));
     await client.waitForRenderIdle();
 
     dump = await toolbarDump(client);
-    if (!/annotEditToolbar visible=1/.test(dump) || !/ editing=0/.test(dump)) {
-      throw new Error(`annot-contents-click-away: annotation was not left selected: ${dump}`);
+    if (!/ editing=0/.test(dump)) {
+      throw new Error(`annot-contents-tab-switch: editor still open: ${dump}`);
     }
-    const contents = await selectedContents(client);
-    if (contents !== typed) {
-      throw new Error(`annot-contents-click-away: contents are "${contents}", want "${typed}"`);
+    if ((await annotsMatching(client, TEXT)) !== 1) {
+      throw new Error(`annot-contents-tab-switch: no annotation holds "${typed}" after the tab switch`);
     }
   } finally {
     client.close();
     await killAndWait(proc);
   }
 
-  console.log("annot-contents-click-away: OK");
+  console.log("annot-contents-tab-switch: OK");
 }
 
 if (import.meta.main) {

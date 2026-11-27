@@ -408,8 +408,9 @@ enum {
     CmdImagesToPdf = 602,
     CmdExportAnnotations = 603,
     CmdLocateFile = 604,
+    CmdRefHoverPushToJabRef = 605,
 
-    CmdLast = 604,
+    CmdLast = 605,
     CmdFirstCustom = CmdLast + 100,
 
     // aliases, at the end to not mess ordering

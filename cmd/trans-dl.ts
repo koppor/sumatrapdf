@@ -12,8 +12,10 @@
  *   3. Fix suspicious translations (trailing whitespace / \n / \r) via /api/edittranslation
  *      as user "ai fix"
  *   4. GET /api/dltranshist (every string the server ever had) and index it by
- *      English text with '&' stripped: a string that only moved or lost its
- *      access key reuses the old translations, submitted as user "ai auto"
+ *      English text with '&' and a trailing "..." stripped, case-insensitive: a
+ *      string that only moved or lost its access key, gained or lost "...", or
+ *      changed case ("Foo Bar" -> "Foo bar") reuses the old translations (adding /
+ *      removing the ellipsis, matching the case), submitted as user "ai auto"
  *   5. If any language is still missing translations:
  *        - translate with Claude or Grok
  *        - submit each via /api/edittranslation as user "ai claude" / "ai grok"
@@ -37,14 +39,18 @@ import { join, extname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { commands, commandAltDescs } from "./gen-commands";
+import {
+  APP_NAME,
+  DEFAULT_SERVER,
+  LOCAL_SERVER,
+  readSecret,
+  submitTranslation,
+  tryGetTransSecret,
+} from "./helper/apptranslator.ts";
 
 // strings that should not be sent for translation
 // (e.g. command names whose display text is set dynamically)
 const translationBlacklist: string[] = ["Toggle Windows Previewer", "Toggle Windows Search Filter"];
-
-const DEFAULT_SERVER = "https://www.apptranslator.org";
-const LOCAL_SERVER = "http://127.0.0.1:9311";
-const APP_NAME = "SumatraPDF";
 
 const workDir = ".work";
 const translationsTxtPath = join(workDir, "translations.txt");
@@ -207,43 +213,6 @@ export function extractStringsToTranslate(): string[] {
     `${filtered.length} unique strings to translate (including command descriptions, ${translationBlacklist.length} blacklisted)`,
   );
   return filtered;
-}
-
-function readSecret(name: string, required: boolean): string {
-  const secretsPath = join("..", "hack", "secrets", "sumatrapdf.env");
-  try {
-    const content = readFileSync(secretsPath, "utf-8");
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith(name)) {
-        const eqIdx = trimmed.indexOf("=");
-        if (eqIdx !== -1) {
-          const val = trimmed.substring(eqIdx + 1).trim();
-          if (val.length >= 4) {
-            return val;
-          }
-        }
-      }
-    }
-  } catch {
-    // fall through
-  }
-  const val = process.env[name] ?? "";
-  if (val.length >= 4) {
-    return val;
-  }
-  if (required) {
-    throw new Error(`must set ${name} env variable or in secrets file`);
-  }
-  return "";
-}
-
-function tryGetTransSecret(): string {
-  const s = readSecret("TRANS_UPLOAD_SECRET", false);
-  if (s) {
-    console.log("Got TRANS_UPLOAD_SECRET");
-  }
-  return s;
 }
 
 /** Minimal empty cache when we cannot talk to apptranslator (no secret). */
@@ -573,14 +542,146 @@ async function downloadHistory(server: string): Promise<ServerHistory> {
   return hist;
 }
 
-// translations found under the same English text with '&' removed
+// translations found under the same English text with '&' and a trailing "..." removed, ignoring case
 interface StrippedMatch {
   english: string;
   translation: string;
 }
 
-// lang -> english without '&' -> translated strings that share it
+// lang -> lower-cased english without '&' and "..." -> translated strings that share it
 type StrippedIndex = Map<string, Map<string, StrippedMatch[]>>;
+
+// "Save As..." / "Loading %s ..."
+const kEnglishDotsRe = /\s*\.\.\.$/;
+// translations end with "..." or "…", sometimes before a CJK access key suffix: "另存為...(&A)"
+const kTransDotsRe = /\s*(?:\.\.\.|…)(&?)(\s*\(&?[^\s()]\))?$/u;
+// Hebrew translators sometimes typed the dots first ("...שמור"), as an LTR editor shows them
+const kTransLeadingDotsRe = /^(?:\.\.\.|…)\s*/u;
+
+function hasEnglishDots(s: string): boolean {
+  return kEnglishDotsRe.test(s);
+}
+
+function stripCaseKey(english: string): string {
+  return stripAmpersand(english).replace(kEnglishDotsRe, "");
+}
+
+function stripKey(english: string): string {
+  return stripCaseKey(english).toLowerCase();
+}
+
+// languages that capitalize nouns: a word's case there isn't English title case
+const kNounCapsLangs = new Set(["de"]);
+
+function isCased(ch: string): boolean {
+  return ch.toUpperCase() !== ch.toLowerCase();
+}
+
+function isUpper(ch: string): boolean {
+  return isCased(ch) && ch === ch.toUpperCase();
+}
+
+function setCharCase(s: string, i: number, upper: boolean): string {
+  const ch = s[i]!;
+  return s.slice(0, i) + (upper ? ch.toUpperCase() : ch.toLowerCase()) + s.slice(i + 1);
+}
+
+// words with their offsets; '&' may sit inside a word ("&Datei", "Spei&chern")
+function findWords(s: string): { word: string; start: number }[] {
+  return [...s.matchAll(/[\p{L}\p{M}&]+/gu)].map((m) => ({ word: m[0], start: m.index! }));
+}
+
+// index of the word's first letter, -1 if none
+function firstLetterIdx(word: string): number {
+  return word.search(/\p{L}/u);
+}
+
+// Re-case a translation of srcEnglish for dstEnglish, which differs only in
+// case. The first letter follows the English one. When English lowered later
+// words ("Foo Bar" -> "Foo bar"), title-cased translation words are lowered
+// too, except names English kept ("Open in Windows") and all-caps or mixed-case
+// words ("PDF", "SumatraPDF"). Uncased scripts (CJK, Arabic) are unchanged.
+export function matchTransCase(srcEnglish: string, dstEnglish: string, t: string, lang = ""): string {
+  const srcWords = findWords(stripAmpersand(srcEnglish));
+  const dstWords = findWords(stripAmpersand(dstEnglish));
+  if (srcWords.length === 0 || srcWords.length !== dstWords.length) return t;
+  const nounCaps = kNounCapsLangs.has(lang);
+
+  // first letter of the whole string
+  const srcFirst = srcWords[0]!.word[0]!;
+  const dstFirst = dstWords[0]!.word[0]!;
+  const transWords = findWords(t);
+  if (transWords.length === 0) return t;
+  const tw0 = transWords[0]!;
+  const i0 = tw0.start + firstLetterIdx(tw0.word);
+  const wantUpper = isUpper(dstFirst);
+  const firstChanged = isUpper(srcFirst) !== wantUpper;
+  if (firstChanged && isCased(t[i0]!) && (wantUpper || !nounCaps)) {
+    t = setCharCase(t, i0, wantUpper);
+  }
+
+  // later words English lowered, and capitalized words it kept (names)
+  let lowered = false;
+  const keptCaps = new Set<string>();
+  for (let i = 1; i < srcWords.length; i++) {
+    const src = srcWords[i]!.word;
+    const dst = dstWords[i]!.word;
+    if (isUpper(src[0]!) && !isUpper(dst[0]!)) lowered = true;
+    if (isUpper(dst[0]!)) keptCaps.add(dst.toLowerCase());
+  }
+  if (!lowered || nounCaps) return t;
+
+  for (let i = 1; i < transWords.length; i++) {
+    const { word, start } = transWords[i]!;
+    const letters = stripAmpersand(word);
+    if (letters.length < 2 || !isUpper(letters[0]!)) continue;
+    if ([...letters.slice(1)].some(isUpper)) continue;
+    if (keptCaps.has(letters.toLowerCase())) continue;
+    t = setCharCase(t, start + firstLetterIdx(word), false);
+  }
+  return t;
+}
+
+function hasTransDots(t: string): boolean {
+  return kTransDotsRe.test(t) || kTransLeadingDotsRe.test(t);
+}
+
+// "&Open..." -> "&Open"; "另存為...(&A)" -> "另存為(&A)"; "...שמור" -> "שמור"
+export function removeTransDots(t: string): string {
+  if (kTransDotsRe.test(t)) {
+    return t.replace(kTransDotsRe, (_m, amp: string, suffix: string | undefined) => amp + (suffix ?? ""));
+  }
+  return t.replace(kTransLeadingDotsRe, "");
+}
+
+// "&Open" -> "&Open..."; "另存為(&A)" -> "另存為(&A)...", as most CJK translations and Windows do.
+// In RTL text the dots go at the logical end too: bidi shows them on the left, where reading ends.
+// A trailing '&' ("حول&") stays last, or the dots would become the access key.
+export function addTransDots(t: string, dots: string): string {
+  if (hasTransDots(t)) return t;
+  if (t.endsWith("&")) return t.slice(0, -1) + dots + "&";
+  return t + dots;
+}
+
+// the language's own ellipsis: "...", "…" or " …" (Slovenian), whichever its translations use most
+function langDots(pt: ParsedTranslations, lang: string): string {
+  const counts = new Map<string, number>();
+  for (const [english, t] of pt.fromServer.get(lang) ?? []) {
+    if (!hasEnglishDots(english)) continue;
+    const m = /(\s*(?:\.\.\.|…))&?(?:\s*\(&?[^\s()]\))?$/u.exec(t);
+    if (!m) continue;
+    counts.set(m[1]!, (counts.get(m[1]!) ?? 0) + 1);
+  }
+  let best = "...";
+  let bestN = 0;
+  for (const [dots, n] of counts) {
+    if (n > bestN) {
+      best = dots;
+      bestN = n;
+    }
+  }
+  return best;
+}
 
 function addToIndex(index: StrippedIndex, lang: string, english: string, translation: string): void {
   if (translation.length === 0) return;
@@ -589,7 +690,7 @@ function addToIndex(index: StrippedIndex, lang: string, english: string, transla
     byStripped = new Map();
     index.set(lang, byStripped);
   }
-  const key = stripAmpersand(english);
+  const key = stripKey(english);
   let matches = byStripped.get(key);
   if (!matches) {
     matches = [];
@@ -617,17 +718,36 @@ function buildStrippedIndex(hist: ServerHistory | null, pt: ParsedTranslations):
 
 // "Show &Toolbar" -> "Sh&ow Toolbar" keeps the translation as is (its own
 // '&' stays where the translator put it); "Show Toolbar" from "Show &Toolbar"
-// drops the '&'. A match whose '&' status equals ours is preferred.
-function pickStrippedMatch(english: string, matches: StrippedMatch[]): string | undefined {
+// drops the '&'. A match with our case is preferred, then one whose '&' status
+// equals ours, the newest among equals; a match in another case is re-cased
+// (matchTransCase). The result ends with the language's ellipsis exactly when
+// the English does, also when the translator dropped or added it: "P&roperties..."
+// from "プロパティ(&R)" is "プロパティ(&R)...".
+export function pickStrippedMatch(
+  english: string,
+  matches: StrippedMatch[],
+  dots = "...",
+  lang = "",
+): string | undefined {
   const wantAmp = english.includes("&");
-  const others = matches.filter((m) => m.english !== english);
-  const same = others.filter((m) => m.english.includes("&") === wantAmp);
-  const m = same[same.length - 1] ?? others[others.length - 1];
+  const caseKey = stripCaseKey(english);
+  const score = (c: StrippedMatch) =>
+    (stripCaseKey(c.english) === caseKey ? 2 : 0) + (c.english.includes("&") === wantAmp ? 1 : 0);
+  let m: StrippedMatch | undefined;
+  for (const c of matches) {
+    if (c.english === english) continue;
+    if (!m || score(c) >= score(m)) m = c;
+  }
   if (!m) return undefined;
-  return wantAmp ? m.translation : stripAmpersand(m.translation);
+
+  let t = wantAmp ? m.translation : stripAmpersand(m.translation);
+  if (stripCaseKey(m.english) !== caseKey) {
+    t = matchTransCase(m.english, english, t, lang);
+  }
+  return hasEnglishDots(english) ? addTransDots(t, dots) : removeTransDots(t);
 }
 
-/** Fill untranslated strings from translations of the same text modulo '&' (local only until submitted). */
+/** Fill untranslated strings from translations of the same text modulo '&', "..." and case (local only until submitted). */
 function autoAddStrippedMatches(pt: ParsedTranslations, index: StrippedIndex): Map<string, Map<string, string>> {
   const { perLang, allStrings } = pt;
   const added = new Map<string, Map<string, string>>();
@@ -636,11 +756,12 @@ function autoAddStrippedMatches(pt: ParsedTranslations, index: StrippedIndex): M
     if (lang === "en") continue;
     const byStripped = index.get(lang);
     if (!byStripped) continue;
+    const dots = langDots(pt, lang);
     for (const s of allStrings) {
       if (existingTranslation(perLang, lang, s) !== undefined) continue;
-      const matches = byStripped.get(stripAmpersand(s));
+      const matches = byStripped.get(stripKey(s));
       if (!matches) continue;
-      const trans = pickStrippedMatch(s, matches);
+      const trans = pickStrippedMatch(s, matches, dots, lang);
       if (!trans) continue;
       translations.set(s, trans);
       let m = added.get(lang);
@@ -663,9 +784,9 @@ interface SupportedLang {
   name: string;
 }
 
-/** Languages we ship (from trans-gen.ts gLangs), excluding English. */
+/** Languages we ship (from regenerate-translation-languages.ts gLangs), excluding English. */
 function loadSupportedLangs(): SupportedLang[] {
-  const path = join(import.meta.dir, "trans-gen.ts");
+  const path = join(import.meta.dir, "regenerate-translation-languages.ts");
   const text = readFileSync(path, "utf-8");
   const startIdx = text.indexOf("const gLangs");
   const endIdx = text.indexOf("];", startIdx);
@@ -887,34 +1008,6 @@ function findMissing(
     }
   }
   return missing;
-}
-
-async function submitTranslation(
-  server: string,
-  secret: string,
-  user: string,
-  lang: string,
-  english: string,
-  translation: string,
-): Promise<void> {
-  const params = new URLSearchParams({
-    app: APP_NAME,
-    lang,
-    string: english,
-    translation,
-    secret,
-    user,
-  });
-  const uri = `${server}/api/edittranslation?${params.toString()}`;
-  const resp = await fetch(uri, { method: "GET" });
-  if (!resp.ok) {
-    const body = await resp.text();
-    throw new Error(`edittranslation HTTP ${resp.status}: ${body.slice(0, 300)}`);
-  }
-  const text = await resp.text();
-  if (!text.includes("OK")) {
-    throw new Error(`edittranslation unexpected response: ${text.slice(0, 200)}`);
-  }
 }
 
 function previewEnglish(s: string): string {

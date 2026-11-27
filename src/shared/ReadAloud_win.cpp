@@ -58,7 +58,7 @@ static Str gTtsVoiceId;
 
 // playback speed multiplier, 1.0 is normal speed
 constexpr float kTtsSpeedMin = 0.5f;
-constexpr float kTtsSpeedMax = 3.0f;
+constexpr float kTtsSpeedMax = 3.5f;
 static float gTtsSpeed = 1.0f;
 
 static HWND gTtsNotifyHwnd = nullptr;
@@ -799,6 +799,10 @@ static bool WinTtsInit() {
     hr = factory->ActivateInstance(&inspectable);
     factory->Release();
     if (FAILED(hr) || !inspectable) {
+        if (gWinVoicesStatic) {
+            gWinVoicesStatic->Release();
+            gWinVoicesStatic = nullptr;
+        }
         return false;
     }
 
@@ -1332,7 +1336,6 @@ static void WinTtsProcessEvents() {
                 gTtsActive = false;
             }
         }
-        return;
     }
 
     // playback finished
@@ -1541,6 +1544,9 @@ int TtsGetSpokenPosUtf8() {
             return -1;
         }
         return 0;
+    }
+    if (wpos > gTtsSpokenText.len) {
+        wpos = gTtsSpokenText.len;
     }
     int n = WideCharToMultiByte(CP_UTF8, 0, gTtsSpokenText.s, wpos, nullptr, 0, nullptr, nullptr);
     return n > 0 ? n : -1;

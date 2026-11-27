@@ -158,14 +158,6 @@ TempStr OsDefaultDestinationLanguageTemp() {
     return StrL("English");
 }
 
-static void ReadPipeToStrBuilder(HANDLE hPipe, str::Builder& out) {
-    char buf[4096];
-    DWORD bytesRead = 0;
-    while (ReadFile(hPipe, buf, sizeof(buf) - 1, &bytesRead, nullptr) && bytesRead > 0) {
-        out.Append(Str(buf, (int)bytesRead));
-    }
-}
-
 static void PopulateEngineDropDown(DropDown* dd, TranslateEngine selected) {
     StrVec items;
     int selIdx = 0;
@@ -195,12 +187,9 @@ TranslateRun RunTranslateCli(Str cmdLine, Str cwd, str::Builder& output) {
         return TranslateRun::LaunchFailed;
     }
 
-    ReadPipeToStrBuilder(launch.hReadPipe, output);
-    CloseHandle(launch.hReadPipe);
+    bool exited = AIChatReadUntilExit(launch.hReadPipe, launch.hProcess, 5 * 60 * 1000, output);
     launch.hReadPipe = nullptr;
-
-    DWORD waitRes = WaitForSingleObject(launch.hProcess, 5 * 60 * 1000);
-    if (waitRes == WAIT_TIMEOUT) {
+    if (!exited) {
         TerminateProcess(launch.hProcess, 1);
         AIChatCloseProcess(&launch.hProcess, false);
         return TranslateRun::TimedOut;
@@ -491,12 +480,13 @@ bool SelectionTranslateWnd::Create(HWND owner, Str selText, Str title) {
         CreateCustomArgs args;
         args.title = title;
         args.visible = false;
+        // it disables the owner like a modal dialog, so it must stay in front of it
+        args.owner = owner;
         // resizable: thick frame; CLIPCHILDREN avoids flicker while resizing
         args.style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_CLIPCHILDREN;
         args.font = fontText;
         args.isRtl = isRtl;
         args.bgColor = colBg;
-        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
         CreateCustom(args);
     }
     if (!hwnd) {

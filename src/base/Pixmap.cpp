@@ -36,19 +36,6 @@ void CopyPixmapRows(Pixmap* dst, const u8* src, int srcStride) {
     }
 }
 
-static void AppendPixmapPixelBGR(str::Builder& data, const Pixmap* pixmap, int x, int y) {
-    const u8* src = pixmap->data + ((size_t)y * pixmap->stride) + ((size_t)x * PixmapBytesPerPixel(pixmap->format));
-    if (pixmap->format == PixmapFormat::RGBA8) {
-        data.AppendChar((char)src[2]);
-        data.AppendChar((char)src[1]);
-        data.AppendChar((char)src[0]);
-        return;
-    }
-    data.AppendChar((char)src[0]);
-    data.AppendChar((char)src[1]);
-    data.AppendChar((char)src[2]);
-}
-
 // create data for a .bmp file from this pixmap. The output matches the classic BMP
 // format accepted by Windows LoadImage(..., LD_LOADFROMFILE): BITMAPFILEHEADER +
 // BITMAPINFOHEADER + bottom-up 24bpp BGR rows.
@@ -90,15 +77,37 @@ Str PixmapToBmpFormat(const Pixmap* pixmap) {
     w2.Write32(0);
     w2.Write32(0);
 
-    int padding = (int)rowStride - (pixmap->width * 3);
-    for (int y = pixmap->height - 1; y >= 0; y--) {
-        for (int x = 0; x < pixmap->width; x++) {
-            AppendPixmapPixelBGR(bmpData, pixmap, x, y);
-        }
-        for (int i = 0; i < padding; i++) {
-            bmpData.AppendChar(0);
-        }
+    size_t pixelBytes = rowStride * h;
+    if (!bmpData.Reserve((int)bmpBytes)) {
+        return {};
     }
+    u8* dst = (u8*)bmpData.els + bmpData.len;
+    memset(dst, 0, pixelBytes);
+    int bpp = PixmapBytesPerPixel(pixmap->format);
+    bool isRgba = pixmap->format == PixmapFormat::RGBA8;
+    for (int y = pixmap->height - 1; y >= 0; y--) {
+        const u8* src = pixmap->data + ((size_t)y * pixmap->stride);
+        if (bpp == 3) {
+            memcpy(dst, src, w * 3);
+        } else if (isRgba) {
+            u8* d = dst;
+            for (int x = 0; x < pixmap->width; x++, src += 4, d += 3) {
+                d[0] = src[2];
+                d[1] = src[1];
+                d[2] = src[0];
+            }
+        } else {
+            u8* d = dst;
+            for (int x = 0; x < pixmap->width; x++, src += 4, d += 3) {
+                d[0] = src[0];
+                d[1] = src[1];
+                d[2] = src[2];
+            }
+        }
+        dst += rowStride;
+    }
+    bmpData.len = (int)bmpBytes;
+    bmpData.els[bmpData.len] = 0;
 
     return bmpData.TakeStr();
 }
@@ -283,6 +292,7 @@ static Pixmap* CopyHeapPixmapAsBgraDib(const Pixmap* px) {
     }
     dib->xres = px->xres;
     dib->yres = px->yres;
+    dib->hasAlpha = px->hasAlpha;
     return dib;
 }
 
@@ -632,8 +642,6 @@ Pixmap* PixmapToBgr(Pixmap* p) {
 //
 // Only 1:1 blits are composited; a scaling blit falls back to the opaque path.
 #if OS_WIN
-static bool BlitPixmapRegionComposited(Pixmap* p, HDC hdc, Rect target, Rect source);
-
 bool BlitPixmapAlpha(Pixmap* p, HDC hdc, Rect target) {
     if (!p || !p->data || target.IsEmpty()) {
         return false;
@@ -812,13 +820,17 @@ static void RecolorHbitmap(HBITMAP hbmp, Color textColor, Color bgColor, Color l
         ReportIf(info.dsBmih.biBitCount != 8);
         RGBQUAD palette[256];
         HDC hDC = CreateCompatibleDC(nullptr);
-        DeleteObject(SelectObject(hDC, hbmp));
+        if (!hDC) {
+            return;
+        }
+        HGDIOBJ oldBmp = SelectObject(hDC, hbmp);
         uint num = GetDIBColorTable(hDC, 0, dimof(palette), palette);
         // RGBQUAD is B,G,R,reserved: the same layout a 32-bit pixel has
         RecolorPixels((u8*)palette, (int)num, 1, sizeof(palette), 4, textColor, bgColor, linkColor, nullptr);
         if (num > 0) {
             SetDIBColorTable(hDC, 0, num, palette);
         }
+        SelectObject(hDC, oldBmp);
         DeleteDC(hDC);
         return;
     }
@@ -826,15 +838,22 @@ static void RecolorHbitmap(HBITMAP hbmp, Color textColor, Color bgColor, Color l
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
     bmi.bmiHeader.biWidth = w;
-    bmi.bmiHeader.biHeight = h;
+    bmi.bmiHeader.biHeight = -h;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
 
     HDC hDC = CreateCompatibleDC(nullptr);
+    if (!hDC) {
+        return;
+    }
     size_t stride = (size_t)w * 4;
     AutoFree<u8> bmpData((u8*)malloc(stride * h));
-    ReportIf(!bmpData);
+    if (!bmpData) {
+        ReportIf(true);
+        DeleteDC(hDC);
+        return;
+    }
     if (GetDIBits(hDC, hbmp, 0, h, bmpData, &bmi, DIB_RGB_COLORS)) {
         RecolorPixels(bmpData, w, h, stride, 4, textColor, bgColor, linkColor, skipRects);
         SetDIBits(hDC, hbmp, 0, h, bmpData, &bmi, DIB_RGB_COLORS);
@@ -848,7 +867,7 @@ void RecolorPixmap(Pixmap* px, Color textColor, Color bgColor, Color linkColor, 
     if (!px) {
         return;
     }
-    if ((textColor & 0xffffff) == kColBlack && (bgColor & 0xffffff) == kColWhite && !linkColor && !skipRects) {
+    if ((textColor & 0xffffff) == kColBlack && (bgColor & 0xffffff) == kColWhite && !linkColor) {
         return;
     }
 #if OS_WIN

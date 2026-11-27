@@ -46,6 +46,7 @@
 #include "AnnotFilterToolbar.h"
 #include "AnnotTextPopup.h"
 #include "AnnotPlacement.h"
+#include "AnnotPlacementCommon.h"
 #include "FormFields.h"
 #include "SystemFonts.h"
 #include "gui/DialogWidgets.h"
@@ -289,12 +290,18 @@ void RefreshAnnotEditToolbar(MainWindow* win) {
     UpdateAnnotEditToolbar(win);
 }
 
+// the toolbar whose contents editor is open
+static AnnotEditToolbar* gEditingTb = nullptr;
+
 void DeleteAnnotEditToolbar(MainWindow* win) {
     AnnotEditToolbar* tb = win ? win->annotEditToolbar : nullptr;
     if (!tb) {
         return;
     }
     win->annotEditToolbar = nullptr;
+    if (gEditingTb == tb) {
+        gEditingTb = nullptr;
+    }
     delete tb;
 }
 
@@ -322,8 +329,6 @@ bool AnnotContentsEditJustEnded() {
     gContentsEditJustEnded = false;
     return res;
 }
-
-static AnnotEditToolbar* gEditingTb = nullptr;
 
 // A kill-focus with no new window is the on-screen keyboard, not a click away.
 void AnnotContentsKeepOnKillFocus(MainWindow* win) {
@@ -413,8 +418,7 @@ void StartSelectedAnnotContentsEdit(MainWindow* win) {
 // Ctrl+Enter, Esc or clicking away ends it and the rendered annotation comes
 // back.
 // ng: orig's box is a win32 edit that does not wrap and grows with its text.
-// This one stays on the annotation. A taller box covers the property row,
-// which orig draws in its own window. The annotation rect grows on commit.
+// The editor keeps the annotation width and grows downward as its text wraps.
 struct FreeTextInPlaceEdit {
     MainWindow* win = nullptr;
     WindowTab* tab = nullptr;
@@ -424,6 +428,7 @@ struct FreeTextInPlaceEdit {
     gp::InputState* edit = nullptr;
     // where gpui put the box last frame, in dips
     gp::Bounds box;
+    int layoutHeight = 0;
     bool wantFocus = false;
 };
 
@@ -466,8 +471,6 @@ bool FreeTextInPlaceCommitOnChar(MainWindow* win, int ch) {
     return true;
 }
 
-constexpr float kInPlaceLineHeight = 1.2f;
-
 static Str InPlaceMeasureFamily(Str family) {
 #if OS_WIN
     if (str::EqI(family, StrL("Courier"))) {
@@ -487,9 +490,7 @@ static Str InPlaceMeasureFamily(Str family) {
     return family;
 }
 
-// Screen pixels `text` needs. Width is the longest line; height is one row
-// per newline. The caller keeps the annotation's own size as a minimum.
-static Size MeasureInPlaceText(Annotation* annot, Str text, float scale) {
+static float MeasureInPlaceHeight(Annotation* annot, Str text, float scale, int width) {
     int textSize = DefaultAppearanceTextSize(annot);
     if (textSize <= 0) {
         textSize = 12;
@@ -506,35 +507,35 @@ static Size MeasureInPlaceText(Annotation* annot, Str text, float scale) {
     float sizePt = (float)fontPx * 72.f / 96.f;
     PlatformFont* font = GetPlatformFont(InPlaceMeasureFamily(FreeTextFontFamily(annot)), sizePt, style);
 
-    int maxPx = 0;
-    int nLines = 1;
+    int border = BorderWidth(annot);
+    int textWidth = std::max(1, width - (int)ceilf(2.f * FreeTextPadding(border) * scale) - 2);
+    int lineDy = std::max(1, PlatformFontMeasureText(font, StrL("Ag")).dy);
+    int lines = 0;
     int start = 0;
     for (int i = 0; i <= len(text); i++) {
         if (i < len(text) && text.s[i] != '\n') {
             continue;
         }
         int n = i - start;
-        if (n > 0 && text.s[start + n - 1] == '\r') {
+        if (n > 0 && text.s[i - 1] == '\r') {
             n--;
         }
-        Size ts = PlatformFontMeasureText(font, Str(text.s + start, n));
-        if (ts.dx > maxPx) {
-            maxPx = ts.dx;
-        }
-        if (i < len(text)) {
-            nLines++;
-        }
+        Size size = PlatformFontMeasureText(font, Str(text.s ? text.s + start : nullptr, n), textWidth);
+        int wrapped = (int)lroundf((float)size.dy / (float)lineDy);
+        // GDI may return an over-wide word even when measuring with wrapping.
+        int extra = size.dx > textWidth ? (size.dx - 1) / textWidth : 0;
+        lines += std::max(wrapped, 1) + extra;
         start = i + 1;
     }
+    return FreeTextWrappedHeight(lines, textSize, border);
+}
 
-    int border = std::max(BorderWidth(annot), 0);
-    float emDx = fontPx > 0 ? (float)maxPx / (float)fontPx : 0.f;
-    // MuPDF pads by twice the border width on each side
-    float padPts = 4.f * (float)border;
-    int caret = std::max(DpiScale(3), 2);
-    int dx = (int)((emDx * (float)textSize * kInPlaceWidthSlack + padPts) * scale) + caret;
-    int dy = (int)((((float)nLines * kInPlaceLineHeight * (float)textSize) + padPts) * scale);
-    return {dx, dy};
+static int InPlaceEditorHeight(MainWindow* win, Annotation* annot, RectF pageRect, Rect rc) {
+    float scale = pageRect.dy > 0 ? (float)rc.dy / pageRect.dy : 1.f;
+    Str text = FromGpui(gp::InputValue(gInPlace.edit));
+    int height = (int)ceilf(MeasureInPlaceHeight(annot, text, scale, rc.dx) * scale);
+    int canvasHeight = (int)((float)win->canvasRc.dy / CanvasScale(win));
+    return std::min(std::max(rc.dy, height), std::max(rc.dy, canvasHeight - rc.y));
 }
 
 TempStr FreeTextInPlaceEditStateTemp(MainWindow* win) {
@@ -549,13 +550,9 @@ TempStr FreeTextInPlaceEditStateTemp(MainWindow* win) {
         s = 1.f;
     }
     if (dm && annot) {
-        r = dm->CvtToScreen(PageNo(annot), GetRect(annot));
-        float scale = r.dy > 0 ? ((float)r.dy / GetRect(annot).dy) : 1.f;
-        Size fit = MeasureInPlaceText(annot, str::DupTemp(FromGpui(gp::InputValue(gInPlace.edit))), scale);
-        // the box on screen stays on the annotation so it does not cover the
-        // property row; the reported size is what the text needs
-        r.dx = std::max(r.dx, fit.dx);
-        r.dy = std::max(r.dy, fit.dy);
+        RectF pageRect = GetRect(annot);
+        r = dm->CvtToScreen(PageNo(annot), pageRect);
+        r.dy = InPlaceEditorHeight(win, annot, pageRect, r);
         r.x += (int)((float)win->canvasRc.x / s);
         r.y += (int)((float)win->canvasRc.y / s);
     }
@@ -578,6 +575,7 @@ void EndFreeTextInPlaceEdit(bool accept) {
     gInPlace.tab = nullptr;
     gInPlace.annot = nullptr;
     gInPlace.box = {};
+    gInPlace.layoutHeight = 0;
     gContentsEditJustEnded = true;
     // the annotation is drawn again
     EngineMupdfSetEditedAnnot(tab ? tab->GetEngine() : nullptr, nullptr);
@@ -593,19 +591,17 @@ void EndFreeTextInPlaceEdit(bool accept) {
         DisplayModel* dm = winOk ? win->AsFixed() : nullptr;
         int pageNo = PageNo(annot);
         if (dm && dm->ValidPageNo(pageNo)) {
-            // make room so MuPDF doesn't clip or wrap what was just written:
-            // to the right and down, in page units, so the top-left corner
-            // stays put. The annotation still has the old text.
-            RectF cur = GetRect(annot);
-            Rect curScreen = dm->CvtToScreen(pageNo, cur);
-            float scale = cur.dy > 0 ? ((float)curScreen.dy / cur.dy) : 1.f;
-            Size fitOld = MeasureInPlaceText(annot, Contents(annot), scale);
-            Size fitNew = MeasureInPlaceText(annot, text, scale);
-            Size grow = FreeTextGrowth(curScreen.Size(), fitOld, fitNew);
-            if ((grow.dx > 0 || grow.dy > 0) && scale > 0) {
-                cur.dx += (float)grow.dx / scale;
-                cur.dy += (float)grow.dy / scale;
-                SetRect(annot, cur);
+            RectF rect = GetRect(annot);
+            Rect screen = dm->CvtToScreen(pageNo, rect);
+            float scale = rect.dy > 0 ? (float)screen.dy / rect.dy : 1.f;
+            Str oldText = Contents(annot);
+            if (scale > 0 && !str::Eq(oldText, text)) {
+                float oldHeight = MeasureInPlaceHeight(annot, oldText, scale, screen.dx);
+                float newHeight = MeasureInPlaceHeight(annot, text, scale, screen.dx);
+                if (newHeight > oldHeight && newHeight > rect.dy) {
+                    rect.dy = newHeight;
+                    SetRect(annot, rect);
+                }
             }
         }
         SetContents(annot, text);
@@ -674,6 +670,7 @@ AnnotEditKind ChipColorKind(AnnotEditToolbarBase* tb) {
 // the dialog the pencil opens. cmdId 0 is the annotation preset list, not a
 // toolbar button's (orig's ShowAnnotColorsDialog).
 struct AnnotColorDlgTarget {
+    MainWindow* win = nullptr;
     AnnotEditToolbar* tb = nullptr;
 };
 
@@ -682,7 +679,10 @@ static void AnnotColorDlgPicked(AnnotColorDlgTarget* target, ChangeColorsArgs* a
         str::ReplaceWithCopy(&gSettings->annotations.presetColors, SerializeColorList(args->colors));
         ScheduleSaveSettings();
     }
-    if (args->didSelect && args->color != kColorUnset && target->tb) {
+    // the dialog is not modal: the window or its toolbar may be gone by now
+    MainWindow* win = target->win;
+    bool tbLive = IsMainWindowValidAndNotClosing(win) && win->annotEditToolbar == target->tb;
+    if (args->didSelect && args->color != kColorUnset && tbLive) {
         ChipColorPicked(target->tb, args->color);
     }
     delete target;
@@ -696,6 +696,7 @@ static void OpenAnnotColorsDialog(AnnotEditToolbar* tb) {
         return;
     }
     auto* target = new AnnotColorDlgTarget();
+    target->win = win;
     target->tb = tb;
 
     auto* args = new ChangeColorsArgs();
@@ -945,11 +946,15 @@ static void OnChipClick(AnnotEditToolbar* tb, int chipIdx) {
             if (AppShellPickFileAsync(tb->win, Tr("Open"), {}, MkFunc1(OnAttachPicked, tb->win))) {
                 break;
             }
-            TempStr path = AppShellPromptForPathTemp(tb->win, Tr("Open"), {});
-            if (len(path) > 0 && SetEmbeddedFileFromPath(annot, path)) {
-                AnnotChanged(tab);
+            // the prompt's nested loop can close the window or drop the annotation
+            MainWindow* win = tb->win;
+            TempStr path = AppShellPromptForPathTemp(win, Tr("Open"), {});
+            bool ok = len(path) > 0 && IsMainWindowValidAndNotClosing(win);
+            if (ok && LiveToolbarAnnot(win->annotEditToolbar) == annot && SetEmbeddedFileFromPath(annot, path)) {
+                AnnotChanged(win->CurrentTab());
             }
-            break;
+            AppShellInvalidate(win);
+            return;
         }
         case AnnotEditKind::SaveAttachment: {
             if (!HasEmbeddedFile(annot)) {
@@ -1601,7 +1606,9 @@ static gp::El* BuildContentsEditor(AnnotEditToolbar* tb, gp::Ctx* cx, int annotD
                       ->Gap((float)DpiScale(kBtnGap))
                       ->W((float)wantDx)
                       ->CaptureKeyDown(gp::ListenTo(gAnnotEditView, &AnnotEditView::OnContentsKey));
-    col->Child(gpc::Textarea::New(cx, GStrL("annot-contents"), tb->contentsEdit)->Rows(kContentsLines)->IntoEl());
+    col->Child(
+        EditStyle(cx, gpc::Textarea::New(cx, GStrL("annot-contents"), tb->contentsEdit)->Rows(kContentsLines)->IntoEl(),
+                  tb->contentsEdit, EditLook::Frame));
     gp::El* row = gp::Div(cx->a)->FlexRow()->Gap((float)DpiScale(kBtnGap))->JustifyStart()->W(gp::kFill);
     row->Child(ContentsButton(cx, StrL("annot-contents-ok"), Tr("Accept"), StrL("Ctrl + Enter"), true,
                               gp::ListenTo(gAnnotEditView, &AnnotEditView::OnContentsOk)));
@@ -1741,66 +1748,45 @@ static gp::El* BuildPopup(AnnotEditToolbar* tb, gp::Ctx* cx) {
         card->Child(list);
     }
     if (tb->popupKind == AnnotPopupKind::FontList) {
-        // only the rows in view are built, between two spacers that stand in
-        // for the rest
         constexpr int kFontRows = 12;
-        constexpr int kOverscan = 4;
         float rowDy = (float)DpiScale(22);
         int n = len(tb->popupNames);
         float viewDy = rowDy * (float)std::min(n, kFontRows);
         float maxScroll = std::max(0.f, (float)n * rowDy - viewDy);
-        tb->fontScrollY = std::max(0.f, std::min(tb->fontScrollY, maxScroll));
-        int first = std::max((int)(tb->fontScrollY / rowDy) - kOverscan, 0);
-        int last = std::min(first + kFontRows + 1 + 2 * kOverscan, n);
-        gp::El* rows = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->PadR((float)DpiScale(10));
-        if (first > 0) {
-            rows->Child(gp::Div(cx->a)->W(gp::kFill)->H((float)first * rowDy)->Shrink0());
-        }
-        for (int i = first; i < last; i++) {
-            TempStr id = fmt("annot-font-%d", i);
+        tb->fontScrollY = std::min(std::max(tb->fontScrollY, 0.f), maxScroll);
+        auto rowFn = [](void* user, gp::Ctx* cx, int i) -> gp::El* {
+            auto* bar = (AnnotEditToolbar*)user;
+            float dy = (float)DpiScale(22);
             gp::El* row = gp::Div(cx->a)
                               ->FlexRow()
                               ->ItemsCenter()
                               ->W(gp::kFill)
-                              ->H(rowDy)
+                              ->H(dy)
                               ->Shrink0()
                               ->PadX(6)
                               ->Radius(4)
                               ->HoverBg(ToGpui(BarHoverBg()))
                               ->Cursor(gp::CursorKind::Pointer)
-                              ->PathClick(GpuiDup(cx->a, id))
+                              ->PathClick(GpuiDup(cx->a, fmt("annot-font-%d", i)))
                               ->OnClick(gp::ListenTo(gAnnotEditView, &AnnotEditView::OnFontItem, (intptr_t)i));
-            if (i == tb->popupCurrent) {
+            if (i == bar->popupCurrent) {
                 row->Bg(ToGpui(BarActiveBg()));
             }
-            row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, tb->popupNames[i]))
+            row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, bar->popupNames[i]))
                            ->Font(13)
-                           ->Fg(ToGpui(fg))
+                           ->Fg(ToGpui(BarTextColor()))
                            ->Flex1()
                            ->MinW(0)
                            ->Truncate());
-            rows->Child(row);
-        }
-        if (last < n) {
-            rows->Child(gp::Div(cx->a)->W(gp::kFill)->H((float)(n - last) * rowDy)->Shrink0());
-        }
-        card->Child(gp::Div(cx->a)
-                        ->Id(GStrL("annot-font-list"))
-                        ->FlexCol()
-                        ->W(gp::kFill)
+            return gp::Div(cx->a)->W(gp::kFill)->H(dy)->Shrink0()->PadR((float)DpiScale(10))->Child(row);
+        };
+        card->Child(VirtualRows(cx, GStrL("annot-font-list"), n, rowDy, viewDy, tb->fontScrollY, rowFn, tb)
                         ->MinW((float)DpiScale(240))
-                        ->H(viewDy)
                         ->Shrink0()
-                        ->ScrollY(tb->fontScrollY)
-                        ->ScrollFromPath()
-                        ->OnScroll(gp::ListenTo(gAnnotEditView, &AnnotEditView::OnFontScroll))
-                        ->Child(rows));
+                        ->OnScroll(gp::ListenTo(gAnnotEditView, &AnnotEditView::OnFontScroll)));
     }
     return card;
 }
-
-// MuPDF pads free text by twice the border width (pdf_write_free_text_appearance)
-constexpr float kFreeTextPadPerBorder = 2.f;
 
 gp::El* FreeTextInPlaceEditBuild(MainWindow* win, gp::Ctx* cx) {
     if (!IsEditingFreeTextInPlace(win)) {
@@ -1834,7 +1820,9 @@ gp::El* FreeTextInPlaceEditBuild(MainWindow* win, gp::Ctx* cx) {
         textSize = 12;
     }
     float fontPx = std::max(6.f, roundf((float)textSize * scale)) * k;
-    float pad = kFreeTextPadPerBorder * (float)std::max(BorderWidth(annot), 0) * scale * k;
+    float pad = FreeTextPadding(BorderWidth(annot)) * scale * k;
+    gInPlace.layoutHeight = InPlaceEditorHeight(win, annot, pageRect, rc);
+    float height = (float)gInPlace.layoutHeight * k;
     // the annotation's text color on its background, or on the page under the
     // box (the annotation is left out of rendering while edited), as orig's
     // FreeTextInPlaceEditCtlColor (#6534)
@@ -1865,8 +1853,8 @@ gp::El* FreeTextInPlaceEditBuild(MainWindow* win, gp::Ctx* cx) {
                       ->Left((float)rc.x * k)
                       ->Top((float)rc.y * k)
                       ->W((float)rc.dx * k)
-                      ->H((float)rc.dy * k)
-                      ->MaxH((float)rc.dy * k)
+                      ->H(height)
+                      ->MaxH(height)
                       ->ClipY()
                       ->Pad(pad)
                       ->Bg(bg)
@@ -1892,6 +1880,9 @@ gp::El* AnnotEditToolbarBuild(MainWindow* win, gp::Ctx* cx) {
     Rect bounds;
     if (!annot || len(tb->items) == 0 || !GetAnnotScreenBounds(win, annot, bounds)) {
         return nullptr;
+    }
+    if (IsEditingFreeTextInPlace(win) && gInPlace.annot == annot) {
+        bounds.dy = std::max(bounds.dy, gInPlace.layoutHeight);
     }
     if (!gAnnotEditView.IsValid()) {
         gAnnotEditView = gp::EntityNewState<AnnotEditView>(cx->app);
@@ -2228,23 +2219,9 @@ TempStr AnnotationHoverOverlayStateTemp(MainWindow* win) {
     if (!(k > 0.f)) {
         k = 1.f;
     }
-    int ox = 0;
-    int oy = 0;
-#if OS_WIN
-    POINT origin{0, 0};
-    if (HWND hwnd = MainWindowHwnd(win)) {
-        ClientToScreen(hwnd, &origin);
-    }
-    ox = origin.x;
-    oy = origin.y;
-#else
-    Rect content = win->gpuiWin ? FromGpui(gp::WindowContentBounds(win->gpuiWin)) : Rect{};
-    if (content.IsEmpty()) {
-        content = AppShellWindowScreenRect(win);
-    }
-    ox = content.x;
-    oy = content.y;
-#endif
+    Point origin = AppShellContentOrigin(win);
+    int ox = origin.x;
+    int oy = origin.y;
     // measured is window dips. screen= is frame pixels, and tests add the
     // content origin on top of that.
     gp::Bounds b = overlay->measured;

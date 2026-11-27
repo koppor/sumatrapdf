@@ -9,7 +9,17 @@
 // must be last due to assert() over-write
 #include "base/tests/UtAssert.h"
 
+// the user's home: an existing directory wherever there is one
+static void HomeDirTest() {
+#if !OS_WASM
+    TempStr home = GetHomeDirTemp();
+    utassert(len(home) > 0);
+    utassert(dir::Exists(home));
+#endif
+}
+
 void FileUtilTest() {
+    HomeDirTest();
     FILETIME epoch = FileTimeFromU64(kFileTimeUnixEpoch);
     FILETIME oneSecond = FileTimeFromU64(kFileTimeUnixEpoch + kFileTimeTicksPerSec);
     utassert(FileTimeToU64(epoch) == kFileTimeUnixEpoch);
@@ -67,6 +77,18 @@ void FileUtilTest() {
     utassert(path::Match(StrL("C:\\file.pdf"), StrL("f??e.p?f")));
     utassert(!path::Match(StrL("C:\\file.pdf"), StrL("*.xps;*.djvu")));
     utassert(!path::Match(StrL("C:\\dir.xps\\file.pdf"), StrL("*.xps;*.djvu")));
+    // non-NUL-terminated slice shorter than filter must not over-read
+    {
+        const char* raw = "file.pdf";
+        utassert(!path::Match(Str(raw, 4), StrL("file.pdf")));
+    }
+    // 6-byte non-NUL-terminated slice for /mnt/c
+    {
+        const char* raw = "/mnt/cx";
+        utassert(path::IsWslMount(Str(raw, 6)));
+    }
+    utassert(!path::HasVariableDriveLetter(Str{}));
+    utassert(!path::HasVariableDriveLetter(StrL("e.pdf")));
 
     utassert(path::IsEphemeralHostFile(StrL("C:\\Users\\x\\AppData\\Local\\Microsoft\\OneNote\\16.0\\cache\\a.pdf")));
     utassert(path::IsEphemeralHostFile(StrL("C:\\Users\\x\\AppData\\Local\\Temp\\OneNote\\tmp\\a.pdf")));
@@ -252,13 +274,23 @@ void FileUtilTest() {
 
 #if OS_WIN
     {
-        // the short path's length must not count the NUL terminator
+        // the short path's length must not count the NUL terminator, and
+        // path::IsSame must match long vs 8.3 short paths and hardlinks
+        // with different basenames
         TempStr path = path::JoinTemp(GetTempDirTemp(), StrL("short path test long name.txt"));
         utassert(file::WriteFile(path, StrL("x")));
         TempStr shortPath = path::ShortPathTemp(path);
         utassert(len(shortPath) > 0);
         utassert(len(shortPath) == (int)strlen(shortPath.s));
         utassert(file::Exists(shortPath));
+        utassert(path::IsSame(path, shortPath));
+
+        TempStr linkPath = path::JoinTemp(GetTempDirTemp(), StrL("different-hardlink-name.txt"));
+        file::Delete(linkPath);
+        if (CreateHardLinkW(CWStrTemp(linkPath), CWStrTemp(path), nullptr)) {
+            utassert(path::IsSame(path, linkPath));
+            file::Delete(linkPath);
+        }
         file::Delete(path);
     }
 
@@ -333,6 +365,47 @@ void UncExistsTest() {
 #endif
 }
 
+// The real path of a UNC path is \\server\share\..., and a path longer than
+// GetNonVirtualTemp's first buffer still resolves.
+void NonVirtualPathTest() {
+#if OS_WIN
+    // the real path has long names; %TEMP% can be 8.3 (C:\Users\RUNNER~1\...)
+    TempStr local = path::NormalizeTemp(GetTempFilePathTemp(StrL("nonvirt")));
+    file::Delete(local);
+    if (len(local) < 3 || local.s[1] != ':') {
+        return;
+    }
+
+    TempStr uncRoot = fmt("\\\\localhost\\%c$\\", local.s[0]);
+    if (GetFileAttributesW(CWStrTemp(uncRoot)) != INVALID_FILE_ATTRIBUTES) {
+        TempStr unc = fmt("\\\\localhost\\%c$%s", local.s[0], Str(local.s + 2, len(local) - 2));
+        utassert(file::WriteFile(local, StrL("x")));
+        TempStr real = path::GetNonVirtualTemp(unc);
+        utassert(str::EqI(real, unc));
+        file::Delete(local);
+    }
+
+    // \\?\ lets the dirs exceed MAX_PATH; 6 x 200 chars is past MAX_PATH * 4
+    TempStr root = fmt("\\\\?\\%s", local);
+    utassert(dir::Create(root));
+    str::Builder seg;
+    for (int i = 0; i < 200; i++) {
+        seg.AppendChar('d');
+    }
+    TempStr deep = root;
+    for (int i = 0; i < 6; i++) {
+        deep = path::JoinTemp(deep, ToStr(seg));
+        utassert(dir::Create(deep));
+    }
+    TempStr deepFile = path::JoinTemp(deep, StrL("f.txt"));
+    utassert(file::WriteFile(deepFile, StrL("x")));
+    TempStr real = path::GetNonVirtualTemp(deepFile);
+    Str want = Str(deepFile.s + 4, len(deepFile) - 4);
+    utassert(str::EqI(real, want));
+    dir::RemoveAll(root);
+#endif
+}
+
 // dir::RemoveAll must remove nested and read-only content and must be safe
 // to call from several threads at once (the shutdown WebView profile removal
 // races the DeleteStaleFilesAsync sweep)
@@ -379,5 +452,77 @@ void DirRemoveAllTest() {
     file::Delete(missing);
     utassert(!dir::RemoveAll(missing));
     utassert(!dir::Empty(missing));
+#endif
+}
+
+#if OS_WIN
+namespace {
+struct OverflowWatch {
+    AtomicInt calls = 0;
+    AtomicBool release = 0;
+};
+} // namespace
+
+// the first call blocks the watcher thread, so ReadDirectoryChangesW isn't
+// re-armed and the dir's change buffer overflows
+static void OnOverflowBlocker(OverflowWatch* w) {
+    if (AtomicIntInc(&w->calls) != 1) {
+        return;
+    }
+    for (int i = 0; i < 1000 && !AtomicBoolGet(&w->release); i++) {
+        SleepInMs(10);
+    }
+}
+
+static void OnOverflowTarget(OverflowWatch* w) {
+    AtomicIntInc(&w->calls);
+}
+
+static bool WaitForCalls(OverflowWatch* w, int n) {
+    for (int i = 0; i < 500 && AtomicIntGet(&w->calls) < n; i++) {
+        SleepInMs(10);
+    }
+    return AtomicIntGet(&w->calls) >= n;
+}
+#endif
+
+// a change lost in a ReadDirectoryChangesW buffer overflow must still be reported
+void FileWatcherOverflowTest() {
+#if OS_WIN
+    TempStr dir = GetTempFilePathTemp(StrL("fwover"));
+    file::Delete(dir);
+    utassert(dir::CreateAll(dir));
+    TempStr blockerPath = path::JoinTemp(dir, StrL("blocker.txt"));
+    TempStr targetPath = path::JoinTemp(dir, StrL("target.txt"));
+    utassert(file::WriteFile(blockerPath, StrL("x")));
+    utassert(file::WriteFile(targetPath, StrL("x")));
+
+    OverflowWatch blocker;
+    OverflowWatch target;
+    WatchedFile* wfBlocker = FileWatcherSubscribe(blockerPath, MkFunc0(OnOverflowBlocker, &blocker));
+    WatchedFile* wfTarget = FileWatcherSubscribe(targetPath, MkFunc0(OnOverflowTarget, &target));
+    utassert(wfBlocker && wfTarget);
+
+    // the watch is armed asynchronously: a write before that goes unseen
+    for (int i = 0; i < 50 && AtomicIntGet(&blocker.calls) == 0; i++) {
+        utassert(file::WriteFile(blockerPath, StrL("y")));
+        SleepInMs(100);
+    }
+    utassert(AtomicIntGet(&blocker.calls) > 0);
+
+    // ~200 bytes per notification: far more than the 16 KB buffer
+    Str longName = StrL("overflow-file-with-a-long-name-to-fill-the-change-buffer-quickly-0123456789");
+    for (int i = 0; i < 300; i++) {
+        utassert(file::WriteFile(path::JoinTemp(dir, fmt("%s-%d.txt", longName, i)), StrL("x")));
+    }
+    utassert(file::WriteFile(targetPath, StrL("changed")));
+    AtomicBoolSet(&blocker.release, true);
+
+    utassert(WaitForCalls(&target, 1));
+
+    FileWatcherUnsubscribe(wfBlocker);
+    FileWatcherUnsubscribe(wfTarget);
+    FileWatcherWaitForShutdown();
+    dir::RemoveAll(dir);
 #endif
 }

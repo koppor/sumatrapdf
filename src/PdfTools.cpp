@@ -70,11 +70,6 @@ static void ShowToolOutput(Str path) {
     OpenPathInDefaultFileManager(path);
 }
 
-// the Sumatra app icon, shown in each tool dialog's title bar / taskbar
-static HICON GetAppIcon() {
-    return LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
-}
-
 // shared "Save As" browse used by the layout-based PDF tool dialogs below.
 // Seeds the dialog with the edit's current text and writes the chosen path back.
 static void BrowseForDest(HWND owner, Edit* edit, WStr filter, WStr defExt) {
@@ -147,6 +142,8 @@ struct PdfToolDialog : WindowBase {
     PlatformFont* fontMeta = nullptr;
     // the window's height once laid out; the frame can only be dragged wider
     int windowDy = 0;
+    // the tool running on a thread, if any
+    PdfToolJob* job = nullptr;
 
     ~PdfToolDialog() override;
 
@@ -172,8 +169,13 @@ struct PdfToolDialog : WindowBase {
     void OnCancel(VirtMouseEvent* ev = nullptr);
     void OnGetMinMaxInfo(WindowBase::GetMinMaxInfoEvent* ev);
     void OnSize(WindowBase::SizeEvent* ev);
+    void OnAction(VirtMouseEvent* ev = nullptr);
+    void RunJob(PdfToolJob* job);
+    void DetachJob();
     // what the action button does; the only thing the dialogs really differ in
     virtual void DoIt(VirtMouseEvent* ev = nullptr) {}
+    virtual void JobEnded() { SetActionEnabled(true); }
+    virtual void JobProgress(int nDone, int nTotal) {}
 };
 
 // the tab the dialog was opened for; the user may have switched tabs since
@@ -182,6 +184,7 @@ WindowTab* PdfToolDialog::SrcTab() const {
 }
 
 PdfToolDialog::~PdfToolDialog() {
+    DetachJob();
     str::FreePtr(&srcPath);
     // ~WindowBase deletes `layout`, which owns the whole tree - the virtual
     // controls and the edits alike
@@ -189,6 +192,7 @@ PdfToolDialog::~PdfToolDialog() {
 
 static void PdfToolDialogOnClose(WindowBase::CloseEvent* ev) {
     auto* dlg = (PdfToolDialog*)ev->e->self;
+    dlg->DetachJob();
     // hand activation back to the main window ourselves: after the browse
     // dialog has been up, letting DestroyWindow pick the next window can drop
     // the frame behind whatever else is on screen
@@ -201,6 +205,63 @@ static void PdfToolDialogOnClose(WindowBase::CloseEvent* ev) {
 
 void PdfToolDialog::OnCancel(VirtMouseEvent*) {
     Close();
+}
+
+// the dialog goes away before its tool finishes; the output isn't opened
+void PdfToolDialog::DetachJob() {
+    if (job) {
+        job->owner = nullptr;
+        job = nullptr;
+    }
+}
+
+void PdfToolDialog::OnAction(VirtMouseEvent*) {
+    if (!job) {
+        DoIt();
+    }
+}
+
+// the action button stays disabled until FinishPdfToolJob
+void PdfToolDialog::RunJob(PdfToolJob* j) {
+    job = j;
+    job->owner = this;
+    SetActionEnabled(false);
+    StartPdfToolJob(job);
+}
+
+void FinishPdfToolJob(PdfToolJob* job) {
+    auto* dlg = (PdfToolDialog*)job->owner;
+    if (!dlg) {
+        return;
+    }
+    dlg->job = nullptr;
+    dlg->JobEnded();
+    if (job->res != 0 && job->fail == PdfToolFail::Notification) {
+        ShowWarningNotification(dlg->win, job->failMsg, kNotif5SecsTimeOut);
+        return;
+    }
+    if (job->res != 0) {
+        MessageBoxWarning(dlg->hwnd, job->failMsg, job->failTitle);
+        return;
+    }
+    MainWindow* w = dlg->win;
+    TempStr path = str::DupTemp(job->destPath);
+    dlg->Close();
+    if (job->done == PdfToolDone::ShowDest) {
+        ShowToolOutput(path);
+        return;
+    }
+    if (IsMainWindowValidAndNotClosing(w)) {
+        LoadArgs args(path, w);
+        StartLoadDocument(&args);
+    }
+}
+
+void PdfToolJobProgress(PdfToolJob* job) {
+    auto* dlg = (PdfToolDialog*)job->owner;
+    if (dlg) {
+        dlg->JobProgress(AtomicIntGet(&job->nDone), job->nTotal);
+    }
 }
 
 // no narrower than the layout's minimum, never taller than the layout
@@ -238,7 +299,6 @@ bool PdfToolDialog::CreateToolDialog(MainWindow* w, WindowTab* tab, Str title) {
     cargs.font = GetDefaultGuiFont();
     cargs.style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
     cargs.visible = false;
-    cargs.icon = GetAppIcon();
     cargs.bgColor = colBg;
     onGetMinMaxInfo = MkMethod1<PdfToolDialog, WindowBase::GetMinMaxInfoEvent*, &PdfToolDialog::OnGetMinMaxInfo>(this);
     onSize = MkMethod1<PdfToolDialog, WindowBase::SizeEvent*, &PdfToolDialog::OnSize>(this);
@@ -429,7 +489,7 @@ void PdfToolDialog::AddFooter(Str actionText, Str hint, Str footerBtnText) {
     row->AddChild(cancelBtn);
 
     actionBtn = NewDlgButton(hwnd, actionText, fontText, DlgButtonStyle::Filled, true);
-    actionBtn->onClick = MkMethod1<PdfToolDialog, VirtMouseEvent*, &PdfToolDialog::DoIt>(this);
+    actionBtn->onClick = MkMethod1<PdfToolDialog, VirtMouseEvent*, &PdfToolDialog::OnAction>(this);
     row->AddChild(actionBtn);
     mainBox->AddChild(new Padding(row, DpiScaledInsets(kToolDlgFootPadDy, kToolDlgPadDx)));
 }
@@ -453,9 +513,10 @@ void PdfToolDialog::FinishDialog(Edit* focusOn) {
     EditSetFocus(focusOn);
 }
 
+// stays disabled while the tool runs
 void PdfToolDialog::SetActionEnabled(bool enabled) {
     if (actionBtn) {
-        SetDlgButtonEnabled(actionBtn, DlgButtonStyle::Filled, enabled);
+        SetDlgButtonEnabled(actionBtn, DlgButtonStyle::Filled, enabled && !job);
     }
 }
 
@@ -564,25 +625,10 @@ void PdfBakeDialog::DoIt(VirtMouseEvent*) {
     // build argv for pdfbake_main: "bake" input output
     char* argv[] = {(char*)"bake", (char*)"-p", PdfToolPasswordTemp(win, srcPath), CStrTemp(inputPath),
                     CStrTemp(destPath)};
-    int argc = dimofi(argv);
-
-    fz_set_optind(0);
-    int res = pdfbake_main(argc, argv);
-    if (tmpPath) {
-        file::Delete(tmpPath);
-    }
-    if (res == 0) {
-        logf("PdfBakeDoIt: baked successfully\n");
-        MainWindow* w = win;
-        TempStr path = str::DupTemp(destPath);
-        Close();
-        // open the baked file
-        LoadArgs args(path, w);
-        StartLoadDocument(&args);
-    } else {
-        logf("PdfBakeDoIt: pdfbake_main failed with %d\n", res);
-        MessageBoxWarning(hwnd, Tr("Failed to bake PDF file."), Tr("Bake PDF"));
-    }
+    auto* j =
+        NewPdfToolJob(pdfbake_main, StrL("PdfBakeDoIt"), destPath, Tr("Failed to bake PDF file."), Tr("Bake PDF"));
+    SetPdfToolJobArgs(j, argv, dimofi(argv), tmpPath);
+    RunJob(j);
 }
 
 bool PdfBakeDialog::Create(MainWindow* w, WindowTab* tab) {
@@ -634,7 +680,6 @@ void PdfExtractTextDialog::DoIt(VirtMouseEvent*) {
 
     logf("PdfExtractTextDoIt: extracting text from '%s' to '%s', pages: %s\n", srcPath, destPath, pages);
 
-    bool ok = false;
     WindowTab* tab = SrcTab();
     bool isPdf = tab && IsPdfDoc(tab);
     if (isPdf) {
@@ -642,13 +687,15 @@ void PdfExtractTextDialog::DoIt(VirtMouseEvent*) {
         char* argv[] = {(char*)"convert", (char*)"-p",        PdfToolPasswordTemp(win, srcPath),
                         (char*)"-o",      CStrTemp(destPath), CStrTemp(srcPath),
                         CStrTemp(pages)};
-        int argc = dimofi(argv);
-        fz_set_optind(0);
-        ok = muconvert_main(argc, argv) == 0;
-    } else {
-        // use engine text extraction for other formats (DjVu, etc.)
-        ok = ExtractTextViaEngine(tab, destPath, pages);
+        auto* j = NewPdfToolJob(muconvert_main, StrL("PdfExtractTextDoIt"), destPath, Tr("Failed to extract text."),
+                                Tr("Extract Text"));
+        SetPdfToolJobArgs(j, argv, dimofi(argv), {});
+        j->done = PdfToolDone::ShowDest;
+        RunJob(j);
+        return;
     }
+    // use engine text extraction for other formats (DjVu, etc.)
+    bool ok = ExtractTextViaEngine(tab, destPath, pages);
 
     if (ok) {
         logf("PdfExtractTextDoIt: extracted successfully\n");
@@ -790,22 +837,10 @@ void PdfCompressDialog::DoIt(VirtMouseEvent*) {
     VecAppend(argv, CStrTemp(inputPath));
     VecAppend(argv, CStrTemp(destPath));
 
-    fz_set_optind(0);
-    int res = pdfclean_main(len(argv), argv.els);
-    if (tmpPath) {
-        file::Delete(tmpPath);
-    }
-    if (res == 0) {
-        logf("PdfCompressDoIt: compressed successfully\n");
-        MainWindow* w = win;
-        TempStr path = str::DupTemp(destPath);
-        Close();
-        LoadArgs args(path, w);
-        StartLoadDocument(&args);
-    } else {
-        logf("PdfCompressDoIt: pdfclean_main failed with %d\n", res);
-        MessageBoxWarning(hwnd, Tr("Failed to compress PDF file."), Tr("Compress PDF"));
-    }
+    auto* j = NewPdfToolJob(pdfclean_main, StrL("PdfCompressDoIt"), destPath, Tr("Failed to compress PDF file."),
+                            Tr("Compress PDF"));
+    SetPdfToolJobArgs(j, argv.els, len(argv), tmpPath);
+    RunJob(j);
 }
 
 bool PdfCompressDialog::Create(MainWindow* w, WindowTab* tab) {
@@ -876,24 +911,10 @@ void PdfDecompressDialog::DoIt(VirtMouseEvent*) {
     // equivalent of: clean -d input output
     char* argv[] = {(char*)"clean", (char*)"-p",         PdfToolPasswordTemp(win, srcPath),
                     (char*)"-d",    CStrTemp(inputPath), CStrTemp(destPath)};
-    int argc = dimofi(argv);
-
-    fz_set_optind(0);
-    int res = pdfclean_main(argc, argv);
-    if (tmpPath) {
-        file::Delete(tmpPath);
-    }
-    if (res == 0) {
-        logf("PdfDecompressDoIt: decompressed successfully\n");
-        MainWindow* w = win;
-        TempStr path = str::DupTemp(destPath);
-        Close();
-        LoadArgs args(path, w);
-        StartLoadDocument(&args);
-    } else {
-        logf("PdfDecompressDoIt: pdfclean_main failed with %d\n", res);
-        MessageBoxWarning(hwnd, Tr("Failed to decompress PDF file."), Tr("Decompress PDF"));
-    }
+    auto* j = NewPdfToolJob(pdfclean_main, StrL("PdfDecompressDoIt"), destPath, Tr("Failed to decompress PDF file."),
+                            Tr("Decompress PDF"));
+    SetPdfToolJobArgs(j, argv, dimofi(argv), tmpPath);
+    RunJob(j);
 }
 
 bool PdfDecompressDialog::Create(MainWindow* w, WindowTab* tab) {
@@ -1005,27 +1026,11 @@ void PdfDeletePageDialog::DoIt(VirtMouseEvent*) {
                     (char*)"-f",        (char*)"-i",         (char*)"-t",
                     (char*)"-Z",        CStrTemp(inputPath), CStrTemp(destPath),
                     CStrTemp(pageRange)};
-    int argc = dimofi(argv);
-
-    fz_set_optind(0);
-    int res = pdfclean_main(argc, argv);
-    if (tmpPath) {
-        file::Delete(tmpPath);
-    }
-    if (res == 0) {
-        logf("PdfDeletePageDoIt: %s pages successfully\n", op);
-        MainWindow* w = win;
-        TempStr path = str::DupTemp(destPath);
-        Close();
-        LoadArgs args(path, w);
-        StartLoadDocument(&args);
-    } else {
-        logf("PdfDeletePageDoIt: pdfclean_main failed with %d for %s\n", res, op);
-        Str msg =
-            isExtract ? Tr("Failed to extract pages from PDF file.") : Tr("Failed to delete pages from PDF file.");
-        Str title = isExtract ? Tr("Extract Pages From PDF") : Tr("Delete Pages From PDF");
-        MessageBoxWarning(hwnd, msg, title);
-    }
+    Str msg = isExtract ? Tr("Failed to extract pages from PDF file.") : Tr("Failed to delete pages from PDF file.");
+    Str title = isExtract ? Tr("Extract Pages From PDF") : Tr("Delete Pages From PDF");
+    auto* j = NewPdfToolJob(pdfclean_main, StrL("PdfDeletePageDoIt"), destPath, msg, title);
+    SetPdfToolJobArgs(j, argv, dimofi(argv), tmpPath);
+    RunJob(j);
 }
 
 // Page Up / Page Down skip the edit accelerator table; send next/prev page.
@@ -1146,22 +1151,10 @@ void PdfEncryptDialog::DoIt(VirtMouseEvent*) {
     char* argv[] = {(char*)"clean", (char*)"-E", (char*)"aes-256",    (char*)"-U",       pwdZ,
                     (char*)"-O",    pwdZ,        CStrTemp(inputPath), CStrTemp(destPath)};
 
-    fz_set_optind(0);
-    int res = pdfclean_main(dimofi(argv), argv);
-    if (tmpPath) {
-        file::Delete(tmpPath);
-    }
-    if (res == 0) {
-        logf("PdfEncryptDoIt: encrypted successfully\n");
-        MainWindow* w = win;
-        TempStr path = str::DupTemp(destPath);
-        Close();
-        LoadArgs args(path, w);
-        StartLoadDocument(&args);
-    } else {
-        logf("PdfEncryptDoIt: pdfclean_main failed with %d\n", res);
-        MessageBoxWarning(hwnd, Tr("Failed to encrypt PDF file."), Tr("Encrypt PDF"));
-    }
+    auto* j = NewPdfToolJob(pdfclean_main, StrL("PdfEncryptDoIt"), destPath, Tr("Failed to encrypt PDF file."),
+                            Tr("Encrypt PDF"));
+    SetPdfToolJobArgs(j, argv, dimofi(argv), tmpPath);
+    RunJob(j);
 }
 
 bool PdfEncryptDialog::Create(MainWindow* w, WindowTab* tab) {
@@ -1213,6 +1206,7 @@ struct PdfStampDialog : PdfPagesDialog {
 
     bool Create(MainWindow* win, WindowTab* tab, bool watermark);
     void DoIt(VirtMouseEvent* ev = nullptr) override;
+    void JobEnded() override { UpdateButton(); }
     void UpdateButton();
 };
 
@@ -1236,23 +1230,8 @@ void PdfStampDialog::DoIt(VirtMouseEvent*) {
         return;
     }
     int posIdx = dropPosition ? CbGetCurrentSelection(dropPosition) : 0;
-    Vec<PdfStamp> stamps;
-    DialogStamps(watermark, textEdit->GetTextTemp(), pages, posIdx, stamps);
-    logf("PdfStampDialog: %d pages of '%s' to '%s'\n", len(stamps), srcPath, destPath);
-    Str err;
-    HCURSOR prev = SetCursor(LoadCursor(nullptr, IDC_WAIT));
-    bool ok = StampPdfToFile(engine, stamps, destPath, &err);
-    SetCursor(prev);
-    if (!ok) {
-        logf("PdfStampDialog: failed: %s\n", err);
-        MessageBoxWarning(hwnd, err, watermark ? Tr("Add Watermark") : Tr("Add Page Numbers"));
-        return;
-    }
-    MainWindow* w = win;
-    TempStr path = str::DupTemp(destPath);
-    Close();
-    LoadArgs args(path, w);
-    StartLoadDocument(&args);
+    logf("PdfStampDialog: %d pages of '%s' to '%s'\n", len(pages), srcPath, destPath);
+    RunJob(NewStampJob(engine, watermark, textEdit->GetTextTemp(), pages, posIdx, destPath));
 }
 
 bool PdfStampDialog::Create(MainWindow* w, WindowTab* tab, bool watermarkArg) {
@@ -1342,22 +1321,11 @@ void PdfDecryptDialog::DoIt(VirtMouseEvent*) {
     char* argv[] = {(char*)"clean", (char*)"-p",         PdfToolPasswordTemp(win, srcPath),
                     (char*)"-D",    CStrTemp(inputPath), CStrTemp(destPath)};
 
-    fz_set_optind(0);
-    int res = pdfclean_main(dimofi(argv), argv);
-    if (tmpPath) {
-        file::Delete(tmpPath);
-    }
-    if (res == 0) {
-        logf("PdfDecryptDoIt: decrypted successfully\n");
-        MainWindow* w = win;
-        TempStr path = str::DupTemp(destPath);
-        Close();
-        LoadArgs args(path, w);
-        StartLoadDocument(&args);
-    } else {
-        logf("PdfDecryptDoIt: failed, src: '%s'\n", srcPath);
-        ShowWarningNotification(win, Tr("Failed to decrypt PDF file."), kNotif5SecsTimeOut);
-    }
+    auto* j = NewPdfToolJob(pdfclean_main, StrL("PdfDecryptDoIt"), destPath, Tr("Failed to decrypt PDF file."),
+                            Tr("Decrypt PDF"));
+    SetPdfToolJobArgs(j, argv, dimofi(argv), tmpPath);
+    j->fail = PdfToolFail::Notification;
+    RunJob(j);
 }
 
 bool PdfDecryptDialog::Create(MainWindow* w, WindowTab* tab) {
@@ -1419,19 +1387,7 @@ void ConvertToPdfDialog::DoIt(VirtMouseEvent*) {
     }
 
     logf("ConvertToPdf: converting '%s' to '%s'\n", srcPath, destPath);
-    // OFD keeps its text and vector paths; image collections become one image per page
-    bool ok = isOfd ? EngineMupdfSaveAsPdf(engine, destPath) : ConvertImageCollectionToPdf(engine, destPath);
-    if (ok) {
-        logf("ConvertToPdf: converted successfully\n");
-        MainWindow* w = win;
-        TempStr path = str::DupTemp(destPath);
-        Close();
-        LoadArgs args(path, w);
-        StartLoadDocument(&args);
-    } else {
-        logf("ConvertToPdf: SaveImageCollectionAsPdf failed\n");
-        MessageBoxWarning(hwnd, Tr("Failed to save a file"), Tr("Convert to PDF"));
-    }
+    RunJob(NewConvertToPdfJob(engine, destPath));
 }
 
 bool ConvertToPdfDialog::Create(MainWindow* w, WindowTab* tab) {
@@ -1532,20 +1488,7 @@ void ConvertEpubToPdfDialog::DoIt(VirtMouseEvent*) {
     }
     const EbookPdfPageSize& ps = kEbookPdfPageSizes[idx];
     logf("ConvertEpubToPdf: '%s' -> '%s', %s, %d pt\n", srcPath, destPath, ps.label, fontSize);
-
-    HCURSOR prev = SetCursor(LoadCursor(nullptr, IDC_WAIT));
-    int nPages = EngineMupdfEbookToPdf(srcPath, destPath, ps.dx, ps.dy, (float)fontSize);
-    SetCursor(prev);
-    if (nPages == 0) {
-        MessageBoxWarning(hwnd, Tr("Failed to save a file"), Tr("Convert EPUB to PDF"));
-        return;
-    }
-    logf("ConvertEpubToPdf: wrote %d pages\n", nPages);
-    MainWindow* w = win;
-    TempStr path = str::DupTemp(destPath);
-    Close();
-    LoadArgs args(path, w);
-    StartLoadDocument(&args);
+    RunJob(NewEpubToPdfJob(srcPath, destPath, ps, fontSize));
 }
 
 bool ConvertEpubToPdfDialog::Create(MainWindow* w, WindowTab* tab) {
@@ -1594,19 +1537,7 @@ void ConvertCajToPdfDialog::DoIt(VirtMouseEvent*) {
         return;
     }
     logf("ConvertCajToPdf: '%s' -> '%s'\n", srcPath, destPath);
-
-    HCURSOR prev = SetCursor(LoadCursor(nullptr, IDC_WAIT));
-    bool ok = ConvertCajToPdf(srcPath, destPath);
-    SetCursor(prev);
-    if (!ok) {
-        MessageBoxWarning(hwnd, CajErrorReasonTemp(srcPath), Tr("Convert CAJ to PDF"));
-        return;
-    }
-    MainWindow* w = win;
-    TempStr path = str::DupTemp(destPath);
-    Close();
-    LoadArgs args(path, w);
-    StartLoadDocument(&args);
+    RunJob(NewCajToPdfJob(srcPath, destPath));
 }
 
 bool ConvertCajToPdfDialog::Create(MainWindow* w, WindowTab* tab) {
@@ -1738,6 +1669,8 @@ struct ConvertPdfToImagesDialog : PdfToolDialog {
 
     bool Create(MainWindow* win, WindowTab* tab);
     void DoIt(VirtMouseEvent* ev = nullptr) override;
+    void JobEnded() override { UpdateButton(); }
+    void JobProgress(int nDone, int nTotal) override;
     void OnBrowseTemplate(VirtMouseEvent* ev = nullptr);
     void UpdateButton();
     bool SelectedPages(Vec<int>& pages);
@@ -1928,22 +1861,16 @@ void ConvertPdfToImagesDialog::DoIt(VirtMouseEvent*) {
     }
 
     logf("ConvertPdfToImages: '%s' -> '%s', %d page(s), %d DPI\n", srcPath, destPath, len(pages), dpi);
+    RunJob(NewImagesJob(engine, dm->GetRotation(), destPath, pages, dpi));
+}
 
-    HCURSOR prev = SetCursor(LoadCursor(nullptr, IDC_WAIT));
-    Str firstPath;
-    int nOk = ConvertPagesToImages(engine, dm->GetRotation(), destPath, pages, dpi, &firstPath);
-    SetCursor(prev);
-
-    if (nOk == 0) {
-        str::Free(firstPath);
-        MessageBoxWarning(hwnd, Tr("Failed to convert to images."), Tr("Convert to Images"));
-        return;
-    }
-    logf("ConvertPdfToImages: wrote %d of %d file(s)\n", nOk, len(pages));
-    TempStr openPath = str::DupTemp(firstPath);
-    str::Free(firstPath);
-    Close();
-    ShowToolOutput(openPath);
+// the hint says which page is being converted
+void ConvertPdfToImagesDialog::JobProgress(int nDone, int nTotal) {
+    hintText->SetText(fmt(Tr("Page %d of %d").s, nDone + 1, nTotal));
+    hintText->SetColor(kColText, colMuted);
+    footerBtn->SetIsVisible(false);
+    DoLayout();
+    HwndInvalidate(hwnd);
 }
 
 bool ConvertPdfToImagesDialog::Create(MainWindow* w, WindowTab* tab) {

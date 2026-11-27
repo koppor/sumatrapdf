@@ -142,7 +142,8 @@ static void OnWasmUrlFetched(WasmFetchData* d, Str path) {
 struct UrlDownload {
     MainWindow* win = nullptr;
     Str url;
-    Str path;
+    Str path; // AddMissingExt can rename it on the download thread
+    Str name; // for progress messages; doesn't change
     bool ok = false;
     u64 lastProgressMs = 0; // download thread only
 };
@@ -157,9 +158,8 @@ static void ShowUrlDownloadProgress(UrlDownloadProgress* p) {
     NotificationWnd* wnd =
         IsMainWindowValidAndNotClosing(win) ? GetNotificationForGroup(win, kNotifOpenFromUrl) : nullptr;
     if (wnd) {
-        TempStr name = path::GetBaseNameTemp(p->d->path);
         NotificationUpdateMessage(
-            wnd, fmt("%s %s: %s", Tr("Downloading"), name, str::FormatSizeShortTemp(p->nDownloaded, nullptr)));
+            wnd, fmt("%s %s: %s", Tr("Downloading"), p->d->name, str::FormatSizeShortTemp(p->nDownloaded, nullptr)));
     }
     delete p;
 }
@@ -177,14 +177,19 @@ static void OnUrlDownloadProgress(UrlDownload* d, HttpProgress* progress) {
 static void UrlDownloadDone(UrlDownload* d) {
     MainWindow* win = DownloadWindow(d->win);
     logf("UrlDownloadDone: ok=%d '%s' -> '%s'\n", d->ok ? 1 : 0, d->url, d->path);
-    if (win && !d->ok) {
-        ShowDownloadFailed(win, d->url);
+    if (!d->ok) {
+        // StartOpenFromUrl reserved the name with an empty file
+        file::Delete(d->path);
+        if (win) {
+            ShowDownloadFailed(win, d->url);
+        }
     } else if (win) {
         RemoveNotificationsForGroup(win, kNotifOpenFromUrl);
         OpenDownloadedFile(win, d->path);
     }
     str::Free(d->url);
     str::Free(d->path);
+    str::Free(d->name);
     delete d;
 }
 
@@ -260,6 +265,7 @@ bool StartOpenFromUrl(MainWindow* win, Str urlIn, Str dirIn) {
     d->win = win;
     d->url = str::Dup(url);
     d->path = str::Dup(path);
+    d->name = str::Dup(path::GetBaseNameTemp(path));
     RunAsync(MkFunc0<UrlDownload>(UrlDownloadThread, d), StrL("OpenFromUrl"));
     return true;
 #endif

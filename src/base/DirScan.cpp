@@ -18,12 +18,14 @@ DirIter::DirIter(Str dir) : dir(dir) {}
 
 DirIter::iterator::iterator(const DirIter* di, bool didFinish) {
     this->di = di;
-    this->dirsToVisit.Append(di->dir);
     this->didFinish = didFinish;
 #if OS_WIN
     this->data.fd = &this->fd;
 #endif
-    AdvanceDirIter(this, 1);
+    if (!didFinish) {
+        this->dirsToVisit.Append(di->dir);
+        AdvanceDirIter(this, 1);
+    }
 }
 
 DirIter::iterator::iterator(const iterator& that) {
@@ -66,20 +68,8 @@ DirIterEntry* DirIter::iterator::operator*() {
     return &data;
 }
 
-// postfix increment
-DirIter::iterator DirIter::iterator::operator++(int) {
-    auto res = *this;
-    AdvanceDirIter(this, 1);
-    return res;
-}
-
 DirIter::iterator& DirIter::iterator::operator++() {
     AdvanceDirIter(this, 1);
-    return *this;
-}
-
-DirIter::iterator& DirIter::iterator::operator+(int n) {
-    AdvanceDirIter(this, n);
     return *this;
 }
 
@@ -116,6 +106,7 @@ static void DirTraverseThread(DirTraverseThreadData* td) {
     di.includeDirs = false;
     di.recurse = td->recurse;
     for (DirIterEntry* de : di) {
+        AutoArenaSavepoint sp;
         td->queue->append(de->filePath);
     }
     td->queue->MarkFinished();

@@ -6,6 +6,10 @@
 
 #if IS_DEBUG
 
+#include <ktmw32.h>
+
+#include "base/AutoWin.h"
+
 #include "base/WinDynCalls.h"
 #include "base/DbgHelpDyn.h"
 #include "base/File.h"
@@ -13,6 +17,8 @@
 #include "base/GuessFileType.h"
 #include "base/SettingsUtil.h"
 #include "base/Win.h"
+#include "base/CrashHandler.h"
+#include "base/Zip.h"
 
 #include "gui/UIModels.h"
 #include "gui/Layout.h"
@@ -22,6 +28,8 @@
 #include "gui/VirtCtrl.h"
 
 #include "AppTools.h"
+#include "Version.h"
+#include "Installer.h"
 #include "Settings.h"
 #include "DocController.h"
 #include "DocProperties.h"
@@ -29,6 +37,7 @@
 #include "EngineAll.h"
 #include "AppSettings.h"
 #include "AIChatTypes.h"
+#include "AIChatCommon.h"
 #include "WindowTab.h"
 #include "Flags.h"
 #include "Commands.h"
@@ -47,6 +56,7 @@
 #include "HomePageCommon.h"
 #include "UpdateCheck.h"
 #include "UpdateCheckCommon.h"
+#include "shared/PdfToolsCommon.h"
 
 // must be last to over-write assert()
 #include "base/tests/UtAssert.h"
@@ -61,10 +71,12 @@ void parseCommandsTest();
 void DocPropertiesTest();
 void JsMenuTest();
 void HtmlImageCacheTest();
+void HtmlFormatterNarrowPageTest();
 void PrintAdvancedDefaultsTest();
 void ParseFileArgsTest();
 void ParseCommandLineTest();
 void RestrictedUseConfigTest();
+void CrashReportSettingsTest();
 void ControlFrameActionTest();
 void HexViewTest();
 void SumatraPDFWebTest();
@@ -76,6 +88,9 @@ void UpdateCheckDecisionTest();
 void ArchiveTest();
 void ZipDirTest();
 void ArchiveWarnTest();
+void ArchiveTarLazyTest();
+void ArchiveRarHugeEntryTest();
+void ArchiveTarHugeEntryTest();
 void BaseUtilTest();
 void ByteOrderTests();
 void ClipboardImageTest();
@@ -84,8 +99,11 @@ void CssParser_UnitTests();
 void DictTest();
 void DirRemoveAllTest();
 void UncExistsTest();
+void NonVirtualPathTest();
+void FileWatcherOverflowTest();
 void FileUtilTest();
 void UpdateTempFileTests();
+void ExifTest();
 void GuessFileTypeTest();
 void JsonTest();
 void RefHoverTest();
@@ -102,6 +120,7 @@ void ChapterTable_UnitTests();
 void LitDoc_UnitTests();
 void RtfDoc_UnitTests();
 void MobiDoc_UnitTests();
+void Ofd_UnitTests();
 void PagePosition_UnitTests();
 void PdfSync_UnitTests();
 void CachedObjects_UnitTests();
@@ -112,9 +131,12 @@ void TextSelection_UnitTests();
 void EngineDjvuDec_UnitTests();
 void Layout_UnitTests();
 void VirtCtrl_UnitTests();
+bool PlatformTextCache_UnitTest();
 bool TableOfContents_UnitTestSnapshotNamedDest();
 bool Translations_UnitTestUnescape();
 bool Translations_UnitTestLocale();
+bool Translations_UnitTestLookup();
+bool Eutl_UnitTestListedCache();
 bool MarkdownModel_UnitTestBrowserNavigationUrl();
 bool MarkdownToc_UnitTestHtmlLinks();
 bool MarkdownToc_UnitTestHtmlHeadings();
@@ -147,6 +169,7 @@ void ReadAloudHighlight_UnitTests();
 bool RenderCache_UnitTestCookieUnlocked();
 bool RenderCache_UnitTestFullOfOneVisiblePage();
 bool RenderCache_UnitTestFullOfOldZoom();
+bool RenderCache_UnitTestReduceTileSize();
 bool DisplayModel_UnitTestZoomFallback();
 bool EngineEbook_UnitTestUrlLink();
 bool DisplayModel_UnitTestFreePanFirstPage();
@@ -471,16 +494,102 @@ static void GuiFontLangTest() {
     SetGuiFontLang({});
 }
 
+// a child that keeps its output open must not hold the reader past the timeout
+static void AIChatReadUntilExitTest() {
+    AIChatProcessLaunchResult launch;
+    utassert(AIChatLaunchProcessWithStdoutPipe(StrL("cmd /c echo done"), {}, &launch));
+    str::Builder out;
+    utassert(AIChatReadUntilExit(launch.hReadPipe, launch.hProcess, 10 * 1000, out));
+    AIChatCloseProcess(&launch.hProcess, true);
+    utassert(str::Contains(ToStr(out), StrL("done")));
+
+    utassert(AIChatLaunchProcessWithStdoutPipe(StrL("cmd /c \"echo hi & ping -n 30 127.0.0.1\""), {}, &launch));
+    str::Builder out2;
+    u64 start = GetTickCount64();
+    bool exited = AIChatReadUntilExit(launch.hReadPipe, launch.hProcess, 1000, out2);
+    u64 elapsed = GetTickCount64() - start;
+    AIChatCloseProcess(&launch.hProcess, true);
+    utassert(!exited);
+    utassert(elapsed < 10 * 1000);
+    utassert(str::Contains(ToStr(out2), StrL("hi")));
+}
+
+static void InstallRegistryRollbackTest() {
+    TempStr testPath = fmt("Software\\SumatraPDF-unit-test-%u-%llu", (uint)GetCurrentProcessId(), GetTickCount64());
+    HKEY root;
+    DWORD disposition;
+    LSTATUS status = RegCreateKeyExW(HKEY_CURRENT_USER, CWStrTemp(testPath), 0, nullptr, 0, KEY_ALL_ACCESS, nullptr,
+                                     &root, &disposition);
+    utassert(status == ERROR_SUCCESS && disposition == REG_CREATED_NEW_KEY);
+    if (status != ERROR_SUCCESS) {
+        return;
+    }
+    defer {
+        RegCloseKey(root);
+    };
+    if (disposition != REG_CREATED_NEW_KEY) {
+        return;
+    }
+    defer {
+        RegDeleteTreeW(HKEY_CURRENT_USER, CWStrTemp(testPath));
+    };
+
+    TempStr uninstallKey = GetRegPathUninstTemp(StrL(kAppName));
+    TempStr pdfProgId = str::JoinTemp(StrL("Software\\Classes\\"), StrL(kAppName), StrL(".pdf"));
+    Str mimeKey = StrL(R"(Software\Classes\MIME\Database\Content Type\application/pdf)");
+    Str valueName = StrL("InstallLocation");
+    Str previousDir = StrL("C:\\previous");
+    Str friendlyName = StrL("Previous friendly name");
+    Str previousExt = StrL(".previous");
+    utassert(WriteRegStr(root, uninstallKey, valueName, previousDir));
+    utassert(WriteRegStr(root, pdfProgId, {}, friendlyName));
+    utassert(WriteRegStr(root, mimeKey, StrL("Extension"), previousExt));
+
+    TempStr installDir = GetTempDirTemp();
+    {
+        // Hold a write on the last association key so earlier writes must roll back.
+        AutoCloseHandle blocker(CreateTransaction(nullptr, nullptr, TRANSACTION_DO_NOT_PROMOTE, 0, 0, 0, nullptr));
+        utassert(blocker.IsValid());
+        HKEY held;
+        status = RegOpenKeyTransactedW(root, CWStrTemp(mimeKey), 0, KEY_SET_VALUE, &held, blocker, nullptr);
+        utassert(status == ERROR_SUCCESS);
+        if (status != ERROR_SUCCESS) {
+            return;
+        }
+        DWORD data = 1;
+        utassert(RegSetValueExW(held, L"Extension", 0, REG_DWORD, (BYTE*)&data, sizeof(data)) == ERROR_SUCCESS);
+        RegCloseKey(held);
+        auto result = InstallRegistryInfo(root, installDir, DesktopShortcut::Omit);
+        utassert(result == InstallRegResult::AssociationsFailed);
+    }
+
+    DWORD shortcut;
+    utassert(str::Eq(ReadRegStrTemp(root, uninstallKey, valueName), previousDir));
+    utassert(!ReadRegDWORD(root, uninstallKey, StrL(kRegDesktopShortcut), shortcut));
+    utassert(str::Eq(ReadRegStrTemp(root, pdfProgId, {}), friendlyName));
+    utassert(!RegKeyExists(root, str::JoinTemp(pdfProgId, StrL("\\shell"))));
+    utassert(str::Eq(ReadRegStrTemp(root, mimeKey, StrL("Extension")), previousExt));
+
+    utassert(InstallRegistryInfo(root, installDir, DesktopShortcut::Omit) == InstallRegResult::Complete);
+    utassert(str::Eq(ReadRegStrTemp(root, uninstallKey, valueName), installDir));
+    utassert(ReadRegDWORD(root, uninstallKey, StrL(kRegDesktopShortcut), shortcut) && shortcut == 0);
+    utassert(RegKeyExists(root, str::JoinTemp(pdfProgId, StrL("\\shell\\open\\command"))));
+    utassert(str::Eq(ReadRegStrTemp(root, mimeKey, StrL("Extension")), StrL(".pdf")));
+}
+
 static void SumatraPDF_UnitTests() {
     GuiFontLangTest();
     StripGroupOrderTest();
     OnlineURLAllowedTest();
     RestrictedUseConfigTest();
+    CrashReportSettingsTest();
     ControlFrameActionTest();
     HexViewTest();
     SumatraPDFWebTest();
     HttpTransferTest();
     OpenDdeCmdTest();
+    InstallRegistryRollbackTest();
+    utassert(PlatformTextCache_UnitTest());
     UpdateCheckDecisionTest();
     CachedObjects_UnitTests();
     CommandPaletteModel_UnitTests();
@@ -488,10 +597,12 @@ static void SumatraPDF_UnitTests() {
     SidebarViewSettingTest();
     FileUriTest();
     ServerPromoTest();
+    AIChatReadUntilExitTest();
     GhostButtonDisabledTest();
     DocPropertiesTest();
     JsMenuTest();
     HtmlImageCacheTest();
+    HtmlFormatterNarrowPageTest();
     PrintAdvancedDefaultsTest();
     parseCommandsTest();
     colorTest();
@@ -696,6 +807,106 @@ static void ParseTip_UnitTests() {
     }
 }
 
+namespace {
+int gTestCrashCommentCalls = 0;
+
+Str TestCrashComment(Arena* a, Str, Str, bool) {
+    gTestCrashCommentCalls++;
+    return str::Dup(a, StrL("test report\n"));
+}
+
+void InstallTestCrashHandler() {
+    CrashHandlerConfig cfg{};
+    cfg.crashDumpPath = path::JoinTemp(GetTempDirTemp(), StrL("sumatra-ut-crash.dmp"));
+    cfg.getCrashComment = TestCrashComment;
+    InstallCrashHandler(cfg);
+}
+} // namespace
+
+// tears down the app's crash handler: run last
+static void CrashHandler_UnitTests() {
+    LPTOP_LEVEL_EXCEPTION_FILTER saved = SetUnhandledExceptionFilter(nullptr);
+    UninstallCrashHandler();
+
+    // uninstall restores the filter it replaced
+    SetUnhandledExceptionFilter(nullptr);
+    InstallTestCrashHandler();
+    UninstallCrashHandler();
+    LPTOP_LEVEL_EXCEPTION_FILTER cur = SetUnhandledExceptionFilter(nullptr);
+    utassert(cur == nullptr);
+
+    // a debug report that isn't uploaded builds its full text once per session
+    InstallTestCrashHandler();
+    gTestCrashCommentCalls = 0;
+    _uploadDebugReport(StrL("test cond"), StrL("Sumatra_ut.cpp:1"), false);
+    _uploadDebugReport(StrL("test cond"), StrL("Sumatra_ut.cpp:1"), false);
+    utassert(gTestCrashCommentCalls <= 1);
+    UninstallCrashHandler();
+
+    SetUnhandledExceptionFilter(saved);
+}
+
+// a tool main run in-process must not read the previous run's argv: those
+// strings are gone (they were in the job thread's temp arena)
+static void PdfToolRerunTest() {
+    char arg0[] = "clean";
+    char argZ[] = {'-', 'Z', 0, 0};
+    char* argv1[] = {arg0, argZ};
+    // no input file: prints usage
+    utassert(RunPdfToolMain(pdfclean_main, dimofi(argv1), argv1) != 0);
+    // the first run's "-Z" string, freed and reused
+    argZ[2] = 'Q';
+
+    TempStr dir = GetTempDirTemp();
+    TempStr src = path::JoinTemp(dir, StrL("sumatra-ut-rerun.pdf"));
+    TempStr dst = path::JoinTemp(dir, StrL("sumatra-ut-rerun-out.pdf"));
+    Str pdf = StrL(
+        "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
+        "2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+        "3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 10 10]>>endobj\n"
+        "trailer<</Root 1 0 R>>\n%%EOF\n");
+    utassert(file::WriteFile(src, pdf));
+    char argZ2[] = "-Z";
+    char* argv2[] = {arg0, argZ2, CStrTemp(src), CStrTemp(dst)};
+    utassert(RunPdfToolMain(pdfclean_main, dimofi(argv2), argv2) == 0);
+    utassert(file::Exists(dst));
+    file::Delete(src);
+    file::Delete(dst);
+}
+
+static void TestCbxSourceData() {
+    TempStr dir = GetTempFilePathTemp(StrL("cbx"));
+    file::Delete(dir);
+    utassert(dir::Create(dir));
+    defer {
+        dir::RemoveAll(dir);
+    };
+
+    utassert(file::WriteFile(path::JoinTemp(dir, StrL("page.png")), StrL("image bytes")));
+    Str input = ZipDirToData(dir);
+    utassert(len(input) > 0);
+    Str expected = str::DupTemp(input);
+    EngineBase* engine = CreateEngineCbxFromData(input);
+    str::Free(input);
+    utassert(engine);
+    if (!engine) {
+        return;
+    }
+    defer {
+        engine->Release();
+    };
+
+    Str data = engine->GetFileData();
+    utassert(str::Eq(data, expected));
+    str::Free(data);
+
+    TempStr dst = path::JoinTemp(dir, StrL("copy.cbz"));
+    utassert(engine->SaveFileAs(dst));
+    Str saved = file::ReadFile(dst);
+    utassert(str::Eq(saved, expected));
+    str::Free(saved);
+}
+
 static LONG WINAPI ForAiCrashHandler(EXCEPTION_POINTERS* ei) {
     printf("unit tests crash\n");
     str::Builder s;
@@ -724,8 +935,12 @@ int RunAppUnitTests(bool forAi) {
     printf("Running unit tests\n");
 
     ArchiveTest();
+    TestCbxSourceData();
     ZipDirTest();
     ArchiveWarnTest();
+    ArchiveTarLazyTest();
+    ArchiveRarHugeEntryTest();
+    ArchiveTarHugeEntryTest();
     BaseUtilTest();
     ByteOrderTests();
     ClipboardImageTest();
@@ -734,8 +949,11 @@ int RunAppUnitTests(bool forAi) {
     DictTest();
     DirRemoveAllTest();
     UncExistsTest();
+    NonVirtualPathTest();
+    FileWatcherOverflowTest();
     FileUtilTest();
     UpdateTempFileTests();
+    ExifTest();
     GuessFileTypeTest();
     JsonTest();
     RefHoverTest();
@@ -746,11 +964,13 @@ int RunAppUnitTests(bool forAi) {
     StrVecTest();
     VecTest();
     WinUtilTest();
+    PdfToolRerunTest();
 
     ChapterTable_UnitTests();
     LitDoc_UnitTests();
     RtfDoc_UnitTests();
     MobiDoc_UnitTests();
+    Ofd_UnitTests();
     PagePosition_UnitTests();
     PdfSync_UnitTests();
     utassert(PdfDarkModeImageStats_UnitTest());
@@ -768,6 +988,8 @@ int RunAppUnitTests(bool forAi) {
     utassert(TableOfContents_UnitTestSnapshotNamedDest());
     utassert(Translations_UnitTestUnescape());
     utassert(Translations_UnitTestLocale());
+    utassert(Translations_UnitTestLookup());
+    utassert(Eutl_UnitTestListedCache());
     utassert(MarkdownModel_UnitTestBrowserNavigationUrl());
     utassert(MarkdownToc_UnitTestHtmlLinks());
     utassert(MarkdownToc_UnitTestHtmlHeadings());
@@ -799,6 +1021,7 @@ int RunAppUnitTests(bool forAi) {
     utassert(RenderCache_UnitTestCookieUnlocked());
     utassert(RenderCache_UnitTestFullOfOneVisiblePage());
     utassert(RenderCache_UnitTestFullOfOldZoom());
+    utassert(RenderCache_UnitTestReduceTileSize());
     utassert(DisplayModel_UnitTestZoomFallback());
     utassert(EngineEbook_UnitTestUrlLink());
     utassert(DisplayModel_UnitTestFreePanFirstPage());
@@ -806,6 +1029,7 @@ int RunAppUnitTests(bool forAi) {
     utassert(Commands_UnitTestIdLimit());
     ReadAloudHighlight_UnitTests();
 #endif
+    CrashHandler_UnitTests();
     return utassert_print_results();
 }
 

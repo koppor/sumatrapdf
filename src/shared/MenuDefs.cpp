@@ -36,8 +36,7 @@
 #include "Menu.h"
 #include "MenuDefs.h"
 
-// The menus that are the same in orig and ng. An entry is a title and either a
-// command id or, cast to an integer, the table of its submenu.
+// Menu definitions shared by the original app and ng.
 
 // clang-format off
 //[ ACCESSKEY_GROUP File Open Menu
@@ -47,11 +46,11 @@ MenuDef menuDefFileOpen[] = {
         CmdOpenFile,
     },
     {
-        TrN("Open using &Windows File Picker..."),
+        TrN("Open Using &Windows File Picker..."),
         CmdOpenFileWithOSFilePicker,
     },
     {
-        TrN("Open using &SumatraPDF File Picker..."),
+        TrN("Open Using &SumatraPDF File Picker..."),
         CmdOpenFileWithSumatraFilePicker,
     },
     {
@@ -82,15 +81,15 @@ MenuDef menuDefFileOpen[] = {
     },
 #else
     {
-        TrN("&Next File In Folder"),
+        TrN("&Next File in Folder"),
         CmdOpenNextFileInFolder,
     },
     {
-        TrN("&Previous File In Folder"),
+        TrN("&Previous File in Folder"),
         CmdOpenPrevFileInFolder,
     },
     {
-        TrN("&Browse Files In Folder..."),
+        TrN("&Browse Files in Folder..."),
         CmdNavigateFilesInFolder,
     },
 #endif
@@ -104,19 +103,19 @@ MenuDef menuDefFileOpen[] = {
 //[ ACCESSKEY_GROUP File Menu
 MenuDef menuDefFile[] = {
     {
-        TrN("New &window"),
+        TrN("New &Window"),
         CmdNewWindow,
     },
     {
         TrN("&Open"),
-        (UINT_PTR)menuDefFileOpen,
+        menuDefFileOpen,
     },
     {
         TrN("&Close"),
         CmdClose,
     },
     {
-        TrN("Show in fo&lder"),
+        TrN("Show in Fo&lder"),
         CmdShowInFolder,
     },
     {
@@ -207,7 +206,7 @@ MenuDef menuDefFile[] = {
         0,
     },
     {
-        TrN("P&roperties"),
+        TrN("P&roperties..."),
         CmdProperties,
     },
     {
@@ -225,16 +224,67 @@ MenuDef menuDefFile[] = {
 };
 //] ACCESSKEY_GROUP File Menu
 
-//[ ACCESSKEY_GROUP View Menu
-MenuDef menuDefView[] = {
+// the parts of the window to show; in View and the document context menu
+//[ ACCESSKEY_GROUP Show Menu
+MenuDef menuDefShow[] = {
     {
-        TrN("Command Palette"),
-        CmdCommandPalette,
+        TrN("&Bookmarks"),
+        CmdToggleBookmarks,
     },
     {
-        TrN("Navigate Thumbnails"),
-        CmdNavigateThumbnail,
+        TrN("&Thumbnails"),
+        CmdToggleThumbnails,
     },
+    {
+        TrN("&Favorites"),
+        CmdFavoriteToggle,
+    },
+    {
+        TrN("T&oolbar"),
+        CmdToggleToolbar,
+    },
+    {
+        TrN("&Menu Bar"),
+        CmdToggleMenuBar,
+    },
+    {
+        TrN("&Caption"),
+        CmdToggleCaption,
+    },
+    {
+        TrN("&Auto-Hide Sidebar"),
+        CmdToggleSidebarAutoHide,
+    },
+    {
+        StrL(kMenuSeparator),
+        0,
+    },
+    {
+        TrN("&Highlight Form Fields"),
+        CmdToggleHighlightFormFields,
+    },
+    {
+        TrN("Transparency Gri&d"),
+        CmdToggleTransparencyGrid,
+    },
+    {
+        TrN("Page Grid"),
+        CmdTogglePageGrid,
+    },
+    {
+        TrN("Configure Page Grid..."),
+        CmdConfigurePageGrid,
+    },
+    {
+        {},
+        0,
+    },
+};
+//] ACCESSKEY_GROUP Show Menu
+
+// how pages are laid out, like Adobe Reader's View > Page Display
+//[ ACCESSKEY_GROUP Page Display Menu
+MenuDef menuDefPageDisplay[] = {
     {
         TrN("&Single Page"),
         CmdSinglePageView,
@@ -248,6 +298,10 @@ MenuDef menuDefView[] = {
         CmdBookView,
     },
     {
+        StrL(kMenuSeparator),
+        0,
+    },
+    {
         TrN("Show &Pages Continuously"),
         CmdToggleContinuousView,
     },
@@ -257,28 +311,16 @@ MenuDef menuDefView[] = {
         CmdToggleMangaMode,
     },
     {
-        TrN("Auto-Rotate Wide Pages"),
-        CmdToggleAutoRotateWidePages,
-    },
-    {
         TrN("&Uniform Page Width"),
         CmdToggleUniformPageWidth,
     },
     {
-        TrN("&Trim Empty Margins"),
-        CmdToggleTrimEmptyMargins,
+        TrN("Auto-Rotate Wide Pages"),
+        CmdToggleAutoRotateWidePages,
     },
     {
-        TrN("Trim Pages To Selection"),
-        CmdTrimPagesToSelection,
-    },
-    {
-        TrN("Show Whole Pages"),
-        CmdShowWholePages,
-    },
-    {
-        TrN("Save Trimmed Pages As..."),
-        CmdSaveTrimmedPagesAs,
+        StrL(kMenuSeparator),
+        0,
     },
     {
         TrN("Read &Columns"),
@@ -289,13 +331,22 @@ MenuDef menuDefView[] = {
         CmdToggleColumnsWholePage,
     },
     {
-        TrN("View As &Hex"),
-        CmdViewAsHex,
-    },
-    {
         StrL(kMenuSeparator),
         0,
     },
+    {
+        TrN("View as &Hex"),
+        CmdViewAsHex,
+    },
+    {
+        {},
+        0,
+    },
+};
+//] ACCESSKEY_GROUP Page Display Menu
+
+//[ ACCESSKEY_GROUP Rotate Menu
+MenuDef menuDefRotate[] = {
     {
         TrN("Rotate &Left"),
         CmdRotateLeft,
@@ -307,6 +358,68 @@ MenuDef menuDefView[] = {
     {
         TrN("Mirror Pages"),
         CmdToggleMirror,
+    },
+    {
+        {},
+        0,
+    },
+};
+//] ACCESSKEY_GROUP Rotate Menu
+
+//[ ACCESSKEY_GROUP Trim Menu
+MenuDef menuDefTrim[] = {
+    {
+        TrN("&Trim Empty Margins"),
+        CmdToggleTrimEmptyMargins,
+    },
+    {
+        TrN("Trim Pages to Selection"),
+        CmdTrimPagesToSelection,
+    },
+    {
+        TrN("Show Whole Pages"),
+        CmdShowWholePages,
+    },
+    {
+        StrL(kMenuSeparator),
+        0,
+    },
+    {
+        TrN("Save Trimmed Pages As..."),
+        CmdSaveTrimmedPagesAs,
+    },
+    {
+        {},
+        0,
+    },
+};
+//] ACCESSKEY_GROUP Trim Menu
+
+//[ ACCESSKEY_GROUP View Menu
+MenuDef menuDefView[] = {
+    {
+        TrN("Command Palette"),
+        CmdCommandPalette,
+    },
+    {
+        StrL(kMenuSeparator),
+        0,
+    },
+    {
+        TrN("Page &Display"),
+        menuDefPageDisplay,
+    },
+    {
+        TrN("&Rotate"),
+        menuDefRotate,
+    },
+    {
+        TrN("Tri&m"),
+        menuDefTrim,
+    },
+    {
+        TrN("Sh&ow"),
+        menuDefShow,
     },
     {
         StrL(kMenuSeparator),
@@ -329,46 +442,6 @@ MenuDef menuDefView[] = {
         CmdToggleReadingBar,
     },
     {
-        StrL(kMenuSeparator),
-        0,
-    },
-    {
-        TrN("Show Book&marks"),
-        CmdToggleBookmarks,
-    },
-    {
-        TrN("Sho&w Thumbnails"),
-        CmdToggleThumbnails,
-    },
-    {
-        TrN("Show Me&nu"),
-        CmdToggleMenuBar,
-    },
-    {
-        TrN("Sh&ow Toolbar"),
-        CmdToggleToolbar,
-    },
-    {
-        TrN("Show Caption"),
-        CmdToggleCaption,
-    },
-    {
-        TrN("&Highlight Form Fields"),
-        CmdToggleHighlightFormFields,
-    },
-    {
-        TrN("Transparency Gri&d"),
-        CmdToggleTransparencyGrid,
-    },
-    {
-        TrN("Page Grid"),
-        CmdTogglePageGrid,
-    },
-    {
-        TrN("Configure Page Grid..."),
-        CmdConfigurePageGrid,
-    },
-    {
         TrN("Measure"),
         CmdMeasure,
     },
@@ -377,24 +450,8 @@ MenuDef menuDefView[] = {
         0,
     },
     {
-        TrN("Claude chat"),
-        CmdAIChatWithClaudeCode,
-    },
-    {
-        TrN("Grok chat"),
-        CmdAIChatWithGrokBuild,
-    },
-    {
-        TrN("Codex chat"),
-        CmdAIChatWithOpenAICodex,
-    },
-    {
-        TrN("Antigravity chat"),
-        CmdAIChatWithAntiGravity,
-    },
-    {
-        TrN("Custom AI"),
-        CmdAIChatWithCustomAPI,
+        TrN("AI C&hat"),
+        menuDefDocumentAIChat,
     },
     {
         {},
@@ -424,6 +481,10 @@ MenuDef menuDefGoTo[] = {
     {
         TrN("Pa&ge..."),
         CmdGoToPage,
+    },
+    {
+        TrN("Navigate Thumbnails"),
+        CmdNavigateThumbnail,
     },
     {
         TrN("Next &Chapter"),
@@ -491,7 +552,7 @@ MenuDef menuDefZoom[] = {
         CmdZoomFitVisible,
     },
     {
-        TrN("&Shrink To Fit"),
+        TrN("&Shrink to Fit"),
         CmdZoomShrinkToFit,
     },
     {
@@ -584,7 +645,7 @@ MenuDef menuDefSettings[] = {
         CmdAdvancedSettings,
     },
     {
-        TrN("&Open Advanced Settings File..."),
+        TrN("&Open Advanced Settings File"),
         CmdOpenSettingsFile,
     },
     {
@@ -592,12 +653,12 @@ MenuDef menuDefSettings[] = {
         CmdConfigureRestrictedUse,
     },
     {
-        TrN("Change Language"),
+        TrN("Change Language..."),
         CmdChangeLanguage,
     },
     {
         TrN("&Theme"),
-        (UINT_PTR)menuDefThemes,
+        menuDefThemes,
     },
     {
         {},
@@ -609,11 +670,11 @@ MenuDef menuDefSettings[] = {
 //[ ACCESSKEY_GROUP Favorites Menu
 MenuDef menuDefTabGroups[] = {
     {
-        TrN("Save Tab Group"),
+        TrN("Save Tab Group..."),
         CmdTabGroupSave,
     },
     {
-        TrN("Restore Tab Group"),
+        TrN("Restore Tab Group..."),
         CmdTabGroupRestore,
     },
     {
@@ -624,11 +685,11 @@ MenuDef menuDefTabGroups[] = {
 
 MenuDef menuDefFavorites[] = {
     {
-        TrN("Add to favorites"),
+        TrN("Add to Favorites..."),
         CmdFavoriteAdd,
     },
     {
-        TrN("Remove from favorites"),
+        TrN("Remove from Favorites"),
         CmdFavoriteDel,
     },
     {
@@ -649,7 +710,7 @@ MenuDef menuDefFavorites[] = {
     },
     {
         TrN("Tab Groups"),
-        (UINT_PTR)menuDefTabGroups,
+        menuDefTabGroups,
     },
     {
         {},
@@ -669,7 +730,7 @@ MenuDef menuDefHelp[] = {
         CmdHelpOpenKeyboardShortcuts
     },
     {
-        TrN("Manual On Website"),
+        TrN("Manual on Website"),
         CmdHelpOpenManualOnWebsite,
     },
     {
@@ -693,7 +754,7 @@ MenuDef menuDefHelp[] = {
         0,
     },
     {
-        TrN("&About"),
+        TrN("&About..."),
         CmdHelpAbout,
     },
     {
@@ -743,7 +804,7 @@ MenuDef menuDefDebug[] = {
 //[ ACCESSKEY_GROUP Context Menu (Google Lens)
 MenuDef menuDefGoogleLens[] = {
     {
-        TrN("&Selection As Image"),
+        TrN("&Selection as Image"),
         CmdSearchGoogleLens,
     },
     {
@@ -765,27 +826,27 @@ MenuDef menuDefGoogleLens[] = {
 // shared by the Selection menu and the selection context menu
 MenuDef menuDefTranslateWith[] = {
     {
-        TrN("&Google"),
+        TrN("&Google..."),
         CmdTranslateSelectionWithGoogle,
     },
     {
-        TrN("&DeepL"),
+        TrN("&DeepL..."),
         CmdTranslateSelectionWithDeepL,
     },
     {
-        TrN("G&rok Build"),
+        TrN("G&rok Build..."),
         CmdTranslateSelectionWithGrokBuild,
     },
     {
-        TrN("Claude C&ode"),
+        TrN("Claude C&ode..."),
         CmdTranslateSelectionWithClaudeCode,
     },
     {
-        TrN("OpenAI Code&x"),
+        TrN("OpenAI Code&x..."),
         CmdTranslateSelectionWithOpenAICodex,
     },
     {
-        TrN("A&ntigravity"),
+        TrN("A&ntigravity..."),
         CmdTranslateSelectionWithAntiGravity,
     },
     {
@@ -820,19 +881,84 @@ MenuDef menuDefSearchWith[] = {
 };
 //] ACCESSKEY_GROUP Search With Menu
 
-//[ ACCESSKEY_GROUP Menu (Selection)
-MenuDef menuDefMainSelection[] = {
+//[ ACCESSKEY_GROUP Context Menu (Selection)
+MenuDef menuDefSelection[] = {
     {
-        TrN("&Copy To Clipboard"),
+        TrN("&Copy to Clipboard"),
         CmdCopySelection,
     },
     {
-        TrN("&Translate with"),
-        (UINT_PTR)menuDefTranslateWith,
+        TrN("Copy as &Image to Clipboard"),
+        CmdCopySelectionAsImage,
     },
     {
-        TrN("S&earch with"),
-        (UINT_PTR)menuDefSearchWith,
+        TrN("&Save as Image..."),
+        CmdSaveSelectionAsImage,
+    },
+    {
+        TrN("&Print Selection..."),
+        CmdPrintSelection,
+    },
+    {
+        TrN("Visual Search with Google &Lens"),
+        CmdSearchGoogleLens,
+    },
+    {
+        TrN("&Zoom to Selection"),
+        CmdZoomToSelection,
+    },
+    {
+        TrN("&Trim Pages to Selection"),
+        CmdTrimPagesToSelection,
+    },
+    {
+        TrN("Count &Words"),
+        CmdCountWords,
+    },
+    {
+        TrN("Show Selected Te&xt"),
+        CmdShowSelectedText,
+    },
+    {
+        StrL(kMenuSeparator),
+        0,
+    },
+    {
+        TrN("&Translate With"),
+        menuDefTranslateWith,
+    },
+    {
+        TrN("S&earch With"),
+        menuDefSearchWith,
+    },
+    {
+        TrN("Select C&urrent Page"),
+        CmdSelectCurrentPage,
+    },
+    {
+        TrN("Select &All"),
+        CmdSelectAll,
+    },
+    {
+        {},
+        0,
+    },
+};
+//] ACCESSKEY_GROUP Context Menu (Selection)
+
+//[ ACCESSKEY_GROUP Menu (Selection)
+MenuDef menuDefMainSelection[] = {
+    {
+        TrN("&Copy to Clipboard"),
+        CmdCopySelection,
+    },
+    {
+        TrN("&Translate With"),
+        menuDefTranslateWith,
+    },
+    {
+        TrN("S&earch With"),
+        menuDefSearchWith,
     },
     {
         TrN("Select C&urrent Page"),
@@ -851,15 +977,13 @@ MenuDef menuDefMainSelection[] = {
 
 //[ ACCESSKEY_GROUP Read Aloud Menu
 // Placeholder only: real items are built in RebuildReadAloudMenu().
-// idOrSubmenu must be a normal Cmd* id (not a Tts menu id above CmdLast), or
-// BuildMenuFromDef mis-identifies it as a submenu pointer and crashes.
 MenuDef menuDefReadAloud[] = {
     {
         TrN("Stop Reading"),
         CmdStopReadAloud,
     },
     {
-        TrN("Start Reading From Top"),
+        TrN("Start Reading from Top"),
         CmdReadAloudFromTopPage,
     },
     {
@@ -876,7 +1000,7 @@ MenuDef menuDefContextReadAloud[] = {
         CmdStopReadAloud,
     },
     {
-        TrN("Start Reading From Top"),
+        TrN("Start Reading from Top"),
         CmdReadAloudFromTopPage,
     },
     {
@@ -890,43 +1014,43 @@ MenuDef menuDefContextReadAloud[] = {
 MenuDef menuDefMenubar[] = {
     {
         TrN("&File"),
-        (UINT_PTR)menuDefFile,
+        menuDefFile,
     },
     {
         TrN("&View"),
-        (UINT_PTR)menuDefView,
+        menuDefView,
     },
     {
         TrN("&Go To"),
-        (UINT_PTR)menuDefGoTo,
+        menuDefGoTo,
     },
     {
         TrN("&Zoom"),
-        (UINT_PTR)menuDefZoom,
+        menuDefZoom,
     },
     {
         TrN("S&election"),
-        (UINT_PTR)menuDefMainSelection,
+        menuDefMainSelection,
     },
     {
         TrN("Read Aloud"),
-        (UINT_PTR)menuDefReadAloud,
+        menuDefReadAloud,
     },
     {
         TrN("F&avorites"),
-        (UINT_PTR)menuDefFavorites,
+        menuDefFavorites,
     },
     {
         TrN("&Settings"),
-        (UINT_PTR)menuDefSettings,
+        menuDefSettings,
     },
     {
         TrN("&Help"),
-        (UINT_PTR)menuDefHelp,
+        menuDefHelp,
     },
     {
         StrL("Debug"),
-        (UINT_PTR)menuDefDebug,
+        menuDefDebug,
     },
     {
         {},
@@ -969,16 +1093,16 @@ MenuDef menuDefCreateAnnotFromSelection[] = {
 // menu itself stays short
 MenuDef menuDefContextAnnotations[] = {
     {
-        TrN("Create From Selection"),
-        (UINT_PTR)menuDefCreateAnnotFromSelection,
+        TrN("Create from Selection"),
+        menuDefCreateAnnotFromSelection,
     },
     {
         TrN("Create &Under Cursor"),
-        (UINT_PTR)menuDefCreateAnnotUnderCursor,
+        menuDefCreateAnnotUnderCursor,
     },
     {
         StrL(kMenuSeparator),
-        kMenuSeparatorID,
+        0,
     },
     {
         TrN("Edit Annotation Text"),
@@ -1002,7 +1126,7 @@ MenuDef menuDefContextAnnotations[] = {
     },
     {
         StrL(kMenuSeparator),
-        kMenuSeparatorID,
+        0,
     },
     {
         TrN("Apply Redactions"),
@@ -1010,18 +1134,18 @@ MenuDef menuDefContextAnnotations[] = {
     },
     {
         StrL(kMenuSeparator),
-        kMenuSeparatorID,
+        0,
     },
     {
-        TrN("Save changes"),
+        TrN("Save Changes"),
         CmdSaveAnnotations,
     },
     {
-        TrN("Save to new file"),
+        TrN("Save to New File..."),
         CmdSaveAnnotationsNewFile,
     },
     {
-        TrN("Discard changes"),
+        TrN("Discard Changes"),
         CmdDiscardChanges,
     },
     {
@@ -1034,23 +1158,23 @@ MenuDef menuDefContextAnnotations[] = {
 //[ ACCESSKEY_GROUP Context Menu (Image)
 MenuDef menuDefContextImage[] = {
     {
-        TrN("C&opy To Clipboard"),
+        TrN("C&opy to Clipboard"),
         CmdCopyImage,
     },
     {
-        TrN("Visual Search With Google &Lens"),
+        TrN("Visual Search with Google &Lens"),
         CmdSearchGoogleLensImage,
     },
     {
-        TrN("&Save"),
+        TrN("&Save..."),
         CmdSaveImage,
     },
     {
-        TrN("C&rop"),
+        TrN("C&rop..."),
         CmdCropImage,
     },
     {
-        TrN("R&esize"),
+        TrN("R&esize..."),
         CmdResizeImage,
     },
     {
@@ -1062,7 +1186,7 @@ MenuDef menuDefContextImage[] = {
         CmdEditImageExternally,
     },
     {
-        TrN("Convert page to &PDF"),
+        TrN("Convert Page to &PDF..."),
         CmdConvertImageToPdf,
     },
     {
@@ -1108,23 +1232,23 @@ MenuDef menuDefDocumentAIChat[] = {
 //[ ACCESSKEY_GROUP Context Menu (Document)
 MenuDef menuDefDocumentOperations[] = {
     {
-        TrN("P&roperties"),
+        TrN("P&roperties..."),
         CmdProperties,
     },
     {
-        TrN("Show PDF Info"),
+        TrN("Show PDF Info..."),
         CmdPdfShowInfo,
     },
     {
-        TrN("Show Document Table Of Contents"),
+        TrN("Show Document Table of Contents..."),
         CmdDocumentShowOutline,
     },
     {
-        TrN("Extract Pages"),
+        TrN("Extract Pages..."),
         CmdPdfExtractPages,
     },
     {
-        TrN("Delete Pages From PDF"),
+        TrN("Delete Pages from PDF..."),
         CmdPdfDeletePages,
     },
     {
@@ -1132,7 +1256,7 @@ MenuDef menuDefDocumentOperations[] = {
         CmdMergePDF,
     },
     {
-        TrN("Make PDF From Images..."),
+        TrN("Make PDF from Images..."),
         CmdImagesToPdf,
     },
     {
@@ -1140,11 +1264,11 @@ MenuDef menuDefDocumentOperations[] = {
         CmdRunPDFScript,
     },
     {
-        TrN("Extract Text From Document"),
+        TrN("Extract Text from Document..."),
         CmdDocumentExtractText,
     },
     {
-        TrN("Export as Markdown"),
+        TrN("Export as Markdown..."),
         CmdExportMarkdown,
     },
     {
@@ -1152,23 +1276,23 @@ MenuDef menuDefDocumentOperations[] = {
         CmdExportAnnotations,
     },
     {
-        TrN("Compress PDF"),
+        TrN("Compress PDF..."),
         CmdPdfCompress,
     },
     {
-        TrN("Decompress PDF"),
+        TrN("Decompress PDF..."),
         CmdPdfDecompress,
     },
     {
-        TrN("Encrypt PDF"),
+        TrN("Encrypt PDF..."),
         CmdPdfEncrypt,
     },
     {
-        TrN("Decrypt PDF"),
+        TrN("Decrypt PDF..."),
         CmdPdfDecrypt,
     },
     {
-        TrN("Bake PDF"),
+        TrN("Bake PDF..."),
         CmdPdfBake,
     },
     {
@@ -1184,7 +1308,7 @@ MenuDef menuDefDocumentOperations[] = {
         CmdInsertImage,
     },
     {
-        TrN("Sign With Image"),
+        TrN("Sign with Image"),
         CmdSignWithImage,
     },
     {
@@ -1208,7 +1332,7 @@ MenuDef menuDefDocumentOperations[] = {
         CmdConvertCajToPDF,
     },
     {
-        TrN("Show in fo&lder"),
+        TrN("Show in Fo&lder"),
         CmdShowInFolder,
     },
     {
@@ -1225,7 +1349,7 @@ MenuDef menuDefContextStart[] = {
         CmdOpenSelectedDocument,
     },
     {
-        TrN("Show in folder"),
+        TrN("Show in Folder"),
         CmdShowInFolder,
     },
     {
@@ -1237,7 +1361,7 @@ MenuDef menuDefContextStart[] = {
         0,
     },
     {
-        TrN("&Remove From History"),
+        TrN("&Remove from History"),
         CmdForgetSelectedDocument,
     },
     {
@@ -1271,15 +1395,15 @@ MenuDef menuDefContextTab[] = {
     // these top items are removed unless the document has unsaved changes;
     // text matches the "Unsaved changes" close dialog
     {
-        TrN("&Save changes to existing PDF"),
+        TrN("&Save Changes to Existing PDF"),
         CmdSaveAnnotations,
     },
     {
-        TrN("Save changes to &new PDF"),
+        TrN("Save Changes to &New PDF..."),
         CmdSaveAnnotationsNewFile,
     },
     {
-        TrN("&Discard changes"),
+        TrN("&Discard Changes"),
         CmdDiscardChanges,
     },
     {
@@ -1287,11 +1411,11 @@ MenuDef menuDefContextTab[] = {
         0,
     },
     {
-        TrN("Properties..."),
+        TrN("Document Properties..."),
         CmdProperties,
     },
     {
-        TrN("Show in folder"),
+        TrN("Show in Folder"),
         CmdShowInFolder,
     },
     {
@@ -1300,10 +1424,10 @@ MenuDef menuDefContextTab[] = {
     },
     {
         TrN("Duplicate"),
-        (UINT_PTR)menuDefContextTabDuplicate,
+        menuDefContextTabDuplicate,
     },
     {
-        TrN("Change Tab Color"),
+        TrN("Change Tab Color..."),
         CmdSetTabColor,
     },
     {
@@ -1319,11 +1443,11 @@ MenuDef menuDefContextTab[] = {
         CmdCloseOtherTabs,
     },
     {
-        TrN("Close Tabs To The Right"),
+        TrN("Close Tabs to the Right"),
         CmdCloseTabsToTheRight,
     },
     {
-        TrN("Close Tabs To The Left"),
+        TrN("Close Tabs to the Left"),
         CmdCloseTabsToTheLeft,
     },
     {
@@ -1348,11 +1472,11 @@ MenuDef menuDefContextTab[] = {
         0,
     },
     {
-        TrN("Save Tab Group"),
+        TrN("Save Tab Group..."),
         CmdTabGroupSave,
     },
     {
-        TrN("Restore Tab Group"),
+        TrN("Restore Tab Group..."),
         CmdTabGroupRestore,
     },
     {
@@ -1464,7 +1588,7 @@ MenuDef menuDefContextToc[] = {
 
 MenuDef menuDefContextFav[] = {
     {
-        TrN("Sort By Name"),
+        TrN("Sort by Name"),
         CmdToggleFavoritesSort,
     },
     {
@@ -1476,7 +1600,7 @@ MenuDef menuDefContextFav[] = {
         0,
     },
     {
-        TrN("Remove from favorites"),
+        TrN("Remove from Favorites"),
         CmdFavoriteDel,
     },
     {
@@ -1504,15 +1628,15 @@ MenuDef menuDefCreateAnnotUnderCursor[] = {
         CmdCreateAnnotStamp,
     },
     {
-        TrN("&Image From Clipboard"),
+        TrN("&Image from Clipboard"),
         CmdCreateAnnotImageFromClipboard,
     },
     {
-        TrN("Image From Fi&le..."),
+        TrN("Image from Fi&le..."),
         CmdInsertImage,
     },
     {
-        TrN("Si&gn With Image"),
+        TrN("Si&gn with Image"),
         CmdSignWithImage,
     },
     {

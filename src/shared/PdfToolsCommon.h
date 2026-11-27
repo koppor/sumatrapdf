@@ -84,7 +84,7 @@ TempStr UniqueImagesTemplateTemp(Str templatePath, const Vec<int>& pages);
 TempStr ExistingImagesTextTemp(int nExisting);
 bool PagesFitDpi(EngineBase* engine, const Vec<int>& pages, int dpi);
 int ConvertPagesToImages(EngineBase* engine, int rotation, Str templatePath, const Vec<int>& pages, int dpi,
-                         Str* firstPathOwnedOut);
+                         Str* firstPathOwnedOut, const Func1<int>& onProgress = {});
 void CollectAllPages(int pageCount, Vec<int>& pages);
 Pixmap* RenderSelectionPixmap(EngineBase* engine, int rotation, int pageNo, RectF rect, float dpi);
 bool WriteSelectionPixmap(Pixmap* px, Str destPath);
@@ -131,10 +131,66 @@ int EbookPdfFontSizeFromText(Str s);
 
 // rectangular selection → PNG / JPEG / BMP at a chosen DPI, independent of
 // the current zoom (issue #6127)
-static Kind kNotifSaveSelectionAsImage = "notifSaveSelectionAsImage";
+extern Kind kNotifSaveSelectionAsImage;
 
 // entry points of the mupdf command line tools we link in
 extern "C" int pdfbake_main(int argc, char** argv);
 extern "C" int pdfclean_main(int argc, char** argv);
 extern "C" int muconvert_main(int argc, char** argv);
 extern "C" void fz_set_optind(int val);
+
+using PdfToolMain = int (*)(int, char**);
+int RunPdfToolMain(PdfToolMain toolMain, int argc, char** argv);
+
+// what a dialog does once its tool succeeded
+enum class PdfToolDone {
+    LoadDest,
+    ShowDest,
+    // reloads destPath where it's open, else loads it (Merge)
+    ReloadDest,
+};
+
+// how a dialog reports its tool's failure
+enum class PdfToolFail {
+    MessageBox,
+    Notification,
+};
+
+// a mutool command (or, overriding Run(), other work) a tool dialog runs on a thread
+struct PdfToolJob {
+    virtual ~PdfToolJob() = default;
+    virtual int Run();
+    // pages done and to do, for a dialog that shows progress
+    AtomicInt nDone = 0;
+    int nTotal = 0;
+    // called instead of FinishPdfToolJob, for an owner that isn't a tool dialog
+    Func1<PdfToolJob*> onFinish;
+    PdfToolMain toolMain = nullptr;
+    StrVec args;
+    Str tmpPath;   // owned; a copy of the input, deleted after the run
+    Str destPath;  // owned
+    Str logName;   // owned
+    Str failMsg;   // owned
+    Str failTitle; // owned
+    PdfToolDone done = PdfToolDone::LoadDest;
+    PdfToolFail fail = PdfToolFail::MessageBox;
+    int res = -1;
+    // the dialog; the app clears it when the dialog goes away first
+    void* owner = nullptr;
+};
+PdfToolJob* NewPdfToolJob(PdfToolMain toolMain, Str logName, Str destPath, Str failMsg, Str failTitle);
+void SetPdfToolJobArgs(PdfToolJob* job, char** argv, int argc, Str tmpPath);
+void StartPdfToolJob(PdfToolJob* job);
+void FreePdfToolJob(PdfToolJob* job);
+int RunPdfToolJobNow(PdfToolJob* job);
+PdfToolJob* NewStampJob(EngineBase* engine, bool watermark, Str text, const Vec<int>& pages, int posIdx, Str destPath);
+PdfToolJob* NewImagesJob(EngineBase* engine, int rotation, Str templatePath, const Vec<int>& pages, int dpi);
+PdfToolJob* NewEpubToPdfJob(Str srcPath, Str destPath, const EbookPdfPageSize& ps, int fontSize);
+PdfToolJob* NewCajToPdfJob(Str srcPath, Str destPath);
+PdfToolJob* NewConvertToPdfJob(EngineBase* engine, Str destPath);
+struct PdfMergeSource;
+struct PdfMergePage;
+PdfToolJob* NewMergeJob(const Vec<PdfMergeSource>& srcs, const Vec<PdfMergePage>& pages, Str srcCopy, Str destPath);
+// implemented by each app
+void FinishPdfToolJob(PdfToolJob* job);
+void PdfToolJobProgress(PdfToolJob* job);

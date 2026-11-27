@@ -4,15 +4,12 @@
 #include "base/Base.h"
 #include "base/Win.h"
 
-#include <uiautomationcore.h>
-
 #include "gui/UIModels.h"
 
 #include "Settings.h"
 #include "DocController.h"
 #include "EngineBase.h"
 #include "DisplayModel.h"
-#include "uia/Constants.h"
 #include "uia/Common.h"
 #include "uia/DocumentProvider.h"
 #include "uia/Provider.h"
@@ -20,14 +17,7 @@
 
 SumatraUIAutomationPageProvider::SumatraUIAutomationPageProvider(int pageNum, HWND canvasHwnd, DisplayModel* dm,
                                                                  SumatraUIAutomationDocumentProvider* root)
-    : refCount(1),
-      pageNum(pageNum),
-      canvasHwnd(canvasHwnd),
-      dm(dm),
-      root(root),
-      sibling_prev(nullptr),
-      sibling_next(nullptr),
-      released(false) {
+    : refCount(1), pageNum(pageNum), canvasHwnd(canvasHwnd), dm(dm), root(root), released(false) {
     // root->AddRef(); Don't add refs to our parent & owner.
 }
 
@@ -35,10 +25,6 @@ SumatraUIAutomationPageProvider::~SumatraUIAutomationPageProvider() = default;
 
 int SumatraUIAutomationPageProvider::GetPageNum() const {
     return pageNum;
-}
-
-SumatraUIAutomationPageProvider* SumatraUIAutomationPageProvider::GetNextPage() {
-    return sibling_next;
 }
 
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::QueryInterface(REFIID riid, void** ppv) {
@@ -70,9 +56,9 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::Navigate(enum Navigat
 
     *pRetVal = nullptr;
     if (direction == NavigateDirection_PreviousSibling) {
-        *pRetVal = sibling_prev;
+        *pRetVal = root->GetPage(pageNum - 1);
     } else if (direction == NavigateDirection_NextSibling) {
-        *pRetVal = sibling_next;
+        *pRetVal = root->GetPage(pageNum + 1);
     } else if (direction == NavigateDirection_FirstChild || direction == NavigateDirection_LastChild) {
         // do nothing
     } else if (direction == NavigateDirection_Parent) {
@@ -88,24 +74,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::Navigate(enum Navigat
 }
 
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::GetRuntimeId(SAFEARRAY** pRetVal) {
-    if (pRetVal == nullptr) {
-        return E_POINTER;
-    }
-
-    SAFEARRAY* psa = SafeArrayCreateVector(VT_I4, 0, 2);
-    if (!psa) {
-        return E_OUTOFMEMORY;
-    }
-
-    // RuntimeID magic, use hwnd to differentiate providers of different windows
-    int rId[] = {HandleToLong(canvasHwnd), kSumatraUiaPageRuntimeId(pageNum)};
-    for (LONG i = 0; i < 2; i++) {
-        HRESULT hr = SafeArrayPutElement(psa, &i, (void*)&(rId[i]));
-        ReportIf(FAILED(hr));
-    }
-
-    *pRetVal = psa;
-    return S_OK;
+    return UiaMakeRuntimeId(canvasHwnd, kSumatraUiaPageRuntimeId(pageNum), pRetVal);
 }
 
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::GetEmbeddedFragmentRoots(SAFEARRAY** pRetVal) {
@@ -131,10 +100,10 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::get_BoundingRectangle
         return E_FAIL;
     }
 
-    Rect canvasRect = HwndWindowRect(canvasHwnd);
+    Point tl = HwndClientToScreen(canvasHwnd, page->pageOnScreen.TL());
 
-    pRetVal->left = canvasRect.x + page->pageOnScreen.x;
-    pRetVal->top = canvasRect.y + page->pageOnScreen.y;
+    pRetVal->left = tl.x;
+    pRetVal->top = tl.y;
     pRetVal->width = page->pageOnScreen.dx;
     pRetVal->height = page->pageOnScreen.dy;
 
@@ -171,10 +140,8 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::GetPropertyValue(PROP
     }
 
     if (propertyId == UIA_NamePropertyId) {
-        pRetVal->vt = VT_BSTR;
         TempStr s = fmt("Page %d", pageNum);
-        pRetVal->bstrVal = SysAllocString(CWStrTemp(s));
-        return S_OK;
+        return UiaSetBstr(pRetVal, CWStrTemp(s));
     } else if (propertyId == UIA_IsValuePatternAvailablePropertyId) {
         // VARIANT_TRUE (-1), not TRUE (1) - see DocumentProvider::GetPropertyValue
         pRetVal->vt = VT_BOOL;
@@ -215,7 +182,7 @@ HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::get_Value(BSTR* pRetV
 
     TempWStr pageContentW = ToWStrTemp(pageContent);
     *pRetVal = SysAllocString(pageContentW.s);
-    return S_OK;
+    return *pRetVal ? S_OK : E_OUTOFMEMORY;
 }
 
 HRESULT STDMETHODCALLTYPE SumatraUIAutomationPageProvider::get_IsReadOnly(BOOL* pRetVal) {

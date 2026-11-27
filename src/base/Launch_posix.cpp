@@ -7,7 +7,9 @@
 #include "base/Base.h"
 #include "base/File.h"
 
+#include <errno.h>
 #include <spawn.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -77,32 +79,58 @@ static pid_t SpawnArgs(const StrVec& args) {
     return pid;
 }
 
-static bool SpawnDetached(const StrVec& args) {
-    return SpawnArgs(args) != 0;
+static Mutex gDetachedMutex;
+static Vec<pid_t> gDetachedPids;
+
+// nothing waits for a detached child, so reap the ones that exited; else each
+// stays a zombie until we exit
+static void ReapDetached() {
+    for (int i = len(gDetachedPids) - 1; i >= 0; i--) {
+        pid_t pid = gDetachedPids[i];
+        pid_t res = waitpid(pid, nullptr, WNOHANG);
+        if (res == pid || (res < 0 && errno == ECHILD)) {
+            VecRemoveAtFast(gDetachedPids, i);
+        }
+    }
 }
 
-struct ChildProcess {
-    pid_t pid = 0;
-    bool exited = false;
-};
-
-ChildProcess* StartChildProcess(Str cmdLine) {
-    StrVec args;
-    SplitCmdLine(cmdLine, args);
+static bool SpawnDetached(const StrVec& args) {
     pid_t pid = SpawnArgs(args);
-    if (pid == 0) {
-        return nullptr;
+    AutoUnlockMutex lock(&gDetachedMutex);
+    ReapDetached();
+    if (pid != 0) {
+        VecAppend(gDetachedPids, pid);
     }
-    auto* p = new ChildProcess();
-    p->pid = pid;
-    return p;
+    return pid != 0;
 }
 
 bool gBlockExternalLaunch = false;
 int gExternalLaunchesBlocked = 0;
+static Str gExternalLaunchAllowDir;
+
+void SetExternalLaunchAllowDir(Str dir) {
+    str::ReplaceWithCopy(&gExternalLaunchAllowDir, dir);
+    int n = len(gExternalLaunchAllowDir);
+    if (n > 1) {
+        char c = gExternalLaunchAllowDir.s[n - 1];
+        if (c == '\\' || c == '/') {
+            gExternalLaunchAllowDir.len--;
+            gExternalLaunchAllowDir.s[n - 1] = 0;
+        }
+    }
+}
+
+static bool ExternalLaunchAllowed(Str what) {
+    int n = len(gExternalLaunchAllowDir);
+    if (n == 0 || len(what) <= n || !str::StartsWithI(what, gExternalLaunchAllowDir)) {
+        return false;
+    }
+    char sep = what.s[n];
+    return sep == '\\' || sep == '/';
+}
 
 bool ExternalLaunchBlocked(Str what) {
-    if (!gBlockExternalLaunch) {
+    if (!gBlockExternalLaunch || ExternalLaunchAllowed(what)) {
         return false;
     }
     logf("ExternalLaunchBlocked: not opening '%s' in test mode\n", what);
@@ -117,26 +145,42 @@ bool LaunchFileShellArgs(const StrVec& args) {
     return SpawnDetached(args);
 }
 
-bool LaunchFileShell(Str path, Str params, Str, bool) {
+// even an executable is handed to the desktop: documents on vfat / smb mounts
+// or from archives often have the exec bit. Programs go through LaunchProgram
+static void ShellOpenArgs(Str path, StrVec& args) {
+    args.Append(Str(OpenerProgram()));
+    args.Append(path);
+}
+
+bool LaunchFileShell(Str path, Str, Str, bool) {
     if (len(path) == 0 || ExternalLaunchBlocked(path)) {
         return false;
     }
     StrVec args;
-    // an executable is run directly, anything else is handed to the desktop
-    if (access(CStrTemp(path), X_OK) == 0 && !dir::Exists(path)) {
-        args.Append(path);
-        if (len(params) > 0) {
-            SplitCmdLine(params, args);
-        }
-    } else {
-        args.Append(Str(OpenerProgram()));
-        args.Append(path);
-    }
+    ShellOpenArgs(path, args);
     return SpawnDetached(args);
 }
 
+// argv for exe + argsTemplate. The template is split before expand substitutes
+// into each argument, so substituted text (a file name with ") can't add arguments
+void ProgramArgs(Str exe, Str argsTemplate, const Func1<Str*>& expand, StrVec& args) {
+    args.Append(exe);
+    StrVec templ;
+    SplitCmdLine(argsTemplate, templ);
+    for (Str arg : templ) {
+        expand.Call(&arg);
+        args.Append(arg);
+    }
+}
+
+bool LaunchProgram(Str exe, Str cmdLine) {
+    StrVec args;
+    ProgramArgs(exe, cmdLine, {}, args);
+    return LaunchFileShellArgs(args);
+}
+
 bool LaunchBrowser(Str url) {
-    if (ExternalLaunchBlocked(url)) {
+    if (len(url) == 0 || ExternalLaunchBlocked(url)) {
         return false;
     }
     StrVec args;
@@ -145,42 +189,85 @@ bool LaunchBrowser(Str url) {
     return SpawnDetached(args);
 }
 
-void OpenPathInDefaultFileManager(Str path) {
-    if (len(path) == 0 || ExternalLaunchBlocked(path)) {
-        return;
-    }
-    if (dir::Exists(path)) {
-        StrVec args;
-        args.Append(Str(OpenerProgram()));
-        args.Append(path);
-        SpawnDetached(args);
-        return;
-    }
+static void OpenFolder(Str folder) {
+    StrVec args;
+    args.Append(Str(OpenerProgram()));
+    args.Append(folder);
+    SpawnDetached(args);
+}
 
-    TempStr fullPath = path::NormalizeTemp(path);
+static void RevealFiles(Str folder, const StrVec& files) {
     StrVec args;
 #if OS_DARWIN
     args.Append(StrL("open"));
     args.Append(StrL("-R"));
-    args.Append(fullPath);
+    for (Str file : files) {
+        args.Append(path::NormalizeTemp(file));
+    }
 #else
-    TempStr uri = fmt("file://%s", url::EncodePathTemp(fullPath));
+    str::Builder uris;
+    uris.Append(StrL("array:string:"));
+    bool first = true;
+    for (Str file : files) {
+        if (!first) {
+            uris.AppendChar(',');
+        }
+        first = false;
+        uris.Append(StrL("file://"));
+        uris.Append(url::EncodePathTemp(path::NormalizeTemp(file)));
+    }
     args.Append(StrL("dbus-send"));
     args.Append(StrL("--session"));
     args.Append(StrL("--dest=org.freedesktop.FileManager1"));
     args.Append(StrL("--type=method_call"));
     args.Append(StrL("/org/freedesktop/FileManager1"));
     args.Append(StrL("org.freedesktop.FileManager1.ShowItems"));
-    args.Append(fmt("array:string:%s", uri));
+    args.Append(ToStr(uris));
     args.Append(StrL("string:"));
 #endif
-    if (SpawnDetached(args)) {
+    if (!SpawnDetached(args)) {
+        OpenFolder(folder);
+    }
+}
+
+void OpenPathInDefaultFileManager(Str path) {
+    if (len(path) == 0 || ExternalLaunchBlocked(path)) {
         return;
     }
-
-    TempStr dir = path::GetDirTemp(path);
-    args.Reset();
-    args.Append(Str(OpenerProgram()));
-    args.Append(dir);
-    SpawnDetached(args);
+    if (dir::Exists(path)) {
+        OpenFolder(path);
+        return;
+    }
+    StrVec files;
+    files.Append(path);
+    RevealFiles(path::GetDirTemp(path), files);
 }
+
+void OpenFilesInDefaultManager(Str folder, const StrVec& files) {
+    if (len(folder) > 0 && !files.IsEmpty() && !ExternalLaunchBlocked(folder)) {
+        RevealFiles(folder, files);
+    }
+}
+
+#if IS_DEBUG
+static void ExpandDocPath(Str* docPath, Str* arg) {
+    *arg = str::ReplaceTemp(*arg, StrL("%1"), *docPath);
+}
+
+bool Launch_UnitTests() {
+    // a document with the exec bit (vfat / smb mounts, archives) is opened, not run
+    TempStr doc = GetTempFilePathTemp(StrL("launch-ut"));
+    bool ok = file::WriteFile(doc, StrL("#!/bin/sh\n")) && chmod(CStrTemp(doc), 0755) == 0;
+    StrVec args;
+    ShellOpenArgs(doc, args);
+    ok = ok && len(args) == 2 && str::Eq(args[0], Str(OpenerProgram())) && str::Eq(args[1], doc);
+    file::Delete(doc);
+
+    // a quote in the document path doesn't add arguments
+    Str docPath = StrL("/tmp/a\" --attach \"/etc/passwd.pdf");
+    args.Reset();
+    ProgramArgs(StrL("xdg-email"), StrL("--attach \"%1\" -x"), MkFunc1(ExpandDocPath, &docPath), args);
+    ok = ok && len(args) == 4 && str::Eq(args[2], docPath) && str::Eq(args[3], StrL("-x"));
+    return ok;
+}
+#endif

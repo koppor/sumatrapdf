@@ -171,50 +171,12 @@ static void LayoutAIChatBox(MainWindow* win) {
 
 // --- Session combo ---
 
-static void PopulateSessionCombo(MainWindow* win) {
-    AIChatProvider* p = CurrentProvider(win);
-    if (!win->aiChatSessionCombo || !p) {
+void AIChatSetSessionItems(MainWindow* win, StrVec& items, int sel) {
+    if (!win->aiChatSessionCombo) {
         return;
     }
-
-    StrVec items;
-    items.Append(StrL("+ New Session"));
-
-    WindowTab* tab = win->CurrentTab();
-    AIChatTabState* st = GetTabState(tab, win->aiChatProvider);
-    if (!tab || len(tab->filePath) == 0 || !st) {
-        win->aiChatSessionCombo->SetItems(items);
-        CbSetCurrentSelection(win->aiChatSessionCombo, 0);
-        return;
-    }
-
-    TempStr dir = path::GetDirTemp(tab->filePath);
-    Vec<AIChatSessionInfo> sessions;
-    p->CollectSessions(dir, sessions);
-
-    int selectedIdx = 0;
-    bool foundCurrent = false;
-    for (int i = 0; i < len(sessions); i++) {
-        Str display = sessions[i].display;
-        if (len(display) == 0) {
-            display = StrL("(no description)");
-        }
-        items.Append(ShortenStringUtf8Temp(display, 50));
-        if (st->sessionId && str::Eq(st->sessionId, sessions[i].sessionId)) {
-            selectedIdx = i + 1;
-            foundCurrent = true;
-        }
-    }
-
-    // if current tab has a session but it wasn't found on disk, add it anyway
-    if (st->sessionId && !foundCurrent) {
-        items.Append(StrL("(current session)"));
-        selectedIdx = len(sessions) + 1;
-    }
-
     win->aiChatSessionCombo->SetItems(items);
-    CbSetCurrentSelection(win->aiChatSessionCombo, selectedIdx);
-    AIChatFreeSessions(sessions);
+    CbSetCurrentSelection(win->aiChatSessionCombo, sel);
 }
 
 static void OnSessionComboChange(MainWindow* win) {
@@ -240,23 +202,17 @@ static void OnSessionComboChange(MainWindow* win) {
         return;
     }
 
-    // re-collect sessions to get the ID
-    TempStr dir = path::GetDirTemp(tab->filePath);
-    Vec<AIChatSessionInfo> sessions;
-    p->CollectSessions(dir, sessions);
-
-    int sessionIdx = sel - 1;
-    if (sessionIdx >= 0 && sessionIdx < len(sessions)) {
-        AIChatLog(p->logger, StrL("session"), sessions[sessionIdx].sessionId);
-        str::ReplaceWithCopy(&st->sessionId, sessions[sessionIdx].sessionId);
-        st->chatLog.Reset();
-        AIChatResetAPI(st);
-        WebViewClearChat(win);
-        p->LoadSessionHistory(win, st->sessionId, dir);
-        // LoadSessionHistory writes to the webview which rebuilds chatLog
+    Str sessionId = AIChatSessionIdAt(win, sel);
+    if (len(sessionId) == 0) {
+        return;
     }
-
-    AIChatFreeSessions(sessions);
+    AIChatLog(p->logger, StrL("session"), sessionId);
+    str::ReplaceWithCopy(&st->sessionId, sessionId);
+    st->chatLog.Reset();
+    AIChatResetAPI(st);
+    WebViewClearChat(win);
+    // LoadSessionHistory writes to the webview which rebuilds chatLog
+    p->LoadSessionHistory(win, st->sessionId, path::GetDirTemp(tab->filePath));
 }
 
 // --- Settings <-> UI ---
@@ -297,6 +253,26 @@ static void ApplyAIChatSettingsToUI(MainWindow* win) {
     }
     if (win->aiChatCheckbox) {
         win->aiChatCheckbox->SetIsChecked(p->GetFlag());
+    }
+}
+
+// a provider's model list arrived after its panel was built; keeps the
+// picked model, which is only saved on send
+void AIChatModelsChanged(AIChatProvider* p) {
+    for (MainWindow* win : gWindows) {
+        if (!win->aiChatModelCombo || CurrentProvider(win) != p) {
+            continue;
+        }
+        TempStr cur = HwndGetTextTemp(win->aiChatModelCombo->hwnd);
+        PopulateModelCombo(win, p);
+        StrVec models;
+        p->BuildModelsList(models);
+        int idx = AIChatFindModelInList(models, cur);
+        if (idx < 0) {
+            Str model = AIChatResolveModel(models, p->GetModel(), p->defaultModel);
+            idx = std::max(AIChatFindModelInList(models, model), 0);
+        }
+        CbSetCurrentSelection(win->aiChatModelCombo, idx);
     }
 }
 
@@ -379,7 +355,7 @@ void OnAIChatFinished(MainWindow* win, AIChatProvider* p, AIChatTabState* st, bo
     if (isActiveTab) {
         WebViewFlushBlock(win);
         SetAIChatWorking(win, false);
-        PopulateSessionCombo(win);
+        ScanAIChatSessions(win, AIChatScanMode::Populate);
     }
 }
 
@@ -455,14 +431,6 @@ static void AIChatReadThread(AIChatReadThreadCtx* ctx) {
 
 // --- Headless chat runner (for -dbg-control tests) ---
 
-static void AIChatReadAllPipe(HANDLE hPipe, str::Builder& out) {
-    char buf[4096];
-    DWORD n = 0;
-    while (ReadFile(hPipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
-        out.Append(Str(buf, (int)n));
-    }
-}
-
 // Runs one chat turn synchronously with no UI: builds the command line, launches
 // the process, reads its whole stdout, then feeds each line through the real
 // provider parser while capturing the emitted text/errors. Same provider code
@@ -519,11 +487,9 @@ bool RunAIChatSync(AIChatBackend backend, Str filePath, Str message, Str& outTex
 
     str::Builder raw;
     raw.Reserve(4096);
-    AIChatReadAllPipe(launch.hReadPipe, raw);
-    CloseHandle(launch.hReadPipe);
+    bool exited = AIChatReadUntilExit(launch.hReadPipe, launch.hProcess, 5 * 60 * 1000, raw);
     launch.hReadPipe = nullptr;
-    DWORD waitRes = WaitForSingleObject(launch.hProcess, 5 * 60 * 1000);
-    if (waitRes == WAIT_TIMEOUT) {
+    if (!exited) {
         TerminateProcess(launch.hProcess, 1);
         AIChatCloseProcess(&launch.hProcess, false);
         outErr = str::Dup(StrL("chat timed out"));
@@ -728,8 +694,7 @@ static LRESULT CALLBACK WndProcAIChatBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
         case WM_TIMER:
             if (wp == kTimerAutoSelectSession) {
                 KillTimer(hwnd, kTimerAutoSelectSession);
-                AutoSelectRecentSession(win);
-                PopulateSessionCombo(win);
+                ScanAIChatSessions(win, AIChatScanMode::AutoSelect);
             } else if (wp == kTimerWebViewSize) {
                 KillTimer(hwnd, kTimerWebViewSize);
                 if (win->aiChatWebView) {
@@ -781,6 +746,31 @@ void RelayoutAIChatPanel(MainWindow* win) {
 
 // --- Lazy WebView2 init ---
 
+// the per-process WebView2 data dirs the chat panels used. Every window's
+// panel shares them (one WebView2 environment per process), so they are
+// deleted when the process exits, not when a panel closes
+static StrVec gAIChatWebViewDataDirs;
+
+// how long to wait for the WebView2 browser process to let go of the files
+constexpr int kDataDirDeleteTries = 20;
+constexpr int kDataDirDeleteRetryMs = 50;
+
+void DeleteAIChatWebViewDataDirs() {
+    for (Str dir : gAIChatWebViewDataDirs) {
+        for (int i = 0; i < kDataDirDeleteTries; i++) {
+            dir::RemoveAll(dir);
+            if (!dir::Exists(dir)) {
+                break;
+            }
+            ::Sleep(kDataDirDeleteRetryMs);
+        }
+        if (dir::Exists(dir)) {
+            logf("DeleteAIChatWebViewDataDirs: couldn't delete '%s'\n", dir);
+        }
+    }
+    gAIChatWebViewDataDirs.Reset();
+}
+
 static void DeleteAIChatWebView(MainWindow* win) {
     delete win->aiChatWebView;
     win->aiChatWebView = nullptr;
@@ -798,6 +788,8 @@ static void OnAIChatWebViewNavigated(void* ctx, Str, bool) {
         return;
     }
     if (win->aiChatWebView) {
+        // only now does the page's JS exist to eval into
+        win->aiChatWebViewReady = true;
         // the webview is created lazily, often before the panel has its final
         // size, leaving its window (and so the WebView2 controller) at 0x0. Now
         // that the page has loaded and the panel is laid out, re-run the layout
@@ -809,7 +801,7 @@ static void OnAIChatWebViewNavigated(void* ctx, Str, bool) {
 }
 
 static void EnsureWebViewReady(MainWindow* win) {
-    if (win->aiChatWebViewReady) {
+    if (win->aiChatWebView) {
         return;
     }
     if (!HasWebView()) {
@@ -826,6 +818,7 @@ static void EnsureWebViewReady(MainWindow* win) {
     // use unique data dir per process to avoid locking conflicts
     webView->dataDir =
         str::Dup(fmt("%s\\SumatraPDF\\%s_%d", localAppData, p->webViewDataDirPrefix, (int)GetCurrentProcessId()));
+    AppendIfNotExists(&gAIChatWebViewDataDirs, webView->dataDir);
     int markdownJsLen = 0;
     u8* markdownJs = GetEmbeddedFileData(StrL("markdown-it.min.js"), &markdownJsLen);
     if (!markdownJs || markdownJsLen <= 0) {
@@ -850,14 +843,14 @@ static void EnsureWebViewReady(MainWindow* win) {
     webView->Create(wvArgs);
 
     if (webView->hwnd) {
+        // set first: the navigated handler looks for it
+        win->aiChatWebView = webView;
         TempStr url = fmt("%sindex.html", p->virtualHost);
         webView->Navigate(url);
         // make the webview visible, like the manual browser does; without this
         // the embedded controller stays hidden (isVisible defaults to false) and
         // the loaded page never paints
         webView->SetIsVisible(true);
-        win->aiChatWebView = webView;
-        win->aiChatWebViewReady = true;
         RelayoutAIChatPanel(win);
     } else {
         delete webView;
@@ -1137,7 +1130,7 @@ void OnAIChatToggle(MainWindow* win, int providerId) {
         UpdateAIChatPanelTitle(win, 0);
         EnsureWebViewReady(win);
         UpdateAIChatPanelForCurrentTab(win);
-        PopulateSessionCombo(win);
+        ScanAIChatSessions(win, AIChatScanMode::Populate);
         EditSetFocus(win->aiChatInput);
         // if the webview was recreated (provider change), its navigationCompleted
         // callback replays the chat once the new page has loaded
@@ -1174,7 +1167,7 @@ void OnAIChatTabChanged(MainWindow* win) {
         return;
     }
 
-    PopulateSessionCombo(win);
+    ScanAIChatSessions(win, AIChatScanMode::Populate);
     WebViewClearChat(win);
 
     AIChatTabState* st = GetTabState(tab, win->aiChatProvider);
@@ -1208,13 +1201,8 @@ void DestroyAIChatPanel(MainWindow* win) {
         }
     }
 
-    // save webview dataDir before deleting so we can clean up
-    Str webViewDataDir;
     WebviewWnd* webView = win->aiChatWebView;
     win->aiChatWebView = nullptr;
-    if (webView) {
-        webViewDataDir = str::Dup(webView->dataDir);
-    }
     delete webView;
 
     // deleting the layout deletes the controls in it
@@ -1242,11 +1230,5 @@ void DestroyAIChatPanel(MainWindow* win) {
     if (win->hwndAiChatBox) {
         DestroyWindow(win->hwndAiChatBox);
         win->hwndAiChatBox = nullptr;
-    }
-
-    // clean up per-process WebView2 cache dir
-    if (webViewDataDir) {
-        dir::RemoveAll(webViewDataDir);
-        str::Free(webViewDataDir);
     }
 }

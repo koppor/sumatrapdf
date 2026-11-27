@@ -229,15 +229,15 @@ static bool IsCompactable(const StructInfo* info) {
     return info->fieldCount > 0;
 }
 
-static_assert(sizeof(float) == sizeof(int) && sizeof(Color) == sizeof(int),
-              "compact array code can't be simplified if int, float and colorref are of different sizes");
+static_assert(sizeof(float) == sizeof(int),
+              "FloatArray and IntArray share Vec<int> code and require equal element size");
 
 static bool SerializeField(str::Builder& out, const u8* base, const FieldInfo& field) {
     const u8* fieldPtr = base + field.offset;
 
     switch (field.type) {
         case SettingType::Bool:
-            out.Append(Str(*(bool*)fieldPtr ? "true" : "false"));
+            out.Append(*(bool*)fieldPtr ? StrL("true") : StrL("false"));
             return true;
         case SettingType::Int:
             out.Append(fmt("%d", *(int*)fieldPtr));
@@ -315,6 +315,20 @@ static bool parseBool(Str value) {
     return i != 0;
 }
 
+static bool ParseSettingsFloat(Str s, float* value) {
+    // Older builds could write the user locale's decimal comma.
+    Str num(s.s, SkipNonWhitespaceOff(s, 0));
+    if (str::ContainsChar(num, ',') && !str::ContainsChar(num, '.')) {
+        s = str::ReplaceTemp(num, StrL(","), StrL("."));
+    }
+    float parsed = 0;
+    if (str::IsNull(str::Parse(s, "%f", &parsed)) || !isfinite(parsed)) {
+        return false;
+    }
+    *value = parsed;
+    return true;
+}
+
 static void deserializeField(const FieldInfo& field, u8* base, Str value) {
     u8* fieldPtr = base + field.offset;
 
@@ -339,13 +353,11 @@ static void deserializeField(const FieldInfo& field, u8* base, Str value) {
         } break;
 
         case SettingType::Float: {
-            Str s = !str::IsNull(value) ? value : FieldDefaultStr(field);
-            // builds before #6498's fix wrote the user locale's decimal comma: "8,33"
-            Str num = Str(s.s, SkipNonWhitespaceOff(s, 0));
-            if (str::ContainsChar(num, ',') && !str::ContainsChar(num, '.')) {
-                s = str::ReplaceTemp(num, StrL(","), StrL("."));
+            float parsed = 0;
+            if (!ParseSettingsFloat(value, &parsed)) {
+                ParseSettingsFloat(FieldDefaultStr(field), &parsed);
             }
-            str::Parse(s, "%f", (float*)fieldPtr);
+            *(float*)fieldPtr = parsed;
             break;
         }
 
@@ -386,28 +398,39 @@ static void deserializeField(const FieldInfo& field, u8* base, Str value) {
                     Str token;
                     if (!str::IsNull(value)) {
                         off = SkipWhitespaceOff(value, off);
-                        token = off < value.len ? Str(value.s + off, value.len - off) : Str{};
+                        int end = SkipNonWhitespaceOff(value, off);
+                        token = off < end ? Str(value.s + off, end - off) : Str{};
+                        off = end;
                     }
                     deserializeField(GetSubstruct(field)->fields[i], fieldPtr, token);
-                    if (!str::IsNull(value)) {
-                        off = SkipNonWhitespaceOff(value, off);
-                    }
                 }
             }
             break;
-        case SettingType::FloatArray:
+        case SettingType::FloatArray: {
+            Str src = !str::IsNull(value) ? value : FieldDefaultStr(field);
+            Vec<float>* v = *(Vec<float>**)fieldPtr;
+            delete v;
+            v = new Vec<float>();
+            *(Vec<float>**)fieldPtr = v;
+            int off = SkipWhitespaceOff(src, 0);
+            while (off < len(src)) {
+                int end = SkipNonWhitespaceOff(src, off);
+                float parsed = 0;
+                if (ParseSettingsFloat(Str(src.s + off, end - off), &parsed)) {
+                    VecAppend(*v, parsed);
+                }
+                off = SkipWhitespaceOff(src, end);
+            }
+        } break;
         case SettingType::IntArray: {
             Str src = !str::IsNull(value) ? value : FieldDefaultStr(field);
             Vec<int>* v = *(Vec<int>**)fieldPtr;
             delete v;
             v = new Vec<int>();
             *(Vec<int>**)fieldPtr = v;
-            FieldInfo info{};
-            info.type = field.type == SettingType::FloatArray ? SettingType::Float : SettingType::Int;
             int off = 0;
             while (src && off < src.len) {
-                Str token = Str(src.s + off, src.len - off);
-                deserializeField(info, (u8*)VecAppendBlanks(*v, 1), token);
+                VecAppend(*v, ParseInt(Str(src.s + off, src.len - off)));
                 off = SkipNonWhitespaceOff(src, off);
                 off = SkipWhitespaceOff(src, off);
             }
@@ -419,7 +442,9 @@ static void deserializeField(const FieldInfo& field, u8* base, Str value) {
             v = new Vec<Str>();
             *(Vec<Str>**)fieldPtr = v;
             if (!str::IsNull(value)) {
-                DeserializeUtf8StringArray(v, UnescapeStr(value));
+                Str unescaped = UnescapeStr(value);
+                DeserializeUtf8StringArray(v, unescaped);
+                str::Free(unescaped);
             } else if (field.value) {
                 DeserializeUtf8StringArray(v, FieldDefaultStr(field));
             }
@@ -648,6 +673,7 @@ static void FreeStructData(const StructInfo* info, u8* base) {
             case SettingType::Comment:
                 // nothing to free
                 break;
+            case SettingType::Compact:
             case SettingType::Struct: {
                 const StructInfo* substruct = GetSubstruct(field);
                 FreeStructData(substruct, fieldPtr);

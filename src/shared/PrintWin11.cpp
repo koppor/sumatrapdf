@@ -993,14 +993,19 @@ class Win11PrintSession {
             return hr;
         }
 
-        PrintDocumentSource* src = source.Get();
-        auto handler = Callback<OptionChangedHandler>(
-            [src](OptDetails::IPrintTaskOptionDetails*, OptDetails::IPrintTaskOptionChangedEventArgs*) -> HRESULT {
-                src->InvalidatePreview();
+        ComPtr<PrintDocumentSource> retainedSource = source;
+        auto handler =
+            Callback<OptionChangedHandler>([retainedSource](OptDetails::IPrintTaskOptionDetails*,
+                                                            OptDetails::IPrintTaskOptionChangedEventArgs*) -> HRESULT {
+                retainedSource->InvalidatePreview();
                 return S_OK;
             });
         if (!handler) {
             return E_OUTOFMEMORY;
+        }
+        if (optionDetails && optionToken.value) {
+            optionDetails->remove_OptionChanged(optionToken);
+            optionToken.value = 0;
         }
         optionDetails = details;
         return details->add_OptionChanged(handler.Get(), &optionToken);
@@ -1185,6 +1190,7 @@ class Win11PrintSession {
     }
 
     HRESULT Show(MainWindow* win) {
+        u64 lifetimeId = win->lifetimeId;
         ComPtr<__FIAsyncOperation_1_boolean> operation;
         HRESULT hr = interop->ShowPrintUIForWindowAsync(hwnd, IID_PPV_ARGS(&operation));
         logf("Win11 print: ShowPrintUIForWindowAsync result=0x%08x operation=%p\n", (uint)hr, operation.Get());
@@ -1199,7 +1205,7 @@ class Win11PrintSession {
         // completes with false (or fails) when the host process couldn't put the
         // dialog up, which is otherwise silent -- printing just does nothing
         auto completed = Callback<__FIAsyncOperationCompletedHandler_1_boolean>(
-            [win](__FIAsyncOperation_1_boolean* op, Foundation::AsyncStatus status) -> HRESULT {
+            [win, lifetimeId](__FIAsyncOperation_1_boolean* op, Foundation::AsyncStatus status) -> HRESULT {
                 boolean shown = false;
                 HRESULT opHr = op->GetResults(&shown);
                 logf("Win11 print: ShowPrintUI done status=%d shown=%d hr=0x%08x\n", (int)status, (int)shown,
@@ -1208,7 +1214,7 @@ class Win11PrintSession {
                     return S_OK;
                 }
                 gWin11PrintUnavailable = true;
-                PostForWindow(win, PrintCurrentFileDeferred, "Win11PrintFallback");
+                PostForWindow(win, lifetimeId, PrintCurrentFileDeferred, "Win11PrintFallback");
                 return S_OK;
             });
         if (!completed) {

@@ -170,7 +170,7 @@ static void FinishSavePathDialog(Str path) {
         args->onDone.Call(args);
 #if OS_WASM
         // a file in MEMFS is not a file the user has; hand it to the browser
-        if (len(path) > 0) {
+        if (len(path) > 0 && !args->pickOnly) {
             WasmDownloadFile(path);
         }
 #endif
@@ -433,8 +433,10 @@ gp::El* SavePathDialogBuild(MainWindow* win, gp::Ctx* cx) {
     if (!OS_WASM) {
         AddDirBrowser(cx, th, body);
     }
-    body->Child(
-        gpc::Input::New(cx, GStrL("save-name"), gSave.nameEdit)->WithSize(gp::UiSize::Small)->W(gp::kFill)->IntoEl());
+    body->Child(EditStyle(
+        cx,
+        gpc::Input::New(cx, GStrL("save-name"), gSave.nameEdit)->WithSize(gp::UiSize::Small)->W(gp::kFill)->IntoEl(),
+        gSave.nameEdit, EditLook::Frame));
     if (gSave.confirmingOverwrite) {
         TempStr msg = fmt(Tr("File %s already exists. Overwrite?").s, path::GetBaseNameTemp(gSave.pendingPath));
         body->Child(gp::TextEl(cx->a, GpuiDup(cx->a, msg))->Font(13)->Fg(th.danger)->Wrap());

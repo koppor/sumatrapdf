@@ -3,13 +3,17 @@
 
 // --- shared by MenuCommon.cpp and each app's Menu.cpp ---
 
+struct MenuDef;
+struct AppCommandCtx;
+
+bool HideContextMenuEntry(const MenuDef* menu, const MenuDef& item, const AppCommandCtx& ctx);
 bool ShowDebugMenu();
 struct FileHistoryEntry {
     Str path;
     int cmdId;
 };
 void SetFileHistoryCmdIds(Vec<FileHistoryEntry>& files);
-TempStr CleanupURLForClipbardCopyTemp(Str s);
+TempStr CleanupURLForClipboardCopyTemp(Str s);
 
 // the fixed entries of the zoom menu
 struct ZoomMenuId {

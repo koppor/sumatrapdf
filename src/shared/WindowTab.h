@@ -4,6 +4,7 @@
 struct AIChatAPIRequest;
 struct SelectionOnPage;
 struct MainWindow;
+struct PushedCitation;
 struct DocController;
 struct DisplayModel;
 struct ChmModel;
@@ -108,6 +109,7 @@ struct WindowTab {
         HexView,   // filePath's bytes (CmdViewAsHex)
     };
     MainWindow* win = nullptr;
+    u64 lifetimeId = 0;
     DocController* ctrl = nullptr;
     HexView* hex = nullptr;
     u64 loadStartedAt = 0;
@@ -135,6 +137,8 @@ struct WindowTab {
     i64 autoReloadSize = -1;
     u64 autoReloadStartMs = 0;
     FILETIME autoReloadModTime{};
+    // an async auto-reload's engine load is running on a background thread
+    bool autoReloadInFlight = false;
 #if defined(SUMATRA_NG)
     Countdown autoReload;
 #endif
@@ -227,6 +231,17 @@ struct WindowTab {
     // Skip the next file-watcher auto-reload (e.g. after we save annotations
     // and already call ReloadDocument ourselves). Consumed by kAutoReloadTimerID.
     bool ignoreNextAutoReload = false;
+    // In-text citation markers painted as colored dots on the source page.
+    // Populated by the Ctrl+J push UI task on a successful add (and by the
+    // future page-scan flow on a positive existence-check); read by Canvas
+    // WM_PAINT. Pointer-owned so callers can null-check cheaply; allocated
+    // lazily on first push to avoid a Vec for every tab that never sees a
+    // citation push.
+    Vec<PushedCitation>* pushedCitations = nullptr;
+    // pushedCitations restored from disk for this document (lazy, first paint)
+    bool pushedCitationsLoaded = false;
+    // pages already auto-scanned for bibliography entries (JabRef existence)
+    Vec<int> bibScanPages;
     // follow the spoken word while reading; disabled when the user scrolls away
     bool readAloudAutoScroll = false;
     AutoScroll autoScroll;
@@ -274,3 +289,15 @@ bool IsEpubDoc(WindowTab* tab);
 bool IsMupdfNonPdfDoc(WindowTab* tab);
 bool IsCajDoc(WindowTab* tab);
 TempStr LoadingMessageTemp(WindowTab* tab);
+
+enum class AutoReloadTrigger {
+    TabFocus,
+    Timer,
+    TimerInMenu,
+};
+enum class AutoReloadAction {
+    Nothing,
+    Retry,
+    Reload,
+};
+AutoReloadAction DecideAutoReload(WindowTab* tab, AutoReloadTrigger trigger);

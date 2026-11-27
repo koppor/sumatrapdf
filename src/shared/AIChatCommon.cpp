@@ -10,6 +10,7 @@
 
 #include "base/CmdLineArgs.h"
 #include "base/DirScan.h"
+#include "base/Dict.h"
 #include "base/File.h"
 #include "base/UITask.h"
 #if OS_WIN
@@ -88,37 +89,6 @@ bool IsAIChatSupportedForTab(WindowTab* tab) {
     return IsAIChatSupportedForFile(tab->filePath, tab->GetEngineType());
 }
 
-TempStr AIChatJsEscapeTemp(Str s) {
-    if (len(s) == 0) {
-        return str::DupTemp(StrL(""));
-    }
-    str::Builder buf;
-    for (int i = 0; i < s.len; i++) {
-        char c = s.s[i];
-        switch (c) {
-            case '\\':
-                buf.Append(StrL("\\\\"));
-                break;
-            case '\'':
-                buf.Append(StrL("\\'"));
-                break;
-            case '\n':
-                buf.Append(StrL("\\n"));
-                break;
-            case '\r':
-                buf.Append(StrL("\\r"));
-                break;
-            case '\t':
-                buf.Append(StrL("\\t"));
-                break;
-            default:
-                buf.AppendChar(c);
-                break;
-        }
-    }
-    return ToStrTemp(buf);
-}
-
 TempStr AIChatJsonStrTemp(Str json, Str key) {
     TempStr pattern = fmt("\"%s\":\"", key);
     Str rest;
@@ -163,15 +133,6 @@ MainWindow* AIChatFindMainWindowByFrame(HWND hwndFrame) {
 }
 
 #endif
-
-TempStr AIChatHomeDirTemp() {
-#if OS_WIN
-    return GetSpecialFolderTemp(CSIDL_PROFILE);
-#else
-    const char* home = getenv("HOME");
-    return str::DupTemp(Str((char*)(home && *home ? home : "")));
-#endif
-}
 
 AIChatJsonlReader::AIChatJsonlReader(Str path) {
     data = file::ReadFile(path);
@@ -241,13 +202,75 @@ void AIChatCollectJsonlSessions(Str sessionDir, Str project, Vec<AIChatSessionIn
         if (duplicate) {
             continue;
         }
+        i64 mtime = AIChatFileTimeToMs(de->modificationTime);
+        TempStr display;
+        if (!AIChatFileCacheGet(de->filePath, de->size, mtime, &display)) {
+            Str desc = AIChatSessionDescription(de->filePath);
+            AIChatFileCacheSet(de->filePath, de->size, mtime, desc);
+            display = str::DupTemp(desc);
+            str::Free(desc);
+        }
         AIChatSessionInfo session;
         session.sessionId = str::Dup(sessionId);
-        session.display = AIChatSessionDescription(de->filePath);
+        session.display = str::Dup(display);
         session.project = str::Dup(project);
-        session.timestamp = AIChatFileTimeToMs(de->modificationTime);
+        session.timestamp = mtime;
         VecAppend(sessions, session);
     }
+}
+
+// a value parsed out of a session file, kept while the file's size and mtime
+// hold: the session list is re-read on every tab switch
+struct AIChatFileCacheEntry {
+    i64 size = 0;
+    i64 mtime = 0;
+    Str value; // owned
+};
+
+struct AIChatFileCache {
+    Mutex mu;
+    dict::StrToInt idx{256}; // path -> index in entries
+    Vec<AIChatFileCacheEntry> entries;
+    ~AIChatFileCache() {
+        for (AIChatFileCacheEntry& e : entries) {
+            str::Free(e.value);
+        }
+    }
+};
+
+static AIChatFileCache gAIChatFileCache;
+
+bool AIChatFileCacheGet(Str path, i64 size, i64 mtime, TempStr* valueOut) {
+    AIChatFileCache& c = gAIChatFileCache;
+    ScopedMutex lock(&c.mu);
+    int idx = -1;
+    if (!c.idx.Get(path, &idx)) {
+        return false;
+    }
+    AIChatFileCacheEntry& e = c.entries[idx];
+    if (e.size != size || e.mtime != mtime) {
+        return false;
+    }
+    *valueOut = str::DupTemp(e.value);
+    return true;
+}
+
+void AIChatFileCacheSet(Str path, i64 size, i64 mtime, Str value) {
+    if (len(path) == 0) {
+        return;
+    }
+    AIChatFileCache& c = gAIChatFileCache;
+    ScopedMutex lock(&c.mu);
+    int idx = len(c.entries);
+    if (c.idx.Insert(path, idx, &idx)) {
+        VecAppend(c.entries, AIChatFileCacheEntry{});
+    } else {
+        str::Free(c.entries[idx].value);
+    }
+    AIChatFileCacheEntry& e = c.entries[idx];
+    e.size = size;
+    e.mtime = mtime;
+    e.value = str::Dup(value);
 }
 
 static TempStr AIChatProjectDirTemp(Str home, Str encodedDir, Str root) {
@@ -255,7 +278,7 @@ static TempStr AIChatProjectDirTemp(Str home, Str encodedDir, Str root) {
 }
 
 void AIChatCollectProjectSessions(Str dir, const Str* roots, int rootCount, Vec<AIChatSessionInfo>& sessions) {
-    TempStr home = AIChatHomeDirTemp();
+    TempStr home = GetHomeDirTemp();
     if (len(home) == 0) {
         return;
     }
@@ -267,7 +290,7 @@ void AIChatCollectProjectSessions(Str dir, const Str* roots, int rootCount, Vec<
 }
 
 TempStr AIChatFindProjectSessionTemp(Str dir, Str sessionId, const Str* roots, int rootCount) {
-    TempStr home = AIChatHomeDirTemp();
+    TempStr home = GetHomeDirTemp();
     if (len(home) == 0) {
         return {};
     }
@@ -307,11 +330,7 @@ TempStr AIChatDebugGetTemp() {
 static TempStr LocalTimeStampTemp() {
     time_t t = time(nullptr);
     struct tm lt{};
-#if OS_WIN
-    localtime_s(&lt, &t);
-#else
-    localtime_r(&t, &lt);
-#endif
+    LocalTime(t, &lt);
     return fmt("%04d-%02d-%02d %02d:%02d:%02d", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min,
                lt.tm_sec);
 }
@@ -1029,3 +1048,45 @@ void AIChatWaitForTabProcessesToFinish(MainWindow* win, bool (*tabHasRunningProc
     }
     uitask::DrainQueue();
 }
+
+#if OS_WIN
+// Collects the process's output until it exits and the pipe is drained. A
+// child (or a grandchild) can keep the pipe open, so a plain read to the end
+// could block forever. false if it's still running after timeoutMs. Closes the pipe.
+bool AIChatReadUntilExit(void* hReadPipe, void* hProcess, int timeoutMs, str::Builder& out) {
+    HANDLE pipe = (HANDLE)hReadPipe;
+    ULONGLONG deadline = GetTickCount64() + (ULONGLONG)timeoutMs;
+    bool exited = false;
+    bool ok = true;
+    for (;;) {
+        DWORD available = 0;
+        if (pipe && !PeekNamedPipe(pipe, nullptr, 0, nullptr, &available, nullptr)) {
+            // every writer closed its end
+            CloseHandle(pipe);
+            pipe = nullptr;
+        }
+        if (available > 0) {
+            char buf[4096];
+            DWORD nRead = 0;
+            DWORD toRead = available < sizeof(buf) ? available : (DWORD)sizeof(buf);
+            if (ReadFile(pipe, buf, toRead, &nRead, nullptr) && nRead > 0) {
+                out.Append(Str(buf, (int)nRead));
+                continue;
+            }
+        }
+        // one more pass after the exit drains what it wrote before exiting
+        if (exited) {
+            break;
+        }
+        if (GetTickCount64() >= deadline) {
+            ok = false;
+            break;
+        }
+        exited = WaitForSingleObject((HANDLE)hProcess, 10) == WAIT_OBJECT_0;
+    }
+    if (pipe) {
+        CloseHandle(pipe);
+    }
+    return ok;
+}
+#endif

@@ -152,8 +152,8 @@ bool DisplayModel::HasPageLabels() const {
     return engine->hasPageLabels;
 }
 
-TempStr DisplayModel::GetPageLabeTemp(int pageNo) const {
-    return engine->GetPageLabeTemp(pageNo);
+TempStr DisplayModel::GetPageLabelTemp(int pageNo) const {
+    return engine->GetPageLabelTemp(pageNo);
 }
 
 int DisplayModel::GetPageByLabel(Str label) const {
@@ -1281,10 +1281,18 @@ static void RememberStableNavPointCandidateAfterViewChange(DisplayModel* dm, con
     nav.hasPending = true;
 }
 
+// Takes ownership of engine, including when it cannot be displayed.
+DisplayModel* DisplayModel::Create(EngineBase* engine, DocControllerCallback* cb) {
+    if (!engine || engine->PageCount() <= 0 || !cb) {
+        SafeEngineRelease(&engine);
+        return nullptr;
+    }
+    return new DisplayModel(engine, cb);
+}
+
 // must call SetInitialViewSettings() after creation
 DisplayModel::DisplayModel(EngineBase* engine, DocControllerCallback* cb) : DocController(cb) {
     this->engine = engine;
-    ReportIf(!engine || engine->PageCount() <= 0);
     engineType = engine->kind;
     VecAppend(gLiveDisplayModels, this);
 
@@ -1485,10 +1493,9 @@ void DisplayModel::UpdateEstimatedMediaBox() {
 }
 
 PageInfo* DisplayModel::GetPageInfo(int pageNo) const {
-    if (!ValidPageNo(pageNo)) {
+    if (!pagesInfo || !ValidPageNo(pageNo)) {
         return nullptr;
     }
-    ReportIf(!pagesInfo);
     return &pagesInfo[pageNo - 1];
 }
 
@@ -1519,7 +1526,11 @@ void DisplayModel::SetInitialViewSettings(DisplayMode newDisplayMode, int newSta
         // would make dpiFactor and therefore zoomReal negative
         screenDPI = 96;
     }
-    dpiFactor = 1.0f * (float)screenDPI / engine->fileDPI;
+    float fileDPI = engine->fileDPI;
+    if (!(fileDPI > 0) || !isfinite(fileDPI)) {
+        fileDPI = 96.f;
+    }
+    dpiFactor = (float)screenDPI / fileDPI;
     // pagesInfo isn't built yet, so ValidPageNo() (which reads pageCount from
     // the snapshot) would always say no; ask the engine directly
     if (newStartPage >= 1 && newStartPage <= engine->PageCount()) {
@@ -2551,21 +2562,22 @@ void DisplayModel::RecalcVisibleParts() const {
         return;
     }
 
-    DocumentLayout layout;
-    layout.Reset(PageCount());
-    layout.viewPort = viewPort;
-    for (int pageNo = 1; pageNo <= PageCount(); ++pageNo) {
-        DocumentLayoutPage* layoutPage = layout.GetPage(pageNo);
+    int count = PageCount();
+    for (int pageNo = 1; pageNo <= count; ++pageNo) {
         PageInfo* pageInfo = GetPageInfo(pageNo);
-        if (!layoutPage || !pageInfo) {
+        if (!pageInfo) {
             continue;
         }
-        layoutPage->pos = pageInfo->pos;
-        layoutPage->isShown = pageInfo->isShown;
-        layoutPage->zoomReal = pageInfo->zoomReal;
+        Rect pageRect = pageInfo->pos;
+        Rect visiblePart = pageRect.Intersect(viewPort);
+        pageInfo->visibleRatio = 0;
+        if (!visiblePart.IsEmpty() && !pageRect.IsEmpty()) {
+            pageInfo->visibleRatio =
+                1.0f * (float)visiblePart.dx * (float)visiblePart.dy / ((float)pageRect.dx * (float)pageRect.dy);
+        }
+        pageInfo->pageOnScreen = pageRect;
+        pageInfo->pageOnScreen.Offset(-viewPort.x, -viewPort.y);
     }
-    layout.RecalcVisibleParts();
-    CopyDocumentLayoutToPageInfo(this, layout);
 }
 
 int DisplayModel::GetPageNoByPoint(Point pt) {
@@ -3065,9 +3077,21 @@ void DisplayModel::SetDisplayMode(DisplayMode newDisplayMode, bool keepContinuou
     GoToPage(currPageNo, 0);
 }
 
+// Fullscreen.DisplayMode, when it names a layout. "automatic" names none: a
+// model's display mode is always a resolved one
+static bool FullscreenDisplayModePref(DisplayMode* modeOut) {
+    DisplayMode mode{};
+    if (!TryParseDisplayMode(gSettings->fullscreen.displayMode, &mode) || mode == DisplayMode::Automatic) {
+        return false;
+    }
+    *modeOut = mode;
+    return true;
+}
+
 void DisplayModel::SetInPresentation(bool enable) {
-    // entering twice would save the presentation layout as the one to restore
-    if (enable && inPresentation) {
+    // entering twice would save the presentation layout as the one to restore;
+    // exiting when not in presentation would restore uninitialized state
+    if (enable == inPresentation) {
         return;
     }
     inPresentation = enable;
@@ -3078,7 +3102,7 @@ void DisplayModel::SetInPresentation(bool enable) {
         windowMargin.top = windowMargin.right = windowMargin.bottom = windowMargin.left = 0;
         // Fullscreen.DisplayMode overrides the built-in single-page layout
         DisplayMode mode = DisplayMode::SinglePage;
-        TryParseDisplayMode(gSettings->fullscreen.displayMode, &mode);
+        FullscreenDisplayModePref(&mode);
         SetDisplayMode(mode);
         SetZoomVirtual(kZoomFitPage, nullptr);
         return;
@@ -3096,7 +3120,7 @@ void DisplayModel::SetInPresentation(bool enable) {
 // Presentation uses SetInPresentation instead.
 void DisplayModel::ApplyFullscreenDisplayMode(bool enable) {
     DisplayMode wanted{};
-    bool havePref = TryParseDisplayMode(gSettings->fullscreen.displayMode, &wanted);
+    bool havePref = FullscreenDisplayModePref(&wanted);
     if (enable) {
         if (!havePref) {
             return;

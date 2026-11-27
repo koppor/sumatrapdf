@@ -415,6 +415,7 @@ const commandsRaw = [
     "CmdImagesToPdf", "Make PDF From Images...",
     "CmdExportAnnotations", "Export Annotations...",
     "CmdLocateFile", "Locate File...",
+    "CmdRefHoverPushToJabRef", "Push Reference to JabRef",
 ];
 
 // removed slots are dropped: nothing outside the generators should see them

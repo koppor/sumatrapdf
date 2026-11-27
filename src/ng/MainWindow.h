@@ -205,6 +205,7 @@ struct MainWindow {
     MainWindow(const MainWindow&) = delete;
     MainWindow& operator=(const MainWindow&) = delete;
     ~MainWindow();
+    u64 lifetimeId = 0;
 
     bool IsCurrentTabAbout() const;
     bool IsDocLoaded() const;
@@ -412,8 +413,6 @@ struct MainWindow {
     bool findMatchWholeWord = false;
     // find-as-you-type is debounced: orig arms a WM_TIMER on hwndFrame, here
     // the shell's tick counts this down and fires the deferred search.
-    // findDebouncePending mirrors findDebounce.IsArmed(): shared code reads it
-    bool findDebouncePending = false;
     Countdown findDebounce;
     // the current find session already recorded its starting view
     bool searchStartMarked = false;
@@ -577,6 +576,9 @@ struct MainWindow {
     int contextMenuHighlightPageNo = 0;
     Point contextMenuPt;
     bool contextMenuPtValid = false;
+    // contextMenuPt on its page: the view can scroll while the menu is up
+    int contextMenuPageNo = 0;
+    PointF contextMenuPagePt;
 
     bool showSelection = false;
     // -quicklook: a chrome-less always-on-top preview window (Explorer Space)
@@ -644,6 +646,7 @@ bool IsMainWindowValidAndNotClosing(MainWindow*);
 bool IsCurrentTab(MainWindow* win, WindowTab* tab);
 bool IsWindowTabValid(WindowTab*);
 void PostForWindow(MainWindow*, void (*fn)(MainWindow*), Kind kind);
+void PostForWindow(MainWindow*, u64 lifetimeId, void (*fn)(MainWindow*), Kind kind);
 void PostForTab(WindowTab*, void (*fn)(WindowTab*), Kind kind);
 extern Vec<MainWindow*> gWindows;
 void CleanRemoteDestNameInPlace(Str& destName);

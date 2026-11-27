@@ -116,6 +116,7 @@
 #include "ReadAloud.h"
 #include "ReadingAutoScroll.h"
 #include "ReadingBar.h"
+#include "OverlayScrollbar.h"
 #include "SumatraControl.h"
 #include "SumatraControlCommon.h"
 #include "StripGroups.h"
@@ -130,7 +131,7 @@
 // action: "add" | "goto" | "goto-fav" | "next" | "prev" | "page"
 // Adds a favorite without the name dialog.
 void AddFavoriteSilent(MainWindow* win, int pageNo) {
-    TempStr label = win->ctrl->GetPageLabeTemp(pageNo);
+    TempStr label = win->ctrl->GetPageLabelTemp(pageNo);
     ApplyAddFavorite(win, win->ctrl->GetFilePath(), pageNo, label, {});
 }
 
@@ -391,6 +392,12 @@ static TempStr TripleClickLineResultTemp(Str pdfPath, Str clickWord, Str expecte
     return fmt("OK selected=%s\n", selected);
 }
 
+// The text engine answers before the first layout. Tests retry NOTREADY.
+static bool PageLaidOut(DisplayModel* dm, int pageNo) {
+    PageInfo* pi = dm ? dm->GetPageInfo(pageNo) : nullptr;
+    return pi && pi->isShown && !pi->pageOnScreen.IsEmpty();
+}
+
 // tests/issue-5881.ts: a click on empty page drops the text selection
 TempStr ClickClearsSelectionResultTemp(Str word, int* exitCodeOut) {
     str::Builder out;
@@ -418,6 +425,9 @@ TempStr ClickClearsSelectionResultTemp(Str word, int* exitCodeOut) {
     double wx = 0, wy = 0;
     if (!FindWordCenter(dm->GetEngine(), pageNo, word, &wx, &wy)) {
         return fail(StrL("ERROR word-not-found"));
+    }
+    if (!PageLaidOut(dm, pageNo)) {
+        return fail(StrL("NOTREADY no-layout"));
     }
 
     WindowTab* tab = win->CurrentTab();
@@ -480,6 +490,9 @@ TempStr RectSelectionDragResultTemp(Str word, int* exitCodeOut) {
     double wx = 0, wy = 0;
     if (!FindWordCenter(dm->GetEngine(), pageNo, word, &wx, &wy)) {
         return fail(StrL("ERROR word-not-found"));
+    }
+    if (!PageLaidOut(dm, pageNo)) {
+        return fail(StrL("NOTREADY no-layout"));
     }
     Point center = dm->CvtToScreen(pageNo, PointF((float)wx, (float)wy));
 
@@ -577,219 +590,6 @@ TempStr ResolveUnsavedChangesResultTemp(Str action, Str path, int* exitCodeOut) 
     return ToStrTemp(out);
 }
 
-enum class ControlCmd : u16 {
-    // [word]: drag-selects word on page 1 from its first glyph's outer edge to its last's
-    TestSelectWordEdges = 153,
-    Ping = 1,
-    Quit = 2,
-    TestSynctex = 10,
-    TestSearch = 11,
-    TestDest = 12,
-    TestNamedDest = 13,
-    TestChm = 14,
-    TestSelectionTranslate = 15,
-    TestTripleClickLineSelect = 16,
-    TestContextMenuSelection = 17,
-    TestGoToFindMatch = 18,
-    // IDs 19-21 unused (reserved on the -dbg-control wire protocol; do not renumber).
-    // Assign new test commands starting at 23.
-    TestInverseSearch = 22,
-    TestImageResizeArrowKey = 23,
-    TestFindResultPageColumnClip = 24,
-    TestScrollToLink = 26,
-    TestPageInfoOverlay = 28,
-    TestGetToc = 29,
-    TestPageLinks = 30,
-    TestWindowStateDuringLoad = 31,
-    TestTocNavigate = 32,
-    TestMarkdownTocNavigate = 33,
-    TestFavoriteNav = 34,
-    TestToolbarButtons = 35,
-    TestKeyboardLinkFollow = 36,
-    TestFindResultsOrder = 37,
-    TestClickClearsSelection = 38,
-    TestRectSelectionDrag = 39,
-    TestSelectTextKeyboard = 40,
-    TestAIChat = 41,
-    TestAIChatReplay = 42,
-    TestMarkdownFollowLink = 43,
-    TestHomeListRows = 44,
-    TestPageComments = 45,
-    TestAdvSettingsRows = 46,
-    TestDestZoomNav = 47,
-    TestAnnotEditorLayout = 48,
-    TestDisplayMode = 49,
-    TestSidebarLayout = 50,
-    TestCadEnhanceColors = 51,
-    TestFindPageRange = 52,
-    TestDocumentFontList = 53,
-    WaitRenderIdle = 54,
-    SetNotificationsEnabled = 55,
-    TestHomeSelection = 56,
-    TestImageRenderEdges = 57,
-    TestInsertImage = 58,
-    TestRenderPageColors = 59,
-    TestListSigningCerts = 60,
-    TestSignDocument = 61,
-    TestGetPolicies = 62,
-    TestPageBoxes = 63,
-    TestDocumentSignatures = 64,
-    TestCommandPalette = 65,
-    TestFindHistory = 66,
-    TestImageResizeEdges = 67,
-    TestLinkDestHighlight = 68,
-    TestConvertToImages = 69,
-    TestLayout = 70,
-    TestDpi = 71,
-    TestSelectionVars = 72,
-    TestSelectionToolbar = 73,
-    TestMarkupAnnots = 74,
-    TestCmykImageSave = 75,
-    TestFindWindowContents = 77,
-    TestFindUiState = 78,
-    TestRenderViewPrint = 79,
-    TestReadAloudPlaybackBar = 80,
-    TestRotatedTextMouseDrag = 81,
-    TestChapterInfo = 82,
-    TestGoToLocation = 83,
-    TestTocSidebarNav = 84,
-    TestSelectionSurvivesRenumber = 85,
-    TestConvertToPdf = 86,
-    TestInvokeCommand = 87,
-    TestCurrentTab = 88,
-    TestCommandVisibility = 89,
-    TestExtractPages = 90,
-    TestAnnotFilter = 91,
-    TestCanvasFlags = 92,
-    CrashMe = 93,
-    TestDocumentProperties = 94,
-    TestHiddenTabGoToPage = 95,
-    TestSaveSelectionAsImage = 96,
-    TestReadingAutoScroll = 97,
-    TestReadingBar = 98,
-    TestSeedTextSelection = 99,
-    TestTtsEngineCrash = 100,
-    TestTtsPumpOnSpeak = 107,
-    TestRenderSelections = 108,
-    TestToggleFormButton = 109,
-    ResolveUnsavedChanges = 110,
-    // orig's. 105 is TestSaveFileAs.
-    TestImageOrientation = 106,
-    // orig's
-    StopPerfLog = 102,
-    // orig's. The session restore the tests wait on.
-    WaitSessionRestored = 103,
-    TestNavFiles = 104,
-    TestRefHover = 111,
-    // orig's. Page widths and bookmark targets.
-    TestPageInfo = 112,
-    // orig's. The thumbnail pane: hwnd, highlighted page, cell rects.
-    TestSidebarThumbnails = 113,
-    // orig's. Maximized, and the non-client strips WM_NCPAINT would fill.
-    TestFrameNcStrips = 114,
-    TestMergePdf = 115,
-    // orig's. A wheel while CloseWindow is in progress.
-    TestWheelWhileClosing = 116,
-    TestMainMenu = 117,
-    // 119 / 120: retired (StartPerfLog / StopPerfLog before they moved to orig's ids)
-    // ng: not orig's; gpui input with modifiers / hover / a held button, and
-    // one line of shell state to check it against
-    TestInput = 121,
-    TestUiState = 122,
-    // ng: not one of orig's; the tool windows (gui/ToolWindow.h) and input
-    // into one of them
-    TestToolWindow = 125,
-    // ng: the page context menu at a canvas point, same rows as TestMainMenu
-    TestContextMenuAt = 127,
-    // ng: DDE execute grammar ([GotoPageWord], [Open], ...). Orig receives
-    // these as WM_COPYDATA; macOS has no such message.
-    TestDdeExecute = 129,
-    // the installer's KillProcWithId on a process id (Windows only)
-    TestQuitProcess = 130,
-    // Rename File without its dialog
-    TestRenameFile = 131,
-    TestChapterLayoutHold = 133,
-    // ng: open a file the way a drop or a Finder open does
-    TestOpenFiles = 132,
-    // the path the next Save As takes, without its dialog
-    TestSaveFileName = 134,
-    // places the signature being placed at a canvas point (pixels), as a click does
-    TestPlaceSignature = 135,
-    // [brightness, contrast] applied to the current file as the Brightness /
-    // Contrast dialog's OK does; returns the current values
-    TestPageAdjust = 138,
-    // the current document: from a temporary folder?, its notification, its path
-    TestTemporaryFile = 140,
-    // [destPath, pageSizeIdx, fontSize]: Convert EPUB to PDF without its dialog
-    TestConvertEpubToPdf = 142,
-    // [path, pageNo]: image element rects of a page
-    TestPageImages = 143,
-    // the first window's page and scroll position
-    TestScrollState = 144,
-    TestDrawRectSelection = 145,
-    // the first window's tab widths, one "dx=<n> text=<title>" line per tab
-    // [panel | close | row <n> | open <n>]: the signature bar, the sidebar
-    // view, the mark and the dialog (SignatureUiStateTemp)
-    TestSignatureStatus = 148,
-    TestTabWidths = 149,
-    // [url, dir]: Open from URL as the dialog's Download starts it
-    TestOpenFromUrl = 150,
-    // [srcWin, tabIdx, dstWin]: move a tab as a drag does (-1 = new window);
-    // tabIdx < 0 only lists every window's tabs
-    TestMigrateTab = 151,
-    // [toggle <row> | show | colors]: the Layers pane's rows (see SidebarTestLayers)
-    TestLayers = 152,
-    // the word count notification's text
-    TestWordCount = 154,
-    // the page info tip's text
-    TestPageInfoText = 155,
-    // the page info bar: where it is, the canvas, its text
-    TestPageInfoBar = 156,
-    // the Show Selected Text notification's text
-    TestSelectedText = 157,
-    // the bookmarks tree's visible rows and their heights
-    TestTocRows = 158,
-    // [action, pageNo, x, y, length, unit]: drives the Measure tool
-    TestMeasurement = 159,
-    // [replace <path> | edit, pageNo, imageIdx]: an image embedded in a PDF
-    TestImageReplace = 160,
-    // ng: not one of orig's; the performance snapshot cmd/port-perf.ts reads
-    TestPerfStats = 161,
-    // ng: not one of orig's; the state of the six canvas overlays
-    TestOverlayState = 162,
-    // [definition]: does "CmdToggleX on" parse, and the command's on/off state
-    TestToggleCmd = 165,
-    // page 1 pixels a Clone() of the current document renders differently
-    TestCloneRender = 166,
-    // does the document have load errors, does the Errors notification show
-    TestDocErrors = 167,
-    // [pageNo, idx, value]: pick value in the idx-th combo / list box
-    TestSetFormChoice = 168,
-    // [action, a, b, c]: "drop" from to groupPos, "move" dir, "select" idx, or
-    // "" for the state; answers with the strip groups and tabs (StripGroupsStateTemp)
-    TestStripGroups = 169,
-    // ng only (macOS): [path, mode]: a PNG of the first window as drawn ("all": with its other windows)
-    TestCaptureWindow = 170,
-    // [ms]: every document open waits this long first, like a sleeping drive
-    TestLoadDelay = 171,
-    TestWindows = 172,
-    // [path, value]: sets a setting the way the palette's "= settings" rows do
-    TestSetSetting = 173,
-    // [action, word]: touch selection probe (TouchSelResultTemp)
-    TestTouchSel = 174,
-    // ["status"] or ["hooks", stallMs, delayMs, pathMatch, relistMs]: the
-    // content hashes of history files (ContentHashStatusTemp), or the test hooks
-    // of the hashing and of re-listing SumatraPDF Web files
-    TestContentHash = 175,
-    // [paths, a line each]: the files the next multi-file Open takes, without its dialog
-    TestOpenFileNames = 176,
-};
-
-static_assert((u16)ControlCmd::Quit == (u16)ControlFrameCmd::Quit);
-static_assert((u16)ControlCmd::WaitRenderIdle == (u16)ControlFrameCmd::WaitRenderIdle);
-static_assert((u16)ControlCmd::CrashMe == (u16)ControlFrameCmd::CrashMe);
-static_assert((u16)ControlCmd::WaitSessionRestored == (u16)ControlFrameCmd::WaitSessionRestored);
-
 bool ParseArg(PacketReader& r, ControlArg** argOut) {
     u16 typeRaw = 0;
     if (!r.ReadU16(typeRaw)) {
@@ -874,11 +674,7 @@ static MainWindow* FirstWindow() {
 // test. The title is last, as it may have spaces.
 static TempStr TestWindowsListTemp() {
     str::Builder out;
-#if OS_WIN || OS_WASM
-    int pid = 0;
-#else
-    int pid = (int)getpid();
-#endif
+    int pid = (int)GetCurrProcessId();
     for (MainWindow* w : gWindows) {
         if (!w || w->isBeingClosed) {
             continue;
@@ -1318,25 +1114,15 @@ TempStr ImageOrientationResultTemp(Str pdfPath, int pageNo, int* exitCodeOut) {
         SafeEngineRelease(&engine);
         return fail(StrL("ERROR no-image-element"));
     }
-    Pixmap* px = nullptr;
     Str origData = engine->GetImageDataForPageElement(imgEl);
     int dataLen = len(origData);
     str::Free(origData);
-#if OS_WIN
-    RenderedBitmap* bmp = engine->GetImageForPageElement(imgEl);
-    SafeEngineRelease(&engine);
-    if (!bmp) {
-        return fail(StrL("ERROR no-image"));
-    }
-    px = PixmapToBgra(PixmapFromRenderedBitmap(bmp));
-#else
-    px = EngineMupdfPageImagePixmap(engine, imgEl);
+    Pixmap* px = PageElementImagePixmap(engine, imgEl);
     SafeEngineRelease(&engine);
     if (!px) {
         return fail(StrL("ERROR no-image"));
     }
-#endif
-    if (!px || !px->data) {
+    if (!px->data) {
         FreePixmap(px);
         return fail(StrL("ERROR no-pixmap"));
     }
@@ -1538,9 +1324,7 @@ static TempStr DpiResultTemp(Str action, int* exitCodeOut) {
     };
 
     if (str::Eq(action, StrL("hidden"))) {
-        int prevX = dpiX;
-        int prevY = dpiY;
-        DpiSet(240, 240);
+        DpiScope dpiScope(240, 240);
         HWND hwnd = CreateWindowExW(0, L"STATIC", L"DPI test", WS_POPUP, 0, 0, 10, 10, nullptr, nullptr,
                                     GetModuleHandleW(nullptr), nullptr);
         int layoutDpi = DpiGet();
@@ -1549,7 +1333,6 @@ static TempStr DpiResultTemp(Str action, int* exitCodeOut) {
         if (hwnd) {
             DestroyWindow(hwnd);
         }
-        DpiSet(prevX, prevY);
         out.Append(fmt("layout=%d window=%d font=%d\n", layoutDpi, windowDpi, fontDy));
         return finish(layoutDpi == 240 && windowDpi == 240 && fontDy >= 24 ? 0 : 1);
     }
@@ -1559,7 +1342,7 @@ static TempStr DpiResultTemp(Str action, int* exitCodeOut) {
     if (str::StartsWith(action, StrL("override "))) {
         int pct = 0;
         str::Parse(Str(action.s + 9, len(action) - 9), "%d", &pct);
-        gDpiOverride = pct;
+        SetDpiOverride(pct);
         out.Append(fmt("override=%d\n", pct));
         return finish(0);
     }
@@ -2368,6 +2151,13 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestAIChatSessions: {
+            int exitCode = 0;
+            Str res = AIChatSessionsTestTemp(&exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         case ControlCmd::TestSaveFileName: {
 #if OS_WIN
             SetTestSaveFileName(StringArg(req, 0));
@@ -2997,6 +2787,7 @@ static void ExecuteControlRequest(ControlRequest* req) {
                            win->scrollV.nMax, win->scrollV.nPage));
             out.Append(fmt("scrollH pos=%d min=%d max=%d page=%d\n", win->scrollH.nPos, win->scrollH.nMin,
                            win->scrollH.nMax, win->scrollH.nPage));
+            out.Append(OverlayScrollbarFindMarkersReportTemp(win->overlayScrollV));
             DisplayModel* dm = win->AsFixed();
             if (dm) {
                 out.Append(
@@ -3260,7 +3051,9 @@ static void ExecuteControlRequest(ControlRequest* req) {
             IntArg(req, 1, y);
             // a frame point, as TestMarkupAnnots' screen= reports it
             Point pt = FramePointToCanvas(win, Point{x, y});
-            AppendTestResult(req, 0, ContextMenuAtPointResultTemp(win, pt.x, pt.y));
+            Str name = StringArg(req, 2);
+            int invoke = name ? GetCommandIdByName(name) : 0;
+            AppendTestResult(req, 0, ContextMenuAtPointResultTemp(win, pt.x, pt.y, invoke));
             break;
         }
 
@@ -3332,6 +3125,29 @@ static void ExecuteControlRequest(ControlRequest* req) {
             if (len(op) > 0) {
                 i32 arg = 0;
                 IntArg(req, 1, arg);
+                // notifications of the first window: 0 = count, 1 = show an ad-hoc one,
+                // 2 / 3 = show one of a test group tied to tab 0 / 1
+                if (str::Eq(op, StrL("notif"))) {
+                    MainWindow* win = FirstWindow();
+                    if (!win) {
+                        AppendTestResult(req, 2, StrL("NOTREADY no-window"));
+                        break;
+                    }
+                    static Kind kNotifTestGroup = "notifTestGroup";
+                    if (arg == 1) {
+                        ShowTemporaryNotification(win, StrL("ad-hoc"), 0);
+                    } else if (arg == 2 || arg == 3) {
+                        NotificationCreateArgs nargs;
+                        nargs.win = win;
+                        nargs.groupId = kNotifTestGroup;
+                        nargs.tab = win->GetTab(arg - 2);
+                        nargs.msg = StrL("grouped");
+                        nargs.plainText = true;
+                        ShowNotification(nargs);
+                    }
+                    AppendTestResult(req, 0, fmt("OK count=%d", NotificationCountForWindow(win)));
+                    break;
+                }
                 if (str::Eq(op, StrL("menubuilds"))) {
                     AppendTestResult(req, 0, fmt("OK builds=%d", MenuBuildCount()));
                     break;
@@ -3719,6 +3535,18 @@ static void ExecuteControlRequest(ControlRequest* req) {
             break;
         }
 
+        case ControlCmd::TestSaveFileAs: {
+            Str dstPath = StringArg(req, 0);
+            if (len(dstPath) == 0) {
+                AppendError(req, StrL("TestSaveFileAs expects string dstPath"));
+                break;
+            }
+            int exitCode = 0;
+            Str res = SaveFileAsResultTemp(dstPath, &exitCode);
+            AppendTestResult(req, exitCode, res);
+            break;
+        }
+
         default:
             // ng: orig answers the rest through SumatraTest.cpp and the win32
             // layout probes; neither is in this port (step 18)
@@ -3988,7 +3816,27 @@ void SumatraControlThread(ControlThreadArg* arg) {
             logf("poll() failed for control socket, errno=%d\n", errno);
             break;
         }
-        if ((fds[0].revents & POLLIN) != 0) {
+        // Only the connections present at poll() have readiness results.
+        for (int i = nConns - 1; i >= 0 && !stop; i--) {
+            short rev = fds[i + 1].revents;
+            if ((rev & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) == 0) {
+                continue;
+            }
+            bool quit = false;
+            bool keep = (rev & POLLIN) != 0 && HandleControlRequest(conns[i], &quit);
+            if (quit) {
+                stop = true;
+            }
+            if (keep && !stop) {
+                continue;
+            }
+            // The client reads the reply before it sees the close.
+            shutdown(conns[i], SHUT_WR);
+            close(conns[i]);
+            nConns--;
+            conns[i] = conns[nConns];
+        }
+        if (!stop && (fds[0].revents & POLLIN) != 0) {
             int conn = accept(listener, nullptr, nullptr);
             if (conn >= 0) {
                 if (nConns < kMaxConns) {
@@ -4000,30 +3848,6 @@ void SumatraControlThread(ControlThreadArg* arg) {
                 logf("accept() failed for control socket, errno=%d\n", errno);
                 break;
             }
-        }
-        for (int i = 0; i < nConns;) {
-            short rev = fds[i + 1].revents;
-            if ((rev & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) == 0) {
-                i++;
-                continue;
-            }
-            bool quit = false;
-            bool keep = (rev & POLLIN) != 0 && HandleControlRequest(conns[i], &quit);
-            if (quit) {
-                stop = true;
-            }
-            if (keep && !stop) {
-                i++;
-                continue;
-            }
-            // the client reads the reply (to Quit, too) before it sees the close.
-            // fds[] still describes this slot, so the swapped connection waits
-            // for the next poll.
-            shutdown(conns[i], SHUT_WR);
-            close(conns[i]);
-            nConns--;
-            conns[i] = conns[nConns];
-            i++;
         }
     }
     for (int i = 0; i < nConns; i++) {

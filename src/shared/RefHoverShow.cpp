@@ -16,7 +16,7 @@ enum class MissingEntry {
 };
 
 // the page's text with watermark glyphs dropped and glyphs snapped to lines
-static TempWStr RegionTextTemp(EngineBase* engine, int pageNo, Rect** coordsOut) {
+TempWStr RefHoverPageTextTemp(EngineBase* engine, int pageNo, Rect** coordsOut) {
     Rect* coords = nullptr;
     int textLen = 0;
     Str textUtf8 = engine->GetTextForPage(pageNo, &textLen, &coords);
@@ -37,20 +37,22 @@ static TempWStr RegionTextTemp(EngineBase* engine, int pageNo, Rect** coordsOut)
 static RectF DetectNoteRegion(EngineBase* engine, int pageNo, RectF mediabox, float destY) {
     AutoArenaSavepoint tempScope;
     Rect* coords = nullptr;
-    TempWStr text = RegionTextTemp(engine, pageNo, &coords);
+    TempWStr text = RefHoverPageTextTemp(engine, pageNo, &coords);
     return NoteBox(mediabox, destY, text, coords);
 }
 
 static RectF DetectRegion(EngineBase* engine, int pageNo, RectF mediabox, float destX, float destY, RectF* continuation,
-                          MissingEntry missingEntry) {
+                          MissingEntry missingEntry, bool* isBibEntry, EntryPageWrap* pageWrap) {
+    *isBibEntry = false;
+    *pageWrap = {};
     AutoArenaSavepoint tempScope;
 
     Rect* normCoords = nullptr;
-    TempWStr text = RegionTextTemp(engine, pageNo, &normCoords);
+    TempWStr text = RefHoverPageTextTemp(engine, pageNo, &normCoords);
 
     RectF region = DetectEquationBox(text, normCoords, mediabox, destX, destY);
     if (region.dx <= 0.f || region.dy <= 0.f) {
-        region = DetectEntryBox(text, normCoords, mediabox, destX, destY, continuation);
+        region = DetectEntryBox(text, normCoords, mediabox, destX, destY, continuation, isBibEntry, pageWrap);
     }
     if ((region.dx <= 0.f || region.dy <= 0.f) && missingEntry == MissingEntry::Landscape) {
         region = LandscapeBox(mediabox, destX, destY, text, normCoords);
@@ -64,6 +66,13 @@ void RefHoverOnTimer(RefHoverState* s, EngineBase* engine, float pageZoom) {
     if (!s || !engine || s->pending.destPage <= 0) {
         return;
     }
+#if !defined(SUMATRA_NG)
+    if (s->pending.bibProbe) {
+        s->pending.bibProbe = false;
+        RefHoverBibProbeOnTimer(s, engine);
+        return;
+    }
+#endif
     if (s->hitEngine != engine) {
         if (s->hitEngine) {
             s->hitEngine->Release();
@@ -95,17 +104,22 @@ void RefHoverOnTimer(RefHoverState* s, EngineBase* engine, float pageZoom) {
     }
 
     RectF region;
+    // Only set true when the destination is a fitted bibliography / glossary
+    // entry (DetectEntryBox path) — gates the JabRef push existence check.
+    bool isBibEntry = false;
     // Set when a bracket-style entry wraps across a 2-column page break (e.g.
     // "[63]"): a second crop, stitched below `region` in the delivered
     // bitmap. Empty (dx/dy <= 0) otherwise.
     RectF continuation{};
+    EntryPageWrap pageWrap;
     RectF noteRegion = s->pending.noteRef ? DetectNoteRegion(engine, destPage, mediabox, destY) : RectF{};
     if (noteRegion.dx > 0.f && noteRegion.dy > 0.f) {
         region = noteRegion;
     } else if (useLinkZoom) {
         region = RectF{0.f, destY, mediabox.dx, mediabox.dy - destY};
     } else {
-        region = DetectRegion(engine, destPage, mediabox, destX, destY, &continuation, MissingEntry::Empty);
+        region = DetectRegion(engine, destPage, mediabox, destX, destY, &continuation, MissingEntry::Empty, &isBibEntry,
+                              &pageWrap);
         bool regionEmpty = region.dx <= 0.f || region.dy <= 0.f;
         bool searchNext = regionEmpty || ShouldSearchNextPage(mediabox, destY);
         if (searchNext && !regionEmpty) {
@@ -126,11 +140,27 @@ void RefHoverOnTimer(RefHoverState* s, EngineBase* engine, float pageZoom) {
                 destY = nextY;
                 destX = std::max(destX, 0.f);
                 mediabox = engine->PageMediabox(destPage);
-                region = DetectRegion(engine, destPage, mediabox, destX, destY, &continuation, MissingEntry::Landscape);
+                region = DetectRegion(engine, destPage, mediabox, destX, destY, &continuation, MissingEntry::Landscape,
+                                      &isBibEntry, &pageWrap);
             }
         }
         if (regionEmpty && nextY < 0.f) {
-            region = DetectRegion(engine, destPage, mediabox, destX, destY, &continuation, MissingEntry::Landscape);
+            region = DetectRegion(engine, destPage, mediabox, destX, destY, &continuation, MissingEntry::Landscape,
+                                  &isBibEntry, &pageWrap);
+        }
+    }
+    // The entry ends its column with nothing below: look for its tail at the
+    // top of the next page's reference column and stitch it below the popup.
+    int continuationPageNo = 0;
+    if (isBibEntry && pageWrap.mayWrap && continuation.dx <= 0.f && destPage < engine->PageCount()) {
+        AutoArenaSavepoint tempScope;
+        Rect* nextCoords = nullptr;
+        TempWStr nextText = RefHoverPageTextTemp(engine, destPage + 1, &nextCoords);
+        RectF nextMediabox = engine->PageMediabox(destPage + 1);
+        RectF tail = FindPageWrapContinuation(nextText, nextCoords, nextMediabox, pageWrap.indentDx);
+        if (tail.dx > 0.f && tail.dy > 0.f) {
+            continuation = tail;
+            continuationPageNo = destPage + 1;
         }
     }
     bool hasContinuation = continuation.dx > 0.f && continuation.dy > 0.f;
@@ -197,6 +227,7 @@ void RefHoverOnTimer(RefHoverState* s, EngineBase* engine, float pageZoom) {
     req.region = region;
     if (hasContinuation) {
         req.continuationRegion = continuation;
+        req.continuationPageNo = continuationPageNo;
     }
     req.showPopup = true;
     req.screenPt = s->pending.screenPt;
@@ -206,4 +237,48 @@ void RefHoverOnTimer(RefHoverState* s, EngineBase* engine, float pageZoom) {
     req.srcPageRaw = s->pending.srcPage;
     req.srcRectRaw = s->pending.srcRect;
     RefHoverRequestRender(s, engine, req);
+
+    // JabRef push: capture the bib entry text and fire the existence check
+    // (lights the popup-corner badge) for the freshly-shown destination.
+#if !defined(SUMATRA_NG)
+    RefHoverCaptureEntryAndCheck(s, engine, destPage, region, isBibEntry, continuationPageNo, continuation);
+#endif
 }
+
+#if !defined(SUMATRA_NG)
+// Bib-probe timer: the cursor rests on plain bibliography text (no link, no
+// citation pattern). Detect the entry under it, light the corner badge via the
+// usual capture + existence check, and remember the rect so Ctrl+J and the
+// marker dot anchor at the entry itself. No popup — the entry is on screen.
+void RefHoverBibProbeOnTimer(RefHoverState* s, EngineBase* engine) {
+    int pageNo = s->pending.destPage;
+    float x = s->pending.destX;
+    float y = s->pending.destY;
+    s->pending.destPage = -1;
+
+    RectF mediabox = engine->PageMediabox(pageNo);
+    if (mediabox.dx <= 0.f || mediabox.dy <= 0.f) {
+        RefHoverClearBibHover(s, s->hwndCanvas);
+        return;
+    }
+    AutoArenaSavepoint tempScope;
+    Rect* coords = nullptr;
+    TempWStr text = RefHoverPageTextTemp(engine, pageNo, &coords);
+    bool isBibEntry = false;
+    RectF region = DetectEntryBoxAt(text, coords, mediabox, x, y, &isBibEntry);
+    if (!isBibEntry) {
+        RefHoverClearBibHover(s, s->hwndCanvas);
+        return;
+    }
+    if (s->bibHoverPage == pageNo && s->bibHoverRect == region) {
+        return; // same entry: badge already live, don't re-check
+    }
+
+    s->bibHoverPage = pageNo;
+    s->bibHoverRect = region;
+    s->pending.srcPage = pageNo;
+    s->pending.srcRect = region;
+    RefHoverCaptureEntryAndCheck(s, engine, pageNo, region, true);
+    InvalidateRect(s->hwndCanvas, nullptr, FALSE);
+}
+#endif

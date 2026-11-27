@@ -53,6 +53,7 @@
 #include "Menu.h"
 #include "uia/Provider.h"
 #include "SearchAndDDE.h"
+#include "SearchAndDDECommon.h"
 #include "SignatureUICommon.h"
 #include "SignatureUI.h"
 #include "Selection.h"
@@ -1215,6 +1216,11 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM key) {
 
             RefHoverOnCanvasMouseMove(win->refHover, win->hwndCanvas, win->ctrl, win->linkHandler, dm, x, y, el,
                                       srcPageNo, hoverDelayMs);
+            if (win->refHover) {
+                // the existence check snapshots the tab so an async match can
+                // place its marker dot on the right document
+                win->refHover->tab = win->CurrentTab();
+            }
             break;
         }
 
@@ -1374,6 +1380,14 @@ static bool StopAnnotationResize(MainWindow* win, bool aborted) {
     CanvasSetCapture(win, false);
     SetCanvasCursor(win, IDC_ARROW);
 
+    // a rectangle resize writes the annotation on every mouse move: put it back
+    bool wroteRect = !outlineOnly && !IsLineEndpointHandle(handle) && !IsVertexHandle(handle);
+    if (aborted && wroteRect && AnnotationIsLive(annot) && GetRect(annot) != win->annotationOriginalRect) {
+        SetRect(annot, win->annotationOriginalRect);
+        EndPdfEditOperation(win);
+        MainWindowRerender(win);
+        return true;
+    }
     if (aborted || !annot) {
         EndPdfEditOperation(win);
         ScheduleRepaint(win, 0);
@@ -2824,6 +2838,121 @@ NO_INLINE static void PaintCurrentEditAnnotationMark(WindowTab* tab, HDC hdc, Di
     drawHandle(left, midY);
 }
 
+// Paint the in-PDF marker dots for citations the user has pushed to JabRef
+// (mint) or that JabRef reports live in another open library (olive).
+// Mirrors the popup-corner badge palette in RefHover.cpp so the two surfaces
+// match. Skipped for non-fixed-layout tabs (the marker positions are PDF
+// user-space rects and have no meaning in reflowed views).
+// A human annotating a reference list puts the mark in the margin, left of
+// the entry's label — anchor the dot there, centered on the first line.
+static Point CitationMarkerPos(Rect rc, int sz) {
+    int cx = rc.x - sz - DpiScale(4);
+    int firstLineH = std::min(rc.dy, DpiScale(14));
+    int cy = rc.y + (firstLineH - sz) / 2;
+    return Point(cx, cy);
+}
+
+static void PaintCitationMarkers(WindowTab* tab, HDC hdc, DisplayModel* dm) {
+    if (!tab || !tab->pushedCitations || tab->pushedCitations->len == 0) {
+        return;
+    }
+    Gdiplus::Graphics gs(hdc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    // Match the popup badge palette. Same constants are inlined in
+    // RefHover.cpp; keeping them duplicated here avoids cross-TU coupling for
+    // two colours that aren't going to drift.
+    Gdiplus::SolidBrush brushMint(Gdiplus::Color(255, 0x44, 0xBB, 0x99));
+    Gdiplus::SolidBrush brushOlive(Gdiplus::Color(255, 0xAA, 0xAA, 0x00));
+    int sz = DpiScale(8);
+    for (int i = 0; i < tab->pushedCitations->len; i++) {
+        const PushedCitation& pc = tab->pushedCitations->operator[](i);
+        if (pc.srcPage <= 0 || !dm->PageVisible(pc.srcPage)) {
+            continue;
+        }
+        // CvtToScreen requires the page be visible (laid out); guarded above.
+        Rect rc = dm->CvtToScreen(pc.srcPage, pc.srcRect);
+        Point at = CitationMarkerPos(rc, sz);
+        Gdiplus::SolidBrush* brush = (pc.status == RefHoverPushStatus::RelatedMatch) ? &brushOlive : &brushMint;
+        gs.FillEllipse(brush, at.x, at.y, sz, sz);
+    }
+}
+
+// Paint the live push-status badge in the margin left of the hovered
+// bibliography entry (hover-over-bibliography, no popup). Mirrors the popup
+// badge's hue + shape palette in RefHoverPopup.cpp.
+static void PaintBibHoverBadge(MainWindow* win, HDC hdc, DisplayModel* dm) {
+    RefHoverState* s = win->refHover;
+    if (!s || s->bibHoverPage <= 0 || s->pushStatus == RefHoverPushStatus::None) {
+        return;
+    }
+    if (!dm->PageVisible(s->bibHoverPage)) {
+        return;
+    }
+    Rect rc = dm->CvtToScreen(s->bibHoverPage, s->bibHoverRect);
+    int sz = DpiScale(10);
+    Point at = CitationMarkerPos(rc, sz);
+    int bx = at.x;
+    int by = at.y;
+
+    Gdiplus::Graphics gs(hdc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::Color gray(255, 0xBB, 0xBB, 0xBB);
+    Gdiplus::Color mint(255, 0x44, 0xBB, 0x99);
+    Gdiplus::Color olive(255, 0xAA, 0xAA, 0x00);
+    Gdiplus::Color orange(255, 0xEE, 0x77, 0x33);
+    switch (s->pushStatus) {
+        case RefHoverPushStatus::Searching:
+        case RefHoverPushStatus::Sending: {
+            // small centred grey square — the result icon reads larger
+            Gdiplus::SolidBrush b(gray);
+            int side = sz / 2;
+            int off = (sz - side) / 2;
+            gs.FillRectangle(&b, bx + off, by + off, side, side);
+            break;
+        }
+        case RefHoverPushStatus::NoMatch: {
+            Gdiplus::Pen p(gray, (Gdiplus::REAL)DpiScale(2));
+            gs.DrawEllipse(&p, bx, by, sz, sz);
+            break;
+        }
+        case RefHoverPushStatus::Sent: {
+            Gdiplus::SolidBrush b(mint);
+            gs.FillEllipse(&b, bx, by, sz, sz);
+            break;
+        }
+        case RefHoverPushStatus::RelatedMatch: {
+            Gdiplus::SolidBrush b(olive);
+            gs.FillEllipse(&b, bx, by, sz, sz);
+            break;
+        }
+        case RefHoverPushStatus::Failed:
+        case RefHoverPushStatus::Disconnected: {
+            Gdiplus::SolidBrush b(orange);
+            gs.FillEllipse(&b, bx, by, sz, sz);
+            break;
+        }
+        case RefHoverPushStatus::None:
+            break;
+    }
+}
+
+// Restore this document's saved marker dots on first paint and kick the
+// once-per-page bibliography auto-scan for pages that just became visible.
+static void ScanVisibleBibPages(MainWindow* win, WindowTab* tab, DisplayModel* dm) {
+    if (!tab || gSettings->citationHoverDelay < 0) {
+        return;
+    }
+    RefHoverLoadMarkers(tab);
+    for (int p = 1; dm->ValidPageNo(p); p++) {
+        if (!dm->PageVisible(p) || VecContains(tab->bibScanPages, p)) {
+            continue;
+        }
+        if (RefHoverBibScanPage(win->hwndCanvas, tab, dm->GetEngine(), p)) {
+            VecAppend(tab->bibScanPages, p);
+        }
+    }
+}
+
 // CmdToggleMirror (#6221): the part of the page that shows in bounds once
 // flipped is painted as usual into a bitmap, then copied in mirrored. What is
 // already there (the page background, for transparent pages) goes into the
@@ -3104,6 +3233,9 @@ static bool DrawDocument(MainWindow* win, HDC hdc, Rect rcArea) {
     RepositionAnnotEditToolbar(win);
     RepositionFreeTextInPlaceEdit(win);
     PaintCurrentEditAnnotationMark(tab, hdc, dm);
+    PaintCitationMarkers(tab, hdc, dm);
+    PaintBibHoverBadge(win, hdc, dm);
+    ScanVisibleBibPages(win, tab, dm);
     if (ShowPageGrid() && !win->InPresentation()) {
         PaintPageGrid(dm, hdc);
     }
@@ -3535,15 +3667,24 @@ static int WheelPageTurnDelta(MainWindow* win, int delta) {
     return std::max(WHEEL_DELTA, lines * perLine);
 }
 
+static bool WheelMayTurnPage(MainWindow* win);
+static void OnWheelPageTurn(MainWindow* win);
+
 static void WheelTurnPage(MainWindow* win, int dir) {
+    if (dir == 0) {
+        return;
+    }
+    if (!WheelMayTurnPage(win)) {
+        win->wheelAccumDelta = 0;
+        return;
+    }
     if (dir > 0) {
         win->ctrl->GoToPrevPage();
-    } else if (dir < 0) {
+    } else {
         win->ctrl->GoToNextPage();
     }
-    if (dir != 0) {
-        ReadAloudOnUserViewChanged(win);
-    }
+    OnWheelPageTurn(win);
+    ReadAloudOnUserViewChanged(win);
 }
 
 // Fit Content used to turn the mouse wheel into page flipping in every view mode.
@@ -3682,7 +3823,7 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
 
     bool hScroll = (LOWORD(wp) & MK_SHIFT) || IsShiftPressed();
     bool vScroll = !hScroll;
-    bool isCont = !IsContinuous(win->ctrl->GetDisplayMode());
+    bool isCont = IsContinuous(win->ctrl->GetDisplayMode());
 
     // logf("delta: %d, accumDelta: %d, hscroll: %d, continuous: %d, gDeltaPerLine: %d\n", (int)delta,
     // win->wheelAccumDelta,
@@ -3723,8 +3864,9 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
         return 0;
     }
 
-    // fit content: flip page on wheel, regardless of scrollbar state
-    if (vScroll && dm && FitContentWheelFlipsPage(dm) && IsSingle(dm->GetDisplayMode())) {
+    // fit content: flip page on wheel, regardless of scrollbar state (in the
+    // continuous views only if gFitContentWheelFlipsPageInContinuous)
+    if (vScroll && dm && FitContentWheelFlipsPage(dm)) {
         WheelTurnPage(win, WheelPageTurnDir(win, delta, WheelPageTurnDelta(win, delta)));
         return 0;
     }
@@ -3904,7 +4046,7 @@ static LRESULT CanvasOnMouseWheel(MainWindow* win, UINT msg, WPARAM wp, LPARAM l
     }
     // in non-continuous mode flip page if necessary (ScrollEdgeTurnsPage off:
     // stay on this page, it is changed by keyboard / toolbar / scrollbar only)
-    if (!vScroll || !isCont || !gSettings->scrollEdgeTurnsPage) {
+    if (!vScroll || isCont || !gSettings->scrollEdgeTurnsPage) {
         return 0;
     }
     bool didScroll = WheelScrollPosOrTarget(win) != prevScrollPos;
@@ -4933,26 +5075,13 @@ static void OnTimer(MainWindow* win, HWND hwnd, WPARAM timerId) {
 
         case kAutoReloadTimerID: {
             KillTimer(hwnd, kAutoReloadTimerID);
-            auto* tab = win->CurrentTab();
-            if (tab && tab->reloadOnFocus) {
-                if (tab->ignoreNextAutoReload) {
-                    // consume the save-triggered watcher event; do not leave
-                    // reloadOnFocus set or a later tab focus would reload
-                    tab->ignoreNextAutoReload = false;
-                    tab->reloadOnFocus = false;
-                } else if (IsThreadInMenuMode() || AutoReloadFileStillChanging(tab)) {
-                    // an open menu's nested loop dispatches this timer while
-                    // OnWindowContextMenu still holds the controller, engine and
-                    // page element it cached: reload once the menu is gone.
-                    // a writer (LaTeX etc.) is still producing the file: reloading
-                    // now shows a half-written document ("cannot find startxref",
-                    // "document has no pages") and costs a second reload once the
-                    // write finishes. Wait for it to go quiet instead.
-                    SetTimer(hwnd, kAutoReloadTimerID, kAutoReloadDelayInMs, nullptr);
-                } else {
-                    // timer-driven: never ask for a password here (#3493)
-                    ReloadDocument(win, true, false);
-                }
+            auto trigger = IsThreadInMenuMode() ? AutoReloadTrigger::TimerInMenu : AutoReloadTrigger::Timer;
+            auto action = DecideAutoReload(win->CurrentTab(), trigger);
+            if (action == AutoReloadAction::Retry) {
+                SetTimer(hwnd, kAutoReloadTimerID, kAutoReloadDelayInMs, nullptr);
+            } else if (action == AutoReloadAction::Reload) {
+                // A timer must never ask for a password (#3493).
+                ReloadDocument(win, true, false);
             }
             break;
         }
@@ -5154,6 +5283,20 @@ void RevokeCanvasDropTarget(HWND hwndCanvas) {
     RevokeDragDrop(hwndCanvas);
 }
 
+// The vertical bar marks where the search matches are. Everything that moves
+// them (a search, the current match, zoom, a page change, another tab) repaints
+// the canvas, so each paint brings them up to date (they're cached).
+static void SyncFindScrollMarkers(MainWindow* win) {
+    if (!win->overlayScrollV) {
+        return;
+    }
+    Vec<float> markers;
+    float current = -1;
+    FindScrollMarkers(win, markers, &current);
+    OverlayScrollbarSetFindMarkers(win->overlayScrollV, markers, current, kFindOtherMatchColor,
+                                   FindCurrentMatchColor());
+}
+
 LRESULT CALLBACK WndProcCanvas(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     DpiScope dpiScope(hwnd);
     // messages that don't require win
@@ -5240,10 +5383,15 @@ LRESULT CALLBACK WndProcCanvas(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return isWheel ? 0 : DefWindowProc(hwnd, msg, wp, lp);
     }
 
-    // reveal/hide the floating overlay toolbar as the mouse approaches the top;
-    // don't consume the message, just observe it
-    if (msg == WM_MOUSEMOVE && win->isToolbarOverlay) {
+    // The caption can take over the pointer before the canvas gets another move.
+    if (win->isToolbarOverlay && (msg == WM_MOUSEMOVE || msg == WM_MOUSELEAVE)) {
+        if (msg == WM_MOUSEMOVE) {
+            TrackMouseLeave(hwnd);
+        }
         UpdateOverlayToolbarForMouse(win);
+    }
+    if (msg == WM_PAINT) {
+        SyncFindScrollMarkers(win);
     }
 
     // messages that require win

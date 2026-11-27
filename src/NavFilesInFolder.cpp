@@ -148,10 +148,11 @@ struct NavFilesInFolderWnd : WindowBase {
 };
 
 static NavFilesInFolderWnd* gNavFilesWnd = nullptr;
+// across windows: a new window at a freed one's address must not take its scans
+static int gNavScanGen = 0;
 static HWND gHwndToActivateOnNavClose = nullptr;
 
 NavFilesInFolderWnd::~NavFilesInFolderWnd() {
-    scanGen++; // in-flight scans must not apply to a destroyed window
     str::Free(currDir);
     str::Free(pendingSelectPath);
 }
@@ -229,75 +230,6 @@ static void FilterNavEntries(ListBoxModelNav* m, const StrVec& words) {
 static void ClearNavModel(ListBoxModelNav* m) {
     FreeNavEntries(m->all);
     VecReset(m->entries);
-}
-
-void AppendHomeFileEntry(Vec<NavFileEntry>& out, Str path) {
-    if (!CanOpenFile(path)) {
-        return;
-    }
-    // Quick access keeps listing files after they are deleted
-    WIN32_FILE_ATTRIBUTE_DATA fad{};
-    if (!path::GetCachedAttributesEx(path, &fad)) {
-        return;
-    }
-    NavFileEntry e;
-    e.path = str::Dup(path);
-    e.name = str::Dup(path);
-    e.size = ((i64)fad.nFileSizeHigh << 32) | (i64)fad.nFileSizeLow;
-    VecAppend(out, e);
-}
-
-// Built on a worker thread: listing + filtering + sorting a folder of tens of
-// thousands of files must not freeze the UI (discussion #6014).
-void CollectNavEntriesForDir(Str dir, Vec<NavFileEntry>& out) {
-    if (len(dir) == 0) {
-        CollectHomeEntries(out);
-        return;
-    }
-    // ".." also in a drive root, where it leads to the home view
-    AppendNavParentEntry(out);
-    int firstIdx = 1; // keep ".." at the top when sorting
-
-    DirIter di{dir};
-    di.includeFiles = true;
-    di.includeDirs = true;
-    for (DirIterEntry* de : di) {
-        DWORD attrs = de->fd->dwFileAttributes;
-        if (attrs & FILE_ATTRIBUTE_HIDDEN) {
-            continue;
-        }
-        TempStr leaf = NavLeafNameTemp(de);
-        if (len(leaf) == 0) {
-            continue;
-        }
-        // own path/name before any further temp allocations
-        Str fullPath = str::Dup(de->filePath);
-
-        NavFileEntry e;
-        e.path = fullPath;
-        if (IsDirectory(de)) {
-            e.isDir = true;
-            e.name = str::Join(leaf, StrL("\\"));
-        } else {
-            if (!CanOpenFile(leaf)) {
-                str::Free(fullPath);
-                continue;
-            }
-            e.name = str::Dup(leaf);
-            e.size = GetFileSize(de);
-            // FindFirstFile size is sometimes 0 on network/cloud providers even
-            // when the file has content; attributes are cached for network paths.
-            if (e.size == 0) {
-                WIN32_FILE_ATTRIBUTE_DATA fad{};
-                if (path::GetCachedAttributesEx(fullPath, &fad) && !(fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    e.size = ((i64)fad.nFileSizeHigh << 32) | (i64)fad.nFileSizeLow;
-                }
-            }
-        }
-        VecAppend(out, e);
-    }
-
-    SortNavEntries(out, firstIdx);
 }
 
 static int FindEntryIndex(NavFilesInFolderWnd* wnd, ListBoxModelNav* m, Str selectPath);
@@ -580,7 +512,7 @@ void NavFilesInFolderWnd::SetDir(Str dir, Str selectPath, int selectIdx, NavList
     }
     str::ReplaceWithCopy(&currDir, dir);
     UpdateNavButtons();
-    scanGen++;
+    scanGen = ++gNavScanGen;
     scanInFlight = true;
     str::ReplaceWithCopy(&pendingSelectPath, selectPath);
     pendingSelectIdx = selectIdx;
@@ -1149,7 +1081,6 @@ bool NavFilesInFolderWnd::Create(MainWindow* mainWin, Str filePath) {
         args.style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
         args.title = Tr("Navigate Files in Folder");
         args.font = GetFont();
-        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
         args.isRtl = IsUIRtl();
         CreateCustom(args);
     }

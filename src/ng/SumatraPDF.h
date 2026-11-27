@@ -30,6 +30,7 @@ void UpdateTabFileDisplayStateForTab(WindowTab* tab);
 void RememberDefaultWindowPosition(MainWindow* win);
 TempStr WindowStateDuringLoadResultTemp(int* exitCodeOut = nullptr);
 TempStr RenameFileResultTemp(Str dstPath, int* exitCodeOut);
+TempStr SaveFileAsResultTemp(Str dstPath, int* exitCodeOut);
 Str CliPassword();
 
 // orig re-arms a WM_TIMER on the canvas; the shell's tick counts this down
@@ -173,21 +174,24 @@ StrVec* GetNextPrevFilesReady(Str path);
 void CloseCurrentTab(MainWindow* win, bool quitIfLast);
 void CloseTab(WindowTab* tab, bool quitIfLast);
 void RequestCloseWindow(MainWindow* win, bool quitIfLast);
-void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose);
+void CloseWindow(MainWindow* win, bool quitIfLast);
 void CloseWindowIfCan(MainWindow* win, bool quitIfLast);
 void OnMenuExit();
 void CopyFilePath(WindowTab* tab);
 void ShowFileInFolder(MainWindow* win, Str path);
+void DeleteFilesFromHomePage(MainWindow* win, const StrVec& paths);
 enum class DisplayMode;
 void SwitchToDisplayMode(MainWindow* win, DisplayMode displayMode, bool keepContinuous = false);
 
 // if pt is given (a point on the canvas) that point stays put across the zoom
 void SmartZoom(MainWindow* win, float factor, Point* pt, bool smartZoom);
+void RefreshEbookLayoutForDde(MainWindow* win, DisplayMode oldMode, float oldZoom);
 
 bool SettingsUseTabs();
 bool SettingsRememberOpenedFiles();
 
-void CrashHandlerSetSettings(Str settings);
+struct Settings;
+void CrashHandlerSetSettings(const Settings* settings);
 
 void InitializePolicies(bool restrict);
 bool HasPermission(Perm permission);
@@ -214,11 +218,11 @@ struct SettingsApplyState {
     bool showMenubarWithTabs = false;
     bool disableAntiAlias = false;
     bool chmUseFixedPageUI = false;
-    bool markdownUseFixedPageUI = false;
-    bool markdownPreserveLineBreaks = false;
     bool explorerQuickLook = false;
     // owned copy of the ebook layout inputs; ApplyChangedSettingsAndRelayout frees it
     Str ebookLayout;
+    Str markdownLayout;
+    Str htmlLayout;
     // owned copy of the AI chat look (AIChat section, BgColor); freed the same way
     Str aiChatStyle;
     // owned copy of ThumbnailsType; freed the same way

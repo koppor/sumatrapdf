@@ -118,6 +118,11 @@
 #include "RestrictedUseConfig.h"
 #include "VirtualDesktop.h"
 
+Kind kNotifPersistentWarning = "persistentWarning";
+Kind kNotifDocErrors = "docErrors";
+Kind kNotifDefaultApp = "defaultApp";
+Kind kNotifThumbnailProgress = "thumbnailProgress";
+
 #include "SumatraLog.h"
 
 static void CreateThumbnailFromFileAsync(FileState* ds, EngineBase* engine);
@@ -191,6 +196,7 @@ void InitializePolicies(bool restrict) {
     }
 
     Str restrictData = file::ReadFile(restrictPath);
+    AutoFree freeRestrictData(restrictData.s);
     SquareTreeNode* root = ParseSquareTree(restrictData);
     AutoDelete delRoot(root);
     SquareTreeNode* polsec = root ? root->GetChild(StrL("Policies")) : nullptr;
@@ -200,17 +206,12 @@ void InitializePolicies(bool restrict) {
         return;
     }
 
-    static Perm perms[] = {Perm::InternetAccess, Perm::DiskAccess,    Perm::SavePreferences,  Perm::RegistryAccess,
-                           Perm::PrinterAccess,  Perm::CopySelection, Perm::FullscreenAccess, Perm::AIChat};
-    // names come from the editor's table, so both read and write the same keys
-    static_assert(dimof(perms) == kRestrictedUseFeatureCount);
-
     // enable policies as indicated in sumatrapdfrestrict.ini
-    for (int i = 0; i < dimofi(perms); i++) {
+    for (int i = 0; i < RestrictedUseFeatureCount(); i++) {
         Str name = RestrictedUseFeatureName(i);
         Str val = polsec->GetValue(name);
         if (val && ParseInt(val) != 0) {
-            gPolicyRestrictions = gPolicyRestrictions | perms[i];
+            gPolicyRestrictions = gPolicyRestrictions | RestrictedUseFeaturePerm(i);
         }
     }
 
@@ -446,7 +447,7 @@ void UpdatePageInfoHelper(MainWindow* win, NotificationWnd* wnd, int pageNo) {
         pageInfo = fmt("%s %d / %d, %s %d / %d", Tr("Chapter:"), loc.chapter, ctrl->ChapterCount(), Tr("Page:"),
                        loc.page, chapterPages);
     } else if (ctrl->HasPageLabels()) {
-        TempStr label = ctrl->GetPageLabeTemp(pageNo);
+        TempStr label = ctrl->GetPageLabelTemp(pageNo);
         pageInfo = fmt("%s %s (%d / %d)", Tr("Page:"), label, pageNo, nPages);
     } else {
         pageInfo = fmt("%s %d / %d", Tr("Page:"), pageNo, nPages);
@@ -712,7 +713,7 @@ static TempStr PageInfoBarRightTemp(MainWindow* win) {
         AppendBarPart(out, fmt(Tr("Page %d / %d").s, loc.page, ctrl->ChapterPageCount(loc.chapter)));
         AppendBarPart(out, fmt("%d%%", percentRead));
     } else {
-        TempStr label = ctrl->HasPageLabels() ? ctrl->GetPageLabeTemp(pageNo) : TempStr{};
+        TempStr label = ctrl->HasPageLabels() ? ctrl->GetPageLabelTemp(pageNo) : TempStr{};
         if (len(label) > 0 && !str::Eq(label, fmt("%d", pageNo))) {
             AppendBarPart(out, fmt(Tr("Page %s (%d / %d, %d%%)").s, label, pageNo, nPages, percentRead));
         } else {
@@ -1051,24 +1052,6 @@ void CollectHistoryFilesInDir(Str dir, StrVec& out) {
     }
 }
 
-// Keep the cached list naturally sorted without a full SortNatural on the UI thread.
-static void InsertSortedNatural(StrVec* v, Str s) {
-    if (v->Contains(s)) {
-        return;
-    }
-    int lo = 0;
-    int hi = len(*v);
-    while (lo < hi) {
-        int mid = lo + ((hi - lo) / 2);
-        if (StrLessNatural(v->At(mid), s)) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    v->InsertAt(lo, s);
-}
-
 PendingNextPrevNav* gPendingNextPrevNav = nullptr;
 
 void ClearPendingNextPrevNav() {
@@ -1393,10 +1376,11 @@ void TogglePresentationMode(MainWindow* win) {
 // make sure that idx falls within <0, max-1> inclusive range
 // negative numbers wrap from the end
 int wrapIdx(int idx, int max) {
-    for (; idx < 0; idx += max) {
-        idx += max;
+    if (max <= 0) {
+        return 0;
     }
-    return idx % max;
+    int r = idx % max;
+    return r < 0 ? r + max : r;
 }
 
 // first entry is value in gLangCodes, second is ISO 639 lang code
@@ -1455,12 +1439,15 @@ static bool LayoutFollowsEbookSettings(EngineBase* engine) {
     if (!engine) {
         return false;
     }
+    FileType kind = GuessFileTypeFromName(engine->FilePath(), true);
+    if (kind == FileType::Markdown || kind == FileType::HTML) {
+        return false;
+    }
     if (engine->isReflowable || engine->HasChapters()) {
         return true;
     }
     Kind k = engine->kind;
-    return k == kindEngineMobi || k == kindEngineFb2 || k == kindEnginePdb || k == kindEngineHtml ||
-           k == kindEngineEpub;
+    return k == kindEngineMobi || k == kindEngineFb2 || k == kindEnginePdb || k == kindEngineEpub;
 }
 
 void ReloadEbookLayoutDocs() {
@@ -1480,6 +1467,44 @@ void ReloadEbookLayoutDocs() {
             } else {
                 tab->reloadOnFocus = true;
             }
+        }
+    }
+}
+
+static Str WebDocLayoutSnapshot(FileType kind) {
+    WebDocStyle style = GetWebDocStyle(kind);
+    bool fixed = kind == FileType::Markdown ? gSettings->markdownUI.useFixedPageUI : gSettings->htmlUI.useFixedPageUI;
+    return str::Dup(fmt("%d|%d|%g|%g|%d|%d|%s", gSettings->customScreenDPI, (int)fixed, style.fontSize,
+                        style.lineSpacing, style.maxContentWidth, (int)style.preserveLineBreaks, style.fontName));
+}
+
+void ReloadWebDocLayouts(Str beforeMarkdown, Str beforeHtml) {
+    Str markdown = WebDocLayoutSnapshot(FileType::Markdown);
+    Str html = WebDocLayoutSnapshot(FileType::HTML);
+    bool changedMarkdown = !str::Eq(beforeMarkdown, markdown);
+    bool changedHtml = !str::Eq(beforeHtml, html);
+    str::Free(beforeMarkdown);
+    str::Free(beforeHtml);
+    str::Free(markdown);
+    str::Free(html);
+    if (!changedMarkdown && !changedHtml) {
+        return;
+    }
+
+    for (MainWindow* win : gWindows) {
+        bool reloadCurrent = false;
+        for (WindowTab* tab : win->Tabs()) {
+            FileType kind = GuessFileTypeFromName(tab->filePath, true);
+            if ((kind == FileType::Markdown && changedMarkdown) || (kind == FileType::HTML && changedHtml)) {
+                if (IsCurrentTab(win, tab)) {
+                    reloadCurrent = true;
+                } else {
+                    tab->reloadOnFocus = true;
+                }
+            }
+        }
+        if (reloadCurrent) {
+            ReloadDocument(win, false);
         }
     }
 }
@@ -2451,7 +2476,8 @@ bool gNextPrevDirReady = false;
 bool gNextPrevDirScanning = false;
 
 void ScheduleReloadTab(WindowTab* tab) {
-    PostForTab(tab, ReloadTab, "ReloadTab");
+    // called on the file-watcher thread: tab must not be dereferenced here
+    PostForTabFromThread(tab, ReloadTab, "ReloadTab");
 }
 
 // Called from the AUTO_RELOAD_TIMER tick. Returns true if the file changed
@@ -2470,8 +2496,8 @@ void ScheduleReloadTab(WindowTab* tab) {
 // Note: file::GetSize()/GetModificationTime() go through the 1-hour network
 // attribute cache, so on a network drive both values look stable right away
 // and we reload immediately, as before.
-bool AutoReloadFileStillChanging(WindowTab* tab) {
-    if (!tab || len(tab->filePath) == 0) {
+static bool AutoReloadFileStillChanging(WindowTab* tab) {
+    if (len(tab->filePath) == 0) {
         return false;
     }
     u64 now = GetTickCount64();
@@ -2494,6 +2520,31 @@ bool AutoReloadFileStillChanging(WindowTab* tab) {
     }
     AutoReloadResetFileState(tab);
     return false;
+}
+
+AutoReloadAction DecideAutoReload(WindowTab* tab, AutoReloadTrigger trigger) {
+    if (!tab || !tab->reloadOnFocus) {
+        return AutoReloadAction::Nothing;
+    }
+    if (tab->autoReloadInFlight) {
+        // a background reload is already running; it swaps on finish (or sets
+        // reloadOnFocus again), so just check back later
+        return trigger == AutoReloadTrigger::TabFocus ? AutoReloadAction::Nothing : AutoReloadAction::Retry;
+    }
+    if (tab->ignoreNextAutoReload) {
+        tab->ignoreNextAutoReload = false;
+        tab->reloadOnFocus = false;
+        return AutoReloadAction::Nothing;
+    }
+    if (trigger == AutoReloadTrigger::TabFocus) {
+        tab->reloadOnFocus = false;
+        return AutoReloadAction::Reload;
+    }
+    // A popup can hold a page element. An active writer can leave a partial document.
+    if (trigger == AutoReloadTrigger::TimerInMenu || AutoReloadFileStillChanging(tab)) {
+        return AutoReloadAction::Retry;
+    }
+    return AutoReloadAction::Reload;
 }
 
 void EnsureNextPrevDirScan(Str filePath) {
@@ -2620,6 +2671,27 @@ static bool GetCurrentDesktopId(ISumatraVirtualDesktopManager* vdm, GUID* out) {
     return false;
 }
 
+// "{GUID}"; empty for the null GUID
+static TempStr DesktopIdToStrTemp(const GUID& id) {
+    if (IsEqualGUID(id, GUID{})) {
+        return {};
+    }
+    WCHAR buf[40];
+    if (StringFromGUID2(id, buf, dimofi(buf)) == 0) {
+        return {};
+    }
+    return ToUtf8Temp(WStr(buf));
+}
+
+// The desktop the user is looking at; empty when the shell can't tell.
+TempStr GetCurrentDesktopIdTemp(ISumatraVirtualDesktopManager* vdm) {
+    GUID id{};
+    if (!vdm || !GetCurrentDesktopId(vdm, &id)) {
+        return {};
+    }
+    return DesktopIdToStrTemp(id);
+}
+
 // Under OpenOnOtherDesktop = move, pull hwnd onto the user's current virtual
 // desktop so focusing it won't switch desktops. False in the other modes.
 bool BringToCurrentDesktop(HWND hwnd) {
@@ -2644,15 +2716,10 @@ TempStr GetWindowDesktopIdTemp(ISumatraVirtualDesktopManager* vdm, HWND hwnd) {
         return {};
     }
     GUID id{};
-    HRESULT hr = vdm->GetWindowDesktopId(hwnd, &id);
-    if (FAILED(hr) || IsEqualGUID(id, GUID{})) {
+    if (FAILED(vdm->GetWindowDesktopId(hwnd, &id))) {
         return {};
     }
-    WCHAR buf[40];
-    if (StringFromGUID2(id, buf, dimofi(buf)) == 0) {
-        return {};
-    }
-    return ToUtf8Temp(WStr(buf));
+    return DesktopIdToStrTemp(id);
 }
 
 // puts hwnd on the virtual desktop a session saved it on. False when that
@@ -2851,7 +2918,11 @@ static bool SendOpenFileToExistingInstance(HWND targetHwnd, Str fullPath, u32 ne
         return false;
     }
     payload->newWindow = newWindow;
-    memcpy(payload + 1, fullPath.s, pathLen + 1);
+    char* dst = (char*)(payload + 1);
+    if (pathLen > 0) {
+        memcpy(dst, fullPath.s, pathLen);
+    }
+    dst[pathLen] = 0;
     COPYDATASTRUCT cds = {kCopyDataOpen, (DWORD)cbData, payload};
     LRESULT res = SendMessageW(targetHwnd, WM_COPYDATA, 0, (LPARAM)&cds);
     free(payload);
@@ -3091,8 +3162,7 @@ void UndoRedoInTab(WindowTab* tab, bool redo) {
     Vec<Annotation*> removed;
     bool ok = EngineUndoRedo(engine, dir, removed);
     for (Annotation* a : removed) {
-        DetachAnnotationFromUI(a);
-        DeleteAnnotation(a);
+        DeleteAnnotationFromUI(a);
     }
     // the wrapper deletes above mark the document modified; the journal knows better
     EngineMupdfRefreshModifiedState(engine);
@@ -3228,7 +3298,7 @@ Annotation* MakeAnnotationsFromSelection(WindowTab* tab, AnnotCreateArgs* args) 
             // Roll back annots created earlier in this call so we do not leave
             // partial multi-page selections as untracked annotations.
             for (Annotation* a : created) {
-                DeleteAnnotation(a);
+                DeleteAnnotationWithoutUI(a);
             }
             return nullptr;
         }
@@ -3320,8 +3390,7 @@ void ApplyRedactionsInTab(WindowTab* tab) {
     Vec<Annotation*> deleted;
     bool ok = EngineMupdfApplyRedactions(engine, deleted);
     for (Annotation* a : deleted) {
-        DetachAnnotationFromUI(a);
-        DeleteAnnotation(a);
+        DeleteAnnotationFromUI(a);
     }
     DeleteOldSelectionInfo(win, true);
     RefreshAnnotationLists(tab);
@@ -3847,10 +3916,10 @@ SettingsApplyState GetSettingsApplyState() {
     s.showMenubarWithTabs = p->showMenubarWithTabs;
     s.disableAntiAlias = p->disableAntiAlias;
     s.chmUseFixedPageUI = p->chmUI.useFixedPageUI;
-    s.markdownUseFixedPageUI = p->markdownUI.useFixedPageUI;
-    s.markdownPreserveLineBreaks = p->markdownUI.preserveLineBreaks;
     s.explorerQuickLook = p->explorerQuickLook;
     s.ebookLayout = EbookLayoutSnapshot();
+    s.markdownLayout = WebDocLayoutSnapshot(FileType::Markdown);
+    s.htmlLayout = WebDocLayoutSnapshot(FileType::HTML);
     s.aiChatStyle = AIChatStyleSnapshot();
     s.thumbnailsType = str::Dup(p->thumbnailsType);
     return s;
@@ -3861,6 +3930,20 @@ void ToggleCaption(CustomCommand* cmd) {
     if (show != gSettings->showCaption) {
         ToggleSettingsBool(&gSettings->showCaption);
     }
+}
+
+static void OnDontShowDocErrors(bool checked) {
+    gSettings->showDocumentErrors = !checked;
+    ScheduleSaveSettings();
+}
+
+// the Show Errors window's checkbox, the inverse of ShowDocumentErrors
+TextWindowOption DocErrorsWindowOption() {
+    TextWindowOption opt;
+    opt.label = Tr("Don't show document errors");
+    opt.checked = !gSettings->showDocumentErrors;
+    opt.onChanged = OnDontShowDocErrors;
+    return opt;
 }
 
 void ToggleSidebarAutoHide(CustomCommand* cmd) {

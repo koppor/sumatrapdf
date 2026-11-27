@@ -541,7 +541,65 @@ static void FormatSizeTest() {
     utassert(str::Eq(FormatSizeCompactTemp(17), StrL("17 B")));
 }
 
+static void EnvVariableTest() {
+    utassert(len(GetEnvVariableTemp(StrL("SUMATRA_UT_SURELY_NOT_SET_1234"))) == 0);
+#if !OS_WASM
+    utassert(len(GetEnvVariableTemp(StrL("PATH"))) > 0);
+#endif
+}
+
+static void LocalTimeTest() {
+    // 2023-11-14 22:13:20 UTC: November 2023 in every time zone
+    time_t t = 1700000000;
+    struct tm tm{};
+    utassert(LocalTime(t, &tm));
+    utassert(tm.tm_year == 123 && tm.tm_mon == 10);
+    utassert(mktime(&tm) == t);
+}
+
+static void IsAlNumWTest() {
+    utassert(IsAlNumW('a') && IsAlNumW('Z') && IsAlNumW('5'));
+    utassert(!IsAlNumW(' ') && !IsAlNumW('_') && !IsAlNumW('-') && !IsAlNumW('.'));
+#if OS_WIN
+    // posix iswalnum depends on the locale for non-ASCII
+    utassert(IsAlNumW(0x00E9) && IsAlNumW(0x0410));
+    utassert(!IsAlNumW(0x2014));
+#endif
+}
+
+static void ArenaResetSavepointTest() {
+    Arena* arena = ArenaNew();
+    if (!arena) {
+        utassert(arena != nullptr);
+        return;
+    }
+    arena->Alloc(32);
+    ArenaSavepoint beforeReset = GetArenaSavepoint(arena);
+    arena->Reset();
+    arena->Alloc(64);
+    u64 afterReset = arena->Pos();
+    RestoreArenaSavepoint(beforeReset);
+    utassert(arena->Pos() == afterReset);
+    ArenaDelete(arena);
+}
+
+static void ProbeTempArenaScope(bool* preserved) {
+    {
+        AutoArenaSavepoint scope;
+        AllocStrTemp(32);
+        u64 pos = GetTempArena()->Pos();
+        ResetTempArena();
+        *preserved = GetTempArena()->Pos() == pos;
+        DestroyTempArena();
+        *preserved = *preserved && GetTempArena()->Pos() == pos;
+    }
+    DestroyTempArena();
+}
+
 void BaseUtilTest() {
+    EnvVariableTest();
+    LocalTimeTest();
+    IsAlNumWTest();
     StrEqLenTest();
     ReplaceNoCaseTest();
     InPlacePastLenTest();
@@ -564,6 +622,13 @@ void BaseUtilTest() {
     ArenaChainedBlockSizeTest();
     ArenaPushOverflowTest();
     ArenaChainTest();
+    ArenaResetSavepointTest();
+    if (kHasThreads) {
+        bool preserved = false;
+        ThreadHandle thread = StartThread(MkFunc0(ProbeTempArenaScope, &preserved), StrL("temp-arena-scope-test"));
+        utassert(JoinThread(&thread, 5000));
+        utassert(preserved);
+    }
 #if OS_POSIX && !OS_WASM
     TimedJoinTest();
 #endif
@@ -644,5 +709,63 @@ void BaseUtilTest() {
     utassert(!wstr::EqI(WStrL(L"Аb"), WStrL(L"бb")));
     utassert(wstr::StartsWithI(WStrL(L"АБc"), WStrL(L"аб")));
     utassert(!wstr::EqNI(WStrL(L"ab"), WStrL(L"ac"), 2));
+
+    // slices sharing the same pointer with different lengths must not compare equal
+    {
+        const char* buf = "abcdef";
+        utassert(!str::EqI(Str(buf, 2), Str(buf, 5)));
+        utassert(!str::EqIS(Str(buf, 2), Str(buf, 5)));
+        utassert(!str::EqN(Str(buf, 2), Str(buf, 5), 4));
+        utassert(!str::EqNI(Str(buf, 2), Str(buf, 5), 4));
+        utassert(!str::EqN(Str{}, Str{}, 1));
+        utassert(!str::EqNI(Str{}, Str{}, 1));
+        utassert(str::EqIS(StrL(""), StrL("   ")));
+
+        const WCHAR* wbuf = L"abcdef";
+        utassert(!wstr::EqI(WStr(wbuf, 2), WStr(wbuf, 5)));
+        utassert(!wstr::EqN(WStr(wbuf, 2), WStr(wbuf, 5), 4));
+        utassert(!wstr::EqNI(WStr(wbuf, 2), WStr(wbuf, 5), 4));
+        utassert(!wstr::StartsWithI(WStr(wbuf, 2), WStr(wbuf, 5)));
+        utassert(!wstr::EqN(WStr{}, WStr{}, 1));
+        utassert(!wstr::EqNI(WStr{}, WStr{}, 1));
+    }
+
+    // MimeTypeFromExtTemp must only match extension (even) entries, not MIME values
+    utassert(len(MimeTypeFromExtTemp(StrL("text/html"))) == 0);
+    utassert(str::Eq(MimeTypeFromExtTemp(StrL(".html")), StrL("text/html")));
+
+    // CompareProgramVersion with > INT_MAX component
+    utassert(CompareProgramVersion(StrL("2147483648"), StrL("1")) > 0);
+    utassert(CompareProgramVersion(StrL("1"), StrL("2147483648")) < 0);
+
+    // FormatFloatWithThousandSepTemp on negative numbers
+    {
+        TempStr f1 = str::FormatFloatWithThousandSepTemp(-1.25);
+        TempStr f2 = str::FormatFloatWithThousandSepTemp(-0.25);
+        utassert(!str::Contains(f1, StrL(".-")) && str::StartsWith(f1, StrL("-1")));
+        utassert(!str::Contains(f2, StrL(".-")) && str::StartsWith(f2, StrL("-0")));
+    }
+
+    // Builder::Reserve(0) on empty builder
+    {
+        str::Builder b;
+        utassert(b.Reserve(0));
+    }
+
+    // ShortenString edge cases
+    utassert(str::Eq(ShortenStringUtf8Temp(StrL("hello"), 0), StrL("...")));
+    utassert(str::Eq(ShortenStringUtf8InTheMiddleTemp(StrL("hello"), 2), StrL("...")));
+
+    // NormalizeRotation large values
+    utassert(NormalizeRotation(-360000000) == 0);
+    utassert(NormalizeRotation(360000090) == 90);
+
+    // str::Parse must reject whitespace between sign and digits
+    {
+        int v = 0;
+        utassert(str::IsNull(str::Parse(StrL("-   123"), "%d", &v)));
+        utassert(!str::IsNull(str::Parse(StrL("  -123"), "%d", &v)) && v == -123);
+    }
+
     GeomTest();
 }

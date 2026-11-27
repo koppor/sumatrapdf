@@ -1,14 +1,13 @@
 /* Copyright 2026 the SumatraPDF project authors (see AUTHORS file).
    License: GPLv3 */
 
-// ng: the one win32 message path of the shell. gpui does not expose the native
-// handle, and it has no hook for the messages a few services need
+// ng: the one win32 message path of the shell. gpui has no hook for the
+// messages a few services need
 // (WM_HOTKEY for GlobalHotkeys, WM_COPYDATA for Explorer QuickLook,
-// WM_ACTIVATE for the hotkey target window). We claim the gpui window of this
-// thread by its class name and subclass it. OS file drops arrive as gpui
-// ExternalPaths drops on the shell root.
+// WM_ACTIVATE for the hotkey target window), so subclass the native handle.
+// OS file drops arrive as gpui ExternalPaths drops on the shell root.
 
-#include "base/Base.h"
+#include "gui/GpuiBridge.h"
 #include "base/File.h"
 #include "base/UITask.h"
 #include "base/Pixmap.h"
@@ -814,13 +813,13 @@ static LRESULT CALLBACK ShellSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             ShutdownBlockReasonCreate(hwnd, ToWStrTemp(Tr("Printing in progress.")).s);
             return FALSE;
         case WM_ENDSESSION:
-            // the forced CloseWindow below aborts any print job still running
+            // CloseWindow below aborts any print job still running
             ScheduleSaveSettings();
             FlushScheduledSaveSettings();
             // wp is FALSE when the session end was cancelled: we keep running
             if (wp == TRUE) {
                 gDontSaveSettings = true;
-                CloseWindow(WinOf(hwnd), true, true);
+                CloseWindow(WinOf(hwnd), true);
             }
             return 0;
         case WM_SYSCOLORCHANGE:
@@ -839,31 +838,6 @@ static LRESULT CALLBACK ShellSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
             break;
     }
     return DefSubclassProc(hwnd, msg, wp, lp);
-}
-
-static bool HwndIsClaimed(HWND hwnd) {
-    if (ToolWindowOwnsHwnd(hwnd)) {
-        return true;
-    }
-    for (const NativeWin& nw : gNativeWins) {
-        if (nw.hwnd == hwnd) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static BOOL CALLBACK FindGpuiWnd(HWND hwnd, LPARAM lp) {
-    WCHAR cls[64]{};
-    GetClassNameW(hwnd, cls, dimof(cls));
-    if (!wstr::EqI(WStr(cls), WStr((WCHAR*)kGpuiWndClass))) {
-        return TRUE;
-    }
-    if (HwndIsClaimed(hwnd)) {
-        return TRUE; // another MainWindow already took this one
-    }
-    *(HWND*)lp = hwnd;
-    return FALSE;
 }
 
 struct DpiToggleWindows {
@@ -885,11 +859,12 @@ void AppShellToggleDpiOverride() {
         return;
     }
     int next = 125;
-    if (gDpiOverride == 125) {
+    int current = GetDpiOverride();
+    if (current == 125) {
         next = 150;
-    } else if (gDpiOverride == 150) {
+    } else if (current == 150) {
         next = 75;
-    } else if (gDpiOverride == 75) {
+    } else if (current == 75) {
         next = 0;
     }
 
@@ -904,7 +879,7 @@ void AppShellToggleDpiOverride() {
         VecAppend(dpis, DpiGetForHwnd(hwnd));
     }
 
-    gDpiOverride = next;
+    SetDpiOverride(next);
     int newDpi = len(hwnds) > 0 ? DpiGetForHwnd(hwnds[0]) : DpiGet();
     for (int i = 0; i < len(hwnds); i++) {
         int oldDpi = dpis[i] > 0 ? dpis[i] : 96;
@@ -939,14 +914,15 @@ void AppShellClaimToolHwnd(HWND hwnd) {
 }
 
 void AppShellEnableFileDrop(MainWindow* win) {
-    HWND hwnd = nullptr;
-    EnumThreadWindows(GetCurrentThreadId(), FindGpuiWnd, (LPARAM)&hwnd);
-    if (!hwnd) {
+    HWND hwnd = win && win->gpuiWin ? (HWND)gp::PlatWindowHandle(win->gpuiWin) : nullptr;
+    if (!hwnd || !IsWindow(hwnd)) {
         log(StrL("AppShellEnableFileDrop: no gpui window found\n"));
         return;
     }
     NativeWin nw{hwnd, win};
-    VecAppend(gNativeWins, nw);
+    if (AppShellWindowFromHwnd(hwnd) || !VecAppend(gNativeWins, nw)) {
+        return;
+    }
     // WM_DROPFILES, for when gpui's OLE drop target could not be registered
     DragAcceptFiles(hwnd, TRUE);
     SetWindowSubclass(hwnd, ShellSubclass, 1, 0);

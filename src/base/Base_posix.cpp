@@ -46,6 +46,14 @@ int AtomicIntDec(AtomicInt* p) {
 }
 
 // stores v and returns what was there before
+void* AtomicPtrGet(AtomicPtr* p) {
+    return __atomic_load_n(p, __ATOMIC_SEQ_CST);
+}
+
+void AtomicPtrSet(AtomicPtr* p, void* v) {
+    __atomic_store_n(p, v, __ATOMIC_SEQ_CST);
+}
+
 void* AtomicPtrExchange(AtomicPtr* p, void* v) {
     return __atomic_exchange_n(p, v, __ATOMIC_SEQ_CST);
 }
@@ -90,7 +98,7 @@ bool GetPhysMemoryInfo(u64* availPhysOut, int* loadPercentOut, u64* totalPhysOut
         return false;
     }
     *availPhysOut = (u64)avail * (u64)pageSize;
-    *loadPercentOut = (int)(100 - (avail * 100 / total));
+    *loadPercentOut = (int)(100 - ((u64)avail * 100 / (u64)total));
     if (totalPhysOut) {
         *totalPhysOut = (u64)total * (u64)pageSize;
     }
@@ -127,6 +135,15 @@ int GetMeasurementSystem() {
         locale = getenv("LANG");
     }
     return MeasurementSystemForLocale(Str(locale));
+}
+
+// empty if not set
+TempStr GetEnvVariableTemp(Str name) {
+    const char* v = getenv(CStrTemp(name));
+    if (!v) {
+        return {};
+    }
+    return str::DupTemp(Str(v));
 }
 
 bool MeasurementSystem_UnitTests() {

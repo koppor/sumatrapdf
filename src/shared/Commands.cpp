@@ -414,6 +414,7 @@ const CommandInfo gCommands[] = {
     {CmdImagesToPdf, "CmdImagesToPdf\0", StrL("Make PDF From Images...")},
     {CmdExportAnnotations, "CmdExportAnnotations\0", StrL("Export Annotations...")},
     {CmdLocateFile, "CmdLocateFile\0", StrL("Locate File...")},
+    {CmdRefHoverPushToJabRef, "CmdRefHoverPushToJabRef\0", StrL("Push Reference to JabRef")},
 };
 const int gCommandsCount = dimofi(gCommands);
 
@@ -1049,7 +1050,7 @@ CustomCommand* CreateCommandFromDefinition(Str definition) {
     if (cmdId == CmdCommandPalette) {
         // validate mode
         Str s = firstArg->strVal;
-        static SeqStrings validModes = ">\0#\0@\0:\0*\0$\0%\0=\0"; // TODO: "@@\0" ?
+        static SeqStrings validModes = ">\0#\0@\0:\0*\0$\0%\0=\0&\0"; // TODO: "@@\0" ?
         if (SeqStrIndex(validModes, s) < 0) {
             logf("CreateCommandFromDefinition: invalid CmdCommandPalette mode in '%s'\n", definition);
             FreeCommandArgs(firstArg);
@@ -1072,7 +1073,13 @@ CustomCommand* CreateCommandFromDefinition(Str definition) {
     }
     if (cmdId == CmdToggleBoolSetting) {
         // validate the named boolean setting exists (case-insensitive leaf or path)
-        Str settingName = firstArg->strVal;
+        Str settingName;
+        for (CommandArg* a = firstArg; a; a = a->next) {
+            if (str::EqI(a->name, kCmdArgName)) {
+                settingName = a->strVal;
+                break;
+            }
+        }
         if (len(settingName) == 0 || !FindSettingsBoolSetting(settingName)) {
             MaybeDelayedWarningNotification(
                 fmt("Error parsing Shortcuts: unknown boolean setting '%s' in '%s'\n", settingName, definition));

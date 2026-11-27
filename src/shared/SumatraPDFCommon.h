@@ -46,6 +46,7 @@ struct CustomCommand;
 bool RunDocColorsFollowThemeCmd(CustomCommand* cmd);
 void ToggleCaption(CustomCommand* cmd);
 void ToggleSidebarAutoHide(CustomCommand* cmd);
+TextWindowOption DocErrorsWindowOption();
 bool showTocByDefault(Str path, EngineBase* engine);
 bool IsEbookFileType(FileType ft);
 DisplayMode DisplayModeForNewDocument(Str path, EngineBase* engine);
@@ -105,6 +106,7 @@ int wrapIdx(int idx, int max);
 TempStr GetISO639LangCodeFromLangTemp(Str lang);
 Str EbookLayoutSnapshot();
 void ReloadEbookLayoutDocs();
+void ReloadWebDocLayouts(Str beforeMarkdown, Str beforeHtml);
 TempStr ZoomArgTemp(DocController* ctrl);
 void ManualOnJsNotify(void*, Str method, Str paramsJson);
 TempStr DocURIToLocalManualUrlTemp(Str docURI);
@@ -147,7 +149,6 @@ void StealStrVec(StrVec& dst, StrVec& src);
 extern bool gNextPrevDirReady;
 extern bool gNextPrevDirScanning;
 void ScheduleReloadTab(WindowTab* tab);
-bool AutoReloadFileStillChanging(WindowTab* tab);
 void EnsureNextPrevDirScan(Str filePath);
 StrVec* GetNextPrevFilesReady(Str path);
 
@@ -221,11 +222,11 @@ constexpr const char* kSumatraWindowTitle = "SumatraPDF";
 // Cap how many extension links we put in the bar
 constexpr int kMaxDefaultAppLinks = 8;
 
-static Kind kNotifPersistentWarning = "persistentWarning";
-static Kind kNotifDocErrors = "docErrors";
+extern Kind kNotifPersistentWarning;
+extern Kind kNotifDocErrors;
 // Kind used so only one default-app bar is shown at a time
-static Kind kNotifDefaultApp = "defaultApp";
-static Kind kNotifThumbnailProgress = "thumbnailProgress";
+extern Kind kNotifDefaultApp;
+extern Kind kNotifThumbnailProgress;
 int SidebarNativeDx(MainWindow* win);
 void ToggleLineWeights();
 

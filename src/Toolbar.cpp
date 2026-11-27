@@ -498,7 +498,12 @@ static int ToolbarNaturalWidth(MainWindow* win) {
     if (dx <= 0) {
         dx = tb->rowDy * 8;
     }
-    return dx + 2 * DpiScale(kToolbarRowPadX);
+    dx += 2 * DpiScale(kToolbarRowPadX);
+    // the Edit PDF row, when shown, can be wider than the buttons row (#6587)
+    if (tb->annotationRow && tb->annotationRow->GetVisibility() != Visibility::Collapse) {
+        dx = std::max(dx, tb->annotationRow->MinIntrinsicWidth(tb->rowDy));
+    }
+    return dx;
 }
 
 // when the overlay toolbar sits at the bottom, lift it above the horizontal
@@ -522,7 +527,9 @@ static Rect OverlayToolbarRect(MainWindow* win) {
     if (natW <= 0 || natW > canvas.dx) {
         natW = canvas.dx;
     }
-    int h = ToolbarHost(win)->ScreenRect().dy;
+    // the height its rows need: the window's current height can be stale (a
+    // relayout sized it for another mode), and reusing it kept it that tall (#6587)
+    int h = ToolbarDyForWidth(win, natW);
     int x = canvas.x + ((canvas.dx - natW) / 2);
     int y = canvas.y;
     // below a revealed hidden caption (#6537)
@@ -979,6 +986,10 @@ TempStr ToolbarButtonsResultTemp(int* exitCodeOut) {
     int nAnnotations = len(tb->annotationItems);
     bool annotationsVisible = tb->annotationRow && tb->annotationRow->GetVisibility() == Visibility::Visible;
     out.Append(fmt("annotationButtons=%d visible=%d\n", nAnnotations, annotationsVisible ? 1 : 0));
+    // the toolbar window and the height its content needs at that width
+    Rect hostRc = ToolbarHost(win)->ScreenRect();
+    out.Append(fmt("host dx=%d dy=%d overlay=%d contentDy=%d\n", hostRc.dx, hostRc.dy, win->isToolbarOverlay ? 1 : 0,
+                   ToolbarDyForWidth(win, hostRc.dx)));
     for (int i = 0; i < nAnnotations; i++) {
         VirtCtrl* w = tb->annotationItems[i];
         Rect r = w ? w->BoundsInWindow() : Rect{};
@@ -1037,6 +1048,9 @@ static void OnToolbarButtonClicked(MainWindow* win, VirtMouseEvent* ev) {
             ev->didHandle = true;
             return;
         }
+    }
+    if (ev->button != 0) {
+        return;
     }
     if (!w->IsEnabled()) {
         return;
@@ -1812,15 +1826,15 @@ static void BuildSaveHoverMenu(MainWindow* win, ToolbarHoverBuildEvent* ev) {
     bool dirty = ctx->hasUnsavedAnnotations;
 
     TempStr base = tab ? path::GetBaseNameTemp(tab->filePath) : TempStr{};
-    Str saveText = Tr("Save changes to existing PDF");
+    Str saveText = Tr("Save Changes to Existing PDF");
     if (len(base) > 0) {
-        saveText = fmt(Tr("Save changes to %s").s, base);
+        saveText = fmt(Tr("Save Changes to %s").s, base);
     }
 
     Vec<ToolbarHoverMenuItem> items;
     VecAppend(items, {Str(gIconSave), saveText, CmdSaveAnnotations, dirty});
-    VecAppend(items, {Str(gIconSaveToNewFile), Tr("Save changes to a new PDF"), CmdSaveAnnotationsNewFile, dirty});
-    VecAppend(items, {Str(gIconTrash), Tr("Discard changes"), CmdDiscardChanges, dirty});
+    VecAppend(items, {Str(gIconSaveToNewFile), Tr("Save Changes to a New PDF"), CmdSaveAnnotationsNewFile, dirty});
+    VecAppend(items, {Str(gIconTrash), Tr("Discard Changes"), CmdDiscardChanges, dirty});
     ev->layout = NewToolbarHoverMenu(win, items);
 }
 
@@ -2791,7 +2805,7 @@ void CreateToolbar(MainWindow* win) {
                 win->chapterEdit->SetText(fmt("%d", cur.chapter));
             }
         } else {
-            TempStr label = ctrl->GetPageLabeTemp(ctrl->CurrentPageNo());
+            TempStr label = ctrl->GetPageLabelTemp(ctrl->CurrentPageNo());
             win->pageEdit->SetText(label);
         }
         EditSetNumbersOnly(win->pageEdit, !ctrl->HasPageLabels());
@@ -2812,6 +2826,8 @@ void DestroyToolbar(MainWindow* win) {
     win->chapterEdit = nullptr;
     win->toolbarVirt = nullptr;
     win->hwndToolbar = nullptr;
+    // the pending hide timer dies with the host
+    win->toolbarOverlayHidePending = false;
     delete tb->host;
     delete tb;
 }

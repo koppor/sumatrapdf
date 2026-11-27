@@ -13,6 +13,7 @@
 #include "VirtKeys.h"
 
 #include "base/GuessFileType.h"
+#include "base/UITask.h"
 #include "base/Win.h"
 #if OS_WIN
 #include "../../../ext/webview2/WebView2.h"
@@ -102,6 +103,32 @@ static const char* kFindNotifyJs = R"JS(window.__sumatraFindNotify = function() 
   if (window.ipc && window.ipc.postMessage) { window.ipc.postMessage(s); }
 };)JS";
 
+#if OS_WIN
+// ng: orig's AcceleratorKeyPressed handler (WebView.cpp). gpui's webview has
+// none, so the page posts "key <vk> <mods>" for what WebView2 treats as an
+// accelerator (Ctrl / Alt combos, F-keys, Esc) and the frame runs it.
+// Clipboard and select-all stay with the page. mods: 1 shift, 2 ctrl, 4 alt.
+static const char* kForwardKeysJs = R"JS((function(){
+  if (window.__sumatraKeysHooked) { return; }
+  window.__sumatraKeysHooked = true;
+  var pageKeys = { 65: 1, 67: 1, 86: 1, 88: 1, 89: 1, 90: 1 };
+  window.addEventListener("keydown", function(e) {
+    var vk = e.keyCode;
+    if (vk === 16 || vk === 17 || vk === 18 || vk === 91 || vk === 92) { return; }
+    var fkey = vk >= 112 && vk <= 135;
+    if (!e.ctrlKey && !e.altKey && !fkey && vk !== 27) { return; }
+    if (e.ctrlKey && !e.altKey && !e.shiftKey && pageKeys[vk]) { return; }
+    var mods = (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0);
+    try {
+      var wv = window.chrome && window.chrome.webview;
+      if (wv && wv.postMessage) { wv.postMessage("key " + vk + " " + mods); }
+    } catch (ex) {}
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
+})();)JS";
+#endif
+
 struct BrowserView {
     MainWindow* win = nullptr;
     BrowserViewCallback* cb = nullptr;
@@ -109,6 +136,7 @@ struct BrowserView {
     gp::App* app = nullptr;
     gp::Entity<gp::WebView> view;
     bool created = false;
+    bool creating = false;
     // the element asked for a view; it is made from the shell's tick, not
     // during the frame (see BrowserViewCreatePending)
     bool wantCreate = false;
@@ -119,6 +147,9 @@ struct BrowserView {
     bool ownHost = false;
     bool visible = false;
     int clipTop = 0;
+    // popups drawn over the view: wanted, and what the window region cuts out
+    Vec<Rect> holes;
+    Vec<Rect> clipHoles;
     // composition color; unset keeps the white host chm and markdown use
     Color background = kColorUnset;
     int zoomPercent = 100;
@@ -353,9 +384,37 @@ static void OnPageLoad(void* ctx, wry::PageLoadEvent ev, gp::Str url) {
 }
 
 // the notifications kReportScrollJs / kFindInPageJs post back
+struct PageKeyData {
+    MainWindow* win = nullptr;
+    int vk = 0;
+    int mods = 0;
+};
+
+// a shortcut pressed in the page, run by the frame as if pressed there.
+// Posted: the IPC callback runs inside WebView2's event dispatch.
+static void RunPageKey(PageKeyData* d) {
+    AutoDelete delData(d);
+    if (!IsMainWindowValidAndNotClosing(d->win) || !d->win->gpuiWin) {
+        return;
+    }
+    gp::Window* gw = d->win->gpuiWin;
+    gp::WindowKeyDown(gw, d->vk, (d->mods & 1) != 0, (d->mods & 2) != 0, (d->mods & 4) != 0);
+    // no WM_CHAR follows a key that didn't come from the keyboard
+    gw->eatChar = false;
+    gp::AppInvalidate(gw);
+}
+
+static void ForwardPageKey(BrowserView* bv, int vk, int mods) {
+    auto* d = new PageKeyData;
+    d->win = bv->win;
+    d->vk = vk;
+    d->mods = mods;
+    uitask::Post(MkFunc0<PageKeyData>(RunPageKey, d), "BrowserViewPageKey");
+}
+
 static void OnIpcMessage(void* ctx, gp::Str, gp::Str body) {
     auto* bv = (BrowserView*)ctx;
-    if (!bv) {
+    if (!bv || !bv->cb) {
         return;
     }
     Str msg = FromGpui(body);
@@ -369,6 +428,11 @@ static void OnIpcMessage(void* ctx, gp::Str, gp::Str body) {
         if (bv->cb) {
             bv->cb->OnFindResult(gen, current, total);
         }
+        return;
+    }
+    int vk = 0, mods = 0;
+    if (!str::IsNull(str::Parse(msg, "key %d %d", &vk, &mods))) {
+        ForwardPageKey(bv, vk, mods);
         return;
     }
     Str payload = msg;
@@ -398,15 +462,15 @@ BrowserView* BrowserViewCreate(MainWindow* win, HWND, BrowserViewCallback* cb, S
     bv->win = win;
     bv->cb = cb;
     bv->virtualHost = str::Dup(len(virtualHost) > 0 ? virtualHost : Str(kDefaultVirtualHost));
-    VecAppend(gBrowserViews, bv);
+    if (!VecAppend(gBrowserViews, bv)) {
+        str::Free(bv->virtualHost);
+        delete bv;
+        return nullptr;
+    }
     return bv;
 }
 
-void BrowserViewDelete(BrowserView* bv) {
-    if (!bv) {
-        return;
-    }
-    VecRemove(gBrowserViews, bv);
+static void FreeBrowserView(BrowserView* bv) {
     if (bv->app && bv->view.IsValid()) {
         gp::EntityDrop(bv->app, bv->view.id);
     }
@@ -416,6 +480,16 @@ void BrowserViewDelete(BrowserView* bv) {
         str::Free(url);
     }
     delete bv;
+}
+
+void BrowserViewDelete(BrowserView* bv) {
+    if (!bv || VecRemove(gBrowserViews, bv) < 0) {
+        return;
+    }
+    bv->cb = nullptr;
+    if (!bv->creating) {
+        FreeBrowserView(bv);
+    }
 }
 
 MainWindow* BrowserViewWindow(BrowserView* bv) {
@@ -752,11 +826,15 @@ static void CreateWebView(BrowserView* bv, gp::Ctx* cx) {
     bv->app = cx->app;
     bv->createTries++;
 
-    wry::InitializationScript scripts[4];
-    scripts[0].script = ToGpui(Str(kReportScrollJs));
-    scripts[1].script = ToGpui(Str(kFindInPageJs));
-    scripts[2].script = ToGpui(Str(kJsNotifyJs));
-    scripts[3].script = ToGpui(Str(kFindNotifyJs));
+    wry::InitializationScript scripts[5];
+    int nScripts = 0;
+    scripts[nScripts++].script = ToGpui(Str(kReportScrollJs));
+    scripts[nScripts++].script = ToGpui(Str(kFindInPageJs));
+    scripts[nScripts++].script = ToGpui(Str(kJsNotifyJs));
+    scripts[nScripts++].script = ToGpui(Str(kFindNotifyJs));
+#if OS_WIN
+    scripts[nScripts++].script = ToGpui(Str(kForwardKeysJs));
+#endif
 
     wry::CustomProtocol protocol;
     protocol.name = ToGpui(Str(kProtocolName));
@@ -771,7 +849,7 @@ static void CreateWebView(BrowserView* bv, gp::Ctx* cx) {
     attrs.customProtocols = &protocol;
     attrs.customProtocolCount = 1;
     attrs.initializationScripts = scripts;
-    attrs.initializationScriptCount = dimofi(scripts);
+    attrs.initializationScriptCount = nScripts;
     attrs.ctx = bv;
     attrs.navigationHandler = OnNavigationStarting;
     attrs.onPageLoadHandler = OnPageLoad;
@@ -800,9 +878,18 @@ static void CreateWebView(BrowserView* bv, gp::Ctx* cx) {
 
     // creating runs a nested message loop, which can ask for another page
     Str startUrl = str::Dup(bv->pendingUrl);
+    bv->creating = true;
     gWebViewCreateDepth++;
-    bv->view = gp::WebViewNew(cx, &attrs);
+    gp::Entity<gp::WebView> view = gp::WebViewNew(cx, &attrs);
     gWebViewCreateDepth--;
+    bv->creating = false;
+    bv->view = view;
+    // Keep the callback context alive until native creation and disposal finish.
+    if (!bv->cb) {
+        FreeBrowserView(bv);
+        str::Free(startUrl);
+        return;
+    }
     gp::WebView* wv = bv->view.Get(cx->app);
     if (!wv || !gp::WebViewRaw(wv)) {
         str::Free(startUrl);
@@ -848,7 +935,12 @@ static void CreateWebView(BrowserView* bv, gp::Ctx* cx) {
 // inside gpui's paint (the window never stops repainting if it does), so the
 // shell's tick makes the pending views instead of BrowserViewBuild()
 void BrowserViewCreatePending(MainWindow* win, gp::Ctx* cx) {
-    for (BrowserView* bv : gBrowserViews) {
+    // a copy: creating runs a nested loop that can add or delete views
+    Vec<BrowserView*> views = gBrowserViews;
+    for (BrowserView* bv : views) {
+        if (!VecContains(gBrowserViews, bv)) {
+            continue;
+        }
         if (bv->win == win && bv->wantCreate && !bv->created && !bv->ownHost) {
             CreateWebView(bv, cx);
             AppShellInvalidate(win);
@@ -866,13 +958,38 @@ void BrowserViewCreatePendingIn(BrowserView* bv, gp::Ctx* cx) {
     if (!bv || !bv->ownHost || !bv->wantCreate || bv->created) {
         return;
     }
+    MainWindow* win = bv->win;
     CreateWebView(bv, cx);
-    AppShellInvalidate(bv->win);
+    AppShellInvalidate(win);
+}
+
+// ng: gpui draws a popup menu in the frame, under the web view's native
+// window (orig's menus are windows of their own), so the region cuts it out
+void BrowserViewSetHoles(BrowserView* bv, const Vec<Rect>& holes) {
+    if (!bv) {
+        return;
+    }
+    VecReset(bv->holes);
+    for (const Rect& r : holes) {
+        VecAppend(bv->holes, r);
+    }
+}
+
+static bool SameRects(const Vec<Rect>& a, const Vec<Rect>& b) {
+    if (len(a) != len(b)) {
+        return false;
+    }
+    for (int i = 0; i < len(a); i++) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void ClipBrowserTop(BrowserView* bv, int top) {
 #if OS_WIN
-    if (top == bv->clipTop) {
+    if (top == bv->clipTop && SameRects(bv->holes, bv->clipHoles)) {
         return;
     }
     auto* controller = (ICoreWebView2Controller*)wry::WebViewControllerRaw(Raw(bv));
@@ -882,9 +999,18 @@ static void ClipBrowserTop(BrowserView* bv, int top) {
     }
     // Clip the native surface without changing the page's viewport or scroll position.
     HRGN region = nullptr;
-    if (top > 0) {
-        Rect frame = HwndClientRect(AppShellNativeHwnd(bv->win));
+    if (top > 0 || len(bv->holes) > 0) {
+        HWND frameHwnd = AppShellNativeHwnd(bv->win);
+        Rect frame = HwndClientRect(frameHwnd);
         region = CreateRectRgn(0, AppShellDpiPx(bv->win, top), frame.dx, frame.dy);
+        // holes are in frame client pixels, the region in the host window's
+        for (const Rect& r : bv->holes) {
+            POINT pts[2] = {{r.x, r.y}, {r.x + r.dx, r.y + r.dy}};
+            MapWindowPoints(frameHwnd, hwnd, pts, 2);
+            HRGN hole = CreateRectRgn(pts[0].x, pts[0].y, pts[1].x, pts[1].y);
+            CombineRgn(region, region, hole, RGN_DIFF);
+            DeleteObject(hole);
+        }
     }
     if (!SetWindowRgn(hwnd, region, TRUE)) {
         if (region) {
@@ -893,6 +1019,10 @@ static void ClipBrowserTop(BrowserView* bv, int top) {
         return;
     }
     bv->clipTop = top;
+    VecReset(bv->clipHoles);
+    for (const Rect& r : bv->holes) {
+        VecAppend(bv->clipHoles, r);
+    }
 #endif
 }
 
@@ -930,11 +1060,11 @@ gp::El* BrowserViewBuild(BrowserView* bv, gp::Ctx* cx, int clipTop) {
         }
     }
     ClipBrowserTop(bv, clipTop);
-    // The web view stays hidden until the page loads. Without this fill the
-    // capture (and the user) sees the window's white ground instead of the theme.
+    // The web view is transparent, so this is what shows through a page that
+    // does not paint its own ground. An unset color is white.
     gp::El* host = gp::Div(cx->a)->SizeFull();
     if (ColorSkipsPaint(bv->background)) {
-        host->Bg(gp::ThemeNow(cx->app).tokens.muted);
+        host->Bg(ToGpui(kColWhite));
     } else {
         host->Bg(ToGpui(bv->background));
     }

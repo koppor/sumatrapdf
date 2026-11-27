@@ -1168,6 +1168,40 @@ gp::App* AppShellGetApp() {
     return gApp;
 }
 
+// where the window's content (client area) starts on screen
+Point AppShellContentOrigin(MainWindow* win) {
+#if OS_WIN
+    POINT o{0, 0};
+    if (HWND hwnd = AppShellNativeHwnd(win)) {
+        ClientToScreen(hwnd, &o);
+    }
+    return Point(o.x, o.y);
+#else
+    Rect content = win && win->gpuiWin ? FromGpui(gp::WindowContentBounds(win->gpuiWin)) : Rect{};
+    if (content.IsEmpty()) {
+        content = AppShellWindowScreenRect(win);
+    }
+    return Point(content.x, content.y);
+#endif
+}
+
+// A rect in window dips as screen pixels, for tests. Off Windows tests use
+// gpui's window coordinates, so it comes back as is.
+Rect AppShellDipsToScreen(gp::Window* gw, float x, float y, float dx, float dy) {
+#if OS_WIN
+    HWND hwnd = gw ? (HWND)gp::PlatWindowHandle(gw) : nullptr;
+    float scale = hwnd ? (float)DpiGetForHwnd(hwnd) / 96.f : 1.f;
+    POINT p{(int)(x * scale), (int)(y * scale)};
+    if (hwnd) {
+        ClientToScreen(hwnd, &p);
+    }
+    return Rect{p.x, p.y, (int)(dx * scale), (int)(dy * scale)};
+#else
+    (void)gw;
+    return Rect{(int)x, (int)y, (int)dx, (int)dy};
+#endif
+}
+
 #if !OS_WIN
 static bool SystemUsesDarkMode() {
     return gApp && gp::AppWindowAppearance(gApp) == gp::WindowAppearance::Dark;
@@ -1226,7 +1260,7 @@ void AppShellReapClosedWindows() {
         }
         logf("AppShellReapClosedWindows: window 0x%p was closed\n", win);
         win->gpuiWin = nullptr;
-        CloseWindow(win, false, false);
+        CloseWindow(win, false);
     }
 }
 
@@ -1417,7 +1451,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void sumatra_wasm_fullscreen_left() {
 extern "C" EMSCRIPTEN_KEEPALIVE const char* sumatra_wasm_build_info() {
     static char* info = nullptr;
     if (!info) {
-        info = str::Dup(fmt("%s %s", currentVersion, gitCommidId)).s;
+        info = str::Dup(fmt("%s %s", currentVersion, gitCommitId)).s;
     }
     return info;
 }
@@ -2092,6 +2126,28 @@ static bool FailedTabFileExists(WindowTab* tab) {
 
 // a fixed-page document draws through DocCanvas, the Home tab through
 // HomePage, a CHM or markdown document through the browser view
+// the popup menus open in the frame (tab, toolbar and context menus, a menu
+// bar drop-down), in frame client pixels. A popup not laid out yet asks for
+// another frame.
+static void PopupMenuRects(ShellView* self, gp::Ctx* cx, Vec<Rect>& out) {
+    Vec<gp::Bounds> bounds;
+    TrackedPopupBounds(cx, bounds);
+    auto* mb = (gpc::AppMenuBarState*)gp::EntityGet(cx->app, self->menuBarState.id);
+    if (mb && mb->selected >= 0 && self->menuPopupIdx >= 0) {
+        AppendPopupMenuBounds(cx, self->menuPopupState.Get(cx), bounds);
+    }
+    float k = gp::WindowScaleFactor(cx->win);
+    for (const gp::Bounds& b : bounds) {
+        if (b.w <= 0 || b.h <= 0) {
+            AppShellInvalidate(self->win);
+            continue;
+        }
+        int x = (int)floorf(b.x * k);
+        int y = (int)floorf(b.y * k);
+        VecAppend(out, Rect(x, y, (int)ceilf((b.x + b.w) * k) - x, (int)ceilf((b.y + b.h) * k) - y));
+    }
+}
+
 static gp::El* BuildCanvas(ShellView* self, gp::Ctx* cx, bool overlayUp) {
     MainWindow* win = self->win;
     const gp::Theme& th = gp::ThemeNow(cx->app);
@@ -2115,6 +2171,9 @@ static gp::El* BuildCanvas(ShellView* self, gp::Ctx* cx, bool overlayUp) {
         if (win->captionOverlayShown && ShowCaption(win) && !gSettings->showCaption) {
             clipTop = std::max(0, CaptionDy(win, win->isMenuBarVisible, TabsAreVisible(win)) - win->canvasRc.y);
         }
+        Vec<Rect> holes;
+        PopupMenuRects(self, cx, holes);
+        BrowserViewSetHoles(browser, holes);
         box->Child(BrowserViewBuild(browser, cx, clipTop));
         return box;
     }
@@ -2316,11 +2375,18 @@ static gp::El* BuildBody(ShellView* self, gp::Ctx* cx, bool overlayUp) {
 // canvas it belongs to, with orig's five NotifCorner anchors, its close box
 // and the tip markup ([text](CmdFoo), **bold**, (Kbd/..)) as real spans.
 
-constexpr int kNotifPadX = 10;
-constexpr int kNotifPadY = 6;
+// orig's NotificationWnd::BuildTree padding and kCloseLeftMargin - padding
+constexpr int kNotifPadX = 12;
+constexpr int kNotifPadY = 8;
 // orig's kTopLeftMargin
 constexpr int kNotifTopLeftMargin = 8;
-constexpr int kNotifCloseGap = 8;
+constexpr int kNotifCloseGap = 4;
+// orig's kProgressDy
+constexpr int kNotifProgressDy = 5;
+// orig's kPadding between stacked notifications
+constexpr int kNotifStackGap = 6;
+// orig's VirtCloseButton x (kColCloseXDef)
+constexpr Color kNotifCloseCol = MkRgb(0xa0, 0xa0, 0xa0);
 constexpr int kNotifCloseDx = 16;
 
 static bool NotifShownNow(MainWindow* win, NotificationWnd* n);
@@ -2345,8 +2411,8 @@ static bool NotifShownNow(MainWindow* win, NotificationWnd* n) {
 // close box stays reachable even for a very long message (issue #2916)
 static float NotifMaxTextDx(MainWindow* win) {
     int dx = win->canvasRc.dx - 2 * DpiScale(kNotifTopLeftMargin);
-    // the card's border, its padding and the close box after the text
-    dx -= 2 + 2 * kNotifPadX + kNotifCloseGap + kNotifCloseDx;
+    // the card's padding and the close box after the text
+    dx -= 2 * kNotifPadX + kNotifCloseGap + kNotifCloseDx;
     return dx > 0 ? (float)dx : (float)(1 << 20);
 }
 
@@ -2393,12 +2459,7 @@ static gp::El* BuildNotifCard(gp::Ctx* cx, NotificationWnd* n) {
     Color colText = n->warning ? ThemeNotificationsHighlightTextColor() : ThemeNotificationsTextColor();
     Color colLink = n->warning ? ThemeNotificationsHighlightLinkColor() : ThemeWindowLinkColor();
     bool isBar = n->corner == NotifCorner::BottomBar;
-    gp::El* card = gp::Div(cx->a)
-                       ->FlexCol()
-                       ->PadX((float)kNotifPadX)
-                       ->PadY((float)kNotifPadY)
-                       ->Bg(ToGpui(colBg))
-                       ->Border(1, ToGpui(ThemeWindowTextColor()));
+    gp::El* card = gp::Div(cx->a)->FlexCol()->PadX((float)kNotifPadX)->PadY((float)kNotifPadY)->Bg(ToGpui(colBg));
     gp::El* row = gp::Div(cx->a)->FlexRow()->ItemsCenter()->Gap((float)kNotifCloseGap);
     if (isBar) {
         card->W(gp::kFill);
@@ -2406,16 +2467,18 @@ static gp::El* BuildNotifCard(gp::Ctx* cx, NotificationWnd* n) {
     }
     row->Child(BuildNotifSpans(cx, n, colText, colLink));
     row->Child(gp::TextEl(cx->a, GStrL("\xc3\x97"))
-                   ->Font(14)
-                   ->Fg(ToGpui(colText))
+                   ->Font(18)
+                   ->Fg(ToGpui(kNotifCloseCol))
                    ->Cursor(gp::CursorKind::Pointer)
                    ->PathClick(GpuiDup(cx->a, fmt("notif-%d-close", (int)n->key)))
                    ->OnClick(gp::ListenTo(ShellViewOf(n->win), &ShellView::OnNotifClose, (intptr_t)n->key)));
     card->Child(row);
+    // flat: a light track with the done part in the progress color over it
     if (n->progressPerc >= 0) {
-        gp::Rgba col = ToGpui(ThemeNotificationsProgressColor());
-        gp::El* progress = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->H(5)->Border(1, col);
-        progress->Child(gp::Div(cx->a)->WFrac((float)n->progressPerc / 100.f)->H(gp::kFill)->Bg(col));
+        float frac = (float)std::clamp(n->progressPerc, 0, 100) / 100.f;
+        gp::El* progress = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->H((float)kNotifProgressDy);
+        progress->Bg(ToGpui(ThemeNotificationsProgressTrackColor(colBg)));
+        progress->Child(gp::Div(cx->a)->WFrac(frac)->H(gp::kFill)->Bg(ToGpui(ThemeNotificationsProgressColor())));
         card->Gap((float)kNotifPadY)->Child(progress);
     }
     return card;
@@ -2435,16 +2498,17 @@ static void BuildNotifications(MainWindow* win, gp::Ctx* cx, gp::El* parent) {
         if (!stacks[ci]) {
             bool atRight = n->corner == NotifCorner::TopRight || n->corner == NotifCorner::BottomRight;
             bool atBottom = n->corner != NotifCorner::TopLeft && n->corner != NotifCorner::TopRight;
-            gp::El* st = gp::Div(cx->a)->FlexCol()->Gap(4)->Absolute();
+            gp::El* st = gp::Div(cx->a)->FlexCol()->Gap((float)kNotifStackGap)->Absolute();
             if (n->corner == NotifCorner::BottomBar) {
                 st->Left(0)->Right(0)->Bottom(0);
             } else {
                 float mx = (float)DpiScale(n->xMargin);
                 float my = (float)DpiScale(n->yMargin);
+                // each card as wide as its own message, as orig sizes each window
                 if (atRight) {
                     st->Right(mx)->ItemsEnd();
                 } else {
-                    st->Left(mx);
+                    st->Left(mx)->ItemsStart();
                 }
                 if (atBottom) {
                     st->Bottom(my);
@@ -3097,6 +3161,8 @@ void ShellView::OnKeyDown(ShellView* self, gp::Ctx* cx, const gp::KeyEvent* ev) 
             // the page box gave the focus back
         } else if (DialogsOnEscape(win)) {
             // the topmost dialog is gone now
+        } else if (win->IsCurrentTabAbout() && HomePageClearSelection(win)) {
+            // Home's selected file group is cleared
         } else if (ReadingAutoScrollIsOn(win)) {
             // orig's PreTranslate: these two take Esc before the frame does
             ReadingAutoScrollStop(win);

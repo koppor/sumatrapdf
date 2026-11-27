@@ -2,7 +2,7 @@
    License: Simplified BSD (see COPYING.BSD) */
 
 namespace dict {
-class MapStrToInt;
+class StrToInt;
 }
 
 #if OS_WIN
@@ -113,6 +113,7 @@ struct HtmlFormatterArgs {
     WStr GetFontName() const { return fontName; }
 
     float fontSize = 0;
+    float lineHeight = 0;
     bool overrideFontName = false;
 
     // DrawInstr strings must outlive the formatter. Keep original HTML alive with
@@ -207,7 +208,7 @@ struct HtmlFormatter {
     static constexpr int kMaxMeasureCacheFonts = 6;
     struct MeasureCache {
         PlatformFont* font = nullptr;
-        dict::MapStrToInt* keys = nullptr; // text -> index into vals
+        dict::StrToInt* keys = nullptr; // text -> index into vals
         Vec<RectF> vals;
     };
     MeasureCache measureCaches[kMaxMeasureCacheFonts];

@@ -97,6 +97,8 @@ struct SavePathArgs {
     Str nativeDir;            // owned; lpstrInitialDir
     bool noDefExt = false;    // no lpstrDefExt
     bool nativeTitle = false; // lpstrTitle is title; otherwise the system's "Save As"
+    // onDone only picks the path; the caller writes (and on wasm downloads) later
+    bool pickOnly = false;
     // out: the path the user picked, empty if cancelled. Only valid during
     // onDone; the args are deleted afterwards
     Str path;
@@ -124,6 +126,7 @@ gpui::El* RenameStripGroupDialogBuild(MainWindow* win, gpui::Ctx* cx);
 void ShowAddFavoriteDialog(MainWindow* win, Str filePath, int pageNo, Str pageLabel, Str name);
 void ShowEditFavoritesDialog(MainWindow* win);
 void CloseAddFavoriteDialog();
+void AddFavoriteOnSettingsReloaded();
 bool IsAddFavoriteDialogVisible();
 gpui::El* AddFavoriteDialogBuild(MainWindow* win, gpui::Ctx* cx);
 void CloseOpenFromUrlDialog();

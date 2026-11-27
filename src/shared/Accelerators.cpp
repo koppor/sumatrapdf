@@ -25,6 +25,11 @@ constexpr u8 kCmd = KeyShortcut::kCmdKey;
 // https://grok.com/share/bGVnYWN5_d83c2956-4ce2-4c74-ba4d-9794d1760ccb?rid=746312cc-7d0f-4479-abec-25c394652cac
 // NOLINTBEGIN(modernize-use-designated-initializers)
 static Accel gBuiltInAccelerators[] = {
+    // Citation push to JabRef (Ctrl+J) registered as accelerator so it fires
+    // regardless of which child holds focus — alt-tabbing back to SumatraPDF
+    // can leave focus on toolbar / sidebar / search edit, where canvas-level
+    // WM_KEYDOWN never gets the key.
+    {{kCtrl | kVirt, 'J'}, CmdRefHoverPushToJabRef},
     {{kVirt, 'K'}, CmdScrollUp},
     {{kVirt, 'J'}, CmdScrollDown},
     {{kVirt, 'H'}, CmdScrollLeft},

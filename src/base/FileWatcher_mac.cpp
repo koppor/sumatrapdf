@@ -8,7 +8,25 @@
 #include "base/Base.h"
 #include "base/File.h"
 
+#include <sys/stat.h>
+
 #include "base/FileWatcher.h"
+
+static bool StatFileMeta(Str path, FILETIME* modOut, i64* sizeOut) {
+    if (len(path) == 0) {
+        return false;
+    }
+    struct stat st{};
+    if (stat(CStrTemp(path), &st) != 0 || !S_ISREG(st.st_mode)) {
+        return false;
+    }
+    i64 secs = (i64)st.st_mtimespec.tv_sec;
+    i64 nsecs = (i64)st.st_mtimespec.tv_nsec;
+    u64 ticks = kFileTimeUnixEpoch + (u64)secs * kFileTimeTicksPerSec + (u64)(nsecs / 100);
+    *modOut = FileTimeFromU64(ticks);
+    *sizeOut = (i64)st.st_size;
+    return true;
+}
 
 struct WatchedFile {
     WatchedFile* next = nullptr;
@@ -18,6 +36,8 @@ struct WatchedFile {
     i64 size = 0;
     bool exists = false;
     bool ignore = false;
+    // tells a new file apart from a freed one at the same address
+    u64 id = 0;
 };
 
 static Mutex gWatcherMutex;
@@ -25,26 +45,68 @@ static WatchedFile* gWatchedFiles = nullptr;
 static Str gSkipPath;
 static ThreadHandle gWatcherThread = nullptr;
 static AtomicBool gShouldExit = 0;
+static u64 gNextWatchedFileId = 0;
 
 static void FreeWatchedFile(WatchedFile* file) {
     str::Free(file->path);
     delete file;
 }
 
+static bool WatchedFileStillActive(WatchedFile* file, u64 id) {
+    for (WatchedFile* f = gWatchedFiles; f; f = f->next) {
+        if (f == file && f->id == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// stat runs without gWatcherMutex: on a stalled network share it can block
+// for minutes, and Subscribe / Unsubscribe take the mutex on the UI thread
 static void FileWatcherThread() {
+    struct Check {
+        WatchedFile* file = nullptr;
+        u64 id = 0;
+        Str path;
+        FILETIME modified{};
+        i64 size = 0;
+        bool exists = false;
+    };
     while (!AtomicBoolGet(&gShouldExit)) {
         SleepInMs(100);
-        Vec<Func0> toNotify;
+        Vec<Check> checks;
         {
             ScopedMutex lock(&gWatcherMutex);
             for (WatchedFile* file = gWatchedFiles; file; file = file->next) {
-                bool exists = file::Exists(file->path);
-                FILETIME modified = exists ? file::GetModificationTime(file->path) : FILETIME{};
-                i64 size = exists ? file::GetSize(file->path) : 0;
-                bool changed = exists && (!file->exists || !FileTimeEq(modified, file->modified) || size != file->size);
-                file->exists = exists;
-                file->modified = modified;
-                file->size = size;
+                Check c;
+                c.file = file;
+                c.id = file->id;
+                c.path = str::Dup(file->path);
+                VecAppend(checks, c);
+            }
+        }
+        for (Check& c : checks) {
+            c.exists = StatFileMeta(c.path, &c.modified, &c.size);
+            if (!c.exists) {
+                c.modified = {};
+                c.size = 0;
+            }
+            str::Free(c.path);
+        }
+
+        Vec<Func0> toNotify;
+        {
+            ScopedMutex lock(&gWatcherMutex);
+            for (Check& c : checks) {
+                if (!WatchedFileStillActive(c.file, c.id)) {
+                    continue;
+                }
+                WatchedFile* file = c.file;
+                bool changed =
+                    c.exists && (!file->exists || !FileTimeEq(c.modified, file->modified) || c.size != file->size);
+                file->exists = c.exists;
+                file->modified = c.modified;
+                file->size = c.size;
                 if (changed && !file->ignore) {
                     VecAppend(toNotify, file->onFileChanged);
                 }
@@ -72,13 +134,12 @@ void FileWatcherSetSkipPath(Str path) {
     str::ReplacePtr(&gSkipPath, str::Dup(path));
 }
 
-void FileWatcherInit(void) {
-    ScopedMutex lock(&gWatcherMutex);
-    StartFileWatcher();
-}
+void FileWatcherInit(void) {}
 
 WatchedFile* FileWatcherSubscribe(Str path, const Func0& onFileChangedCb, bool) {
-    if (!file::Exists(path)) {
+    FILETIME modified{};
+    i64 size = 0;
+    if (!StatFileMeta(path, &modified, &size)) {
         return nullptr;
     }
     ScopedMutex lock(&gWatcherMutex);
@@ -88,9 +149,10 @@ WatchedFile* FileWatcherSubscribe(Str path, const Func0& onFileChangedCb, bool) 
     auto* file = new WatchedFile();
     file->path = str::Dup(path);
     file->onFileChanged = onFileChangedCb;
-    file->modified = file::GetModificationTime(path);
-    file->size = file::GetSize(path);
+    file->modified = modified;
+    file->size = size;
     file->exists = true;
+    file->id = ++gNextWatchedFileId;
     ListInsertFront(&gWatchedFiles, file);
     logf("FileWatcherSubscribe: watching '%s'\n", path);
     return file;

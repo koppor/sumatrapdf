@@ -133,6 +133,9 @@ HtmlFormatter::HtmlFormatter(HtmlFormatterArgs* args)
     textMeasure->SetFont(CurrFont());
 
     lineSpacing = textMeasure->GetCurrFontLineSpacing();
+    if (args->lineHeight > 0) {
+        lineSpacing = args->lineHeight * defaultFontSize * (96.f / 72.f);
+    }
     spaceDx = CurrFont()->GetSize() / 2.5f; // note: a heuristic
     float spaceDx2 = textMeasure->GetSpaceDx();
     if (spaceDx2 < spaceDx) {
@@ -174,7 +177,7 @@ HtmlFormatter::MeasureCache* HtmlFormatter::GetMeasureCacheForCurrFont() {
     }
     MeasureCache* mc = &measureCaches[nMeasureCaches++];
     mc->font = font;
-    mc->keys = new dict::MapStrToInt(measureCacheInitialSize);
+    mc->keys = new dict::StrToInt(measureCacheInitialSize);
     lastMeasureCache = mc;
     return mc;
 }
@@ -184,7 +187,7 @@ HtmlFormatter::MeasureCache* HtmlFormatter::GetMeasureCacheForCurrFont() {
 RectF HtmlFormatter::MeasureTextCached(Str s) {
     textMeasure->SetFont(CurrFont());
     MeasureCache* mc = GetMeasureCacheForCurrFont();
-    // MapStrToInt keys are utf-8, which is what we measure, so s is the key
+    // StrToInt keys are utf-8, which is what we measure, so s is the key
     int idx = 0;
     if (mc && !mc->keys->Insert(s, len(mc->vals), &idx)) {
         return mc->vals[idx];
@@ -356,9 +359,12 @@ static void SetYPos(Vec<DrawInstr>& instr, float y) {
 // Redistribute extra space in the line equally among the spaces
 void HtmlFormatter::JustifyLineBoth() {
     float extraSpaceDxTotal = pageDx - currX;
-    ReportIf(extraSpaceDxTotal < 0.f);
 
     LayoutLeftStartingAt(0.f);
+    // a character wider than the page overflows the line: nothing to spread
+    if (extraSpaceDxTotal < 0.f) {
+        return;
+    }
     size_t spaces = 0;
     bool endsWithSpace = false;
     for (DrawInstr& i : currLineInstr) {
@@ -671,7 +677,7 @@ static bool CanEmitElasticSpace(float currX, float NewLineX, float maxCurrX, Vec
     if (currX > maxCurrX) {
         return false;
     }
-    DrawInstr& di = VecLast(currLineInstr);
+    DrawInstr di = VecLast(currLineInstr);
     // don't add a space if only an anchor would be in between them
     if (DrawInstrType::Anchor == di.type && len(currLineInstr) > 1) {
         di = currLineInstr[len(currLineInstr) - 2];
@@ -761,9 +767,15 @@ void HtmlFormatter::EmitTextRun(Str s) {
         // get len That Fits the remaining space in the line (pass the width we
         // just measured so it isn't measured again)
         int lenThatFits = textMeasure->StringLenForWidth(buf, pageDx - currX, bbox.dx);
-        if (lenThatFits <= 0) {
+        if (lenThatFits <= 0 && currX != NewLineX()) {
             FlushCurrLine(false);
             continue;
+        }
+        bool overflow = lenThatFits <= 0;
+        if (overflow) {
+            // not even one codepoint fits on an empty line: overflow it rather than loop forever
+            lenThatFits = 0;
+            Utf8CodepointNext(buf, lenThatFits);
         }
 
         // Move an unbroken word to a new line; split it only when the line is empty.
@@ -786,7 +798,7 @@ void HtmlFormatter::EmitTextRun(Str s) {
             lenThatFits = Utf8CodepointStartByte(buf, lenThatFits);
         }
         bbox = MeasureTextCached(Str(buf.s, lenThatFits));
-        ReportIf(bbox.dx > pageDx);
+        ReportIf(!overflow && bbox.dx > pageDx);
         // buf is `run` with the soft hyphens removed, so a length in buf maps
         // back to a longer one in run
         int runLenThatFits = RunLenForBufLen(run, lenThatFits);

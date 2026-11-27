@@ -16,6 +16,32 @@
 #include "EngineBase.h"
 #include "PdfSync.h"
 
+#if OS_WASM
+
+// A browser tab has no TeX editor to sync with, so none of the parser is built.
+
+Synchronizer::Synchronizer(Str syncFilePathIn, Str pdffilename) {
+    syncFilePath = str::Dup(syncFilePathIn);
+    pdfPath = str::Dup(pdffilename);
+}
+
+Synchronizer::~Synchronizer() {
+    str::Free(syncFilePath);
+    str::Free(pdfPath);
+}
+
+int Synchronizer::Create(Str, EngineBase* engine, Synchronizer** sync) {
+    if (!sync || !engine) {
+        return PDFSYNCERR_INVALID_ARGUMENT;
+    }
+    *sync = nullptr;
+    return PDFSYNCERR_SYNCFILE_NOTFOUND;
+}
+
+void DeleteSyncTempFiles() {}
+
+#else
+
 // size of the mark highlighting the location calculated by forward-search
 constexpr int kMarkSize = 10;
 // maximum error in the source file line number when doing forward-search
@@ -138,11 +164,6 @@ int Synchronizer::Create(Str pdffilename, EngineBase* engine, Synchronizer** syn
         return PDFSYNCERR_INVALID_ARGUMENT;
     }
 
-#if OS_WASM
-    // a browser tab has no TeX editor to sync with: no LaTeX integration
-    (void)pdffilename;
-    return PDFSYNCERR_SYNCFILE_NOTFOUND;
-#else
     if (!str::EndsWithI(pdffilename, StrL(".pdf"))) {
         return PDFSYNCERR_INVALID_ARGUMENT;
     }
@@ -168,7 +189,6 @@ int Synchronizer::Create(Str pdffilename, EngineBase* engine, Synchronizer** syn
     }
 
     return PDFSYNCERR_SYNCFILE_NOTFOUND;
-#endif
 }
 
 // PDFSYNC synchronizer
@@ -222,7 +242,11 @@ int Pdfsync::RebuildIndexIfNeeded() {
 
     Vec<int> filestack;
     int page = 1;
-    VecAppend(sheetIndex, 0);
+    int maxPageNo = engine->PageCount();
+    // indexed by sheet number; -1 for a sheet the file doesn't describe
+    for (int i = 0; i <= maxPageNo; i++) {
+        VecAppend(sheetIndex, -1);
+    }
 
     // add the initial tex file to the source file stack
     VecAppend(filestack, len(srcfiles));
@@ -230,7 +254,6 @@ int Pdfsync::RebuildIndexIfNeeded() {
     VecAppend(fileIndex, {});
 
     // parse data
-    int maxPageNo = engine->PageCount();
     while (Str line = ReadSyncLine(rest)) {
         switch (line.s[0]) {
             case 'l': {
@@ -242,11 +265,17 @@ int Pdfsync::RebuildIndexIfNeeded() {
                 }
             } break;
 
-            case 's':
-                if (!str::IsNull(str::Parse(line, "s %u", &page))) {
-                    VecAppend(sheetIndex, len(points));
+            case 's': {
+                uint sheet = 0;
+                if (str::IsNull(str::Parse(line, "s %u", &sheet))) {
+                    break;
                 }
-                break;
+                // page 0 skips the 'p' records of a sheet that isn't in the document
+                page = (sheet >= 1 && sheet <= (uint)maxPageNo) ? (int)sheet : 0;
+                if (page > 0) {
+                    sheetIndex[page] = len(points);
+                }
+            } break;
 
             case 'p': {
                 if (0 == page || page > maxPageNo) {
@@ -260,7 +289,7 @@ int Pdfsync::RebuildIndexIfNeeded() {
 
             case '(': {
                 TempStr filename = strconv::AnsiToUtf8Temp(Str(line.s + 1, line.len - 1));
-                if (len(filename) > 0 && filename.s[0] == '"' && filename.s[len(filename) - 1] == '"') {
+                if (len(filename) >= 2 && filename.s[0] == '"' && filename.s[len(filename) - 1] == '"') {
                     filename = str::DupTemp(Str(filename.s + 1, len(filename) - 2));
                 }
                 // undecorate the filepath: replace * by space and / by \ (backslash)
@@ -321,7 +350,7 @@ int Pdfsync::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
 
     // find the entry in the index corresponding to this page
     int nPages = engine->PageCount();
-    if (pageNo == 0 || pageNo >= len(sheetIndex) || pageNo > nPages) {
+    if (pageNo < 1 || pageNo >= len(sheetIndex) || pageNo > nPages || sheetIndex[pageNo] < 0) {
         return PDFSYNCERR_INVALID_PAGE_NUMBER;
     }
 
@@ -458,12 +487,12 @@ int Pdfsync::SourceToDoc(Str srcfilename, int line, int col, int* page, Vec<Rect
 
     // records have been found for the desired source position:
     // we now find the page and positions in the PDF corresponding to these found records
-    int firstPage = UINT_MAX;
+    int firstPage = 0;
     for (PdfsyncPoint& p : points) {
         if (!VecContains(found_records, (int)p.record)) {
             continue;
         }
-        if (firstPage != UINT_MAX && firstPage != (int)p.page) {
+        if (firstPage != 0 && firstPage != (int)p.page) {
             continue;
         }
         firstPage = *page = (int)p.page;
@@ -718,7 +747,7 @@ int SyncTex::DocToSource(int pageNo, Point pt, Str& filename, int* line, int* co
         return PDFSYNCERR_UNKNOWN_SOURCEFILE;
     }
 
-    filename = str::Dup(name);
+    str::ReplaceWithCopy(&filename, name);
     if (len(filename) == 0) {
         return PDFSYNCERR_OUTOFMEMORY;
     }
@@ -842,3 +871,5 @@ int SyncTex::SourceToDoc(Str srcfilename, int line, int col, int* page, Vec<Rect
     return PDFSYNCERR_SUCCESS;
 }
 #endif // !OS_WASM
+
+#endif // OS_WASM

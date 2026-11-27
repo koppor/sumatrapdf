@@ -619,7 +619,7 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return ctx.tabInGroup ? CommandVisibility::Show : CommandVisibility::Hide;
     }
     if (CmdReopenLastClosedFile == cmdId) {
-        return RecentlyCloseDocumentsCount() > 0 ? CommandVisibility::Show : CommandVisibility::Hide;
+        return RecentlyClosedDocumentsCount() > 0 ? CommandVisibility::Show : CommandVisibility::Hide;
     }
     if (cmdId == CmdTabGroupSave || origCmdId == CmdTabGroupSave) {
         if (surface == CommandSurface::Palette) {
@@ -1001,7 +1001,7 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
 
     // orig's MenuUpdatePrintItem also relabels the row "&Print... (denied)"
     if (!ctx.allowsPrinting && cmdId == CmdPrint) {
-        return CommandVisibility::Disable;
+        return MapForSurface(CommandVisibility::Disable, surface);
     }
 
     if (!ctx.cursorOnLinkTarget && cmdId == CmdCopyLinkTarget) {
@@ -1018,7 +1018,7 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         if (!isRect) {
             return CommandVisibility::Hide;
         }
-        return ctx.allowsPrinting ? CommandVisibility::Show : CommandVisibility::Disable;
+        return ctx.allowsPrinting ? CommandVisibility::Show : MapForSurface(CommandVisibility::Disable, surface);
     }
     if (cmdId == CmdCopySelectionAsImage || cmdId == CmdSaveSelectionAsImage) {
         bool isRect = ctx.hasSelection && !ctx.hasTextSelection;

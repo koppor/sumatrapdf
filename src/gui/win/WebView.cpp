@@ -33,11 +33,12 @@ TempStr GetWebView2VersionTemp() {
 static bool IsWebViewAvailable() {
     WCHAR* ver = nullptr;
     HRESULT hr = GetAvailableCoreWebView2BrowserVersionString(nullptr, &ver);
-    if (FAILED(hr) || len(ver) == 0) {
+    bool ok = SUCCEEDED(hr) && len(ver) > 0;
+    CoTaskMemFree(ver);
+    if (!ok) {
         logf("WebView2 is not available\n");
-        return false;
     }
-    return true;
+    return ok;
 }
 
 bool HasWebView() {
@@ -65,6 +66,7 @@ ICoreWebView2Controller4 : public ICoreWebView2Controller3 {
 class ForwardingDropTarget : public IDropTarget {
     AtomicInt refCount = 1;
     HWND forwardTo = nullptr;
+    bool acceptDrop = false;
 
   public:
     explicit ForwardingDropTarget(HWND forwardTo) : forwardTo(forwardTo) {}
@@ -101,14 +103,18 @@ class ForwardingDropTarget : public IDropTarget {
 
     HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* dataObj, DWORD /*grfKeyState*/, POINTL /*pt*/,
                                         DWORD* pdwEffect) override {
-        *pdwEffect = HasFiles(dataObj) ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        acceptDrop = HasFiles(dataObj);
+        *pdwEffect = acceptDrop ? DROPEFFECT_COPY : DROPEFFECT_NONE;
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE DragOver(DWORD /*grfKeyState*/, POINTL /*pt*/, DWORD* pdwEffect) override {
-        *pdwEffect = DROPEFFECT_COPY;
+        *pdwEffect = acceptDrop ? DROPEFFECT_COPY : DROPEFFECT_NONE;
         return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE DragLeave() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE DragLeave() override {
+        acceptDrop = false;
+        return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE Drop(IDataObject* dataObj, DWORD /*grfKeyState*/, POINTL /*pt*/,
                                    DWORD* pdwEffect) override {
         *pdwEffect = DROPEFFECT_COPY;
@@ -262,10 +268,10 @@ class webview2_com_handler : public ICoreWebView2CreateCoreWebView2ControllerCom
   public:
     webview2_com_handler(HWND hwnd, WebViewMsgCb& msgCb, webview2_com_handler_cb_t cb, bool allowClipboardRead)
         : m_window(hwnd), msgCb(msgCb), m_cb(cb), allowClipboardRead(allowClipboardRead) {}
-    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    ULONG STDMETHODCALLTYPE AddRef() { return (ULONG)AtomicIntInc(&m_refCount); }
 
     ULONG STDMETHODCALLTYPE Release() {
-        ULONG n = --m_refCount;
+        ULONG n = (ULONG)AtomicIntDec(&m_refCount);
         if (n == 0) {
             delete this;
         }
@@ -343,16 +349,16 @@ class webview2_com_handler : public ICoreWebView2CreateCoreWebView2ControllerCom
     WebViewMsgCb msgCb;
     webview2_com_handler_cb_t m_cb;
     bool allowClipboardRead;
-    ULONG m_refCount = 1;
+    AtomicInt m_refCount = 1;
 };
 
 // Intercept accelerator keys so the host can handle app shortcuts.
 class webview2_accel_handler : public ICoreWebView2AcceleratorKeyPressedEventHandler {
   public:
-    webview2_accel_handler(HWND hwnd, WebviewWnd* wnd) : m_hwnd(hwnd), m_wnd(wnd) {}
-    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    explicit webview2_accel_handler(HWND hwnd) : m_hwnd(hwnd) {}
+    ULONG STDMETHODCALLTYPE AddRef() { return (ULONG)AtomicIntInc(&m_refCount); }
     ULONG STDMETHODCALLTYPE Release() {
-        ULONG n = --m_refCount;
+        ULONG n = (ULONG)AtomicIntDec(&m_refCount);
         if (n == 0) {
             delete this;
         }
@@ -389,7 +395,8 @@ class webview2_accel_handler : public ICoreWebView2AcceleratorKeyPressedEventHan
             return S_OK;
         }
 
-        if (m_wnd && m_wnd->forwardAppAccelerators) {
+        auto* wnd = (WebviewWnd*)WindowBaseFromHwnd(m_hwnd);
+        if (wnd && wnd->forwardAppAccelerators) {
             bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
@@ -414,10 +421,10 @@ class webview2_accel_handler : public ICoreWebView2AcceleratorKeyPressedEventHan
                     return S_OK;
                 }
             }
-            if (!m_wnd->events.resolveAccelCmd) {
+            if (!wnd->events.resolveAccelCmd) {
                 return S_OK;
             }
-            int cmd = m_wnd->events.resolveAccelCmd(m_wnd->events.ctx, (u16)vk, ctrl, shift, alt);
+            int cmd = wnd->events.resolveAccelCmd(wnd->events.ctx, (u16)vk, ctrl, shift, alt);
             if (cmd != 0) {
                 args->put_Handled(TRUE);
                 if (root && ::IsWindow(root)) {
@@ -438,9 +445,8 @@ class webview2_accel_handler : public ICoreWebView2AcceleratorKeyPressedEventHan
     }
 
   private:
-    ULONG m_refCount = 1;
+    AtomicInt m_refCount = 1;
     HWND m_hwnd = nullptr;
-    WebviewWnd* m_wnd = nullptr;
 };
 
 static TempWStr UriPathFromPrefix(WStr uri, WStr prefix, bool keepQueryAndFragment = false);
@@ -475,10 +481,10 @@ static void UpdateWebViewHistory(WebviewWnd* wnd) {
 
 class webview2_navigation_starting_handler : public ICoreWebView2NavigationStartingEventHandler {
   public:
-    explicit webview2_navigation_starting_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
-    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    explicit webview2_navigation_starting_handler(HWND hwnd) : m_hwnd(hwnd) {}
+    ULONG STDMETHODCALLTYPE AddRef() { return (ULONG)AtomicIntInc(&m_refCount); }
     ULONG STDMETHODCALLTYPE Release() {
-        ULONG n = --m_refCount;
+        ULONG n = (ULONG)AtomicIntDec(&m_refCount);
         if (n == 0) {
             delete this;
         }
@@ -497,19 +503,20 @@ class webview2_navigation_starting_handler : public ICoreWebView2NavigationStart
         return E_NOINTERFACE;
     }
     HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* /*sender*/, ICoreWebView2NavigationStartingEventArgs* args) {
-        if (!args || !m_wnd || !m_wnd->events.navigationStarting) {
+        auto* wnd = (WebviewWnd*)WindowBaseFromHwnd(m_hwnd);
+        if (!args || !wnd || !wnd->events.navigationStarting) {
             return S_OK;
         }
         WCHAR* uri = nullptr;
         if (FAILED(args->get_Uri(&uri)) || !uri) {
             return S_OK;
         }
-        TempStr url = UrlForWebViewEvent(WStr(uri), m_wnd->resourceUriPrefix);
+        TempStr url = UrlForWebViewEvent(WStr(uri), wnd->resourceUriPrefix);
         CoTaskMemFree(uri);
         if (len(url) == 0) {
             return S_OK;
         }
-        bool allow = m_wnd->events.navigationStarting(m_wnd->events.ctx, url, false);
+        bool allow = wnd->events.navigationStarting(wnd->events.ctx, url, false);
         if (!allow) {
             args->put_Cancel(TRUE);
         }
@@ -517,16 +524,16 @@ class webview2_navigation_starting_handler : public ICoreWebView2NavigationStart
     }
 
   private:
-    WebviewWnd* m_wnd = nullptr;
-    ULONG m_refCount = 1;
+    HWND m_hwnd = nullptr;
+    AtomicInt m_refCount = 1;
 };
 
 class webview2_navigation_completed_handler : public ICoreWebView2NavigationCompletedEventHandler {
   public:
-    explicit webview2_navigation_completed_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
-    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    explicit webview2_navigation_completed_handler(HWND hwnd) : m_hwnd(hwnd) {}
+    ULONG STDMETHODCALLTYPE AddRef() { return (ULONG)AtomicIntInc(&m_refCount); }
     ULONG STDMETHODCALLTYPE Release() {
-        ULONG n = --m_refCount;
+        ULONG n = (ULONG)AtomicIntDec(&m_refCount);
         if (n == 0) {
             delete this;
         }
@@ -545,38 +552,39 @@ class webview2_navigation_completed_handler : public ICoreWebView2NavigationComp
         return E_NOINTERFACE;
     }
     HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* /*sender*/, ICoreWebView2NavigationCompletedEventArgs* args) {
-        if (!args || !m_wnd || !m_wnd->events.navigationCompleted) {
+        auto* wnd = (WebviewWnd*)WindowBaseFromHwnd(m_hwnd);
+        if (!args || !wnd || !wnd->events.navigationCompleted) {
             return S_OK;
         }
         BOOL success = FALSE;
         args->get_IsSuccess(&success);
         WCHAR* uri = nullptr;
-        ICoreWebView2* webview = m_wnd->webview;
+        ICoreWebView2* webview = wnd->webview;
         if (webview) {
             webview->get_Source(&uri);
         }
-        TempStr url = UrlForWebViewEvent(WStr(uri), m_wnd->resourceUriPrefix);
+        TempStr url = UrlForWebViewEvent(WStr(uri), wnd->resourceUriPrefix);
         if (uri) {
             CoTaskMemFree(uri);
         }
         if (url) {
-            m_wnd->events.navigationCompleted(m_wnd->events.ctx, url, success != FALSE);
+            wnd->events.navigationCompleted(wnd->events.ctx, url, success != FALSE);
         }
-        UpdateWebViewHistory(m_wnd);
+        UpdateWebViewHistory(wnd);
         return S_OK;
     }
 
   private:
-    WebviewWnd* m_wnd = nullptr;
-    ULONG m_refCount = 1;
+    HWND m_hwnd = nullptr;
+    AtomicInt m_refCount = 1;
 };
 
 class webview2_history_changed_handler : public ICoreWebView2HistoryChangedEventHandler {
   public:
-    explicit webview2_history_changed_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
-    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    explicit webview2_history_changed_handler(HWND hwnd) : m_hwnd(hwnd) {}
+    ULONG STDMETHODCALLTYPE AddRef() { return (ULONG)AtomicIntInc(&m_refCount); }
     ULONG STDMETHODCALLTYPE Release() {
-        ULONG n = --m_refCount;
+        ULONG n = (ULONG)AtomicIntDec(&m_refCount);
         if (n == 0) {
             delete this;
         }
@@ -595,21 +603,22 @@ class webview2_history_changed_handler : public ICoreWebView2HistoryChangedEvent
         return E_NOINTERFACE;
     }
     HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* /*sender*/, IUnknown* /*args*/) {
-        UpdateWebViewHistory(m_wnd);
+        auto* wnd = (WebviewWnd*)WindowBaseFromHwnd(m_hwnd);
+        UpdateWebViewHistory(wnd);
         return S_OK;
     }
 
   private:
-    WebviewWnd* m_wnd = nullptr;
-    ULONG m_refCount = 1;
+    HWND m_hwnd = nullptr;
+    AtomicInt m_refCount = 1;
 };
 
 class webview2_new_window_handler : public ICoreWebView2NewWindowRequestedEventHandler {
   public:
-    explicit webview2_new_window_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
-    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    explicit webview2_new_window_handler(HWND hwnd) : m_hwnd(hwnd) {}
+    ULONG STDMETHODCALLTYPE AddRef() { return (ULONG)AtomicIntInc(&m_refCount); }
     ULONG STDMETHODCALLTYPE Release() {
-        ULONG n = --m_refCount;
+        ULONG n = (ULONG)AtomicIntDec(&m_refCount);
         if (n == 0) {
             delete this;
         }
@@ -628,25 +637,26 @@ class webview2_new_window_handler : public ICoreWebView2NewWindowRequestedEventH
         return E_NOINTERFACE;
     }
     HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* /*sender*/, ICoreWebView2NewWindowRequestedEventArgs* args) {
-        if (!args || !m_wnd || !m_wnd->events.navigationStarting) {
+        auto* wnd = (WebviewWnd*)WindowBaseFromHwnd(m_hwnd);
+        if (!args || !wnd || !wnd->events.navigationStarting) {
             return S_OK;
         }
         WCHAR* uri = nullptr;
         if (FAILED(args->get_Uri(&uri)) || !uri) {
             return S_OK;
         }
-        TempStr url = UrlForWebViewEvent(WStr(uri), m_wnd->resourceUriPrefix);
+        TempStr url = UrlForWebViewEvent(WStr(uri), wnd->resourceUriPrefix);
         CoTaskMemFree(uri);
         args->put_Handled(TRUE);
         if (url) {
-            m_wnd->events.navigationStarting(m_wnd->events.ctx, url, true);
+            wnd->events.navigationStarting(wnd->events.ctx, url, true);
         }
         return S_OK;
     }
 
   private:
-    WebviewWnd* m_wnd = nullptr;
-    ULONG m_refCount = 1;
+    HWND m_hwnd = nullptr;
+    AtomicInt m_refCount = 1;
 };
 
 // Used when routeDownloadsToOsBrowser is set: cancel the in-webview download
@@ -665,10 +675,10 @@ static bool ShouldOpenWebViewDownloadInOsBrowser(WStr uri, WStr resourceUriPrefi
 
 class webview2_download_starting_handler : public ICoreWebView2DownloadStartingEventHandler {
   public:
-    explicit webview2_download_starting_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
-    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    explicit webview2_download_starting_handler(HWND hwnd) : m_hwnd(hwnd) {}
+    ULONG STDMETHODCALLTYPE AddRef() { return (ULONG)AtomicIntInc(&m_refCount); }
     ULONG STDMETHODCALLTYPE Release() {
-        ULONG n = --m_refCount;
+        ULONG n = (ULONG)AtomicIntDec(&m_refCount);
         if (n == 0) {
             delete this;
         }
@@ -704,8 +714,9 @@ class webview2_download_starting_handler : public ICoreWebView2DownloadStartingE
         if (FAILED(hr) || !uri) {
             return S_OK;
         }
+        auto* wnd = (WebviewWnd*)WindowBaseFromHwnd(m_hwnd);
         WStr uriW = WStr(uri);
-        WStr prefix = m_wnd ? m_wnd->resourceUriPrefix : WStr{};
+        WStr prefix = wnd ? wnd->resourceUriPrefix : WStr{};
         if (ShouldOpenWebViewDownloadInOsBrowser(uriW, prefix)) {
             TempStr url = ToUtf8Temp(uriW);
             logf("WebView2: routing download to OS browser: '%s'\n", url);
@@ -718,8 +729,8 @@ class webview2_download_starting_handler : public ICoreWebView2DownloadStartingE
     }
 
   private:
-    WebviewWnd* m_wnd = nullptr;
-    ULONG m_refCount = 1;
+    HWND m_hwnd = nullptr;
+    AtomicInt m_refCount = 1;
 };
 
 class webview2_env_handler : public ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler {
@@ -728,10 +739,10 @@ class webview2_env_handler : public ICoreWebView2CreateCoreWebView2EnvironmentCo
 
     explicit webview2_env_handler(env_ready_cb_t cb) : m_cb(cb) {}
 
-    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    ULONG STDMETHODCALLTYPE AddRef() { return (ULONG)AtomicIntInc(&m_refCount); }
 
     ULONG STDMETHODCALLTYPE Release() {
-        ULONG n = --m_refCount;
+        ULONG n = (ULONG)AtomicIntDec(&m_refCount);
         if (n == 0) {
             delete this;
         }
@@ -760,7 +771,7 @@ class webview2_env_handler : public ICoreWebView2CreateCoreWebView2EnvironmentCo
 
   private:
     env_ready_cb_t m_cb;
-    ULONG m_refCount = 1;
+    AtomicInt m_refCount = 1;
 };
 
 static TempWStr MimeHeaderFromContentType(Str contentType) {
@@ -817,6 +828,7 @@ static bool CreateWebResourceResponseFromData(ICoreWebView2WebResourceRequestedE
         GlobalUnlock(hMem);
         HRESULT hr = CreateStreamOnHGlobal(hMem, TRUE, &stream);
         if (FAILED(hr)) {
+            GlobalFree(hMem);
             return false;
         }
     }
@@ -838,11 +850,11 @@ static bool CreateWebResourceResponseFromData(ICoreWebView2WebResourceRequestedE
 
 class webview2_resource_handler : public ICoreWebView2WebResourceRequestedEventHandler {
   public:
-    explicit webview2_resource_handler(WebviewWnd* wnd) : m_wnd(wnd) {}
+    explicit webview2_resource_handler(HWND hwnd) : m_hwnd(hwnd) {}
 
-    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    ULONG STDMETHODCALLTYPE AddRef() { return (ULONG)AtomicIntInc(&m_refCount); }
     ULONG STDMETHODCALLTYPE Release() {
-        ULONG n = --m_refCount;
+        ULONG n = (ULONG)AtomicIntDec(&m_refCount);
         if (n == 0) {
             delete this;
         }
@@ -862,7 +874,8 @@ class webview2_resource_handler : public ICoreWebView2WebResourceRequestedEventH
     }
 
     HRESULT STDMETHODCALLTYPE Invoke(ICoreWebView2* /*sender*/, ICoreWebView2WebResourceRequestedEventArgs* args) {
-        if (!args || !m_wnd || !m_wnd->resourceProvider.getResource || len(m_wnd->resourceUriPrefix) == 0) {
+        auto* wnd = (WebviewWnd*)WindowBaseFromHwnd(m_hwnd);
+        if (!args || !wnd || !wnd->resourceProvider.getResource || len(wnd->resourceUriPrefix) == 0) {
             return S_OK;
         }
 
@@ -879,7 +892,7 @@ class webview2_resource_handler : public ICoreWebView2WebResourceRequestedEventH
             return S_OK;
         }
 
-        TempWStr pathW = UriPathFromPrefix(WStr(uri), m_wnd->resourceUriPrefix);
+        TempWStr pathW = UriPathFromPrefix(WStr(uri), wnd->resourceUriPrefix);
         CoTaskMemFree(uri);
         if (len(pathW) == 0) {
             return S_OK;
@@ -887,7 +900,7 @@ class webview2_resource_handler : public ICoreWebView2WebResourceRequestedEventH
 
         TempStr path = ToUtf8Temp(pathW);
         WebViewResourceResult res;
-        if (!m_wnd->resourceProvider.getResource(m_wnd->resourceProvider.ctx, path, &res)) {
+        if (!wnd->resourceProvider.getResource(wnd->resourceProvider.ctx, path, &res)) {
             CreateWebResourceResponseFromData(args, {}, StrL("text/plain"), 404);
             return S_OK;
         }
@@ -901,16 +914,16 @@ class webview2_resource_handler : public ICoreWebView2WebResourceRequestedEventH
     }
 
   private:
-    WebviewWnd* m_wnd = nullptr;
-    ULONG m_refCount = 1;
+    HWND m_hwnd = nullptr;
+    AtomicInt m_refCount = 1;
 };
 
 class webview2_try_suspend_handler : public ICoreWebView2TrySuspendCompletedHandler {
   public:
-    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    ULONG STDMETHODCALLTYPE AddRef() { return (ULONG)AtomicIntInc(&m_refCount); }
 
     ULONG STDMETHODCALLTYPE Release() {
-        ULONG n = --m_refCount;
+        ULONG n = (ULONG)AtomicIntDec(&m_refCount);
         if (n == 0) {
             delete this;
         }
@@ -933,15 +946,15 @@ class webview2_try_suspend_handler : public ICoreWebView2TrySuspendCompletedHand
     HRESULT STDMETHODCALLTYPE Invoke(HRESULT /*errorCode*/, BOOL /*isSuccessful*/) { return S_OK; }
 
   private:
-    ULONG m_refCount = 1;
+    AtomicInt m_refCount = 1;
 };
 
 // trivial completion handler for ICoreWebView2Find::Start (we don't need the result)
 class webview2_find_start_handler : public ICoreWebView2FindStartCompletedHandler {
   public:
-    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    ULONG STDMETHODCALLTYPE AddRef() { return (ULONG)AtomicIntInc(&m_refCount); }
     ULONG STDMETHODCALLTYPE Release() {
-        ULONG n = --m_refCount;
+        ULONG n = (ULONG)AtomicIntDec(&m_refCount);
         if (n == 0) {
             delete this;
         }
@@ -962,55 +975,7 @@ class webview2_find_start_handler : public ICoreWebView2FindStartCompletedHandle
     HRESULT STDMETHODCALLTYPE Invoke(HRESULT /*errorCode*/) { return S_OK; }
 
   private:
-    ULONG m_refCount = 1;
-};
-
-// Receives the id WebView2 assigns to a script passed to
-// AddScriptToExecuteOnDocumentCreated. The id is the only handle to that script
-// and is needed by RemoveScriptToExecuteOnDocumentCreated, so without capturing
-// it here init scripts could never be removed or replaced. Looks the window up
-// by hwnd because the completion is asynchronous and the window may be gone.
-class webview2_add_script_handler : public ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler {
-  public:
-    webview2_add_script_handler(HWND hwnd, int token) : m_hwnd(hwnd), m_token(token) {}
-
-    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
-    ULONG STDMETHODCALLTYPE Release() {
-        ULONG n = --m_refCount;
-        if (n == 0) {
-            delete this;
-        }
-        return n;
-    }
-    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, LPVOID* ppv) {
-        if (!ppv) {
-            return E_POINTER;
-        }
-        *ppv = nullptr;
-        if (riid == IID_IUnknown ||
-            riid == __uuidof(ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler)) {
-            *ppv = static_cast<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler*>(this);
-            AddRef();
-            return S_OK;
-        }
-        return E_NOINTERFACE;
-    }
-
-    HRESULT STDMETHODCALLTYPE Invoke(HRESULT res, LPCWSTR id) {
-        if (FAILED(res) || !id) {
-            return S_OK;
-        }
-        auto* wnd = (WebviewWnd*)WindowBaseFromHwnd(m_hwnd);
-        if (wnd) {
-            wnd->OnInitScriptAdded(m_token, id);
-        }
-        return S_OK;
-    }
-
-  private:
-    ULONG m_refCount = 1;
-    HWND m_hwnd = nullptr;
-    int m_token = 0;
+    AtomicInt m_refCount = 1;
 };
 
 // A WebView2 process died. Without this the control just goes blank forever:
@@ -1020,9 +985,9 @@ class webview2_process_failed_handler : public ICoreWebView2ProcessFailedEventHa
   public:
     explicit webview2_process_failed_handler(HWND hwnd) : m_hwnd(hwnd) {}
 
-    ULONG STDMETHODCALLTYPE AddRef() { return ++m_refCount; }
+    ULONG STDMETHODCALLTYPE AddRef() { return (ULONG)AtomicIntInc(&m_refCount); }
     ULONG STDMETHODCALLTYPE Release() {
-        ULONG n = --m_refCount;
+        ULONG n = (ULONG)AtomicIntDec(&m_refCount);
         if (n == 0) {
             delete this;
         }
@@ -1066,7 +1031,7 @@ class webview2_process_failed_handler : public ICoreWebView2ProcessFailedEventHa
     }
 
   private:
-    ULONG m_refCount = 1;
+    AtomicInt m_refCount = 1;
     HWND m_hwnd = nullptr;
 };
 
@@ -1076,9 +1041,6 @@ WebviewWnd::WebviewWnd() {
 
 void WebviewWnd::OnProcessFailed(WebViewProcessFailure kind) {
     logf("WebviewWnd::OnProcessFailed: kind=%d\n", (int)kind);
-    if (events.processFailed && events.processFailed(events.ctx, kind)) {
-        return;
-    }
     switch (kind) {
         case WebViewProcessFailure::RenderExited:
         case WebViewProcessFailure::RenderUnresponsive:
@@ -1100,14 +1062,13 @@ void WebviewWnd::OnProcessFailed(WebViewProcessFailure kind) {
     }
 }
 
-void WebviewWnd::QueuePendingOp(PendingWebViewOp::Kind kind, Str text, int token) {
+void WebviewWnd::QueuePendingOp(PendingWebViewOp::Kind kind, Str text) {
     if (initFailed) {
         return;
     }
     PendingWebViewOp op;
     op.kind = kind;
     op.text = str::Dup(text ? text : StrL(""));
-    op.token = token;
     VecAppend(pendingOps, op);
 }
 
@@ -1122,11 +1083,7 @@ void WebviewWnd::FlushPendingOps() {
     for (PendingWebViewOp& op : ops) {
         switch (op.kind) {
             case PendingWebViewOp::Init:
-                // keep the token the caller already holds so RemoveInitScript works
-                AddInitScriptWithToken(op.text, op.token);
-                break;
-            case PendingWebViewOp::SetHtml:
-                SetHtml(op.text);
+                Init(op.text);
                 break;
             case PendingWebViewOp::Eval:
                 Eval(op.text);
@@ -1156,6 +1113,8 @@ void WebviewWnd::FailInit() {
         controller->Release();
         controller = nullptr;
     }
+    // RevokeDragDrop fails once the windows are gone, leaking the target
+    RevokeForwardingDropTarget();
     HwndDestroyWindowSafe(&hwnd);
 }
 
@@ -1275,7 +1234,7 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
     }
 
     {
-        webview2_accel_handler* accelHandler = new webview2_accel_handler(hwnd, this);
+        webview2_accel_handler* accelHandler = new webview2_accel_handler(hwnd);
         ::EventRegistrationToken token = {};
         controller->add_AcceleratorKeyPressed(accelHandler, &token);
         accelHandler->Release();
@@ -1291,7 +1250,7 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
         } else {
             webview->AddWebResourceRequestedFilter(filter.s, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);
         }
-        auto* resourceHandler = new webview2_resource_handler(this);
+        auto* resourceHandler = new webview2_resource_handler(hwnd);
         ::EventRegistrationToken resourceToken = {};
         webview->add_WebResourceRequested(resourceHandler, &resourceToken);
         resourceHandler->Release();
@@ -1300,20 +1259,20 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
     if (events.navigationStarting || events.navigationCompleted || events.historyChanged) {
         ::EventRegistrationToken token = {};
         if (events.navigationStarting) {
-            auto* handler = new webview2_navigation_starting_handler(this);
+            auto* handler = new webview2_navigation_starting_handler(hwnd);
             webview->add_NavigationStarting(handler, &token);
             handler->Release();
-            auto* newWindowHandler = new webview2_new_window_handler(this);
+            auto* newWindowHandler = new webview2_new_window_handler(hwnd);
             webview->add_NewWindowRequested(newWindowHandler, &token);
             newWindowHandler->Release();
         }
         if (events.navigationCompleted) {
-            auto* handler = new webview2_navigation_completed_handler(this);
+            auto* handler = new webview2_navigation_completed_handler(hwnd);
             webview->add_NavigationCompleted(handler, &token);
             handler->Release();
         }
         if (events.historyChanged) {
-            auto* handler = new webview2_history_changed_handler(this);
+            auto* handler = new webview2_history_changed_handler(hwnd);
             webview->add_HistoryChanged(handler, &token);
             handler->Release();
         }
@@ -1323,7 +1282,7 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
     if (routeDownloadsToOsBrowser) {
         ICoreWebView2_4* wv4 = nullptr;
         if (SUCCEEDED(webview->QueryInterface(IID_PPV_ARGS(&wv4))) && wv4) {
-            auto* handler = new webview2_download_starting_handler(this);
+            auto* handler = new webview2_download_starting_handler(hwnd);
             ::EventRegistrationToken token = {};
             if (FAILED(wv4->add_DownloadStarting(handler, &token))) {
                 logf("WebviewWnd: add_DownloadStarting failed\n");
@@ -1344,10 +1303,12 @@ void WebviewWnd::OnControllerReady(ICoreWebView2Controller* controller) {
 
     Init(StrL("window.external={invoke:s=>window.chrome.webview.postMessage(s)}"));
     Init(Str(kJsBridgeScript));
-    // re-register any names bound before the controller was ready
-    RebuildBindScript();
     initStarted = true;
     FlushPendingOps();
+
+    if (desiredZoomPercent != 100) {
+        controller->put_ZoomFactor((double)desiredZoomPercent / 100.0);
+    }
 
     // honor desiredVisible (SetControllerVisible) so BrowserDocView can create
     // hidden during a tab probe without the async ready callback showing it
@@ -1389,148 +1350,39 @@ void WebviewWnd::Eval(Str js) {
     webview->ExecuteScript(ws, nullptr);
 }
 
-void WebviewWnd::SetHtml(Str html) {
-    if (initFailed || len(html) == 0) {
-        return;
-    }
-    if (!webview) {
-        QueuePendingOp(PendingWebViewOp::SetHtml, html);
-        return;
-    }
-    WCHAR* html2 = CWStrTemp(html);
-    webview->NavigateToString(html2);
-}
-
 void WebviewWnd::Init(Str js) {
-    AddInitScript(js);
-}
-
-// Registers a script to run on every document, returning a token that
-// RemoveInitScript() takes. The token is ours and valid immediately; the
-// WebView2 id it maps to arrives later via OnInitScriptAdded().
-int WebviewWnd::AddInitScript(Str js) {
     if (initFailed || len(js) == 0) {
-        return 0;
-    }
-    int token = nextInitScriptToken++;
-    AddInitScriptWithToken(js, token);
-    return token;
-}
-
-void WebviewWnd::AddInitScriptWithToken(Str js, int token) {
-    if (initFailed || len(js) == 0 || token == 0) {
         return;
     }
     if (!webview) {
-        QueuePendingOp(PendingWebViewOp::Init, js, token);
+        QueuePendingOp(PendingWebViewOp::Init, js);
         return;
     }
-    WebViewInitScript script;
-    script.token = token;
-    VecAppend(initScripts, script);
-
     WCHAR* ws = CWStrTemp(js);
-    auto* handler = new webview2_add_script_handler(hwnd, token);
-    HRESULT hr = webview->AddScriptToExecuteOnDocumentCreated(ws, handler);
-    handler->Release();
-    if (FAILED(hr)) {
-        int idx = FindInitScript(token);
-        if (idx >= 0) {
-            VecRemoveAt(initScripts, idx);
-        }
-    }
+    webview->AddScriptToExecuteOnDocumentCreated(ws, nullptr);
 }
 
-int WebviewWnd::FindInitScript(int token) const {
-    int n = len(initScripts);
-    for (int i = 0; i < n; i++) {
-        if (initScripts[i].token == token) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-void WebviewWnd::OnInitScriptAdded(int token, const WCHAR* id) {
-    int idx = FindInitScript(token);
-    if (idx < 0) {
-        return;
-    }
-    WebViewInitScript& script = initScripts[idx];
-    // RemoveInitScript() ran before the id arrived; drop it now that we can
-    if (script.removePending) {
-        if (webview) {
-            webview->RemoveScriptToExecuteOnDocumentCreated(id);
-        }
-        VecRemoveAt(initScripts, idx);
-        return;
-    }
-    wstr::Free(script.id);
-    script.id = wstr::Dup(WStr(id));
-}
-
-void WebviewWnd::RemoveInitScript(int token) {
-    if (token == 0) {
-        return;
-    }
-    // still queued: it was never handed to WebView2, so just drop it
-    int n = len(pendingOps);
-    for (int i = 0; i < n; i++) {
-        PendingWebViewOp& op = pendingOps[i];
-        if (op.kind == PendingWebViewOp::Init && op.token == token) {
-            str::Free(op.text);
-            VecRemoveAt(pendingOps, i);
-            return;
-        }
-    }
-    int idx = FindInitScript(token);
-    if (idx < 0) {
-        return;
-    }
-    WebViewInitScript& script = initScripts[idx];
-    if (len(script.id) == 0) {
-        // the id hasn't arrived yet; OnInitScriptAdded will remove it
-        script.removePending = true;
-        return;
-    }
-    if (webview) {
-        webview->RemoveScriptToExecuteOnDocumentCreated(script.id.s);
-    }
-    wstr::Free(script.id);
-    VecRemoveAt(initScripts, idx);
-}
-
-// markers the bridge puts first in its messages; JSON.stringify preserves
-// insertion order, so a prefix test is enough to tell these from raw messages
-static const char* kJsCallPrefix = "{\"__sumatraCall\":1";
 static const char* kJsNotifyPrefix = "{\"__sumatraNotify\":1";
-
-static bool IsJsCallMessage(Str msg) {
-    return str::StartsWith(msg, Str(kJsCallPrefix));
-}
 
 static bool IsJsNotifyMessage(Str msg) {
     return str::StartsWith(msg, Str(kJsNotifyPrefix));
 }
 
 namespace {
-// the string members of a {"id", "method", "params"} message; false if the
+// the string members of a {"method", "params"} message; false if the
 // message isn't JSON. The values are temp-arena copies.
-struct JsCallState {
-    TempStr id;
+struct JsNotifyState {
     TempStr method;
     TempStr params;
 };
 
-static bool ParseJsCall(Str msg, JsCallState& st) {
+static bool ParseJsNotify(Str msg, JsNotifyState& st) {
     json::Reader r(msg);
     for (json::Value& v : r) {
         if (v.type != json::Type::String) {
             continue;
         }
-        if (json::PathMatch(v.path, StrL("/id"))) {
-            st.id = v.value;
-        } else if (json::PathMatch(v.path, StrL("/method"))) {
+        if (json::PathMatch(v.path, StrL("/method"))) {
             st.method = v.value;
         } else if (json::PathMatch(v.path, StrL("/params"))) {
             st.params = v.value;
@@ -1540,30 +1392,12 @@ static bool ParseJsCall(Str msg, JsCallState& st) {
 }
 } // namespace
 
-void WebviewWnd::OnJsCall(Str msg) {
-    JsCallState st;
-    if (!ParseJsCall(msg, st)) {
-        logf("WebviewWnd::OnJsCall: failed to parse '%s'\n", msg);
-        return;
-    }
-    if (len(st.id) == 0 || len(st.method) == 0) {
-        return;
-    }
-    if (!events.jsCall) {
-        // nothing can answer, so reject instead of leaving the promise pending
-        Resolve(st.id, 1, StrL("\"no handler\""));
-        return;
-    }
-    Str params = st.params ? Str(st.params) : StrL("[]");
-    events.jsCall(events.ctx, st.id, st.method, params);
-}
-
 void WebviewWnd::OnJsNotify(Str msg) {
     if (!events.jsNotify) {
         return;
     }
-    JsCallState st;
-    if (!ParseJsCall(msg, st)) {
+    JsNotifyState st;
+    if (!ParseJsNotify(msg, st)) {
         logf("WebviewWnd::OnJsNotify: failed to parse '%s'\n", msg);
         return;
     }
@@ -1572,58 +1406,6 @@ void WebviewWnd::OnJsNotify(Str msg) {
     }
     Str params = st.params ? Str(st.params) : StrL("[]");
     events.jsNotify(events.ctx, st.method, params);
-}
-
-// status 0 resolves the JS promise, non-0 rejects it. resultJson must be
-// valid JSON (or empty for undefined)
-void WebviewWnd::Resolve(Str id, int status, Str resultJson) {
-    if (len(id) == 0) {
-        return;
-    }
-    TempStr js = fmt("if (window.__sumatra__) window.__sumatra__.onReply(\"%s\", %d, \"%s\");", json::EscapeStrTemp(id),
-                     status, json::EscapeStrTemp(resultJson));
-    Eval(js);
-}
-
-// Rebuilds the init script that re-binds every name on each new document, so
-// bindings survive navigation.
-void WebviewWnd::RebuildBindScript() {
-    if (bindScriptToken) {
-        RemoveInitScript(bindScriptToken);
-        bindScriptToken = 0;
-    }
-    if (len(boundNames) == 0) {
-        return;
-    }
-    str::Builder js;
-    js.Append(StrL("(function(){var m=["));
-    bool first = true;
-    for (Str& name : boundNames) {
-        if (!first) {
-            js.Append(StrL(","));
-        }
-        first = false;
-        js.Append(fmt("\"%s\"", json::EscapeStrTemp(name)));
-    }
-    js.Append(StrL("];m.forEach(function(n){window.__sumatra__.onBind(n)})})()"));
-    bindScriptToken = AddInitScript(ToStr(js));
-}
-
-// makes window.<name>(...) available to page JS, returning a promise that
-// WebViewEvents::jsCall resolves via Resolve()
-void WebviewWnd::Bind(Str name) {
-    if (len(name) == 0) {
-        return;
-    }
-    for (Str& n : boundNames) {
-        if (str::Eq(n, name)) {
-            return;
-        }
-    }
-    VecAppend(boundNames, str::Dup(name));
-    RebuildBindScript();
-    // also expose it in the document that's already loaded
-    Eval(fmt("if (window.__sumatra__) window.__sumatra__.onBind(\"%s\");", json::EscapeStrTemp(name)));
 }
 
 void WebviewWnd::Navigate(Str url) {
@@ -1651,6 +1433,7 @@ void WebviewWnd::GoForward() {
 }
 
 void WebviewWnd::SetZoomPercent(int zoom) {
+    desiredZoomPercent = zoom;
     if (controller) {
         double factor = (double)zoom / 100.0;
         controller->put_ZoomFactor(factor);
@@ -1659,7 +1442,7 @@ void WebviewWnd::SetZoomPercent(int zoom) {
 
 int WebviewWnd::GetZoomPercent() const {
     if (!controller) {
-        return 100;
+        return desiredZoomPercent;
     }
     double factor = 1.0;
     controller->get_ZoomFactor(&factor);
@@ -1787,6 +1570,11 @@ void WebviewWnd::RegisterForwardingDropTarget() {
     if (!dropTarget) {
         dropTarget = new ForwardingDropTarget(parent);
     }
+    for (int i = len(dropTargetHwnds) - 1; i >= 0; i--) {
+        if (!::IsWindow(dropTargetHwnds[i])) {
+            VecRemoveAt(dropTargetHwnds, i);
+        }
+    }
     Vec<HWND> wnds;
     VecAppend(wnds, hwnd);
     EnumChildWindows(hwnd, CollectChildHwnds, (LPARAM)&wnds);
@@ -1797,7 +1585,9 @@ void WebviewWnd::RegisterForwardingDropTarget() {
 
 void WebviewWnd::RevokeForwardingDropTarget() {
     for (HWND h : dropTargetHwnds) {
-        RevokeDragDrop(h);
+        if (::IsWindow(h)) {
+            RevokeDragDrop(h);
+        }
     }
     VecReset(dropTargetHwnds);
     if (dropTarget) {
@@ -2069,12 +1859,6 @@ static void OnBrowserMessageCbHwnd(void* hwndVoid, Str msg) {
     HWND hwnd = (HWND)hwndVoid;
     auto* self = (WebviewWnd*)WindowBaseFromHwnd(hwnd);
     if (self) {
-        // structured calls from the JS bridge don't go to OnBrowserMessage, so
-        // subclasses keep seeing only their own raw messages
-        if (IsJsCallMessage(msg)) {
-            self->OnJsCall(msg);
-            return;
-        }
         if (IsJsNotifyMessage(msg)) {
             self->OnJsNotify(msg);
             return;
@@ -2136,7 +1920,13 @@ void WebviewWnd::OnSize(WindowBase::SizeEvent* ev) {
         return;
     }
     if (ev->msg == WM_SIZE) {
-        SetControllerVisible(ev->type != SIZE_MINIMIZED);
+        if (ev->type == SIZE_MINIMIZED) {
+            bool prevDesired = desiredVisible;
+            SetControllerVisible(false);
+            desiredVisible = prevDesired;
+        } else if (desiredVisible && ShouldWebviewBeVisible(hwnd)) {
+            SetControllerVisible(true);
+        }
         if (!isInSizeMove) {
             UpdateWebviewSize();
         }
@@ -2176,14 +1966,6 @@ void WebviewWnd::OnShowWindow(WindowBase::ShowWindowEvent* ev) {
 WebviewWnd::~WebviewWnd() {
     RemovePendingWebview(this);
     FreePendingOps(pendingOps);
-    for (WebViewInitScript& script : initScripts) {
-        wstr::Free(script.id);
-    }
-    VecReset(initScripts);
-    for (Str& name : boundNames) {
-        str::Free(name);
-    }
-    VecReset(boundNames);
     RevokeForwardingDropTarget();
     // Close() shuts down the browser instance behind this webview and is not
     // optional: releasing the controller only drops our reference, so without

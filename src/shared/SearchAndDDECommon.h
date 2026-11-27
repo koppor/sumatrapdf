@@ -53,6 +53,7 @@ void FindEndTask(FindEndTaskData* d);
 void HighlightRestoredFindTerm(MainWindow* win);
 
 // implemented by each app
+bool FindDebouncePending(MainWindow* win);
 void CancelPendingFind(MainWindow* win);
 void AbortCount(MainWindow* win);
 bool JoinFindThread(MainWindow* win, bool hideMessage);
@@ -107,6 +108,9 @@ constexpr int kFindResultsFirstBatch = 16;
 // stands out with the color the user finds most noticeable (issue #5740).
 constexpr Color kFindOtherMatchColor = MkRgb(0xff, 0x96, 0x32);
 
+void FindScrollMarkers(MainWindow* win, Vec<float>& out, float* current);
+Color FindCurrentMatchColor();
+
 // implemented by each app
 bool ApplyFindPageRange(MainWindow* win);
 void StartFindCount(MainWindow* win, Str text, bool matchCase, bool matchWholeWord);
@@ -140,7 +144,6 @@ void CountThread(CountThreadData* d);
 void FindThread(FindThreadData* ftd);
 
 Str HandleOpenCmd(Str cmd, bool* ack);
-void FindDebounceStop(MainWindow* win);
 void BrowserFindStatusShown(MainWindow* win);
 TempStr FindPagesEditTextTemp(MainWindow* win);
 

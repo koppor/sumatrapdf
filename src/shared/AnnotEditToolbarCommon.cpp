@@ -1011,8 +1011,7 @@ void DeleteAnnotationAndUpdateUI(WindowTab* tab, Annotation* annot) {
         CancelDrag(win);
     }
 
-    DetachAnnotationFromUI(annot);
-    DeleteAnnotation(annot);
+    DeleteAnnotationFromUI(annot);
     RefreshAnnotationLists(tab);
     SetSelectedAnnotation(tab, keepSelected);
     if (IsMainWindowValidAndNotClosing(tab->win)) {
@@ -1055,7 +1054,7 @@ void HideAnnotationTextPopupFor(MainWindow* win, Annotation* annot) {
     }
 }
 
-void DetachAnnotationFromUI(Annotation* annot) {
+void DeleteAnnotationFromUI(Annotation* annot) {
     if (!annot) {
         return;
     }
@@ -1081,6 +1080,7 @@ void DetachAnnotationFromUI(Annotation* annot) {
             }
         }
     }
+    DeleteAnnotationWithoutUI(annot);
 }
 
 void RefreshAnnotationLists(WindowTab* tab) {
@@ -1153,8 +1153,11 @@ TempStr AnnotEditorLayoutResultTemp(int* exitCodeOut) {
 // a color from the drop-down of the chip that was clicked last; its alpha is
 // the annotation's opacity, kColorUnset means no color at all
 void ChipColorPicked(AnnotEditToolbarBase* tb, Color col) {
-    WindowTab* tab = tb->tab;
-    Annotation* annot = tab ? tab->selectedAnnotation : nullptr;
+    WindowTab* tab = tb ? tb->tab : nullptr;
+    if (!tab || !IsMainWindowValidAndNotClosing(tab->win) || !VecContains(tab->win->Tabs(), tab)) {
+        return;
+    }
+    Annotation* annot = tab->selectedAnnotation;
     if (!AnnotationIsLive(annot) || annot != tb->annot) {
         return;
     }
@@ -1199,13 +1202,4 @@ void PostedStartContentsEdit(MainWindow* win) {
         return;
     }
     StartSelectedAnnotContentsEdit(win);
-}
-
-// How much committing a free text edit grows its box: only by what the new
-// text needs beyond both the box and what the old text needed. A box that fit
-// its text snugly, smaller than our padded estimate, keeps its size (#6551).
-Size FreeTextGrowth(Size box, Size fitOld, Size fitNew) {
-    int dx = fitNew.dx - std::max(box.dx, fitOld.dx);
-    int dy = fitNew.dy - std::max(box.dy, fitOld.dy);
-    return {std::max(dx, 0), std::max(dy, 0)};
 }

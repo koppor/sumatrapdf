@@ -179,7 +179,8 @@ void TabGroupsWnd::DeleteTabGroup(VirtMouseEvent*) {
 }
 
 static void DrawTabGroupItem(TabGroupsWnd* w, VirtListBox::DrawItemEvent* ev) {
-    if (ev->itemIndex < 0 || ev->itemIndex >= w->model->ItemsCount()) {
+    // closing drops the model; the window can still paint until it's deleted
+    if (!w->model || ev->itemIndex < 0 || ev->itemIndex >= w->model->ItemsCount()) {
         return;
     }
     TempStr info = TabGroupInfoTemp(w->model->groups[ev->itemIndex]);
@@ -227,6 +228,27 @@ static void TeardownTabGroupsWnd(TabGroupsWnd* w) {
     w->ScheduleDelete();
 }
 
+// -dbg-control TestTabGroups. "closepaint": closes the open dialog with a paint
+// between the teardown and the window's end, as when something pumps messages
+// there (tests/tab-groups-close-paint.ts)
+TempStr TabGroupsTestTemp(Str action, int* exitCodeOut) {
+    *exitCodeOut = 0;
+    if (len(gTabGroupsWnds) == 0) {
+        *exitCodeOut = 2;
+        return str::DupTemp(StrL("NOTREADY no-dialog"));
+    }
+    if (!str::Eq(action, StrL("closepaint"))) {
+        *exitCodeOut = 1;
+        return str::DupTemp(StrL("ERROR unknown-action"));
+    }
+    TabGroupsWnd* w = gTabGroupsWnds[0];
+    HWND hwnd = w->hwnd;
+    TeardownTabGroupsWnd(w);
+    RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    DestroyWindow(hwnd);
+    return str::DupTemp(StrL("OK closed"));
+}
+
 static void OnTabGroupsClose(WindowBase::CloseEvent* ev) {
     TeardownTabGroupsWnd((TabGroupsWnd*)ev->e->self);
 }
@@ -254,7 +276,6 @@ bool TabGroupsWnd::Create(MainWindow* winIn, TabGroupDialogMode modeIn) {
         args.font = fontText;
         args.isRtl = isRtl;
         args.bgColor = colBg;
-        args.icon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(GetAppIconID()));
         CreateCustom(args);
     }
     if (!hwnd) {

@@ -95,7 +95,11 @@ struct Synchronizer;
 enum class HeadingTocStart;
 
 struct DisplayModel : DocController {
+  private:
     DisplayModel(EngineBase* engine, DocControllerCallback* cb);
+
+  public:
+    static DisplayModel* Create(EngineBase* engine, DocControllerCallback* cb);
     DisplayModel(DisplayModel const&) = delete;
     DisplayModel& operator=(DisplayModel const&) = delete;
 
@@ -136,7 +140,7 @@ struct DisplayModel : DocController {
     void CreateThumbnail(Size size, const OnBitmapRendered* saveThumbnail) override;
 
     bool HasPageLabels() const override;
-    TempStr GetPageLabeTemp(int pageNo) const override;
+    TempStr GetPageLabelTemp(int pageNo) const override;
     int GetPageByLabel(Str label) const override;
     int LogicalPageCount() const;
 

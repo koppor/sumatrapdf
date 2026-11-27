@@ -42,6 +42,7 @@
 #include "ProgressUpdateUI.h"
 #include "TextSearch.h"
 #include "SearchAndDDE.h"
+#include "SearchAndDDECommon.h"
 #include "Toolbar.h"
 #include "SelectTextKeyboard.h"
 #include "SumatraDialogs.h"
@@ -67,6 +68,7 @@
 #include "CanvasCommon.h"
 #include "MainWindowCommon.h"
 #include "SignatureUI.h"
+#include "SignatureUICommon.h"
 
 #include "SumatraLog.h"
 
@@ -1494,12 +1496,24 @@ static int WheelPageTurnDelta(MainWindow* win, int delta) {
     return std::max(kWheelDelta, lines * perLine);
 }
 
+static bool WheelMayTurnPage(MainWindow* win);
+
 static void WheelTurnPage(MainWindow* win, int dir) {
+    if (dir == 0) {
+        return;
+    }
+    if (!WheelMayTurnPage(win)) {
+        win->wheelAccumDelta = 0;
+        return;
+    }
     if (dir > 0) {
         win->ctrl->GoToPrevPage();
-    } else if (dir < 0) {
+    } else {
         win->ctrl->GoToNextPage();
     }
+    win->wheelAccumDelta = 0;
+    Ui(win)->wheelPageTurnTime = TimeGet();
+    Ui(win)->wheelDidTurnPage = true;
 }
 
 // this does zooming via mouse wheel (with ctrl or the right mouse button)
@@ -1632,7 +1646,7 @@ static void CanvasOnMouseWheel(MainWindow* win, int delta, bool isCtrl, bool isS
 
     bool hScroll = isShift;
     bool vScroll = !hScroll;
-    bool isCont = !IsContinuous(win->ctrl->GetDisplayMode());
+    bool isCont = IsContinuous(win->ctrl->GetDisplayMode());
 
     // Alt speeds up scrolling but also triggers showing menu
     // this will suppress next menu trigger to avoid accidental triggering of menu
@@ -1664,8 +1678,9 @@ static void CanvasOnMouseWheel(MainWindow* win, int delta, bool isCtrl, bool isS
         return;
     }
 
-    // fit content: flip page on wheel, regardless of scrollbar state
-    if (vScroll && dm && FitContentWheelFlipsPage(dm) && IsSingle(dm->GetDisplayMode())) {
+    // fit content: flip page on wheel, regardless of scrollbar state, in every
+    // non-continuous view
+    if (vScroll && dm && FitContentWheelFlipsPage(dm)) {
         WheelTurnPage(win, WheelPageTurnDir(win, delta, WheelPageTurnDelta(win, delta)));
         return;
     }
@@ -1823,7 +1838,7 @@ static void CanvasOnMouseWheel(MainWindow* win, int delta, bool isCtrl, bool isS
         }
     }
     // in non-continuous mode flip the page if necessary
-    if (!vScroll || !isCont || !gSettings->scrollEdgeTurnsPage) {
+    if (!vScroll || isCont || !gSettings->scrollEdgeTurnsPage) {
         return;
     }
     DocCanvasUI* ui = Ui(win);
@@ -2453,6 +2468,14 @@ static bool StopAnnotationResize(MainWindow* win, bool aborted) {
     win->annotationResizeRerender.Cancel();
     CanvasSetCursor(win, kCurArrow);
 
+    // a rectangle resize writes the annotation on every mouse move: put it back
+    bool wroteRect = !outlineOnly && !IsLineEndpointHandle(handle) && !IsVertexHandle(handle);
+    if (aborted && wroteRect && AnnotationIsLive(annot) && GetRect(annot) != win->annotationOriginalRect) {
+        SetRect(annot, win->annotationOriginalRect);
+        EndPdfEditOperation(win);
+        MainWindowRerender(win);
+        return true;
+    }
     if (aborted || !annot) {
         EndPdfEditOperation(win);
         AppShellInvalidate(win);
@@ -3713,17 +3736,8 @@ Point CanvasToScreenPt(MainWindow* win, Point pt) {
     float k = CanvasScale(win);
     float wx = (float)win->canvasRc.x + (float)pt.x * k;
     float wy = (float)win->canvasRc.y + (float)pt.y * k;
-#if OS_WIN
-    HWND hwnd = MainWindowHwnd(win);
-    float dipScale = hwnd ? (float)DpiGetForHwnd(hwnd) / 96.f : 1.f;
-    POINT p{(int)(wx * dipScale), (int)(wy * dipScale)};
-    if (hwnd) {
-        ClientToScreen(hwnd, &p);
-    }
-    return Point(p.x, p.y);
-#else
-    return Point((int)wx, (int)wy);
-#endif
+    Rect r = AppShellDipsToScreen(win->gpuiWin, wx, wy, 0, 0);
+    return Point(r.x, r.y);
 }
 
 void DocCanvasView::OnPaint(gp::PaintCtx* ctx, gp::El* e, void* user) {
@@ -4781,6 +4795,14 @@ gp::El* DocCanvasBuild(MainWindow* win, gp::Ctx* cx) {
 
     OverlayScrollbar* sbV = CanvasScrollbar(win, true);
     OverlayScrollbar* sbH = CanvasScrollbar(win, false);
+    // where the search matches are; first, as they show an auto-hidden bar.
+    // Cached, so per frame is cheap.
+    if (sbV) {
+        Vec<float> markers;
+        float current = -1;
+        FindScrollMarkers(win, markers, &current);
+        OverlayScrollbarSetFindMarkers(sbV, markers, current, kFindOtherMatchColor, FindCurrentMatchColor());
+    }
     bool showV = win->scrollV.visible && IsOverlayScrollbarVisible(sbV);
     bool showH = win->scrollH.visible && IsOverlayScrollbarVisible(sbH);
     // orig's OverlayScrollbarUpdatePos: two thick bars leave the corner free

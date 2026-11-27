@@ -441,7 +441,7 @@ void SetFindCountProgressStatus(MainWindow* win, int nFound, int pageNo) {
     pageNo = gFindCountCurPage;
     TempStr pageStr = {};
     if (pageNo > 0 && win->ctrl) {
-        pageStr = win->ctrl->GetPageLabeTemp(pageNo);
+        pageStr = win->ctrl->GetPageLabelTemp(pageNo);
     }
     if (nFound > 0) {
         FindBarSetStatus(win, fmt("%d %s", nFound, pageStr));
@@ -676,6 +676,10 @@ static Str HandleSearchCmd(HWND hwnd, Str cmd, bool* ack) {
     if (len(term) == 0) {
         return next;
     }
+    // a heap copy: in ng, selecting or reloading the document renders, which
+    // resets the temp arena
+    term = str::Dup(term);
+    AutoFree freeTerm(term.s);
     MainWindow* win = FindDdeTargetWindow(hwnd, pdfFile, true);
     if (!win) {
         return next;
@@ -702,6 +706,10 @@ static Str HandleGotoPageWordCmd(HWND hwnd, Str cmd, bool* ack) {
     if (str::IsNull(next)) {
         return {};
     }
+    // a heap copy: in ng, selecting or reloading the document renders, which
+    // resets the temp arena
+    term = str::Dup(term);
+    AutoFree freeTerm(term.s);
     MainWindow* win = FindDdeTargetWindow(hwnd, pdfFile, true);
     if (!win) {
         return next;
@@ -740,6 +748,10 @@ static Str HandleGotoCmd(HWND hwnd, Str cmd, bool* ack) {
     if (str::IsNull(next)) {
         return {};
     }
+    // a heap copy: in ng, selecting or reloading the document renders, which
+    // resets the temp arena
+    destName = str::Dup(destName);
+    AutoFree freeDestName(destName.s);
 
     MainWindow* win = FindDdeTargetWindow(hwnd, pdfFile, true);
     if (!win) {
@@ -800,6 +812,10 @@ static Str HandleSetViewCmd(HWND hwnd, Str cmd, bool* ack) {
         return {};
     }
 
+    // ReloadDocument can reset the temp arena; copy viewMode to stable storage
+    Str viewModeOwned = str::Dup(viewMode);
+    AutoFree freeViewMode(viewModeOwned.s);
+
     MainWindow* win = FindDdeTargetWindow(hwnd, filePath, true);
     if (!win) {
         return next;
@@ -811,7 +827,13 @@ static Str HandleSetViewCmd(HWND hwnd, Str cmd, bool* ack) {
         }
     }
 
-    DisplayMode mode = DisplayModeFromString(viewMode, DisplayMode::Automatic);
+#if defined(SUMATRA_NG)
+    DisplayMode oldMode = win->ctrl->GetDisplayMode();
+    float oldZoom = win->ctrl->GetZoomVirtual();
+    u64 windowId = win->lifetimeId;
+    WindowTab* tab = win->CurrentTab();
+#endif
+    DisplayMode mode = DisplayModeFromString(viewModeOwned, DisplayMode::Automatic);
     if (mode != DisplayMode::Automatic) {
         SwitchToDisplayMode(win, mode);
     }
@@ -824,6 +846,12 @@ static Str HandleSetViewCmd(HWND hwnd, Str cmd, bool* ack) {
         SmartZoom(win, zoom, nullptr, false);
     }
 
+#if defined(SUMATRA_NG)
+    RefreshEbookLayoutForDde(win, oldMode, oldZoom);
+    if (!IsMainWindowValidAndNotClosing(win) || win->lifetimeId != windowId || win->CurrentTab() != tab) {
+        return next;
+    }
+#endif
     if ((scroll.x != -1 || scroll.y != -1) && win->AsFixed()) {
         DisplayModel* dm = win->AsFixed();
         ScrollState ss = dm->GetScrollState();
@@ -939,7 +967,7 @@ void HighlightRestoredFindTerm(MainWindow* win) {
         return;
     }
     // typing (or a copied selection) is about to start its own search
-    if (win->findDebouncePending || len(win->findMatches) > 0) {
+    if (FindDebouncePending(win) || len(win->findMatches) > 0) {
         return;
     }
     EnsureFindSnippets(win);
@@ -1023,7 +1051,7 @@ void GoToFindMatch(MainWindow* win, int startPage, int startGlyph, int endPage, 
     // document from being searched - that only happens when the find window is
     // closed. Skip the join when idle so stepping through the floating results
     // list stays responsive.
-    if (win->findThread || win->findDebouncePending) {
+    if (win->findThread || FindDebouncePending(win)) {
         CancelPendingFind(win);
         JoinFindThread(win, true);
     }
@@ -1157,11 +1185,17 @@ LRESULT OnDDExecute(HWND hwnd, WPARAM wp, LPARAM lp) {
 
 // Blink a ring around the match: a highlight on a busy page (a PCB drawing)
 // is easy to miss, a blinking one isn't (#6536)
+// on, off per blink; FlashFindMatch is the number of blinks (0: none)
+static int FindFlashSteps() {
+    constexpr int kMaxBlinks = 10;
+    return 2 * limitValue(gSettings->flashFindMatch, 0, kMaxBlinks);
+}
+
 static void StartFindFlash(MainWindow* win, Vec<TextSel>* result) {
     auto& ff = win->findFlash;
     ff.show = false;
     VecReset(ff.rects);
-    if (!gSettings->flashFindMatch) {
+    if (FindFlashSteps() == 0) {
         return;
     }
     // a match spanning pages rings only its first part
@@ -1181,7 +1215,7 @@ static void StartFindFlash(MainWindow* win, Vec<TextSel>* result) {
 bool FindFlashStep(MainWindow* win) {
     auto& ff = win->findFlash;
     ff.step++;
-    if (ff.step >= kFindFlashSteps || len(ff.rects) == 0) {
+    if (ff.step >= FindFlashSteps() || len(ff.rects) == 0) {
         ff.show = false;
         return false;
     }
@@ -1345,6 +1379,11 @@ static Str HandleSyncCmd(Str cmd, bool* ack) {
     if (str::IsNull(next)) {
         return {};
     }
+    // heap copies: in ng, opening a window renders, which resets the temp arena
+    pdfFile = str::Dup(pdfFile);
+    srcFile = str::Dup(srcFile);
+    AutoFree freePdfFile(pdfFile.s);
+    AutoFree freeSrcFile(srcFile.s);
 
     MainWindow* win = nullptr;
     if (pdfFile) {
@@ -2035,6 +2074,11 @@ void StartFindCount(MainWindow* win, Str text, bool matchCase, bool matchWholeWo
     uitask::Post(fn, "FindCountThread");
 #else
     win->findCountThread = StartThread(fn, StrL("FindCountThread"));
+    if (!win->findCountThread) {
+        SafeEngineRelease(&engine);
+        delete d;
+        return;
+    }
 #endif
     d->thread = win->findCountThread;
 }
@@ -2344,7 +2388,7 @@ static bool LaunchInverseSearchCmd(Str cmdLine) {
         }
     }
     str::TrimChar(rest, ' ');
-    return LaunchFileShell(exe, rest);
+    return LaunchProgram(exe, rest);
 #endif
 }
 
@@ -2704,7 +2748,7 @@ LRESULT OnDDEInitiate(HWND hwnd, WPARAM wp, LPARAM lp) {
     ATOM aTopic = GlobalAddAtomW(kSumatraDdeTopic);
 
     if (LOWORD(lp) == aServer && HIWORD(lp) == aTopic) {
-        SendMessageW((HWND)wp, WM_DDE_ACK, (WPARAM)hwnd, MAKELPARAM(aServer, 0));
+        SendMessageW((HWND)wp, WM_DDE_ACK, (WPARAM)hwnd, MAKELPARAM(aServer, aTopic));
     } else {
         GlobalDeleteAtom(aServer);
         GlobalDeleteAtom(aTopic);
@@ -2756,9 +2800,7 @@ bool HandleExecuteCmds(HWND hwnd, Str cmd) {
     // a copy: cmd is often a TempStr, and opening a window can render and reset
     // the temp arena while the handlers still parse the rest of it
     Str ownedCmd = str::Dup(cmd);
-    defer {
-        str::Free(ownedCmd);
-    };
+    AutoFree freeOwnedCmd(ownedCmd.s);
     cmd = ownedCmd;
 
     bool didHandle = false;
@@ -2833,11 +2875,10 @@ bool ApplyFindPageRange(MainWindow* win) {
 }
 
 bool FindFlushPendingSearch(MainWindow* win) {
-    if (!win->findDebouncePending) {
+    if (!FindDebouncePending(win)) {
         return false;
     }
-    win->findDebouncePending = false;
-    FindDebounceStop(win);
+    CancelPendingFind(win);
     if (HasFindText(win)) {
         StartIncrementalFind(win);
     }
@@ -2944,6 +2985,124 @@ void PaintAllFindMatches(MainWindow* win, PaintRef ctx) {
     if (len(currentRects) > 0) {
         PaintTransparentRectangles(ctx, clipRc, currentRects, parsedCol->col, alpha);
     }
+}
+
+// the current match's color, as in the page: FixedPageUI.SelectionColor
+Color FindCurrentMatchColor() {
+    return GetPrefsColor(gSettings->fixedPageUI.selectionColor)->col;
+}
+
+// what the scrollbar markers were computed for; they only change with these
+struct FindScrollMarkersCache {
+    MainWindow* win = nullptr;
+    DisplayModel* dm = nullptr;
+    int epoch = -1;
+    int nMatches = -1;
+    u64 currentKey = 0;
+    Size canvas;
+    float zoom = 0;
+    int rotation = 0;
+    DisplayMode mode = DisplayMode::Automatic;
+    int page = 0;
+    bool byPage = false;
+    Vec<float> markers;
+    float current = -1;
+};
+
+static FindScrollMarkersCache gFindScrollMarkers;
+
+// a match's place along the vertical scrollbar, 0..1; -1 when the bar doesn't
+// cover its page. byPage: the bar's range is the pages (ScrollbarInSinglePage).
+static float MatchScrollFraction(DisplayModel* dm, int pageNo, int glyph, bool byPage) {
+    EngineBase* engine = dm->GetEngine();
+    if (!dm->ValidPageNo(pageNo)) {
+        return -1;
+    }
+    // the glyph when its page's text was extracted (by the count), else the page top
+    RectF r{};
+    int textLen = 0;
+    Rect* coords = nullptr;
+    if (engine->TryGetTextForPage(pageNo, &textLen, &coords) && coords && glyph >= 0 && glyph < textLen) {
+        r = ToRectF(coords[glyph]);
+    }
+    if (byPage) {
+        RectF mb = engine->PageMediabox(pageNo);
+        float inPage = mb.dy > 0 ? limitValue((r.y - mb.y) / mb.dy, 0.f, 1.f) : 0.f;
+        return ((float)(pageNo - 1) + inPage) / (float)dm->PageCount();
+    }
+    // the canvas has the pages that are laid out: all of them when continuous,
+    // the current one (or row) otherwise
+    Size canvas = dm->GetCanvasSize();
+    if (!dm->PageShown(pageNo) || canvas.dy <= 0) {
+        return -1;
+    }
+    Rect onScreen = dm->CvtToScreen(pageNo, r);
+    int y = onScreen.y + (onScreen.dy / 2) + dm->GetViewPort().y;
+    return limitValue((float)y / (float)canvas.dy, 0.f, 1.f);
+}
+
+static int CmpFloat(const float* a, const float* b) {
+    return (*a < *b) ? -1 : ((*a > *b) ? 1 : 0);
+}
+
+// Where the find matches lie along the vertical scrollbar, as fractions of its
+// range (0: top, 1: bottom), sorted; *current is the current match, -1 if none.
+// Empty while the find UI is hidden. Called on every paint, so it's cached.
+void FindScrollMarkers(MainWindow* win, Vec<float>& out, float* current) {
+    VecReset(out);
+    *current = -1;
+    DisplayModel* dm = win->IsDocLoaded() ? win->AsFixed() : nullptr;
+    bool stale = dm && win->findCountEngine && win->findCountEngine != (void*)dm->GetEngine();
+    if (!dm || stale || !IsFindUIVisible(win) || FindEditTextLen(win) == 0 || len(win->findMatches) == 0) {
+        return;
+    }
+    TextSearch* ts = dm->textSearch;
+    bool hasCurrent = ts && len(ts->result) > 0;
+    u64 currentKey = hasCurrent ? MatchKey(ts->startPage, ts->startGlyph) : 0;
+    bool byPage = gSettings->scrollbarInSinglePage && dm->GetDisplayMode() == DisplayMode::SinglePage;
+    bool continuous = IsContinuous(dm->GetDisplayMode());
+
+    FindScrollMarkersCache& c = gFindScrollMarkers;
+    FindScrollMarkersCache key;
+    key.win = win;
+    key.dm = dm;
+    key.epoch = win->findCountEpoch;
+    key.nMatches = len(win->findMatches);
+    key.currentKey = currentKey;
+    key.canvas = dm->GetCanvasSize();
+    key.zoom = dm->GetZoomVirtual();
+    key.rotation = dm->GetRotation();
+    key.mode = dm->GetDisplayMode();
+    // a non-continuous canvas is the current page (row): a new page, new markers
+    key.page = continuous ? 0 : dm->CurrentPageNo();
+    key.byPage = byPage;
+    bool same = c.win == key.win && c.dm == key.dm && c.epoch == key.epoch && c.nMatches == key.nMatches &&
+                c.currentKey == key.currentKey && c.canvas == key.canvas && c.zoom == key.zoom &&
+                c.rotation == key.rotation && c.mode == key.mode && c.page == key.page && c.byPage == key.byPage;
+    if (!same) {
+        c.win = key.win;
+        c.dm = key.dm;
+        c.epoch = key.epoch;
+        c.nMatches = key.nMatches;
+        c.currentKey = key.currentKey;
+        c.canvas = key.canvas;
+        c.zoom = key.zoom;
+        c.rotation = key.rotation;
+        c.mode = key.mode;
+        c.page = key.page;
+        c.byPage = key.byPage;
+        VecReset(c.markers);
+        for (const FindMatch& fm : win->findMatches) {
+            float f = MatchScrollFraction(dm, fm.startPage, fm.startGlyph, byPage);
+            if (f >= 0) {
+                VecAppend(c.markers, f);
+            }
+        }
+        VecSort(c.markers, CmpFloat);
+        c.current = hasCurrent ? MatchScrollFraction(dm, ts->startPage, ts->startGlyph, byPage) : -1;
+    }
+    out = c.markers;
+    *current = c.current;
 }
 
 void PaintForwardSearchMark(MainWindow* win, PaintRef ctx) {

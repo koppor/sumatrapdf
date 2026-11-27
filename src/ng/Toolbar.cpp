@@ -660,25 +660,13 @@ static Rect HoverBoundsScreen(MainWindow* win, gp::Bounds b) {
     if (!(k > 0)) {
         k = 1;
     }
-    int ox = 0;
-    int oy = 0;
-#if OS_WIN
-    POINT o{0, 0};
-    if (HWND hwnd = AppShellNativeHwnd(win)) {
-        ClientToScreen(hwnd, &o);
-    }
-    ox = o.x;
-    oy = o.y;
-#else
+#if !OS_WIN
     // content rect and gpui bounds are both points; CanvasScale is dips per pixel
     k = 1;
-    Rect content = win && win->gpuiWin ? FromGpui(gp::WindowContentBounds(win->gpuiWin)) : Rect{};
-    if (content.IsEmpty()) {
-        content = AppShellWindowScreenRect(win);
-    }
-    ox = content.x;
-    oy = content.y;
 #endif
+    Point origin = AppShellContentOrigin(win);
+    int ox = origin.x;
+    int oy = origin.y;
     int x = ox + (int)(b.x / k + 0.5f);
     int y = oy + (int)(b.y / k + 0.5f);
     int x2 = ox + (int)((b.x + b.w) / k + 0.5f);
@@ -794,15 +782,15 @@ static gp::El* BuildSaveHoverMenu(MainWindow* win, gp::Ctx* cx) {
     bool dirty = ctx->hasUnsavedAnnotations;
 
     TempStr base = tab ? path::GetBaseNameTemp(tab->filePath) : TempStr{};
-    Str saveText = Tr("Save changes to existing PDF");
+    Str saveText = Tr("Save Changes to Existing PDF");
     if (len(base) > 0) {
-        saveText = fmt(Tr("Save changes to %s").s, base);
+        saveText = fmt(Tr("Save Changes to %s").s, base);
     }
 
     Vec<ToolbarHoverMenuItem> items;
     VecAppend(items, {Str(gIconSave), saveText, CmdSaveAnnotations, dirty});
-    VecAppend(items, {Str(gIconSaveToNewFile), Tr("Save changes to a new PDF"), CmdSaveAnnotationsNewFile, dirty});
-    VecAppend(items, {Str(gIconTrash), Tr("Discard changes"), CmdDiscardChanges, dirty});
+    VecAppend(items, {Str(gIconSaveToNewFile), Tr("Save Changes to a New PDF"), CmdSaveAnnotationsNewFile, dirty});
+    VecAppend(items, {Str(gIconTrash), Tr("Discard Changes"), CmdDiscardChanges, dirty});
     gp::El* box = NewToolbarHoverMenu(win, cx, items);
     // under the button, left edges aligned
     box->Left((float)anchor.x)->Top((float)anchor.Bottom());
@@ -1279,11 +1267,13 @@ static void AddPageInfo(MainWindow* win, gp::Ctx* cx, gp::El* row) {
         return gp::TextEl(cx->a, GpuiDup(cx->a, s))->Font(13)->Fg(ToGpui(fg))->PadL(padL)->PadR(padR);
     };
     auto edit = [&](gp::Str id, gp::InputState* st) {
-        return gpc::Input::New(cx, id, st)
-            ->WithSize(gp::UiSize::Small)
-            ->Align(gpc::InputAlign::Right)
-            ->W(editDx)
-            ->IntoEl();
+        return EditStyle(cx,
+                         gpc::Input::New(cx, id, st)
+                             ->WithSize(gp::UiSize::Small)
+                             ->Align(gpc::InputAlign::Right)
+                             ->W(editDx)
+                             ->IntoEl(),
+                         st, EditLook::Frame);
     };
 
     group->Child(text(tb->hasChapters ? Tr("Chapter:") : Tr("Page:"), smallGap, pageGap));
@@ -1344,7 +1334,7 @@ static void SyncLocationEdits(MainWindow* win) {
         return;
     }
     SetEditText(tb->chapterEdit, {});
-    SetEditText(tb->pageEdit, ctrl->GetPageLabeTemp(ctrl->CurrentPageNo()));
+    SetEditText(tb->pageEdit, ctrl->GetPageLabelTemp(ctrl->CurrentPageNo()));
 }
 
 gp::El* ToolbarBuild(MainWindow* win, gp::Ctx* cx) {

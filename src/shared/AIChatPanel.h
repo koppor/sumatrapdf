@@ -19,9 +19,12 @@ constexpr char kAntiGravityDefaultModel[] = "gemini-3.8-flash-medium";
 AIChatProvider* GetAntiGravityProvider();
 
 AIChatProvider* GetAIChatProvider(int providerId);
+// implemented by each app
+void AIChatModelsChanged(AIChatProvider* p);
 
 void CreateAIChatPanel(MainWindow* win);
 void DestroyAIChatPanel(MainWindow* win);
+void DeleteAIChatWebViewDataDirs();
 void ShutdownAIChatForMainWindow(MainWindow* win);
 
 void OnAIChatToggle(MainWindow* win, int providerId);

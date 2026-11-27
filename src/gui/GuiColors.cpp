@@ -13,7 +13,6 @@ Color gColsIconBtn[kColIconBtnCount];
 Color gColsCloseBtn[kColCloseCount];
 Color gColsListBox[kColListCount];
 Color gColsSplitter[kColSplitterCount];
-Color gColsFill[kColFillCount];
 Color gColsLine[kColLineCount];
 Color gColsSlider[kColSliderCount];
 Color gColsRichText[kColRichCount];
@@ -106,8 +105,6 @@ void GuiSetDefaultColorsFromSystem() {
 
     gColsSplitter[kColSplitterBg] = ctlBg;
 
-    gColsFill[kColFillBg] = ctlBg;
-
     gColsLine[kColLineFg] = edge;
 
     gColsSlider[kColSliderTrack] = AccentColor(ctlBg, 40);
@@ -121,6 +118,7 @@ void GuiSetDefaultColorsFromSystem() {
 
     gColsTab[kColTabText] = winText;
     gColsTab[kColTabBg] = ctlBg;
+    gColsTab[kColTabInactiveBg] = AccentColor(ctlBg, 15);
 
     // a custom top-level window's own surface, like the OS paints a window's
     gColsWin[kColWinText] = winText;

@@ -9,18 +9,6 @@
 #include "base/Win.h"
 #include "base/FileWatcher.h"
 
-// Log file path we must not reload-on-change (set by SumatraLog).
-static Str gFileWatcherSkipPath;
-
-void FileWatcherSetSkipPath(Str path) {
-    str::Free(gFileWatcherSkipPath);
-    gFileWatcherSkipPath = str::Dup(path);
-}
-
-static Str FileWatcherGetSkipPath() {
-    return gFileWatcherSkipPath;
-}
-
 /*
 This code is tricky, so here's a high-level overview. More info at:
 http://qualapps.blogspot.com/2010/05/understanding-readdirectorychangesw.html
@@ -90,13 +78,9 @@ struct WatchedFile {
     FileWatcherState fileState;
 
     bool ignore = false;
+    // tells a new file apart from a freed one at the same address
+    u64 id = 0;
 };
-
-void WatchedFileSetIgnore(WatchedFile* wf, bool ignore) {
-    if (wf) {
-        wf->ignore = ignore;
-    }
-}
 
 static ThreadHandle gThreadHandle = nullptr;
 
@@ -104,13 +88,36 @@ static HANDLE gThreadControlHandle = nullptr;
 static AtomicBool gShouldExit = 0;
 
 // protects data structures shared between ui thread and file
-// watcher thread i.e. gWatchedDirs, gWatchedFiles
+// watcher thread i.e. gWatchedDirs, gWatchedFiles, gFileWatcherSkipPath
 static Mutex gFileWatcherMutex;
+
+// Log file path we must not reload-on-change (set by SumatraLog).
+static Str gFileWatcherSkipPath;
+
+void FileWatcherSetSkipPath(Str path) {
+    AutoUnlockMutex cs(&gFileWatcherMutex);
+    str::Free(gFileWatcherSkipPath);
+    gFileWatcherSkipPath = str::Dup(path);
+}
+
+static TempStr FileWatcherGetSkipPathTemp() {
+    AutoUnlockMutex cs(&gFileWatcherMutex);
+    return str::DupTemp(gFileWatcherSkipPath);
+}
+
+void WatchedFileSetIgnore(WatchedFile* wf, bool ignore) {
+    if (!wf) {
+        return;
+    }
+    AutoUnlockMutex cs(&gFileWatcherMutex);
+    wf->ignore = ignore;
+}
 
 static WatchedDir* gWatchedDirs = nullptr;
 static WatchedFile* gWatchedFiles = nullptr;
 
 static AtomicInt gRemovalsPending = 0;
+static u64 gNextWatchedFileId = 0;
 
 // dirs unlinked from gWatchedDirs whose StopMonitoringDirAPC / cancel-io round
 // trip hasn't completed yet. Only used to report what shutdown is waiting for.
@@ -123,7 +130,7 @@ static void AwakeWatcherThread() {
     SetEvent(gThreadControlHandle);
 }
 
-static void GetFileState(Str path, FileWatcherState* fs) {
+static bool GetFileState(Str path, FileWatcherState* fs) {
     // Note: in my testing on network drive that is mac volume mounted
     // via parallels, lastWriteTime is not updated. lastAccessTime is,
     // but it's also updated when the file is being read from (e.g.
@@ -137,16 +144,20 @@ static void GetFileState(Str path, FileWatcherState* fs) {
     // without opening the file content, avoiding the scan.
     WCHAR* pathW = CWStrTemp(path);
     WIN32_FILE_ATTRIBUTE_DATA attrs{};
-    if (GetFileAttributesExW(pathW, GetFileExInfoStandard, &attrs)) {
-        fs->time = attrs.ftLastWriteTime;
-        fs->size = (i64)attrs.nFileSizeHigh << 32 | attrs.nFileSizeLow;
+    if (!GetFileAttributesExW(pathW, GetFileExInfoStandard, &attrs)) {
+        return false;
     }
+    fs->time = attrs.ftLastWriteTime;
+    fs->size = (i64)attrs.nFileSizeHigh << 32 | attrs.nFileSizeLow;
+    return true;
 }
 
 // updates fs and returns true when the file's write time or size changed
 static bool FileStateChanged(Str filePath, FileWatcherState* fs) {
     FileWatcherState curr{};
-    GetFileState(filePath, &curr);
+    if (!GetFileState(filePath, &curr)) {
+        return false;
+    }
     if (0 == CompareFileTime(&fs->time, &curr.time) && fs->size == curr.size) {
         return false;
     }
@@ -180,6 +191,39 @@ static void CollectNotificationsAboutFile(WatchedDir* d, Str fileName, Vec<Func0
         // because the time granularity is so big that this can cause genuine
         // file notifications to be ignored. (This happens for instance for
         // PDF files produced by pdftex from small.tex document)
+        VecAppend(toNotify, wf->onFileChangedCb);
+    }
+}
+
+// collects names of files that changed, without duplicates
+static void CollectChangedFiles(WatchedDir* wd, StrVec& changedFiles) {
+    FILE_NOTIFY_INFORMATION* notify = (FILE_NOTIFY_INFORMATION*)wd->buf;
+    for (;;) {
+        size_t fnLen = notify->FileNameLength / sizeof(WCHAR);
+        TempStr fileName = ToUtf8Temp(WStr(notify->FileName, (int)fnLen));
+        // files can get updated either by writing to them directly or
+        // by writing to a .tmp file first and then moving that file in place
+        // (the latter only yields a RENAMED action with the expected file name)
+        if (notify->Action == FILE_ACTION_ADDED || notify->Action == FILE_ACTION_MODIFIED ||
+            notify->Action == FILE_ACTION_RENAMED_NEW_NAME) {
+            AppendIfNotExists(&changedFiles, fileName);
+        }
+
+        // step to the next entry if there is one
+        DWORD nextOff = notify->NextEntryOffset;
+        if (!nextOff) {
+            break;
+        }
+        notify = (FILE_NOTIFY_INFORMATION*)((char*)notify + nextOff);
+    }
+}
+
+static void CollectNotificationsAboutDir(WatchedDir* d, Vec<Func0>& toNotify) {
+    for (WatchedFile* wf = gWatchedFiles; wf; wf = wf->next) {
+        if (wf->ignore || wf->watchedDir != d) {
+            continue;
+        }
+        logf("CollectNotificationsAboutDir(): '%s'\n", wf->filePath);
         VecAppend(toNotify, wf->onFileChangedCb);
     }
 }
@@ -230,37 +274,19 @@ static void CALLBACK ReadDirectoryChangesNotification(DWORD errCode, DWORD bytes
 
         wd->startMonitoring = false;
 
-        // This might mean overflow? Not sure.
-        if (!bytesTransfered) {
-            StartMonitoringDirForChanges(wd);
-            return;
-        }
-
-        FILE_NOTIFY_INFORMATION* notify = (FILE_NOTIFY_INFORMATION*)wd->buf;
-
-        // collect files that changed, removing duplicates
+        // 0 bytes: the change buffer overflowed and its changes were dropped
+        // (e.g. a LaTeX build churning aux files), so every file may have changed
+        bool overflow = !bytesTransfered && (errCode == ERROR_SUCCESS || errCode == ERROR_NOTIFY_ENUM_DIR);
         StrVec changedFiles;
-        for (;;) {
-            size_t fnLen = notify->FileNameLength / sizeof(WCHAR);
-            TempStr fileName = ToUtf8Temp(WStr(notify->FileName, (int)fnLen));
-            // files can get updated either by writing to them directly or
-            // by writing to a .tmp file first and then moving that file in place
-            // (the latter only yields a RENAMED action with the expected file name)
-            if (notify->Action == FILE_ACTION_ADDED || notify->Action == FILE_ACTION_MODIFIED ||
-                notify->Action == FILE_ACTION_RENAMED_NEW_NAME) {
-                AppendIfNotExists(&changedFiles, fileName);
-            }
-
-            // step to the next entry if there is one
-            DWORD nextOff = notify->NextEntryOffset;
-            if (!nextOff) {
-                break;
-            }
-            notify = (FILE_NOTIFY_INFORMATION*)((char*)notify + nextOff);
+        if (bytesTransfered) {
+            CollectChangedFiles(wd, changedFiles);
         }
 
         StartMonitoringDirForChanges(wd);
 
+        if (overflow) {
+            CollectNotificationsAboutDir(wd, toNotify);
+        }
         for (Str f : changedFiles) {
             CollectNotificationsAboutFile(wd, f, toNotify);
         }
@@ -332,9 +358,9 @@ static DWORD GetTimeoutInMs() {
     return INFINITE;
 }
 
-static bool WatchedFileStillActive(WatchedFile* wf) {
+static bool WatchedFileStillActive(WatchedFile* wf, u64 id) {
     for (WatchedFile* p = gWatchedFiles; p; p = p->next) {
-        if (p == wf) {
+        if (p == wf && p->id == id) {
             return true;
         }
     }
@@ -347,6 +373,7 @@ static bool WatchedFileStillActive(WatchedFile* wf) {
 static void RunManualChecks() {
     struct ManualCheckItem {
         WatchedFile* wf = nullptr;
+        u64 id = 0;
         Str path;
         FileWatcherState state{};
         bool changed = false;
@@ -355,11 +382,12 @@ static void RunManualChecks() {
     {
         AutoUnlockMutex cs(&gFileWatcherMutex);
         for (WatchedFile* wf = gWatchedFiles; wf; wf = wf->next) {
-            if (!wf->isManualCheck) {
+            if (!wf->isManualCheck || wf->ignore) {
                 continue;
             }
             ManualCheckItem it;
             it.wf = wf;
+            it.id = wf->id;
             // Dup so we can use path after releasing the lock (wf may be freed).
             it.path = str::Dup(wf->filePath);
             it.state = wf->fileState;
@@ -381,12 +409,15 @@ static void RunManualChecks() {
             if (!it.changed) {
                 continue;
             }
-            // Unwatch may have removed/freed wf while we were querying attributes
-            if (!WatchedFileStillActive(it.wf)) {
+            // Unwatch may have freed wf, and a new file reused its address,
+            // while we were querying attributes
+            if (!WatchedFileStillActive(it.wf, it.id)) {
                 continue;
             }
             it.wf->fileState = it.state;
-            VecAppend(toNotify, it.wf->onFileChangedCb);
+            if (!it.wf->ignore) {
+                VecAppend(toNotify, it.wf->onFileChangedCb);
+            }
         }
     }
 
@@ -520,6 +551,7 @@ static WatchedFile* NewWatchedFile(Str filePath, const Func0& onFileChangedCb, b
     wf->onFileChangedCb = onFileChangedCb;
     wf->watchedDir = wd;
     wf->isManualCheck = isManualCheck;
+    wf->id = ++gNextWatchedFileId;
 
     ListInsertFront(&gWatchedFiles, wf);
 
@@ -552,7 +584,7 @@ WatchedFile* FileWatcherSubscribe(Str path, const Func0& onFileChangedCb, bool e
         return nullptr;
     }
 
-    if (path::IsSame(FileWatcherGetSkipPath(), path)) {
+    if (path::IsSame(FileWatcherGetSkipPathTemp(), path)) {
         logf("FileWatcherSubscribe: '%s' is our own log file\n", path);
         return nullptr;
     }

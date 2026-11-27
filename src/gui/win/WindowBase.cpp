@@ -80,10 +80,6 @@ static void HwndListAdd(HwndBase* w) {
 
 //- Taskbar.cpp
 
-constexpr DWORD kWmTaskbarCallback = WM_APP + 0x15;
-const DWORD kWmTaskbarCreated = ::RegisterWindowMessage(L"TaskbarCreated");
-const DWORD kWmTaskbarButtonCreated = ::RegisterWindowMessage(L"TaskbarButtonCreated");
-
 //--- HwndBase
 
 static LRESULT CALLBACK WndBaseWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -120,8 +116,21 @@ static LRESULT CALLBACK WndBaseWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LP
 }
 
 static LRESULT CALLBACK WndBaseSubclassedWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR /*subclassId*/,
-                                                    DWORD_PTR /*data*/) {
-    return WndBaseWindowProc(hwnd, msg, wp, lp);
+                                                    DWORD_PTR data) {
+    if (!IsWindow(hwnd)) {
+        return 0;
+    }
+    auto* w = (HwndBase*)data;
+    if (!w || w->hwnd != hwnd) {
+        return ::DefSubclassProc(hwnd, msg, wp, lp);
+    }
+    LRESULT res = w->OnMessage(hwnd, msg, wp, lp);
+    if (msg == WM_NCDESTROY && w->hwnd == hwnd) {
+        HwndListRemove(w);
+        w->subclassId = 0;
+        w->hwnd = nullptr;
+    }
+    return res;
 }
 
 static void RegisterWndClass(WStr className) {
@@ -153,10 +162,25 @@ HwndBase::~HwndBase() {
     DeleteBrushSafe(&bgBrush);
 }
 
+constexpr const WCHAR* kModalOwnerProp = L"SumatraModalOwner";
+
+// A modal window's owner must be enabled before the window is destroyed:
+// otherwise Windows can't activate it and activates another app's window.
+static void EnableModalOwner(HWND hwnd) {
+    if (!hwnd) {
+        return;
+    }
+    HWND owner = (HWND)RemovePropW(hwnd, kModalOwnerProp);
+    if (owner) {
+        EnableWindow(owner, TRUE);
+    }
+}
+
 void HwndBase::Destroy() {
     // the order is important
     // stop dispatching messages to this object
     HwndListRemove(this);
+    EnableModalOwner(hwnd);
     // unsubclass while hwnd is still valid
     UnSubclass();
     // finally destroy hwnd
@@ -188,15 +212,6 @@ void HwndBase::UnSubclass() {
     }
     RemoveWindowSubclass(hwnd, WndBaseSubclassedWindowProc, subclassId);
     subclassId = 0;
-}
-
-HWND HwndBase::Detach() {
-    UnSubclass();
-
-    HWND wnd = hwnd;
-    HwndListRemove(this);
-    hwnd = nullptr;
-    return wnd;
 }
 
 void HwndBase::SetText(Str s) {
@@ -234,7 +249,7 @@ HBRUSH HwndBase::BackgroundBrush() {
 // the brush for `col`, cached in bgBrush; rebuilt when the color changed (a
 // theme change moves a WindowBase's resolved color without SetColors())
 HBRUSH HwndBase::BackgroundBrush(Color col) {
-    if (col == kColorUnset) {
+    if (IsSpecialColor(col)) {
         return nullptr;
     }
     if (bgBrush && bgBrushColor == col) {
@@ -363,6 +378,14 @@ LRESULT HwndBase::FinalWindowProc(UINT msg, WPARAM wparam, LPARAM lparam) {
     return ::DefWindowProc(hwnd, msg, wparam, lparam);
 }
 
+static HICON gDefaultWindowIcon = nullptr;
+
+// Caption icon for top-level windows that don't set CreateCustomArgs::icon,
+// so a new dialog can't end up without the app icon.
+void SetDefaultWindowIcon(HICON icon) {
+    gDefaultWindowIcon = icon;
+}
+
 HWND HwndBase::CreateCustomHwnd(const CreateCustomArgs& args, WStr defaultClassName) {
     font = args.font;
 
@@ -426,9 +449,11 @@ HWND HwndBase::CreateCustomHwnd(const CreateCustomArgs& args, WStr defaultClassN
     DpiSetFromHwnd(hwnd);
     // trigger creating a backgroundBrush
     SetColors(kColorNoChange, args.bgColor);
-    if (args.icon) {
-        HwndSetIcon(hwnd, args.icon);
+    HICON icon = args.icon;
+    if (!icon && !args.parent) {
+        icon = gDefaultWindowIcon;
     }
+    HwndSetIcon(hwnd, icon);
     if (style & WS_VISIBLE) {
         if (style & WS_MAXIMIZE)
             ::ShowWindow(hwnd, SW_MAXIMIZE);
@@ -533,22 +558,6 @@ static LRESULT DispatchOnMessage(T* self, HWND hwnd, UINT msg, WPARAM wparam, LP
         }
     }
     return self->WndProcDefault(hwnd, msg, wparam, lparam);
-}
-
-// shared by WindowBase and ControlBase: subclass an existing HWND and fire onAttach
-template <typename T>
-static void AttachToHwnd(T* self, HWND hwnd) {
-    ReportIf(!IsWindow(hwnd));
-    ReportIf(HwndBaseFromHwnd(hwnd));
-
-    self->hwnd = hwnd;
-    DpiSetFromHwnd(hwnd);
-    self->Subclass();
-    if (self->onAttach.IsValid()) {
-        typename T::AttachEvent ev;
-        ev.w = self;
-        self->onAttach.Call(&ev);
-    }
 }
 
 LRESULT WindowBase::OnMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -673,7 +682,10 @@ bool WindowBase::TabNavigate(bool backwards) {
 }
 
 void WindowBase::Close() {
-    ReportIf(!::IsWindow(hwnd));
+    if (!::IsWindow(hwnd)) {
+        ReportIf(true);
+        return;
+    }
     PostMessageW(hwnd, WM_CLOSE, 0, 0);
 }
 
@@ -918,7 +930,7 @@ LRESULT TryReflectMessages(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             if (hwnd == GetParent(wndFrom->hwnd)) {
                 return wndFrom->DispatchNotifyReflect(wparam, lparam);
             }
-        }
+        } break;
         // A set of messages to be reflected back to the control that generated them.
         case WM_CTLCOLORBTN:
         case WM_CTLCOLOREDIT:
@@ -931,10 +943,14 @@ LRESULT TryReflectMessages(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_HSCROLL:
         case WM_VSCROLL:
         case WM_PARENTNOTIFY: {
-            ControlBase* pWnd = ControlFromHwnd(reinterpret_cast<HWND>(lparam));
+            HWND target = reinterpret_cast<HWND>(lparam);
+            ControlBase* pWnd = ControlFromHwnd(target);
+            if (!pWnd && msg >= WM_CTLCOLORMSGBOX && msg <= WM_CTLCOLORSTATIC && target) {
+                pWnd = ControlFromHwnd(GetParent(target));
+            }
             LRESULT result = 0;
             if (pWnd != nullptr) {
-                result = pWnd->MessageReflect(msg, wparam, lparam);
+                result = pWnd->DispatchMessageReflect(msg, wparam, lparam);
             }
             if (result != 0) {
                 return result;
@@ -969,7 +985,7 @@ LRESULT TryReflectMessages(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             HWND wnd = GetDlgItem(hwnd, static_cast<int>(wparam));
             ControlBase* pWnd = wnd ? ControlFromHwnd(wnd) : nullptr;
             if (pWnd != nullptr) {
-                LRESULT result = pWnd->MessageReflect(msg, wparam, lparam);
+                LRESULT result = pWnd->DispatchMessageReflect(msg, wparam, lparam);
                 if (result != 0) {
                     return result;
                 }
@@ -1022,6 +1038,7 @@ LRESULT WindowBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         }
         // not Destroy(): that unmaps us first, so WM_DESTROY (and onDestroy)
         // would never reach this object; WM_NCDESTROY does the unmapping
+        EnableModalOwner(hwnd);
         ::DestroyWindow(hwnd);
         return 0;
     }
@@ -1083,16 +1100,6 @@ LRESULT WindowBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
                 return 0;
             }
         } break; // Note: Some MDI commands require default processing.
-
-        case WM_CREATE: {
-            if (onCreate.IsValid()) {
-                CreateEvent ev;
-                ev.w = this;
-                ev.cs = (CREATESTRUCT*)lparam;
-                onCreate.Call(&ev);
-            }
-            break;
-        }
 
         case WM_SETFOCUS: {
             if (onFocus.IsValid()) {
@@ -1329,31 +1336,6 @@ LRESULT WindowBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
             }
             break;
         }
-        case WM_LBUTTONDOWN:
-        case WM_MBUTTONDOWN:
-        case WM_RBUTTONDOWN:
-        case WM_LBUTTONUP:
-        case WM_MBUTTONUP:
-        case WM_RBUTTONUP:
-        case WM_MOUSEACTIVATE:
-        case WM_MOUSEHOVER:
-        case WM_MOUSEHWHEEL:
-        case WM_MOUSELEAVE:
-        case WM_MOUSEMOVE:
-        case WM_MOUSEWHEEL: {
-            if (onMouseEvent.IsValid()) {
-                MouseEvent ev;
-                ev.w = this;
-                ev.msg = msg;
-                ev.wparam = wparam;
-                ev.lparam = lparam;
-                onMouseEvent.Call(&ev);
-                if (ev.didHandle) {
-                    return ev.result;
-                }
-            }
-            break;
-        }
         case WM_MOVE: {
             if (onMove.IsValid()) {
                 POINTS pts = MAKEPOINTS(lparam);
@@ -1399,20 +1381,6 @@ LRESULT WindowBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
                 ev.w = this;
                 ev.windowPos = reinterpret_cast<LPWINDOWPOS>(lparam);
                 onWindowPosChanging.Call(&ev);
-            }
-            break;
-        }
-
-        default: {
-            if (msg == kWmTaskbarCreated || msg == kWmTaskbarButtonCreated || msg == kWmTaskbarCallback) {
-                if (onTaskbarCallback.IsValid()) {
-                    TaskbarCallbackEvent ev;
-                    ev.w = this;
-                    ev.msg = msg;
-                    ev.lparam = lparam;
-                    onTaskbarCallback.Call(&ev);
-                }
-                return 0;
             }
             break;
         }
@@ -1499,10 +1467,6 @@ bool WindowBase::PreTranslateMessage(MSG& msg) {
         return false;
     }
     return TabNavigate(ev.isShift);
-}
-
-void WindowBase::Attach(HWND hwnd) {
-    AttachToHwnd(this, hwnd);
 }
 
 int WindowBase::GetDpi() const {
@@ -1605,9 +1569,8 @@ Size ControlBase::Layout(const Constraints bc) {
     auto vinset = insets.top + insets.bottom;
     auto innerConstraints = bc.Inset(hinset, vinset);
 
-    int dx = MinIntrinsicWidth(0);
-    int dy = MinIntrinsicHeight(0);
-    childSize = innerConstraints.Constrain(Size{dx, dy});
+    Size ideal = GetIdealSize();
+    childSize = innerConstraints.Constrain(ideal);
     auto res = Size{
         childSize.dx + hinset,
         childSize.dy + vinset,
@@ -1640,7 +1603,7 @@ void ControlBase::SetBounds(Rect bounds) {
     bounds.dx -= (insets.right + insets.left);
     bounds.dy -= (insets.bottom + insets.top);
 
-    if (mapRtlX) {
+    if (mapRtlX && hwnd) {
         bounds.x = HwndMapChildXForRtlParent(GetParent(hwnd), bounds.x, bounds.dx);
     }
     // Skip a no-op MoveWindow (it still sends WM_WINDOWPOSCHANGED and flashes
@@ -1734,16 +1697,6 @@ LRESULT ControlBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
                 return 0;
             }
         } break; // Note: Some MDI commands require default processing.
-
-        case WM_CREATE: {
-            if (onCreate.IsValid()) {
-                CreateEvent ev;
-                ev.w = this;
-                ev.cs = (CREATESTRUCT*)lparam;
-                onCreate.Call(&ev);
-            }
-            break;
-        }
 
         case WM_DPICHANGED: {
             DpiSet((int)LOWORD(wparam), (int)HIWORD(wparam));
@@ -1867,31 +1820,6 @@ LRESULT ControlBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
             }
             break;
         }
-        case WM_LBUTTONDOWN:
-        case WM_MBUTTONDOWN:
-        case WM_RBUTTONDOWN:
-        case WM_LBUTTONUP:
-        case WM_MBUTTONUP:
-        case WM_RBUTTONUP:
-        case WM_MOUSEACTIVATE:
-        case WM_MOUSEHOVER:
-        case WM_MOUSEHWHEEL:
-        case WM_MOUSELEAVE:
-        case WM_MOUSEMOVE:
-        case WM_MOUSEWHEEL: {
-            if (onMouseEvent.IsValid()) {
-                MouseEvent mev;
-                mev.w = this;
-                mev.msg = msg;
-                mev.wparam = wparam;
-                mev.lparam = lparam;
-                onMouseEvent.Call(&mev);
-                if (mev.didHandle) {
-                    return mev.result;
-                }
-            }
-            break;
-        }
         case WM_CONTEXTMENU: {
             if (onContextMenu.IsValid()) {
                 Point ptScreen = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
@@ -1900,7 +1828,7 @@ LRESULT ControlBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
                 cev.w = this;
                 cev.mouseScreen = ptScreen;
                 Point ptW = ptScreen;
-                if (ptScreen.x != -1) {
+                if (ptScreen.x != -1 || ptScreen.y != -1) {
                     ptW = HwndMapWindowPoint(HWND_DESKTOP, hwnd, ptW);
                 }
                 cev.mouseWindow = ptW;
@@ -1935,10 +1863,6 @@ LRESULT ControlBase::WndProcDefault(HWND hwnd, UINT msg, WPARAM wparam, LPARAM l
 
     // Now hand all messages to the default procedure.
     return FinalWindowProc(msg, wparam, lparam);
-}
-
-void ControlBase::Attach(HWND hwnd) {
-    AttachToHwnd(this, hwnd);
 }
 
 HWND ControlBase::CreateControl(const CreateControlArgs& args) {
@@ -1980,11 +1904,6 @@ HWND ControlBase::CreateControl(const CreateControlArgs& args) {
     DpiSetFromHwnd(hwnd);
 
     Subclass();
-    if (onAttach.IsValid()) {
-        AttachEvent ev;
-        ev.w = this;
-        onAttach.Call(&ev);
-    }
 
     if (args.text) {
         SetText(args.text);
@@ -2069,24 +1988,6 @@ bool PreTranslateMessage(MSG& msg) {
     return false;
 }
 
-int RunMessageLoop(HACCEL accelTable, HWND hwndDialog) {
-    MSG msg;
-    while (GetMessage(&msg, nullptr, 0, 0)) {
-        if (PreTranslateMessage(msg)) {
-            continue;
-        }
-        if (TranslateAccelerator(msg.hwnd, accelTable, &msg)) {
-            continue;
-        }
-        if (hwndDialog && IsDialogMessage(hwndDialog, &msg)) {
-            continue;
-        }
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
-    }
-    return (int)msg.wParam;
-}
-
 // Runs a message loop until hwndDialog is destroyed, making it modal to
 // hwndParent (disabled for the duration). A WM_QUIT ends the loop too and is
 // re-posted so the outer message loop sees it. Keyboard handling (Esc, Enter,
@@ -2099,14 +2000,17 @@ void RunModalWindow(HWND hwndDialog, HWND hwndParent) {
     if (hwndParent && IsWindowEnabled(hwndParent)) {
         EnableWindow(hwndParent, FALSE);
         reEnableParent = true;
+        SetPropW(hwndDialog, kModalOwnerProp, hwndParent);
     }
 
     MSG msg;
     while (::IsWindow(hwndDialog)) {
         BOOL ok = GetMessage(&msg, nullptr, 0, 0);
-        if (!ok) {
-            // WM_QUIT: leave and let the outer loop see it too
-            PostQuitMessage((int)msg.wParam);
+        if (ok <= 0) {
+            if (ok == 0) {
+                // WM_QUIT: leave and let the outer loop see it too
+                PostQuitMessage((int)msg.wParam);
+            }
             break;
         }
         if (PreTranslateMessage(msg)) {
@@ -2116,7 +2020,7 @@ void RunModalWindow(HWND hwndDialog, HWND hwndParent) {
         DispatchMessage(&msg);
     }
 
-    if (reEnableParent) {
+    if (reEnableParent && ::IsWindow(hwndParent)) {
         EnableWindow(hwndParent, TRUE);
         SetActiveWindow(hwndParent);
     }

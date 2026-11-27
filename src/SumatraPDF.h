@@ -105,7 +105,8 @@ DocControllerCallback* CreateControllerCallbackHandler(MainWindow* win);
 bool SettingsUseTabs();
 bool SettingsRememberOpenedFiles();
 
-void CrashHandlerSetSettings(Str settings);
+struct Settings;
+void CrashHandlerSetSettings(const Settings* settings);
 
 void InitializePolicies(bool restrict);
 bool HasPermission(Perm permission);
@@ -134,7 +135,7 @@ WindowTab* FindTabInWindow(Str path, MainWindow* win);
 // the tab that currently owns this controller, null if it is no longer shown
 WindowTab* FindTabByController(DocController*);
 bool CanCloseWindow(MainWindow* win);
-void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose);
+void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose = false);
 void PostAppExit();
 enum class SidebarResizeFrame {
     Keep,
@@ -182,7 +183,6 @@ int ToolbarPositionFromPrefs();
 bool ToolbarAtBottom();
 void UpdateTabFileDisplayStateForTab(WindowTab* tab);
 void ReloadDocument(MainWindow* win, bool autoRefresh, bool canAskForPassword = true);
-bool AutoReloadFileStillChanging(WindowTab* tab);
 void DeleteControllerAsync(DocController* ctrl);
 void ToggleFullScreen(MainWindow* win, bool presentation = false);
 
@@ -320,11 +320,11 @@ struct SettingsApplyState {
     bool showMenubarWithTabs = false;
     bool disableAntiAlias = false;
     bool chmUseFixedPageUI = false;
-    bool markdownUseFixedPageUI = false;
-    bool markdownPreserveLineBreaks = false;
     bool explorerQuickLook = false;
     // owned copy of the ebook layout inputs; ApplyChangedSettingsAndRelayout frees it
     Str ebookLayout;
+    Str markdownLayout;
+    Str htmlLayout;
     // owned copy of the AI chat look (AIChat section, BgColor); freed the same way
     Str aiChatStyle;
     // owned copy of ThumbnailsType; freed the same way

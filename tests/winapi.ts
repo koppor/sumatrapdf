@@ -648,6 +648,13 @@ export function getWindowPid(hwnd: number): number {
   return out[0];
 }
 
+export function getWindowThreadId(hwnd: number): number {
+  if (IS_MAC) {
+    return 0;
+  }
+  return user32.symbols.GetWindowThreadProcessId(hwnd, null);
+}
+
 // Which window has keyboard focus in the thread that owns hwnd. GetFocus() only
 // answers for the calling thread, so a test in another process must go through
 // GUITHREADINFO { DWORD cbSize, flags; HWND active, focus, capture, menuOwner,
@@ -717,6 +724,24 @@ export function findTopWindow(pid: number, className: string): number {
     return true;
   });
   return found;
+}
+
+// Puts a process's visible top-level windows above every non-topmost window,
+// without activating them. Injected touch and pen input goes to whatever window
+// is under the point, so a window in front (a terminal) would get it instead.
+export function raiseProcessWindows(pid: number): void {
+  if (IS_MAC) {
+    return;
+  }
+  const flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+  enumWindows((hwnd) => {
+    if (getWindowPid(hwnd) === pid && isWindowVisible(hwnd)) {
+      // topmost lifts it over everything; not-topmost keeps it at the top of the normal band
+      user32.symbols.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+      user32.symbols.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
+    }
+    return true;
+  });
 }
 
 // find a descendant window of a given class (0 if none)
@@ -831,7 +856,7 @@ export function getScrollPos(hwnd: number, bar: number = SB_VERT): number {
 }
 
 const WM_RBUTTONDBLCLK = 0x0206;
-const WM_MBUTTONUP = 0x0208;
+export const WM_MBUTTONUP = 0x0208;
 const WM_MBUTTONDBLCLK = 0x0209;
 const WM_MOUSEWHEEL = 0x020a;
 const WM_MOUSEHWHEEL = 0x020e;
@@ -991,6 +1016,32 @@ export function sendCopyDataW(hwnd: number, dataId: number, text: string): bigin
   return sendMessage(hwnd, WM_COPYDATA, 0, BigInt(ptr(cds)));
 }
 
+// Same payload, but returns when the window has not answered. A modal dialog
+// runs on that thread, and a plain SendMessage would block the suite.
+const SMTO_ABORTIFHUNG = 0x0002;
+
+export function sendCopyDataWTimeout(hwnd: number, dataId: number, text: string, timeoutMs: number): boolean {
+  if (IS_MAC) {
+    return sendCopyDataW(hwnd, dataId, text) !== 0n;
+  }
+  const payload = wideZ(text);
+  const cds = new Uint8Array(24);
+  const view = new DataView(cds.buffer);
+  view.setBigUint64(0, BigInt(dataId), true);
+  view.setUint32(8, payload.byteLength, true);
+  view.setBigUint64(16, BigInt(ptr(payload)), true);
+  const ret = user32.symbols.SendMessageTimeoutW(
+    hwnd,
+    WM_COPYDATA,
+    0n,
+    BigInt(ptr(cds)),
+    SMTO_ABORTIFHUNG,
+    timeoutMs,
+    null,
+  );
+  return ret !== 0n;
+}
+
 // The reuse-instance open request (kCopyDataOpen): u32 newWindow, then the
 // UTF-8 path, NUL-terminated. The receiver loads it after replying.
 export function sendOpenCopyData(hwnd: number, path: string, newWindow = 0): bigint {
@@ -1092,6 +1143,9 @@ export function moveWindow(hwnd: number, x: number, y: number, w: number, h: num
 
 // SWP_* flags (subset)
 export const HWND_TOPMOST = -1;
+export const HWND_NOTOPMOST = -2;
+export const SWP_NOSIZE = 0x0001;
+export const SWP_NOMOVE = 0x0002;
 export const SWP_NOZORDER = 0x0004;
 export const SWP_NOACTIVATE = 0x0010;
 export const SWP_FRAMECHANGED = 0x0020;
@@ -1132,13 +1186,12 @@ export function setWindowPos(
 ): boolean {
   // macOS: a tool window is moved by name. A frame's "place" takes its index.
   if (IS_MAC) {
-    const listed = macWindow(hwnd);
+    const windows = macWindows();
+    const listed = windows.find((m) => m.hwnd === hwnd);
     if (listed?.toolName) {
       return macPlaceToolWindow(listed.toolName, x, y, w, h);
     }
-    const idx = macWindows()
-      .filter((m) => !m.toolName)
-      .findIndex((m) => m.hwnd === hwnd);
+    const idx = windows.filter((m) => !m.toolName).findIndex((m) => m.hwnd === hwnd);
     const above = insertAfter === HWND_TOPMOST ? 1 : 0;
     return macControlRequest(TestUiState, ["place", x, y, w, h, idx, above])[0] === 0;
   }
@@ -1292,6 +1345,11 @@ const MODIFIER_RELEASE_TRIES = 10;
 // the keys we last warned about as impossible to release, so a session that
 // stays disconnected doesn't repeat the warning before every test
 let unreleasedWarned = "";
+let manageModifiers = true;
+
+export function disableModifierRelease(): void {
+  manageModifiers = false;
+}
 
 function heldModifierKeys(): [string, number][] {
   return MODIFIER_KEYS.filter(([, vk]) => isKeyDownAsync(vk));
@@ -1302,7 +1360,7 @@ function modifierNames(keys: [string, number][]): string {
 }
 
 export async function ensureModifierKeysUp(): Promise<void> {
-  if (!IS_WIN) {
+  if (!IS_WIN || !manageModifiers) {
     return;
   }
   let held = heldModifierKeys();
@@ -1661,8 +1719,7 @@ export function getWindowRect(hwnd: number): Rect {
   if (IS_MAC) {
     // TestWindows already has every frame and tool window. Aiming TestLayout
     // at a tool window's id finds no frame and reports an empty rect.
-    const id = hwnd > 0 ? hwnd : (macWindows().find((m) => !m.toolName)?.hwnd ?? 0);
-    const listed = macWindow(id);
+    const listed = macWindows().find((m) => (hwnd > 0 ? m.hwnd === hwnd : !m.toolName));
     if (listed) {
       return listed.rect;
     }
@@ -2783,6 +2840,7 @@ export function getMenuItemText(hmenu: bigint, pos: number): string {
 
 export const MF_BYPOSITION = 0x400;
 export const MF_GRAYED = 0x0001;
+export const MF_CHECKED = 0x0008;
 export const MF_DISABLED = 0x0002;
 
 // the shortcut a menu item advertises (the part after the tab), "" if none
@@ -2797,7 +2855,7 @@ export function getMenuItemAccel(hmenu: bigint, pos: number): string {
   return parts.length > 1 ? parts[1]!.replace(/&/g, "") : "";
 }
 
-export type MenuItem = { text: string; accel?: string; items?: MenuItem[]; disabled?: boolean };
+export type MenuItem = { text: string; accel?: string; items?: MenuItem[]; disabled?: boolean; checked?: boolean };
 
 export function getMenuItemDisabled(hmenu: bigint, pos: number): boolean {
   const st = user32.symbols.GetMenuState(hmenu, pos, MF_BYPOSITION);
@@ -2805,6 +2863,11 @@ export function getMenuItemDisabled(hmenu: bigint, pos: number): boolean {
     return false;
   }
   return (st & (MF_GRAYED | MF_DISABLED)) !== 0;
+}
+
+export function getMenuItemChecked(hmenu: bigint, pos: number): boolean {
+  const st = user32.symbols.GetMenuState(hmenu, pos, MF_BYPOSITION);
+  return st !== 0xffffffff && (st & MF_CHECKED) !== 0;
 }
 
 // the whole menu tree, submenus included. Separators (empty labels) are skipped
@@ -2824,6 +2887,9 @@ export function readMenuTree(hmenu: bigint): MenuItem[] {
       }
       if (getMenuItemDisabled(hmenu, i)) {
         item.disabled = true;
+      }
+      if (getMenuItemChecked(hmenu, i)) {
+        item.checked = true;
       }
       out.push(item);
     }

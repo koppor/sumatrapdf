@@ -12,6 +12,8 @@ class AutoCloseHandle {
     AutoCloseHandle() = default;
 
     AutoCloseHandle(HANDLE h) : handle(h) {}
+    AutoCloseHandle(const AutoCloseHandle&) = delete;
+    AutoCloseHandle& operator=(const AutoCloseHandle&) = delete;
 
     ~AutoCloseHandle() {
         if (IsValid()) {
@@ -20,8 +22,12 @@ class AutoCloseHandle {
     }
 
     AutoCloseHandle& operator=(HANDLE h) {
-        ReportIf(handle != nullptr);
-        ReportIf(h == nullptr);
+        if (handle == h) {
+            return *this;
+        }
+        if (IsValid()) {
+            CloseHandle(handle);
+        }
         handle = h;
         return *this;
     }
@@ -42,6 +48,8 @@ class AutoReleaseComPtr {
     AutoReleaseComPtr() = default;
 
     explicit AutoReleaseComPtr(T* ptr) : ptr(ptr) {}
+    AutoReleaseComPtr(const AutoReleaseComPtr&) = delete;
+    AutoReleaseComPtr& operator=(const AutoReleaseComPtr&) = delete;
     ~AutoReleaseComPtr() {
         if (ptr) {
             ptr->Release();
@@ -62,6 +70,9 @@ class AutoReleaseComPtr {
     T** operator&() { return &ptr; }
     T* operator->() const { return ptr; }
     AutoReleaseComPtr<T>& operator=(T* newPtr) {
+        if (ptr == newPtr) {
+            return *this;
+        }
         if (ptr) {
             ptr->Release();
         }
@@ -77,11 +88,15 @@ class AutoReleaseComQIPtr {
 
   public:
     AutoReleaseComQIPtr() = default;
+    AutoReleaseComQIPtr(const AutoReleaseComQIPtr&) = delete;
+    AutoReleaseComQIPtr& operator=(const AutoReleaseComQIPtr&) = delete;
 
     explicit AutoReleaseComQIPtr(IUnknown* unk) {
-        HRESULT hr = unk->QueryInterface(&ptr);
-        if (FAILED(hr)) {
-            ptr = nullptr;
+        if (unk) {
+            HRESULT hr = unk->QueryInterface(&ptr);
+            if (FAILED(hr)) {
+                ptr = nullptr;
+            }
         }
     }
     ~AutoReleaseComQIPtr() {
@@ -96,13 +111,14 @@ class AutoReleaseComQIPtr {
         return SUCCEEDED(hr);
     }
     AutoReleaseComQIPtr<T>& operator=(IUnknown* newUnk) {
+        T* next = nullptr;
+        if (newUnk && FAILED(newUnk->QueryInterface(&next))) {
+            next = nullptr;
+        }
         if (ptr) {
             ptr->Release();
         }
-        HRESULT hr = newUnk->QueryInterface(&ptr);
-        if (FAILED(hr)) {
-            ptr = nullptr;
-        }
+        ptr = next;
         return *this;
     }
     operator T*() const { // NOLINT
@@ -111,6 +127,9 @@ class AutoReleaseComQIPtr {
     T** operator&() { return &ptr; }
     T* operator->() const { return ptr; }
     AutoReleaseComQIPtr<T>& operator=(T* newPtr) {
+        if (ptr == newPtr) {
+            return *this;
+        }
         if (ptr) {
             ptr->Release();
         }
@@ -124,6 +143,8 @@ struct AutoDeleteDC {
 
     explicit AutoDeleteDC(HDC hdc) { this->hdc = hdc; }
     AutoDeleteDC() = default;
+    AutoDeleteDC(const AutoDeleteDC&) = delete;
+    AutoDeleteDC& operator=(const AutoDeleteDC&) = delete;
 
     ~AutoDeleteDC() { DeleteDC(hdc); }
     operator HDC() const { // NOLINT
@@ -139,6 +160,8 @@ class AutoDeleteGdiObj {
     AutoDeleteGdiObj(T obj) { // NOLINT
         this->obj = obj;
     }
+    AutoDeleteGdiObj(const AutoDeleteGdiObj&) = delete;
+    AutoDeleteGdiObj& operator=(const AutoDeleteGdiObj&) = delete;
     ~AutoDeleteGdiObj() { DeleteObject(obj); }
     operator T() const { // NOLINT
         return obj;
@@ -156,6 +179,8 @@ class AutoReleaseDC {
         this->hwnd = hwnd;
         this->hdc = GetDC(hwnd);
     }
+    AutoReleaseDC(const AutoReleaseDC&) = delete;
+    AutoReleaseDC& operator=(const AutoReleaseDC&) = delete;
     ~AutoReleaseDC() { ReleaseDC(hwnd, hdc); }
     operator HDC() const { // NOLINT
         return hdc;
@@ -175,6 +200,8 @@ class AutoRestoreGdiObject {
             this->obj = obj;
         }
     }
+    AutoRestoreGdiObject(const AutoRestoreGdiObject&) = delete;
+    AutoRestoreGdiObject& operator=(const AutoRestoreGdiObject&) = delete;
 
     ~AutoRestoreGdiObject() {
         SelectObject(hdc, prev);
@@ -196,6 +223,8 @@ class AutoRestoreFont {
             prev = SelectObject(hdc, font);
         }
     }
+    AutoRestoreFont(const AutoRestoreFont&) = delete;
+    AutoRestoreFont& operator=(const AutoRestoreFont&) = delete;
 
     ~AutoRestoreFont() {
         if (prev) {
@@ -209,19 +238,12 @@ struct AutoRestorePen {
     HPEN prevPen = nullptr;
 
     explicit AutoRestorePen(HDC hdc, HPEN pen) : hdc(hdc) { this->prevPen = (HPEN)SelectObject(hdc, pen); }
+    AutoRestorePen(const AutoRestorePen&) = delete;
+    AutoRestorePen& operator=(const AutoRestorePen&) = delete;
 
     ~AutoRestorePen() { SelectObject(hdc, prevPen); }
 };
 
-class AutoRestoreBrush {
-    HDC hdc = nullptr;
-    HBRUSH prevBrush = nullptr;
-
-  public:
-    explicit AutoRestoreBrush(HDC hdc, HBRUSH brush) : hdc(hdc) { prevBrush = (HBRUSH)SelectObject(hdc, brush); }
-
-    ~AutoRestoreBrush() { SelectObject(hdc, prevBrush); }
-};
 // CoUninitialize() / OleUninitialize() must only be called when the matching
 // Initialize succeeded. On failure (RPC_E_CHANGED_MODE when the thread is
 // already in the other apartment kind) it would decrement an apartment count
@@ -232,6 +254,8 @@ class AutoCoUninitialize {
   public:
     HRESULT hr;
     AutoCoUninitialize() { hr = CoInitialize(nullptr); }
+    AutoCoUninitialize(const AutoCoUninitialize&) = delete;
+    AutoCoUninitialize& operator=(const AutoCoUninitialize&) = delete;
     ~AutoCoUninitialize() {
         if (SUCCEEDED(hr)) {
             CoUninitialize();
@@ -243,6 +267,8 @@ class AutoOleUninitialize {
   public:
     HRESULT hr;
     AutoOleUninitialize() { hr = OleInitialize(nullptr); }
+    AutoOleUninitialize(const AutoOleUninitialize&) = delete;
+    AutoOleUninitialize& operator=(const AutoOleUninitialize&) = delete;
     ~AutoOleUninitialize() {
         if (SUCCEEDED(hr)) {
             OleUninitialize();
@@ -253,10 +279,11 @@ class AutoOleUninitialize {
 class AutoGdiPlusShutdown {
   protected:
     Gdiplus::GdiplusStartupInput si;
-    Gdiplus::GdiplusStartupOutput so;
+    Gdiplus::GdiplusStartupOutput so{};
     ULONG_PTR token = 0;
     ULONG_PTR hookToken = 0;
     bool noBgThread = false;
+    bool started = false;
 
   public:
     // suppress the GDI+ background thread when initiating in WinMain,
@@ -264,13 +291,20 @@ class AutoGdiPlusShutdown {
     // thus causes unexpected timeouts
     explicit AutoGdiPlusShutdown(bool inWinMain = false) : noBgThread(inWinMain) {
         si.SuppressBackgroundThread = noBgThread;
-        Gdiplus::GdiplusStartup(&token, &si, &so);
-        if (noBgThread) {
-            so.NotificationHook(&hookToken);
+        if (Gdiplus::GdiplusStartup(&token, &si, &so) == Gdiplus::Ok) {
+            started = true;
+            if (noBgThread && so.NotificationHook) {
+                so.NotificationHook(&hookToken);
+            }
         }
     }
+    AutoGdiPlusShutdown(const AutoGdiPlusShutdown&) = delete;
+    AutoGdiPlusShutdown& operator=(const AutoGdiPlusShutdown&) = delete;
     ~AutoGdiPlusShutdown() {
-        if (noBgThread) {
+        if (!started) {
+            return;
+        }
+        if (noBgThread && so.NotificationUnhook) {
             so.NotificationUnhook(hookToken);
         }
         Gdiplus::GdiplusShutdown(token);
