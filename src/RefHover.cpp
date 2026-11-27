@@ -472,6 +472,8 @@ static bool JabRefLookup(const char* entryText, DWORD* statusOut, bool* existsOu
                          char** parserCacheKeyOut) {
     str::Builder headers;
     headers.Append(StrL("Content-Type: text/plain; charset=utf-8\r\n"));
+    // identifies the caller to jabsrv's trusted-callers filter (JabRef ADR-0084)
+    headers.Append(StrL("X-JabRef-Connector: SumatraPDF\r\n"));
     str::Builder body;
     body.Append(Str(entryText));
     str::Builder resp;
@@ -769,6 +771,7 @@ RefHoverPushResult RefHoverPushToJabRef(const char* entryText, const char* parse
     if (parserCacheKey && *parserCacheKey) {
         str::Builder cacheHeaders;
         cacheHeaders.Append(StrL("Content-Length: 0\r\n"));
+        cacheHeaders.Append(StrL("X-JabRef-Connector: SumatraPDF\r\n"));
         str::Builder emptyBody;
         str::Builder cacheResp;
         DWORD cacheStatus = 0;
@@ -798,6 +801,7 @@ RefHoverPushResult RefHoverPushToJabRef(const char* entryText, const char* parse
     }
     str::Builder headers;
     headers.Append(StrL("Content-Type: text/plain; charset=utf-8\r\n"));
+    headers.Append(StrL("X-JabRef-Connector: SumatraPDF\r\n"));
     str::Builder data;
     data.Append(Str(entryText));
     DWORD status = 0;
